@@ -40,6 +40,238 @@
 └─────────────────────────────────┘
 ```
 
+## 🔄 核心工作流程
+
+### 1. 渗透测试主流程
+
+```mermaid
+graph TD
+    A[用户启动渗透测试] --> B[Master Controller初始化]
+    B --> C[创建TODO任务列表]
+    C --> D[开始Kill Chain流程]
+    
+    D --> E[1. 侦察阶段]
+    E --> F[Recon Agent执行]
+    F --> G[信息收集完成]
+    
+    G --> H[2. 武器化阶段]
+    H --> I[Weaponize Agent执行]
+    I --> J[载荷制作完成]
+    
+    J --> K[3. 投递阶段]
+    K --> L[Delivery Agent执行]
+    L --> M[载荷投递完成]
+    
+    M --> N[4. 利用阶段]
+    N --> O[Exploit Agent执行]
+    O --> P[漏洞利用完成]
+    
+    P --> Q[5. 安装阶段]
+    Q --> R[Install Agent执行]
+    R --> S[持久化建立]
+    
+    S --> T[6. C2阶段]
+    T --> U[C2 Agent执行]
+    U --> V[命令控制建立]
+    
+    V --> W[7. 目标行为阶段]
+    W --> X[Objectives Agent执行]
+    X --> Y[目标达成]
+    
+    Y --> Z[生成最终报告]
+    
+    style A fill:#e1f5fe
+    style Z fill:#c8e6c9
+    style E fill:#fff3e0
+    style H fill:#fff3e0
+    style K fill:#fff3e0
+    style N fill:#fff3e0
+    style Q fill:#fff3e0
+    style T fill:#fff3e0
+    style W fill:#fff3e0
+```
+
+### 2. LLM决策流程
+
+```mermaid
+graph TD
+    A[任务输入] --> B[Token检查]
+    B --> C{是否超长?}
+    C -->|是| D[任务分解]
+    C -->|否| E[直接处理]
+    
+    D --> F[创建子任务]
+    F --> G[并行执行]
+    G --> H[结果合并]
+    
+    E --> I[LLM分析]
+    I --> J[生成执行计划]
+    J --> K[选择工具]
+    K --> L[执行工具]
+    L --> M[结果分析]
+    
+    H --> M
+    M --> N{需要人工干预?}
+    N -->|是| O[暂停等待]
+    N -->|否| P[继续执行]
+    
+    O --> Q[人工确认]
+    Q --> P
+    P --> R[记录结果]
+    R --> S[更新状态]
+    
+    style A fill:#e3f2fd
+    style S fill:#e8f5e8
+    style D fill:#fff3e0
+    style O fill:#ffebee
+```
+
+### 3. Agent工具调用流程
+
+```mermaid
+graph TD
+    A[Agent接收任务] --> B[分析任务需求]
+    B --> C[选择合适工具]
+    C --> D[检查工具权限]
+    D --> E{权限验证}
+    E -->|通过| F[准备工具参数]
+    E -->|失败| G[权限错误]
+    
+    F --> H[执行工具]
+    H --> I[工具执行中]
+    I --> J{执行成功?}
+    J -->|成功| K[解析结果]
+    J -->|失败| L[错误处理]
+    
+    K --> M[结果验证]
+    M --> N{结果有效?}
+    N -->|有效| O[记录日志]
+    N -->|无效| P[重试或报错]
+    
+    L --> Q[记录错误]
+    P --> Q
+    O --> R[返回结果]
+    Q --> S[返回错误]
+    
+    G --> S
+    
+    style A fill:#e1f5fe
+    style R fill:#c8e6c9
+    style S fill:#ffcdd2
+    style H fill:#fff3e0
+```
+
+### 4. 数据流和存储流程
+
+```mermaid
+graph TD
+    A[渗透测试开始] --> B[创建会话记录]
+    B --> C[初始化数据库]
+    C --> D[开始阶段执行]
+    
+    D --> E[Agent执行]
+    E --> F[工具调用]
+    F --> G[结果生成]
+    
+    G --> H[数据验证]
+    H --> I[存储到数据库]
+    I --> J[写入文件系统]
+    
+    J --> K[更新会话状态]
+    K --> L{阶段完成?}
+    L -->|否| M[继续执行]
+    L -->|是| N[进入下一阶段]
+    
+    M --> E
+    N --> O{所有阶段完成?}
+    O -->|否| D
+    O -->|是| P[生成最终报告]
+    
+    P --> Q[数据归档]
+    Q --> R[清理临时文件]
+    R --> S[测试完成]
+    
+    style A fill:#e3f2fd
+    style S fill:#e8f5e8
+    style I fill:#fff3e0
+    style J fill:#fff3e0
+```
+
+### 5. 错误处理和恢复流程
+
+```mermaid
+graph TD
+    A[执行过程中] --> B{发生错误?}
+    B -->|否| C[正常继续]
+    B -->|是| D[错误分类]
+    
+    D --> E{错误类型}
+    E -->|网络错误| F[重试机制]
+    E -->|权限错误| G[权限检查]
+    E -->|工具错误| H[工具替换]
+    E -->|LLM错误| I[提示词优化]
+    
+    F --> J{重试次数}
+    J -->|< 3次| K[等待重试]
+    J -->|>= 3次| L[标记失败]
+    
+    G --> M[检查配置]
+    M --> N{配置正确?}
+    N -->|是| O[重新执行]
+    N -->|否| P[人工干预]
+    
+    H --> Q[选择备用工具]
+    Q --> R[执行备用工具]
+    
+    I --> S[优化提示词]
+    S --> T[重新调用LLM]
+    
+    K --> A
+    O --> A
+    R --> A
+    T --> A
+    P --> U[等待人工处理]
+    L --> V[记录失败原因]
+    
+    U --> W[人工处理完成]
+    W --> A
+    V --> X[生成错误报告]
+    
+    style A fill:#e3f2fd
+    style C fill:#c8e6c9
+    style L fill:#ffcdd2
+    style P fill:#ffebee
+    style X fill:#fff3e0
+```
+
+## 🎯 设计思路说明
+
+### 1. **分层架构设计**
+- **控制层**: Master Controller作为核心调度器
+- **服务层**: LLM Manager、TODO Manager、Tool Manager提供核心服务
+- **执行层**: 各专业Agent负责具体任务执行
+- **工具层**: 丰富的工具集支持各种渗透测试需求
+
+### 2. **状态机驱动**
+- 基于Cyber Kill Chain的7个阶段状态
+- 每个状态对应专门的Agent和工具集
+- 状态转换由LLM智能决策驱动
+
+### 3. **异步并发处理**
+- 支持多任务并行执行
+- 异步I/O提高执行效率
+- 任务队列管理避免资源冲突
+
+### 4. **容错和恢复机制**
+- 多层次的错误处理
+- 自动重试和降级策略
+- 人工干预和确认机制
+
+### 5. **数据完整性保证**
+- 完整的执行记录和审计日志
+- 结构化数据存储便于分析
+- 实时状态同步和监控
+
 ## 📁 项目结构
 
 ```
