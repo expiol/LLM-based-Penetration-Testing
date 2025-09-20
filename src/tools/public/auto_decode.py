@@ -1,9 +1,146 @@
+"""
+智能解码工具 - 公有工具
+所有Agent都可以使用的解码工具，支持Base64、URL、Unicode等多种编码格式
+"""
 import base64
 import os
 from urllib.parse import unquote, quote
 import json
 import re
 from urllib.parse import urlparse, parse_qs, urlunparse, urlencode
+from typing import Dict, Any, List
+from ...core.agent_tool_manager import ToolInterface
+
+
+class AutoDecodeTool(ToolInterface):
+    """智能解码工具"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__("auto_decode", config)
+        self.smart_decoder = SmartDecodePro()
+        
+    async def execute(self, parameters: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """执行解码操作"""
+        try:
+            text = parameters.get("text")
+            decode_type = parameters.get("decode_type", "auto")  # auto, base64, url, unicode, hex
+            
+            if not text:
+                return {"success": False, "error": "未提供待解码文本"}
+            
+            result = {}
+            
+            if decode_type == "auto":
+                # 自动检测并解码
+                result = self._auto_decode(text)
+            elif decode_type == "base64":
+                result = {"decoded": self.smart_decoder.base64_decode_pro(text)}
+            elif decode_type == "url":
+                result = {"decoded": unquote(text)}
+            elif decode_type == "unicode":
+                result = {"decoded": self.smart_decoder.decode_unicode_escapes(text)}
+            elif decode_type == "hex":
+                result = {"decoded": self.smart_decoder.decode_hex_escapes(text)}
+            else:
+                return {"success": False, "error": f"不支持的解码类型: {decode_type}"}
+            
+            return {
+                "success": True,
+                "original": text,
+                "decoded_type": decode_type,
+                **result
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": f"解码失败: {str(e)}"}
+    
+    def _auto_decode(self, text: str) -> Dict[str, Any]:
+        """自动检测并解码文本"""
+        results = {}
+        
+        # 尝试Base64解码
+        try:
+            base64_result = self.smart_decoder.base64_decode_pro(text)
+            if base64_result != text:
+                results["base64"] = base64_result
+        except:
+            pass
+        
+        # 尝试URL解码
+        try:
+            url_result = unquote(text)
+            if url_result != text:
+                results["url"] = url_result
+        except:
+            pass
+        
+        # 尝试Unicode解码
+        try:
+            unicode_result = self.smart_decoder.decode_unicode_escapes(text)
+            if unicode_result != text:
+                results["unicode"] = unicode_result
+        except:
+            pass
+        
+        # 尝试Hex解码
+        try:
+            hex_result = self.smart_decoder.decode_hex_escapes(text)
+            if hex_result != text:
+                results["hex"] = hex_result
+        except:
+            pass
+        
+        return {"auto_detected": results}
+    
+    def get_description(self) -> str:
+        """获取工具描述"""
+        return "智能解码工具，支持多种编码格式的自动检测和解码，包括Base64、URL、Unicode、Hex等"
+    
+    def get_parameters(self) -> Dict[str, Any]:
+        """获取工具参数"""
+        return {
+            "required": ["text"],
+            "optional": ["decode_type"],
+            "text": {
+                "type": "string",
+                "description": "待解码的文本"
+            },
+            "decode_type": {
+                "type": "string", 
+                "description": "解码类型: auto(自动检测), base64, url, unicode, hex",
+                "default": "auto",
+                "enum": ["auto", "base64", "url", "unicode", "hex"]
+            }
+        }
+    
+    def get_capabilities(self) -> List[str]:
+        """获取工具能力"""
+        return [
+            "base64_decode",
+            "url_decode", 
+            "unicode_decode",
+            "hex_decode",
+            "auto_detect_encoding",
+            "batch_decode"
+        ]
+    
+    def get_tool_info(self) -> Dict[str, Any]:
+        """获取工具信息"""
+        return {
+            "name": "auto_decode",
+            "description": self.get_description(),
+            "parameters": self.get_parameters(),
+            "capabilities": self.get_capabilities(),
+            "returns": {
+                "success": "bool - 是否成功",
+                "original": "str - 原始文本",
+                "decoded_type": "str - 解码类型",
+                "decoded": "str - 解码结果(单一类型)",
+                "auto_detected": "dict - 自动检测的所有可能结果",
+                "error": "str - 错误信息(如果失败)"
+            }
+        }
+
 
 class SmartDecodePro:
     def __init__(self):
@@ -106,10 +243,10 @@ class SmartDecodePro:
         # 解码hex的数据 '\\x70\\x61\\x73\\x73'
         text = self.decode_hex_escapes(text)
         # 解码java数组格式的hex
-        text, match = self.smart_decoder(text, "(?:new )?java\.lang\.String\(new\s+byte\[]({\s*((?:\d{1,3},\s*)*\d{1,3})\s*})\)", self.hex_decode, re.I)
+        text, match = self.smart_decoder(text, r"(?:new )?java\.lang\.String\(new\s+byte\[]({\s*((?:\d{1,3},\s*)*\d{1,3})\s*})\)", self.hex_decode, re.I)
         raw_match_list.append({'id': 5,'value': match})
         # 解码全部的chr函数的hex
-        text, match = self.smart_decoder(text, "cha?r\((\d{1,3}|0x[0-9a-f]{2})\)", self.hex_decode, re.I)
+        text, match = self.smart_decoder(text, r"cha?r\((\d{1,3}|0x[0-9a-f]{2})\)", self.hex_decode, re.I)
         raw_match_list.append({'id': 4,'value': match})
         # 解码全部的0x开头的hex
         text, match = self.smart_decoder(text, "0x(([a-f0-9]{2}){2,}|([A-F0-9]{2}){2,})", self.hex_decode, 0, '0x')

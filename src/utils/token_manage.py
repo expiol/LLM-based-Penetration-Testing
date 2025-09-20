@@ -9,7 +9,7 @@ class TokenManage:
     def __new__(cls, *args, **kwargs):
         if cls._instance_tokenManage is None:
             cls._instance_tokenManage = super(TokenManage, cls).__new__(cls, *args, **kwargs)
-            cls._instance_tokenManage.tokenizer = AutoTokenizer.from_pretrained("src/utils/qwen_tokenizer",
+            cls._instance_tokenManage.tokenizer = AutoTokenizer.from_pretrained("src/utils/llm_tokenizer",
                                                                                 trust_remote_code=True)
         return cls._instance_tokenManage
 

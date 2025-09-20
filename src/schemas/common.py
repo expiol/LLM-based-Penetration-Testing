@@ -17,13 +17,8 @@ class SeverityLevel(str, Enum):
     INFO = "info"
 
 
-class TaskStatus(str, Enum):
-    """任务状态枚举"""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
+# TaskStatus已移至orchestrator.states中，这里保留引用以向后兼容
+from ..orchestrator.states import TaskStatus
 
 
 class BaseResponse(BaseModel):
@@ -95,3 +90,43 @@ class PayloadInfo(BaseModel):
     description: str = Field("", description="载荷描述")
     risk_level: SeverityLevel = Field(..., description="风险等级")
     safe_mode: bool = Field(True, description="安全模式")
+
+
+# API相关模型
+class ScanTarget(BaseModel):
+    """扫描目标模型"""
+    target: str = Field(..., description="扫描目标（IP地址或域名）")
+    ports: Optional[List[int]] = Field(None, description="指定端口列表")
+    scan_type: str = Field("tcp", description="扫描类型：tcp, udp, syn")
+    timeout: int = Field(30, description="超时时间（秒）")
+
+
+class ExploitTarget(BaseModel):
+    """漏洞利用目标模型"""
+    target: str = Field(..., description="目标地址")
+    vulnerability: str = Field(..., description="漏洞类型")
+    payload: Optional[str] = Field(None, description="自定义载荷")
+    options: Optional[Dict[str, Any]] = Field(None, description="额外选项")
+
+
+class ReportRequest(BaseModel):
+    """报告请求模型"""
+    session_id: str = Field(..., description="会话ID")
+    format: str = Field("html", description="报告格式：html, pdf, json")
+    include_raw_data: bool = Field(False, description="是否包含原始数据")
+
+
+class ToolExecutionRequest(BaseModel):
+    """工具执行请求模型"""
+    tool_name: str = Field(..., description="工具名称")
+    parameters: Dict[str, Any] = Field(..., description="工具参数")
+    context: Optional[Dict[str, Any]] = Field(None, description="执行上下文")
+
+
+class ToolExecutionResult(BaseModel):
+    """工具执行结果模型"""
+    tool_name: str = Field(..., description="工具名称")
+    success: bool = Field(..., description="是否成功")
+    result: Dict[str, Any] = Field(..., description="执行结果")
+    execution_time: float = Field(..., description="执行时间（秒）")
+    timestamp: datetime = Field(default_factory=datetime.now, description="时间戳")

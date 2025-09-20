@@ -36,7 +36,10 @@
       "temperature": 0.3,
       "max_tokens": 2048,
       "timeout": 300
-    }
+    },
+    "max_prompt_tokens": 3200,
+    "max_response_tokens": 2048,
+    "enable_token_management": true
   },
   "human_intervention": {
     "rules": {
@@ -65,23 +68,49 @@
     }
   },
   "tools": {
-    "nmap": {
-      "enabled": true,
-      "timeout": 300
-    },
-    "sqlmap": {
-      "enabled": true,
-      "timeout": 600
-    },
-    "custom_tools": [
+    "enabled": true,
+    "timeout": 300,
+    "max_concurrent": 5,
+    "public_tools": [
       {
-        "name": "custom_scanner",
-        "module": "custom_tools.scanner",
-        "class": "CustomScanner",
+        "module": "src.tools.public.nmap_tool",
+        "class": "NmapTool",
         "config": {
-          "timeout": 120
+          "timeout": 300
+        }
+      },
+      {
+        "module": "src.tools.public.auto_decode",
+        "class": "AutoDecodeTool", 
+        "config": {}
+      },
+      {
+        "module": "src.tools.public.cmd_executer",
+        "class": "CommandExecutorTool",
+        "config": {
+          "timeout": 600,
+          "enable_command_restrictions": false,
+          "allowed_commands": null,
+          "environment": {
+            "package_manager": "apt",
+            "temp_directory": "/tmp",
+            "workspace_directory": "/workspace",
+            "max_file_size": 104857600,
+            "max_execution_time": 600
+          }
         }
       }
-    ]
+    ],
+    "private_tools": {},
+    "legacy_tools": {
+      "nmap": {
+        "enabled": true,
+        "timeout": 300
+      },
+      "sqlmap": {
+        "enabled": true,
+        "timeout": 600
+      }
+    }
   }
 }

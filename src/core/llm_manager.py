@@ -9,6 +9,7 @@ import json
 
 from .model_interface import ModelInterface
 from ..prompts.master_prompts import MasterPrompts
+from ..utils.token_manage import TokenManage
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +26,20 @@ class LLMManager:
         # 分析模型接口（用于结果分析）
         self.analysis_model_interface: Optional[ModelInterface] = None
         
+        # Token管理器
+        self.token_manager = TokenManage()
+        
+        # Token限制配置
+        self.max_prompt_tokens = config.get("max_prompt_tokens", 3200)
+        self.max_response_tokens = config.get("max_response_tokens", 2048)
+        
         # 调用统计
         self.stats = {
             "master_calls": 0,
             "analysis_calls": 0,
             "total_tokens": 0,
-            "errors": 0
+            "errors": 0,
+            "token_truncations": 0
         }
     
     async def initialize(self):
@@ -77,10 +86,13 @@ class LLMManager:
             else:
                 full_prompt = prompt
             
+            # Token检查和截断
+            full_prompt = self._ensure_token_limit(full_prompt)
+            
             response = await self.master_model_interface.call(full_prompt, context)
             
             # 更新统计
-            self.stats["total_tokens"] += len(response.split())
+            self.stats["total_tokens"] += self.token_manager.sum_prompt(response)
             
             return response
             
@@ -103,10 +115,13 @@ class LLMManager:
         try:
             self.stats["analysis_calls"] += 1
             
+            # Token检查和截断
+            prompt = self._ensure_token_limit(prompt)
+            
             response = await self.analysis_model_interface.call(prompt, context)
             
             # 更新统计
-            self.stats["total_tokens"] += len(response.split())
+            self.stats["total_tokens"] += self.token_manager.sum_prompt(response)
             
             return response
             
@@ -141,3 +156,39 @@ class LLMManager:
     def get_stats(self) -> Dict[str, Any]:
         """获取调用统计"""
         return self.stats.copy()
+    
+    def _ensure_token_limit(self, prompt: str) -> str:
+        """
+        确保prompt不超过token限制
+        
+        Args:
+            prompt: 原始提示词
+            
+        Returns:
+            str: 处理后的提示词
+        """
+        current_tokens = self.token_manager.sum_prompt(prompt)
+        
+        if current_tokens > self.max_prompt_tokens:
+            self.stats["token_truncations"] += 1
+            logger.warning(f"Prompt超过token限制 ({current_tokens} > {self.max_prompt_tokens})，进行截断")
+            
+            # 使用token管理器截断
+            truncated_prompt = self.token_manager.reverse_cutting_prompt(prompt, self.max_prompt_tokens)
+            
+            logger.info(f"Token截断完成: {current_tokens} -> {self.token_manager.sum_prompt(truncated_prompt)}")
+            return truncated_prompt
+        
+        return prompt
+    
+    def check_response_length(self, response: str) -> str:
+        """
+        检查响应长度，必要时进行处理
+        
+        Args:
+            response: 模型响应
+            
+        Returns:
+            str: 处理后的响应
+        """
+        return self.token_manager.response_extract_with_token_judge(response, self.max_response_tokens)
