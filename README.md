@@ -1,4 +1,4 @@
-# 🔒 LLM-based Penetration Testing Platform (科研版)
+# 🔒 LLM-based Penetration Testing Platform 
 
 本项目是一个基于 **大语言模型（LLM）** 的渗透测试平台，参考 **Cyber Kill Chain（网络杀伤链）** 全流程，设计用于 **模拟/辅助渗透测试**。
 
@@ -143,13 +143,11 @@ LLM-based-Penetration-Testing/
 │  │  │  ├─ recon_agent/
 │  │  │  ├─ exploit_agent/
 │  │  │  └─ ...
-│  │  ├─ shared/                  # 共享工具（已移除）
 │  │  └─ nmap_adapter.py          # Nmap适配器
 │  ├─ prompts/                    # 📝 提示词管理
 │  │  ├─ __init__.py              # 提示词管理器
 │  │  ├─ master_prompts.py        # 主控制器提示词
-│  │  ├─ agent_prompts.py         # Agent提示词
-│  │  └─ recon_prompts.py         # 侦察提示词
+│  │  └─ agent_prompts.py         # Agent提示词
 │  ├─ service/                    # 🌐 API服务
 │  │  ├─ master_controller_api.py # 主控制器API
 │  │  ├─ scan_api.py              # 扫描API
