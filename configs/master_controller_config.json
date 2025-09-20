@@ -1,0 +1,87 @@
+{
+  "master_model": {
+    "base_url": "http://localhost:8000",
+    "api_key": "",
+    "model_name": "gpt-4",
+    "temperature": 0.7,
+    "max_tokens": 4096,
+    "timeout": 600,
+    "max_retries": 3,
+    "use_comprehensive_prompts": true,
+    "enable_todo_management": true
+  },
+  "todo_management": {
+    "max_todo_execution_time": 1800,
+    "todo_timeout_threshold": 3600,
+    "max_parallel_todos": 3,
+    "auto_decompose_long_tasks": true,
+    "decompose_threshold": 1800,
+    "max_retries": 3,
+    "failure_rate_threshold": 0.8,
+    "progress_report_interval": 300
+  },
+  "llm_models": {
+    "master_model": {
+      "base_url": "http://localhost:8000",
+      "api_key": "",
+      "model_name": "gpt-4",
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "timeout": 600
+    },
+    "analysis_model": {
+      "base_url": "http://localhost:8000", 
+      "api_key": "",
+      "model_name": "gpt-3.5-turbo",
+      "temperature": 0.3,
+      "max_tokens": 2048,
+      "timeout": 300
+    }
+  },
+  "human_intervention": {
+    "rules": {
+      "auto_approve_low_risk": true,
+      "require_approval_for_destructive": true,
+      "require_approval_for_external_tools": true,
+      "intervention_timeout": 300
+    }
+  },
+  "self_correction": {
+    "rules": {
+      "max_retry_attempts": 3,
+      "auto_correction_enabled": true,
+      "escalation_threshold": 2,
+      "learning_enabled": true
+    }
+  },
+  "dynamic_env": {
+    "environment": {
+      "package_manager": "apt",
+      "temp_directory": "/tmp",
+      "workspace_directory": "/workspace",
+      "allowed_commands": ["apt", "pip", "npm", "git", "wget", "curl"],
+      "max_file_size": 104857600,
+      "max_execution_time": 300
+    }
+  },
+  "tools": {
+    "nmap": {
+      "enabled": true,
+      "timeout": 300
+    },
+    "sqlmap": {
+      "enabled": true,
+      "timeout": 600
+    },
+    "custom_tools": [
+      {
+        "name": "custom_scanner",
+        "module": "custom_tools.scanner",
+        "class": "CustomScanner",
+        "config": {
+          "timeout": 120
+        }
+      }
+    ]
+  }
+}

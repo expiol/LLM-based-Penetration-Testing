@@ -1,0 +1,70 @@
+{
+  "todo_management": {
+    "max_todo_execution_time": 1800,
+    "todo_timeout_threshold": 3600,
+    "max_parallel_todos": 3,
+    "auto_decompose_long_tasks": true,
+    "decompose_threshold": 1800,
+    "max_retries": 3,
+    "failure_rate_threshold": 0.8,
+    "progress_report_interval": 300
+  },
+  "master_llm": {
+    "use_comprehensive_prompts": true,
+    "enable_todo_list_management": true,
+    "max_prompt_length": 32000,
+    "model_temperature": 0.7,
+    "max_tokens": 4096,
+    "timeout": 60
+  },
+  "agents": {
+    "recon": {
+      "max_execution_time": 1800,
+      "tools": ["nmap", "subdomain_enum", "dns_enum"],
+      "parallel_tasks": 2
+    },
+    "weaponize": {
+      "max_execution_time": 900,
+      "tools": ["metasploit", "custom_payloads"],
+      "parallel_tasks": 1
+    },
+    "delivery": {
+      "max_execution_time": 600,
+      "tools": ["http_delivery", "email_delivery"],
+      "parallel_tasks": 2
+    },
+    "exploit": {
+      "max_execution_time": 1200,
+      "tools": ["metasploit", "sqlmap", "custom_exploits"],
+      "parallel_tasks": 1
+    },
+    "install": {
+      "max_execution_time": 600,
+      "tools": ["persistence_tools", "backdoor_tools"],
+      "parallel_tasks": 1
+    },
+    "c2": {
+      "max_execution_time": 900,
+      "tools": ["c2_frameworks", "custom_c2"],
+      "parallel_tasks": 1
+    },
+    "objectives": {
+      "max_execution_time": 1800,
+      "tools": ["data_collection", "lateral_movement"],
+      "parallel_tasks": 2
+    }
+  },
+  "safety": {
+    "safe_mode": true,
+    "require_authorization": true,
+    "log_all_actions": true,
+    "enable_human_intervention": true,
+    "auto_cleanup": true
+  },
+  "monitoring": {
+    "enable_progress_tracking": true,
+    "real_time_updates": true,
+    "performance_metrics": true,
+    "error_reporting": true
+  }
+}

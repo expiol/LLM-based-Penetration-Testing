@@ -10,7 +10,6 @@ uvicorn==0.24.0.post1
 fastapi==0.104.1
 starlette==0.27.0
 portalocker==2.8.2
-portalocker==2.8.2
 sympy==1.12
 numpy==1.26.4
 pandas==2.2.2
@@ -32,3 +31,16 @@ python-multipart==0.0.20
 python-docx==v1.1.2
 pdfkit==1.0.0
 markdown==3.8
+
+# 数据库相关
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+
+# 网络和安全工具
+python-nmap==0.7.1
+scapy==2.5.0
+cryptography==41.0.7
+
+# 异步支持
+aiofiles==23.2.1
+aiohttp==3.9.1

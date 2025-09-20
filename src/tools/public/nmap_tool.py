@@ -1,0 +1,304 @@
+"""
+Nmap工具 - 公有工具
+所有Agent都可以使用的网络扫描工具
+"""
+import asyncio
+import subprocess
+import json
+import re
+from typing import Dict, Any, List
+from ...core.agent_tool_manager import ToolInterface
+
+
+class NmapTool(ToolInterface):
+    """Nmap网络扫描工具"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__("nmap", config)
+        self.timeout = config.get("timeout", 300)  # 5分钟超时
+        
+    async def execute(self, parameters: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """执行Nmap扫描"""
+        try:
+            target = parameters.get("target")
+            ports = parameters.get("ports", "1-1000")
+            scan_type = parameters.get("scan_type", "tcp_syn")
+            service_detection = parameters.get("service_detection", True)
+            os_detection = parameters.get("os_detection", False)
+            
+            if not target:
+                return {"success": False, "error": "未指定目标"}
+            
+            # 构建Nmap命令
+            cmd = ["nmap"]
+            
+            # 扫描类型
+            if scan_type == "tcp_syn":
+                cmd.append("-sS")
+            elif scan_type == "tcp_connect":
+                cmd.append("-sT")
+            elif scan_type == "udp":
+                cmd.append("-sU")
+            
+            # 服务检测
+            if service_detection:
+                cmd.extend(["-sV", "--version-intensity", "5"])
+            
+            # 操作系统检测
+            if os_detection:
+                cmd.append("-O")
+            
+            # 端口范围
+            cmd.extend(["-p", str(ports)])
+            
+            # 输出格式
+            cmd.extend(["-oX", "-"])  # XML输出到stdout
+            
+            # 目标
+            cmd.append(target)
+            
+            self.logger.info(f"执行Nmap扫描: {' '.join(cmd)}")
+            
+            # 执行扫描
+            result = await self._run_command(cmd)
+            
+            if result.get("success", False):
+                # 解析XML结果
+                parsed_result = self._parse_nmap_xml(result.get("stdout", ""))
+                return {
+                    "success": True,
+                    "tool": self.name,
+                    "target": target,
+                    "scan_type": scan_type,
+                    "result": parsed_result,
+                    "raw_output": result.get("stdout", "")
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": result.get("stderr", "Nmap扫描失败"),
+                    "command": " ".join(cmd)
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Nmap工具执行失败: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def get_description(self) -> str:
+        return "网络端口扫描和服务识别工具，支持TCP/UDP扫描、服务版本检测、操作系统识别"
+    
+    def get_parameters(self) -> Dict[str, Any]:
+        return {
+            "required": ["target"],
+            "optional": {
+                "ports": "扫描端口范围，默认1-1000，支持格式: 80,443,8080 或 1-1000",
+                "scan_type": "扫描类型: tcp_syn(默认), tcp_connect, udp",
+                "service_detection": "是否进行服务检测，默认True",
+                "os_detection": "是否进行操作系统检测，默认False",
+                "timeout": "扫描超时时间(秒)，默认300"
+            }
+        }
+    
+    def get_capabilities(self) -> List[str]:
+        return [
+            "port_scanning", 
+            "service_detection", 
+            "os_detection", 
+            "network_discovery",
+            "vulnerability_scanning",
+            "tcp_scanning",
+            "udp_scanning"
+        ]
+    
+    async def _run_command(self, cmd: List[str]) -> Dict[str, Any]:
+        """运行命令"""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            # 设置超时
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), 
+                    timeout=self.timeout
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                return {"success": False, "error": f"扫描超时 ({self.timeout}秒)"}
+            
+            return {
+                "success": process.returncode == 0,
+                "stdout": stdout.decode('utf-8', errors='ignore') if stdout else "",
+                "stderr": stderr.decode('utf-8', errors='ignore') if stderr else "",
+                "returncode": process.returncode
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def _parse_nmap_xml(self, xml_output: str) -> Dict[str, Any]:
+        """解析Nmap XML输出"""
+        try:
+            import xml.etree.ElementTree as ET
+            
+            # 解析XML
+            root = ET.fromstring(xml_output)
+            
+            result = {
+                "scan_info": {},
+                "hosts": [],
+                "summary": {}
+            }
+            
+            # 扫描信息
+            for scaninfo in root.findall("scaninfo"):
+                result["scan_info"] = {
+                    "type": scaninfo.get("type"),
+                    "protocol": scaninfo.get("protocol"),
+                    "numservices": scaninfo.get("numservices")
+                }
+            
+            # 主机信息
+            for host in root.findall("host"):
+                host_info = self._parse_host(host)
+                if host_info:
+                    result["hosts"].append(host_info)
+            
+            # 统计信息
+            for runstats in root.findall("runstats"):
+                finished = runstats.find("finished")
+                if finished is not None:
+                    result["summary"]["scan_time"] = finished.get("elapsed")
+                    result["summary"]["exit_status"] = finished.get("exit")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"解析Nmap XML失败: {e}")
+            return self._parse_nmap_text(xml_output)
+    
+    def _parse_host(self, host_elem) -> Dict[str, Any]:
+        """解析单个主机信息"""
+        host_info = {
+            "addresses": [],
+            "hostnames": [],
+            "status": {},
+            "ports": [],
+            "os": {}
+        }
+        
+        # 地址信息
+        for address in host_elem.findall("address"):
+            host_info["addresses"].append({
+                "addr": address.get("addr"),
+                "addrtype": address.get("addrtype")
+            })
+        
+        # 主机名
+        for hostname in host_elem.findall("hostnames/hostname"):
+            host_info["hostnames"].append({
+                "name": hostname.get("name"),
+                "type": hostname.get("type")
+            })
+        
+        # 状态
+        status = host_elem.find("status")
+        if status is not None:
+            host_info["status"] = {
+                "state": status.get("state"),
+                "reason": status.get("reason")
+            }
+        
+        # 端口信息
+        ports = host_elem.find("ports")
+        if ports is not None:
+            for port in ports.findall("port"):
+                port_info = self._parse_port(port)
+                if port_info:
+                    host_info["ports"].append(port_info)
+        
+        # 操作系统信息
+        os_elem = host_elem.find("os")
+        if os_elem is not None:
+            host_info["os"] = self._parse_os(os_elem)
+        
+        return host_info
+    
+    def _parse_port(self, port_elem) -> Dict[str, Any]:
+        """解析端口信息"""
+        port_info = {
+            "portid": port_elem.get("portid"),
+            "protocol": port_elem.get("protocol"),
+            "state": {},
+            "service": {}
+        }
+        
+        # 状态
+        state = port_elem.find("state")
+        if state is not None:
+            port_info["state"] = {
+                "state": state.get("state"),
+                "reason": state.get("reason")
+            }
+        
+        # 服务
+        service = port_elem.find("service")
+        if service is not None:
+            port_info["service"] = {
+                "name": service.get("name"),
+                "product": service.get("product"),
+                "version": service.get("version"),
+                "extrainfo": service.get("extrainfo"),
+                "conf": service.get("conf")
+            }
+        
+        return port_info
+    
+    def _parse_os(self, os_elem) -> Dict[str, Any]:
+        """解析操作系统信息"""
+        os_info = {
+            "portused": [],
+            "osmatch": []
+        }
+        
+        for portused in os_elem.findall("portused"):
+            os_info["portused"].append({
+                "state": portused.get("state"),
+                "proto": portused.get("proto"),
+                "portid": portused.get("portid")
+            })
+        
+        for osmatch in os_elem.findall("osmatch"):
+            os_info["osmatch"].append({
+                "name": osmatch.get("name"),
+                "accuracy": osmatch.get("accuracy"),
+                "line": osmatch.get("line")
+            })
+        
+        return os_info
+    
+    def _parse_nmap_text(self, text_output: str) -> Dict[str, Any]:
+        """简单文本解析作为备选方案"""
+        result = {
+            "open_ports": [],
+            "services": [],
+            "os_info": {},
+            "raw_output": text_output
+        }
+        
+        # 提取开放端口
+        port_pattern = r'(\d+)/(tcp|udp)\s+open\s+(\S+)'
+        for match in re.finditer(port_pattern, text_output):
+            port, protocol, service = match.groups()
+            result["open_ports"].append({
+                "port": int(port),
+                "protocol": protocol,
+                "service": service,
+                "state": "open"
+            })
+        
+        return result
