@@ -6,7 +6,7 @@ import json
 import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 
 @dataclass
@@ -21,14 +21,19 @@ class TodoItem:
     phase: Optional[str] = None
     tool: Optional[str] = None
     priority: int = 0  # 0-5, 5为最高优先级
-    dependencies: List[str] = None
+    dependencies: List[str] = field(default_factory=list)
     estimated_duration: int = 0  # 预估时长（秒）
     actual_duration: int = 0  # 实际时长（秒）
     error_message: Optional[str] = None
+    type: str = "generic"
+    config: Dict[str, Any] = field(default_factory=dict)
+    parent_stage: Optional[str] = None
     
     def __post_init__(self):
         if self.dependencies is None:
             self.dependencies = []
+        if self.config is None:
+            self.config = {}
 
 
 class TodoManager:
@@ -44,8 +49,23 @@ class TodoManager:
             "completed_todos": 0,
             "failed_todos": 0,
             "cancelled_todos": 0,
+            "in_progress_todos": 0,
             "start_time": datetime.now().isoformat()
         }
+
+    async def initialize(self) -> bool:
+        """初始化TODO管理器（适配统一初始化流程）"""
+        async with self.lock:
+            self.todo_lists.clear()
+            self.stats.update({
+                "total_todos": 0,
+                "completed_todos": 0,
+                "failed_todos": 0,
+                "cancelled_todos": 0,
+                "in_progress_todos": 0,
+                "start_time": datetime.now().isoformat()
+            })
+        return True
     
     async def create_todo_list(self, list_name: str, todos: List[Dict[str, Any]]) -> bool:
         """创建TODO列表"""
@@ -66,18 +86,27 @@ class TodoManager:
                         tool=todo_data.get("tool"),
                         priority=todo_data.get("priority", 0),
                         dependencies=todo_data.get("dependencies", []),
-                        estimated_duration=todo_data.get("estimated_duration", 0)
+                        estimated_duration=todo_data.get("estimated_duration", todo_data.get("estimated_time", 0)),
+                        type=todo_data.get("type", "generic"),
+                        config=todo_data.get("config", {}),
+                        parent_stage=todo_data.get("parent_stage")
                     )
                     todo_items.append(todo_item)
                 
                 self.todo_lists[list_name] = todo_items
-                self.stats["total_todos"] += len(todo_items)
+                self._recalculate_stats_locked()
                 
                 return True
                 
             except Exception as e:
                 print(f"创建TODO列表失败: {e}")
                 return False
+
+    async def create_batch_todos(self, todos: List[Dict[str, Any]], list_name: str = "execution_plan") -> bool:
+        """批量创建TODO（兼容旧接口）"""
+        if not todos:
+            return False
+        return await self.create_todo_list(list_name, todos)
     
     async def update_todo_status(self, todo_id: str, status: str, error_message: str = None) -> bool:
         """更新TODO状态"""
@@ -106,6 +135,22 @@ class TodoManager:
                 print(f"更新TODO状态失败: {e}")
                 return False
     
+    def _recalculate_stats_locked(self) -> None:
+        """重新计算全局统计（假设已持有锁）"""
+        total = completed = failed = cancelled = in_progress = 0
+        for todo_list in self.todo_lists.values():
+            total += len(todo_list)
+            completed += len([t for t in todo_list if t.status == "completed"])
+            failed += len([t for t in todo_list if t.status == "failed"])
+            cancelled += len([t for t in todo_list if t.status == "cancelled"])
+            in_progress += len([t for t in todo_list if t.status == "in_progress"])
+
+        self.stats["total_todos"] = total
+        self.stats["completed_todos"] = completed
+        self.stats["failed_todos"] = failed
+        self.stats["cancelled_todos"] = cancelled
+        self.stats["in_progress_todos"] = in_progress
+
     def _update_stats(self, old_status: str, new_status: str):
         """更新统计信息"""
         # 减少旧状态计数
@@ -155,6 +200,27 @@ class TodoManager:
             # 按优先级排序
             pending_todos.sort(key=lambda x: x["priority"], reverse=True)
             return pending_todos
+
+    async def get_next_executable_todos(self, max_count: int = 1) -> List[Dict[str, Any]]:
+        """获取下一批可执行的TODO"""
+        async with self.lock:
+            candidates: List[TodoItem] = []
+            for todo_list in self.todo_lists.values():
+                for todo in todo_list:
+                    if todo.status != "pending":
+                        continue
+                    if not await self._check_dependencies_completed(todo.dependencies):
+                        continue
+                    candidates.append(todo)
+
+            candidates.sort(key=lambda t: (-t.priority, t.created_at))
+            max_count = max(1, max_count or 1)
+            return [asdict(todo) for todo in candidates[:max_count]]
+
+    async def get_total_count(self) -> int:
+        """获取TODO总数"""
+        async with self.lock:
+            return sum(len(todo_list) for todo_list in self.todo_lists.values())
     
     async def get_next_todo(self, list_name: str = None) -> Optional[Dict[str, Any]]:
         """获取下一个待处理的TODO"""
@@ -208,6 +274,12 @@ class TodoManager:
                     "in_progress": self._count_in_progress(),
                     "progress_percentage": (self.stats["completed_todos"] / self.stats["total_todos"] * 100) if self.stats["total_todos"] > 0 else 0
                 }
+
+    async def get_statistics(self) -> Dict[str, Any]:
+        """获取统计信息快照"""
+        async with self.lock:
+            self._recalculate_stats_locked()
+            return dict(self.stats)
     
     def _count_in_progress(self) -> int:
         """统计进行中的TODO数量"""
@@ -315,7 +387,7 @@ class TodoManager:
                     self.todo_lists[list_name] = []
                 
                 self.todo_lists[list_name].append(todo_item)
-                self.stats["total_todos"] += 1
+                self._recalculate_stats_locked()
                 
                 return True
                 
@@ -330,16 +402,8 @@ class TodoManager:
                 for list_name, todo_list in self.todo_lists.items():
                     for i, todo in enumerate(todo_list):
                         if todo.id == todo_id:
-                            removed_todo = todo_list.pop(i)
-                            self.stats["total_todos"] -= 1
-                            
-                            # 更新统计
-                            if removed_todo.status == "completed":
-                                self.stats["completed_todos"] -= 1
-                            elif removed_todo.status == "failed":
-                                self.stats["failed_todos"] -= 1
-                            elif removed_todo.status == "cancelled":
-                                self.stats["cancelled_todos"] -= 1
+                            todo_list.pop(i)
+                            self._recalculate_stats_locked()
                             
                             return True
                 
@@ -419,8 +483,6 @@ class TodoManager:
                     self.todo_lists[list_name] = [todo for todo in todo_list if todo.status != "completed"]
                     cleared_count += original_length - len(self.todo_lists[list_name])
             
-            # 更新统计
-            self.stats["total_todos"] -= cleared_count
-            self.stats["completed_todos"] = max(0, self.stats["completed_todos"] - cleared_count)
+            self._recalculate_stats_locked()
             
             return cleared_count

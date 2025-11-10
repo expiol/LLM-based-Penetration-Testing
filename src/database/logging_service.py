@@ -401,7 +401,84 @@ class PentestLoggingService:
         except Exception as e:
             logger.error(f"获取会话摘要失败: {e}")
             return {}
+    
+    def get_current_executing_tasks(self, session_id: str) -> List[Dict[str, Any]]:
+        """
+        获取当前正在执行的任务列表
+        
+        Args:
+            session_id: 会话ID
+            
+        Returns:
+            List[Dict[str, Any]]: 当前执行的任务列表
+        """
+        try:
+            with db_manager.get_session() as db:
+                # 获取当前正在执行的工具
+                running_tools = db.query(ToolExecution).filter(
+                    ToolExecution.session_id == session_id,
+                    ToolExecution.status == TaskStatus.RUNNING
+                ).order_by(ToolExecution.started_at.desc()).limit(3).all()
+                
+                tasks = []
+                for tool_exec in running_tools:
+                    tool_name = tool_exec.tool_name
+                    params = tool_exec.parameters or {}
+                    command = tool_exec.command or ""
+                    
+                    # 根据工具类型生成友好的任务描述
+                    task_desc = self._generate_task_description(tool_name, params, command)
+                    tasks.append({
+                        "tool": tool_name,
+                        "description": task_desc,
+                        "started_at": tool_exec.started_at.isoformat() if tool_exec.started_at else None
+                    })
+                
+                return tasks
+                
+        except Exception as e:
+            logger.error(f"获取当前执行任务失败: {e}")
+            return []
+    
+    def _generate_task_description(self, tool_name: str, parameters: Dict[str, Any], command: str) -> str:
+        """
+        根据工具名称和参数生成友好的任务描述
+        
+        Args:
+            tool_name: 工具名称
+            parameters: 工具参数
+            command: 执行命令
+            
+        Returns:
+            str: 任务描述
+        """
+        target = parameters.get("target") or parameters.get("domain") or "目标"
+        
+        if tool_name == "nmap":
+            ports = parameters.get("ports", "常用端口")
+            scan_type = parameters.get("scan_type", "tcp_connect")
+            scan_type_name = "TCP连接扫描" if scan_type == "tcp_connect" else "TCP SYN扫描"
+            return f"正在扫描 {target} 的开放端口（端口范围: {ports}，扫描类型: {scan_type_name}）"
+        
+        elif tool_name == "dns_enum":
+            return f"正在获取 {target} 的DNS记录（A、AAAA、MX、NS、TXT等）"
+        
+        elif tool_name == "subdomain_enum":
+            methods = parameters.get("methods", [])
+            methods_str = "、".join(methods) if methods else "多种方法"
+            return f"正在枚举 {target} 的子域名（方法: {methods_str}）"
+        
+        elif tool_name == "command_executor":
+            cmd = command or parameters.get("command", "未知命令")
+            return f"正在执行命令: {cmd}"
+        
+        else:
+            # 通用描述
+            if command:
+                return f"正在使用 {tool_name} 执行: {command}"
+            else:
+                return f"正在使用 {tool_name} 处理 {target}"
 
 
-# 全局日志服务实例
+# 单例日志服务，供各个 Agent 直接导入使用
 pentest_logger = PentestLoggingService()

@@ -3,7 +3,12 @@
 """
 import asyncio
 import subprocess
-import dns.resolver
+try:
+    import dns.resolver
+    DNS_AVAILABLE = True
+except ImportError:
+    DNS_AVAILABLE = False
+    dns = None
 import requests
 from typing import Dict, Any, List, Set
 from ....core.agent_tool_manager import ToolInterface
@@ -29,6 +34,17 @@ class SubdomainEnumerationTool(ToolInterface):
             
             self.logger.info(f"开始子域名枚举: {domain}")
             
+            # 检查依赖
+            if not DNS_AVAILABLE and "dns_brute" in methods:
+                self.logger.warning("dnspython未安装，DNS暴力破解功能不可用")
+                # 移除需要DNS的方法
+                methods = [m for m in methods if m != "dns_brute"]
+                if not methods:
+                    return {
+                        "success": False,
+                        "error": "dnspython未安装，子域名枚举功能不可用。请运行: pip install dnspython"
+                    }
+            
             found_subdomains = set()
             results = {}
             
@@ -36,6 +52,9 @@ class SubdomainEnumerationTool(ToolInterface):
             for method in methods:
                 try:
                     if method == "dns_brute":
+                        if not DNS_AVAILABLE:
+                            results["dns_brute"] = {"error": "dnspython未安装"}
+                            continue
                         subdomains = await self._dns_bruteforce(domain)
                         results["dns_brute"] = list(subdomains)
                         found_subdomains.update(subdomains)
@@ -76,6 +95,10 @@ class SubdomainEnumerationTool(ToolInterface):
     
     async def _dns_bruteforce(self, domain: str) -> Set[str]:
         """DNS暴力破解"""
+        if not DNS_AVAILABLE:
+            self.logger.warning("dnspython未安装，DNS暴力破解功能不可用")
+            return set()
+        
         found_subdomains = set()
         
         # 使用异步任务并发查询
@@ -99,6 +122,9 @@ class SubdomainEnumerationTool(ToolInterface):
     
     async def _check_dns_record(self, subdomain: str) -> bool:
         """检查DNS记录"""
+        if not DNS_AVAILABLE:
+            return False
+        
         try:
             resolver = dns.resolver.Resolver()
             resolver.timeout = 2
@@ -292,6 +318,12 @@ class DNSEnumerationTool(ToolInterface):
     async def execute(self, parameters: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
         """执行DNS枚举"""
         try:
+            if not DNS_AVAILABLE:
+                return {
+                    "success": False,
+                    "error": "dnspython未安装，DNS枚举功能不可用。请运行: pip install dnspython"
+                }
+            
             domain = parameters.get("domain")
             record_types = parameters.get("record_types", ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA"])
             

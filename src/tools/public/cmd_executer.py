@@ -11,6 +11,10 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 from ...core.agent_tool_manager import ToolInterface
 
+# 获取项目根目录
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+DEFAULT_WORKSPACE = PROJECT_ROOT / "workspace"
+
 
 class CommandExecutorTool(ToolInterface):
     """通用命令执行工具"""
@@ -27,7 +31,7 @@ class CommandExecutorTool(ToolInterface):
         self.environment_config = config.get("environment", {
             "package_manager": "apt",
             "temp_directory": "/tmp",
-            "workspace_directory": "/workspace", 
+            "workspace_directory": str(DEFAULT_WORKSPACE), 
             "max_file_size": 100 * 1024 * 1024,  # 100MB
             "max_execution_time": 300
         })
@@ -271,7 +275,7 @@ class CommandExecutorTool(ToolInterface):
             
             # 设置默认值
             if working_directory is None:
-                working_directory = self.environment_config.get("workspace_directory", "/tmp")
+                working_directory = self.environment_config.get("workspace_directory", str(DEFAULT_WORKSPACE))
             if timeout is None:
                 timeout = self.timeout
             if env is None:

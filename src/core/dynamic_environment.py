@@ -11,8 +11,13 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 import json
 import uuid
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# 获取项目根目录
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_WORKSPACE = PROJECT_ROOT / "workspace"
 
 
 class EnvironmentAction:
@@ -40,7 +45,7 @@ class DynamicEnvironmentManager:
         self.environment_config = config.get("environment", {
             "package_manager": "apt",  # apt, yum, pip, npm等
             "temp_directory": "/tmp",
-            "workspace_directory": "/workspace",
+            "workspace_directory": str(DEFAULT_WORKSPACE),
             "allowed_commands": ["apt", "pip", "npm", "git", "wget", "curl"],
             "max_file_size": 100 * 1024 * 1024,  # 100MB
             "max_execution_time": 300  # 5分钟
@@ -50,15 +55,26 @@ class DynamicEnvironmentManager:
         """初始化动态环境管理器"""
         try:
             # 创建工作目录
+            print("    正在创建工作空间...", flush=True)
             await self._create_workspace()
+            workspace_dir = self.environment_config.get("workspace_directory", "unknown")
+            print(f"    ✅ 工作空间创建成功: {workspace_dir}", flush=True)
+            await asyncio.sleep(0)
             
             # 检查环境状态
+            print("    正在检查环境状态...", flush=True)
             await self._check_environment_status()
+            available_managers = self.environment_state.get("available_package_managers", [])
+            if available_managers:
+                print(f"    ✅ 环境检查完成，可用包管理器: {', '.join(available_managers)}", flush=True)
+            else:
+                print("    ⚠️  环境检查完成，未检测到包管理器", flush=True)
             
             logger.info("动态环境管理器初始化完成")
             
         except Exception as e:
             logger.error(f"动态环境管理器初始化失败: {e}")
+            print(f"    ❌ 动态环境管理器初始化失败: {e}")
             raise
     
     async def prepare_stage_environment(self, stage_type: str, stage_config: Dict[str, Any]) -> bool:
@@ -402,22 +418,41 @@ class DynamicEnvironmentManager:
         return False
     
     async def _create_workspace(self):
-        """创建工作空间"""
-        workspace_dir = self.environment_config.get("workspace_directory", "/workspace")
+        """创建工作空间，若配置路径不可写则回退到临时目录"""
+        default_path = str(DEFAULT_WORKSPACE)
+        configured_path = Path(self.environment_config.get("workspace_directory", default_path))
+
+        try:
+            configured_path.mkdir(parents=True, exist_ok=True)
+            workspace_dir = configured_path
+            logger.info("工作空间路径: %s", workspace_dir)
+        except OSError as exc:
+            fallback = Path(tempfile.gettempdir()) / "llm_pentest_workspace"
+            fallback.mkdir(parents=True, exist_ok=True)
+            workspace_dir = fallback
+            self.environment_config["workspace_directory"] = str(fallback)
+            logger.warning(
+                "无法在 %s 创建工作空间(%s)，已回退到 %s",
+                configured_path,
+                exc,
+                fallback,
+            )
         
-        if not os.path.exists(workspace_dir):
-            os.makedirs(workspace_dir, exist_ok=True)
-            logger.info(f"创建工作空间: {workspace_dir}")
     
     async def _check_environment_status(self):
         """检查环境状态"""
-        # 检查包管理器
+        # 检查包管理器（带超时保护，避免阻塞）
         package_managers = ["apt", "pip", "npm"]
         available_managers = []
         
         for manager in package_managers:
-            if await self._is_command_available(manager):
-                available_managers.append(manager)
+            try:
+                # 每个命令检查最多2秒超时
+                if await asyncio.wait_for(self._is_command_available(manager), timeout=2.0):
+                    available_managers.append(manager)
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.debug(f"检查包管理器 {manager} 超时或失败: {e}")
+                continue
         
         self.environment_state["available_package_managers"] = available_managers
         self.environment_state["workspace_directory"] = self.environment_config.get("workspace_directory")
@@ -426,9 +461,13 @@ class DynamicEnvironmentManager:
     async def _is_command_available(self, command: str) -> bool:
         """检查命令是否可用"""
         try:
-            result = await self._run_command(["which", command])
+            # 使用较短的超时时间（2秒）
+            result = await asyncio.wait_for(
+                self._run_command(["which", command], timeout=2),
+                timeout=2.0
+            )
             return result.get("success", False)
-        except:
+        except (asyncio.TimeoutError, Exception):
             return False
     
     def get_environment_state(self) -> Dict[str, Any]:

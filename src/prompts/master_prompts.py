@@ -2,6 +2,7 @@
 主控LLM提示词模板
 管理整个渗透测试项目的LLM prompts
 """
+import json
 from typing import Dict, Any, List
 
 
@@ -70,20 +71,33 @@ class MasterPrompts:
         获取渗透测试规划提示词
         
         Args:
-            target: 目标地址
-            options: 测试选项
+            target: 目标地址（可能是 "auto_extract" 标记）
+            options: 测试选项（包含 raw_description）
             context: 执行上下文
             
         Returns:
             str: 规划提示词
         """
-        return f"""你需要为目标 {target} 制定详细的渗透测试计划。
+        # 检查是否需要从描述中提取目标
+        raw_description = options.get("raw_description", "")
+        
+        # 如果target是"auto_extract"或者为空，使用原始描述让LLM提取
+        # 优先使用原始描述，让LLM来理解和规划
+        if (target == "auto_extract" or not target) and raw_description:
+            # 需要LLM从描述中提取目标
+            return f"""你需要从以下自然语言描述中提取目标信息，并为其制定详细的渗透测试计划。
+
+用户描述：{raw_description}
+
+### 任务要求
+1. **目标提取**：从用户描述中准确提取目标地址（IP地址或域名）
+2. **计划制定**：基于提取的目标制定完整的渗透测试计划
 
 ### 目标信息
-- 目标地址: {target}
-- 测试选项: {options}
-- 当前环境状态: {context.get("environment_state", {{}})}
-- 可用工具: {context.get("available_tools", [])}
+- 用户描述: {raw_description}
+- 测试选项: {json.dumps(options, ensure_ascii=False, indent=2)}
+- 当前环境状态: {json.dumps(context.get("environment_state", {}), ensure_ascii=False, indent=2)}
+- 可用工具: {json.dumps(context.get("available_tools", []), ensure_ascii=False)}
 
 ### 规划要求
 请制定一个完整的Cyber Kill Chain渗透测试计划，需要包含：
@@ -146,7 +160,50 @@ class MasterPrompts:
 - 法律合规风险
 - 技术难度评估
 
-请以JSON格式返回完整的测试计划。"""
+### 响应格式要求（重要！）
+你必须严格按照以下JSON格式返回，不要添加任何额外的说明文字：
+
+{{"target": "提取的目标IP地址或域名", "stages": [{{"id": "reconnaissance_0", "type": "reconnaissance", "name": "侦察阶段", "description": "阶段描述", "config": {{"target": "提取的目标IP地址或域名", "tools": ["nmap", "dns_enum"], "scan_type": "tcp_connect", "port_range": "1-1000"}}, "todos": [{{"id": "recon_port_scan", "name": "端口扫描", "description": "使用nmap扫描目标开放端口"}}]}}, {{"id": "weaponization_1", "type": "weaponization", "name": "武器化阶段", "description": "阶段描述", "config": {{}}, "todos": []}}]}}
+
+格式化后的示例（仅用于理解结构，实际返回时请使用紧凑格式或标准JSON格式）：
+{{
+  "target": "提取的目标IP地址或域名",
+  "stages": [
+    {{
+      "id": "reconnaissance_0",
+      "type": "reconnaissance",
+      "name": "侦察阶段",
+      "description": "阶段描述",
+      "config": {{
+        "target": "提取的目标IP地址或域名",
+        "tools": ["nmap", "dns_enum"],
+        "scan_type": "tcp_connect",
+        "port_range": "1-1000"
+      }},
+      "todos": [
+        {{
+          "id": "recon_port_scan",
+          "name": "端口扫描",
+          "description": "使用nmap扫描目标开放端口"
+        }}
+      ]
+    }}
+  ]
+}}
+
+### 关键要求
+1. **target字段**：必须包含提取的目标IP地址或域名（例如："192.168.66.1"）
+2. **stages数组**：必须包含至少一个阶段对象
+3. **每个stage必须包含**：
+   - id: 唯一标识符（格式：阶段类型_序号）
+   - type: 阶段类型（reconnaissance/weaponization/delivery/exploitation/installation/command_control/actions_on_objectives）
+   - name: 阶段名称
+   - description: 阶段描述
+   - config: 配置对象（必须包含target字段）
+   - todos: TODO列表（数组）
+4. **只返回JSON，不要添加任何markdown标记或说明文字**
+
+请严格按照上述格式返回JSON。"""
 
     @staticmethod
     def get_agent_coordination_prompt(agent_type: str, task_result: Dict[str, Any], 
@@ -221,7 +278,7 @@ Agent类型: {agent_type}
 Agent类型: {agent_type}
 错误类型: {error_info.get('error_type', 'unknown')}
 错误消息: {error_info.get('error_message', '')}
-失败的任务: {error_info.get('failed_task', {{}})}
+失败的任务: {json.dumps(error_info.get('failed_task', {}), ensure_ascii=False, indent=2)}
 执行时间: {error_info.get('timestamp', '')}
 
 ### 执行上下文
@@ -282,7 +339,7 @@ Agent类型: {agent_type}
 当前阶段: {execution_state.get('current_stage', 'unknown')}
 执行时长: {execution_state.get('execution_duration', 0)} 秒
 最近的失败: {execution_state.get('recent_failures', [])}
-资源使用情况: {execution_state.get('resource_usage', {{}})}
+资源使用情况: {json.dumps(execution_state.get('resource_usage', {}), ensure_ascii=False, indent=2)}
 
 ### 管理要求
 请分析并提供以下管理建议：

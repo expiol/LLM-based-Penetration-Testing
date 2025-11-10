@@ -177,3 +177,7 @@ my-lock-file
 .vscode/
 tmp.txt
 logs/
+llm_runtime.json
+
+# Workspace directory (runtime generated)
+workspace/

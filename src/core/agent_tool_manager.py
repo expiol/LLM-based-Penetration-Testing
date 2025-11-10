@@ -97,19 +97,24 @@ class AgentToolManager:
         try:
             # 加载公有工具
             await self._load_public_tools()
+            await asyncio.sleep(0)  # 让出控制权
             
             # 加载Agent专有工具
             await self._load_private_tools()
+            await asyncio.sleep(0)  # 让出控制权
             
-            # 注册工具到分类
+            # 注册工具到分类（同步操作，但很快）
             self._categorize_tools()
+            await asyncio.sleep(0)  # 让出控制权
             
+            tool_count = len(self.get_available_tools())
             self.logger.info(f"Agent {self.agent_type.value} 工具管理器初始化完成")
-            self.logger.info(f"可用工具: {len(self.get_available_tools())} 个")
+            self.logger.info(f"可用工具: {tool_count} 个")
             
         except Exception as e:
             self.logger.error(f"工具管理器初始化失败: {e}")
-            raise
+            # 不抛出异常，允许继续初始化其他组件
+            pass
     
     async def register_tool(self, tool: ToolInterface, scope: ToolScope = ToolScope.PRIVATE) -> bool:
         """
@@ -153,7 +158,33 @@ class AgentToolManager:
         try:
             tool = self._get_tool(tool_name)
             if not tool:
-                return {"success": False, "error": f"工具不存在: {tool_name}"}
+                # 检查是否有替代工具
+                available_tools = self.get_available_tools()
+                self.logger.warning(f"工具 {tool_name} 不存在，可用工具: {available_tools}")
+                
+                # 尝试自动安装工具（如果是系统命令工具）
+                install_result = await self._try_install_tool(tool_name)
+                if install_result.get("success"):
+                    # 重新获取工具
+                    tool = self._get_tool(tool_name)
+                    if tool:
+                        self.logger.info(f"工具 {tool_name} 安装成功，已可用")
+                    else:
+                        return {
+                            "success": False, 
+                            "error": f"工具不存在: {tool_name}",
+                            "available_tools": available_tools,
+                            "suggestion": f"请检查工具是否已正确注册，或使用替代工具"
+                        }
+                else:
+                    return {
+                        "success": False, 
+                        "error": f"工具不存在: {tool_name}",
+                        "available_tools": available_tools,
+                        "suggestion": f"请检查工具是否已正确注册，或使用替代工具",
+                        "install_attempted": True,
+                        "install_error": install_result.get("error")
+                    }
             
             # 检查权限
             if not tool.can_be_used_by(self.agent_type):
@@ -171,10 +202,42 @@ class AgentToolManager:
                 **(context or {})
             }
             
+            # 记录工具执行开始（如果context中有session_id）
+            session_id = (context or {}).get("session_id")
+            tool_exec_id = None
+            if session_id:
+                try:
+                    from ..database.logging_service import pentest_logger
+                    command_desc = self._build_command_description(tool_name, parameters)
+                    tool_exec_id = pentest_logger.log_tool_execution(
+                        session_id=session_id,
+                        tool_name=tool_name,
+                        command=command_desc,
+                        parameters=parameters,
+                        safe_mode=True,
+                        risk_level="LOW"
+                    )
+                except Exception as e:
+                    self.logger.debug(f"记录工具执行日志失败: {e}")
+            
             # 执行工具
             start_time = datetime.now()
             result = await tool.execute(parameters, execution_context)
             end_time = datetime.now()
+            
+            # 完成工具执行记录
+            if tool_exec_id and session_id:
+                try:
+                    from ..database.logging_service import pentest_logger
+                    pentest_logger.complete_tool_execution(
+                        tool_exec_id=tool_exec_id,
+                        success=result.get("success", False),
+                        return_code=0 if result.get("success") else 1,
+                        stdout=str(result.get("result", "")),
+                        stderr=result.get("error", "")
+                    )
+                except Exception as e:
+                    self.logger.debug(f"完成工具执行记录失败: {e}")
             
             # 记录使用历史
             usage_record = {
@@ -193,6 +256,20 @@ class AgentToolManager:
         except Exception as e:
             self.logger.error(f"工具执行失败: {e}")
             return {"success": False, "error": str(e)}
+    
+    def _build_command_description(self, tool_name: str, parameters: Dict[str, Any]) -> str:
+        """构建命令描述"""
+        target = parameters.get("target") or parameters.get("domain", "")
+        if tool_name == "nmap":
+            ports = parameters.get("ports", "1-1000")
+            scan_type = parameters.get("scan_type", "tcp_connect")
+            return f"nmap -{scan_type[4:]} -p {ports} {target}"
+        elif tool_name == "dns_enum":
+            return f"dns_enum {target}"
+        elif tool_name == "subdomain_enum":
+            return f"subdomain_enum {target}"
+        else:
+            return f"{tool_name} {target}"
     
     def get_available_tools(self) -> List[str]:
         """获取可用工具列表"""
@@ -269,16 +346,64 @@ class AgentToolManager:
     async def _load_public_tools(self):
         """加载公有工具"""
         try:
-            # 从配置文件或默认位置加载公有工具
+            # 首先从全局注册表获取已注册的公有工具
+            global_public_tools = global_tool_registry.get_all_public_tools()
+            for tool_name, tool in global_public_tools.items():
+                if tool_name not in self.public_tools:
+                    self.public_tools[tool_name] = tool
+                    self.logger.info(f"从全局注册表加载公有工具: {tool_name}")
+            
+            # 从配置文件加载额外的公有工具
             public_tools_config = self.config.get("public_tools", [])
             
             for tool_config in public_tools_config:
                 tool = await self._create_tool_from_config(tool_config)
                 if tool:
                     await self.register_tool(tool, ToolScope.PUBLIC)
+            
+            # 自动发现并注册默认公有工具（如果未配置）
+            if not public_tools_config:
+                await self._auto_discover_public_tools()
                     
         except Exception as e:
             self.logger.error(f"加载公有工具失败: {e}")
+    
+    async def _auto_discover_public_tools(self):
+        """自动发现并注册默认公有工具"""
+        try:
+            # 默认公有工具列表
+            default_public_tools = [
+                {
+                    "module": "src.tools.public.nmap_tool",
+                    "class": "NmapTool",
+                    "config": {}
+                },
+                {
+                    "module": "src.tools.public.cmd_executer",
+                    "class": "CommandExecutorTool",
+                    "config": {}
+                },
+                {
+                    "module": "src.tools.public.auto_decode",
+                    "class": "AutoDecodeTool",
+                    "config": {}
+                }
+            ]
+            
+            for tool_config in default_public_tools:
+                try:
+                    tool = await self._create_tool_from_config(tool_config)
+                    if tool:
+                        await self.register_tool(tool, ToolScope.PUBLIC)
+                        # 同时注册到全局注册表
+                        global_tool_registry.register_public_tool(tool)
+                        self.logger.info(f"自动发现并注册公有工具: {tool.name}")
+                except Exception as e:
+                    self.logger.warning(f"自动发现工具失败 {tool_config.get('class')}: {e}")
+                    continue
+                    
+        except Exception as e:
+            self.logger.error(f"自动发现公有工具失败: {e}")
     
     async def _load_private_tools(self):
         """加载Agent私有工具"""
@@ -287,23 +412,98 @@ class AgentToolManager:
             private_tools_path = f"src.tools.private.{self.agent_type.value.lower()}"
             
             try:
-                module = importlib.import_module(private_tools_path)
+                # 将同步的模块导入放到线程中执行，避免阻塞事件循环
+                module = await asyncio.to_thread(importlib.import_module, private_tools_path)
                 
-                # 查找工具类
-                for name, obj in inspect.getmembers(module):
-                    if (inspect.isclass(obj) and 
-                        issubclass(obj, ToolInterface) and 
-                        obj != ToolInterface):
-                        
+                # 将同步的inspect操作也放到线程中执行
+                def _find_tool_classes():
+                    tool_classes = []
+                    for name, obj in inspect.getmembers(module):
+                        if (inspect.isclass(obj) and 
+                            issubclass(obj, ToolInterface) and 
+                            obj != ToolInterface):
+                            tool_classes.append((name, obj))
+                    return tool_classes
+                
+                tool_classes = await asyncio.to_thread(_find_tool_classes)
+                
+                if not tool_classes:
+                    # 这是正常的，某些Agent可能还没有私有工具
+                    self.logger.debug(f"Agent {self.agent_type.value} 的私有工具模块 {private_tools_path} 中没有工具类（这是正常的，如果该Agent还没有实现私有工具）")
+                
+                # 注册找到的工具类
+                for name, obj in tool_classes:
+                    try:
                         tool_config = self.config.get("private_tools", {}).get(name, {})
                         tool_instance = obj(tool_config)
                         await self.register_tool(tool_instance, ToolScope.PRIVATE)
+                        self.logger.info(f"✅ 成功加载私有工具: {name}")
+                        await asyncio.sleep(0)  # 让出控制权
+                    except Exception as e:
+                        self.logger.error(f"加载工具 {name} 失败: {e}", exc_info=True)
+                        # 尝试安装缺失的依赖
+                        await self._try_install_missing_dependencies(str(e))
+                        continue
                         
-            except ImportError:
-                self.logger.info(f"未找到 {self.agent_type.value} 的私有工具模块")
+            except ImportError as e:
+                error_msg = str(e)
+                # 模块不存在是正常的，某些Agent可能还没有私有工具模块
+                # 只在debug模式下显示，避免产生过多警告
+                if "No module named" in error_msg:
+                    # 模块不存在，这是正常的
+                    self.logger.debug(f"Agent {self.agent_type.value} 的私有工具模块 {private_tools_path} 不存在（这是正常的，如果该Agent还没有实现私有工具）")
+                else:
+                    # 其他导入错误，可能是依赖问题
+                    self.logger.warning(f"导入 {self.agent_type.value} 的私有工具模块失败: {error_msg}")
+                    await self._try_install_missing_dependencies(error_msg)
+            except Exception as e:
+                # 其他错误才显示为警告或错误
+                self.logger.warning(f"加载 {self.agent_type.value} 的私有工具模块失败: {e}")
+                await self._try_install_missing_dependencies(str(e))
                 
         except Exception as e:
-            self.logger.error(f"加载私有工具失败: {e}")
+            self.logger.error(f"加载私有工具失败: {e}", exc_info=True)
+    
+    async def _try_install_missing_dependencies(self, error_msg: str):
+        """尝试根据错误信息安装缺失的依赖"""
+        import platform
+        
+        # 检测缺失的Python包
+        missing_packages = []
+        
+        if "No module named 'dns'" in error_msg or "No module named 'dnspython'" in error_msg:
+            missing_packages.append("dnspython")
+        elif "No module named 'requests'" in error_msg:
+            missing_packages.append("requests")
+        elif "No module named 'nmap'" in error_msg:
+            missing_packages.append("python-nmap")
+        
+        if not missing_packages:
+            return
+        
+        self.logger.info(f"检测到缺失的依赖包: {missing_packages}，尝试自动安装...")
+        
+        for package in missing_packages:
+            try:
+                cmd = ["python", "-m", "pip", "install", package]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode == 0:
+                    self.logger.info(f"成功安装依赖包: {package}")
+                    # 重新加载模块
+                    try:
+                        importlib.reload(importlib.import_module(f"src.tools.private.{self.agent_type.value.lower()}"))
+                    except:
+                        pass
+                else:
+                    self.logger.warning(f"安装依赖包 {package} 失败: {stderr.decode('utf-8', errors='ignore')}")
+            except Exception as e:
+                self.logger.error(f"安装依赖包 {package} 时出错: {e}")
     
     
     async def _create_tool_from_config(self, tool_config: Dict[str, Any]) -> Optional[ToolInterface]:
@@ -315,7 +515,8 @@ class AgentToolManager:
             if not module_name or not class_name:
                 return None
             
-            module = importlib.import_module(module_name)
+            # 将同步的模块导入放到线程中执行，避免阻塞事件循环
+            module = await asyncio.to_thread(importlib.import_module, module_name)
             tool_class = getattr(module, class_name)
             
             tool_instance_config = tool_config.get("config", {})
@@ -324,6 +525,192 @@ class AgentToolManager:
         except Exception as e:
             self.logger.error(f"创建工具实例失败: {e}")
             return None
+    
+    async def _try_install_tool(self, tool_name: str) -> Dict[str, Any]:
+        """尝试自动安装工具"""
+        import platform
+        
+        # 检测操作系统
+        system = platform.system().lower()
+        is_macos = system == "darwin"
+        is_linux = system == "linux"
+        
+        # 工具名称到系统包名的映射（支持不同操作系统）
+        tool_package_map = {
+            "nmap": {
+                "package": "nmap",
+                "apt": {"package": "nmap", "manager": "apt"},
+                "brew": {"package": "nmap", "manager": "brew"},
+                "pip": {"package": "python-nmap", "manager": "pip"}
+            },
+            "dns_enum": {
+                "apt": {"package": "dnsutils", "manager": "apt"},
+                "brew": {"package": "bind", "manager": "brew"},  # macOS上bind包含dig等工具
+                "pip": {"package": "dnspython", "manager": "pip"}
+            },
+            "subdomain_enum": {
+                "apt": {"package": "dnsutils", "manager": "apt"},
+                "brew": {"package": "bind", "manager": "brew"},
+                "pip": {"package": "dnspython", "manager": "pip"}
+            },
+            "nslookup": {
+                "apt": {"package": "dnsutils", "manager": "apt"},
+                "brew": {"package": "bind", "manager": "brew"},
+            },
+            "dig": {
+                "apt": {"package": "dnsutils", "manager": "apt"},
+                "brew": {"package": "bind", "manager": "brew"},
+            },
+            "whois": {
+                "apt": {"package": "whois", "manager": "apt"},
+                "brew": {"package": "whois", "manager": "brew"},
+            },
+            "sqlmap": {
+                "pip": {"package": "sqlmap", "manager": "pip"}
+            },
+            "nikto": {
+                "apt": {"package": "nikto", "manager": "apt"},
+                "brew": {"package": "nikto", "manager": "brew"},
+            },
+            "masscan": {
+                "apt": {"package": "masscan", "manager": "apt"},
+                "brew": {"package": "masscan", "manager": "brew"},
+            },
+        }
+        
+        # 检查工具是否在映射中
+        if tool_name not in tool_package_map:
+            return {
+                "success": False,
+                "error": f"工具 {tool_name} 不在自动安装列表中"
+            }
+        
+        # 根据操作系统选择包管理器
+        package_info = None
+        if is_macos:
+            # macOS优先使用brew，其次pip
+            if "brew" in tool_package_map[tool_name]:
+                package_info = tool_package_map[tool_name]["brew"]
+            elif "pip" in tool_package_map[tool_name]:
+                package_info = tool_package_map[tool_name]["pip"]
+        elif is_linux:
+            # Linux优先使用apt，其次pip
+            if "apt" in tool_package_map[tool_name]:
+                package_info = tool_package_map[tool_name]["apt"]
+            elif "pip" in tool_package_map[tool_name]:
+                package_info = tool_package_map[tool_name]["pip"]
+        else:
+            # 其他系统尝试pip
+            if "pip" in tool_package_map[tool_name]:
+                package_info = tool_package_map[tool_name]["pip"]
+        
+        if not package_info:
+            return {
+                "success": False,
+                "error": f"当前操作系统 ({system}) 不支持自动安装工具 {tool_name}"
+            }
+        
+        package = package_info["package"]
+        manager = package_info["manager"]
+        
+        try:
+            self.logger.info(f"尝试安装工具 {tool_name} (包: {package}, 管理器: {manager}, 系统: {system})")
+            
+            # 检查包管理器是否可用
+            check_cmd = ["which", manager] if manager != "pip" else ["python", "-m", "pip", "--version"]
+            check_process = await asyncio.create_subprocess_exec(
+                *check_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await check_process.wait()
+            
+            if check_process.returncode != 0:
+                return {
+                    "success": False,
+                    "error": f"包管理器 {manager} 不可用，请先安装 {manager}"
+                }
+            
+            # 执行安装
+            if manager == "apt":
+                # 先更新包列表
+                cmd = ["apt-get", "update", "-qq"]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await process.wait()
+                
+                # 安装包
+                cmd = ["apt-get", "install", "-y", package]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode == 0:
+                    return {"success": True, "message": f"成功安装 {package}"}
+                else:
+                    error_msg = stderr.decode('utf-8', errors='ignore')
+                    # 检查是否需要sudo权限
+                    if "permission denied" in error_msg.lower() or "root" in error_msg.lower():
+                        return {
+                            "success": False,
+                            "error": f"需要管理员权限安装 {package}，请手动运行: sudo apt-get install -y {package}"
+                        }
+                    return {
+                        "success": False,
+                        "error": f"安装失败: {error_msg}"
+                    }
+            elif manager == "brew":
+                # macOS使用brew安装
+                cmd = ["brew", "install", package]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode == 0:
+                    return {"success": True, "message": f"成功安装 {package}"}
+                else:
+                    error_msg = stderr.decode('utf-8', errors='ignore')
+                    return {
+                        "success": False,
+                        "error": f"安装失败: {error_msg}"
+                    }
+            elif manager == "pip":
+                cmd = ["python", "-m", "pip", "install", package]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode == 0:
+                    return {"success": True, "message": f"成功安装 {package}"}
+                else:
+                    return {
+                        "success": False,
+                        "error": f"安装失败: {stderr.decode('utf-8', errors='ignore')}"
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": f"不支持的包管理器: {manager}"
+                }
+                
+        except Exception as e:
+            self.logger.error(f"安装工具 {tool_name} 失败: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
     def _categorize_tools(self):
         """将工具分类"""
@@ -370,6 +757,10 @@ class GlobalToolRegistry:
     def register_agent_manager(self, agent_type: AgentType, manager: AgentToolManager):
         """注册Agent工具管理器"""
         self.agent_managers[agent_type] = manager
+    
+    def get_all_public_tools(self) -> Dict[str, ToolInterface]:
+        """获取所有公有工具"""
+        return self.public_tools
     
     def get_global_tool_statistics(self) -> Dict[str, Any]:
         """获取全局工具统计"""

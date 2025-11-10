@@ -6,6 +6,8 @@ import asyncio
 import subprocess
 import json
 import re
+import os
+import sys
 from typing import Dict, Any, List
 from ...core.agent_tool_manager import ToolInterface
 
@@ -16,6 +18,25 @@ class NmapTool(ToolInterface):
     def __init__(self, config: Dict[str, Any]):
         super().__init__("nmap", config)
         self.timeout = config.get("timeout", 300)  # 5分钟超时
+        self._has_root_privileges = None  # 缓存root权限检查结果
+        
+    async def _check_root_privileges(self) -> bool:
+        """检查是否有root权限"""
+        if self._has_root_privileges is not None:
+            return self._has_root_privileges
+        
+        try:
+            # 检查是否是root用户（Unix系统）
+            if sys.platform != "win32":
+                self._has_root_privileges = os.geteuid() == 0
+            else:
+                # Windows系统检查管理员权限
+                import ctypes
+                self._has_root_privileges = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            self._has_root_privileges = False
+        
+        return self._has_root_privileges
         
     async def execute(self, parameters: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
         """执行Nmap扫描"""
@@ -28,6 +49,22 @@ class NmapTool(ToolInterface):
             
             if not target:
                 return {"success": False, "error": "未指定目标"}
+            
+            # 检查root权限，如果使用tcp_syn但没有权限，自动降级到tcp_connect
+            has_root = await self._check_root_privileges()
+            if scan_type == "tcp_syn" and not has_root:
+                self.logger.warning("tcp_syn扫描需要root权限，自动降级到tcp_connect扫描")
+                scan_type = "tcp_connect"
+            
+            # UDP扫描也需要root权限
+            if scan_type == "udp" and not has_root:
+                self.logger.warning("UDP扫描需要root权限，自动降级到tcp_connect扫描")
+                scan_type = "tcp_connect"
+            
+            # 操作系统检测也需要root权限
+            if os_detection and not has_root:
+                self.logger.warning("操作系统检测需要root权限，已禁用")
+                os_detection = False
             
             # 构建Nmap命令
             cmd = ["nmap"]
@@ -62,6 +99,23 @@ class NmapTool(ToolInterface):
             # 执行扫描
             result = await self._run_command(cmd)
             
+            # 如果失败且错误信息包含权限相关，尝试降级
+            if not result.get("success", False):
+                error_msg = result.get("stderr", "").lower()
+                if ("root" in error_msg or "privileges" in error_msg or "permission" in error_msg) and scan_type != "tcp_connect":
+                    self.logger.warning("检测到权限错误，尝试使用tcp_connect扫描")
+                    # 移除-sS或-sU，添加-sT
+                    cmd = [c for c in cmd if c not in ["-sS", "-sU"]]
+                    if "-sT" not in cmd:
+                        cmd.insert(1, "-sT")
+                    # 移除-O（OS检测需要root）
+                    if "-O" in cmd:
+                        cmd.remove("-O")
+                    
+                    self.logger.info(f"重试Nmap扫描（降级模式）: {' '.join(cmd)}")
+                    result = await self._run_command(cmd)
+                    scan_type = "tcp_connect"
+            
             if result.get("success", False):
                 # 解析XML结果
                 parsed_result = self._parse_nmap_xml(result.get("stdout", ""))
@@ -71,7 +125,8 @@ class NmapTool(ToolInterface):
                     "target": target,
                     "scan_type": scan_type,
                     "result": parsed_result,
-                    "raw_output": result.get("stdout", "")
+                    "raw_output": result.get("stdout", ""),
+                    "privilege_note": "使用tcp_connect扫描（无需root权限）" if scan_type == "tcp_connect" else None
                 }
             else:
                 return {

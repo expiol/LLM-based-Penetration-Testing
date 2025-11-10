@@ -1,852 +1,903 @@
 """
-主模型控制器
-负责统筹整个渗透测试流程，协调子模型任务，处理人工干预和自我纠错
+基于Ray的Master Controller
+使用Ray进行分布式任务调度和状态管理
 """
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional, Callable
-from datetime import datetime
-from enum import Enum
 import json
-import uuid
+import re
+from typing import Any, Dict, List, Optional
+from datetime import datetime
+import ray
 
-from ..orchestrator.states import KillChainState, TaskStatus
-from ..schemas.common import BaseResponse, TaskStatus as SchemaTaskStatus
-from .llm_manager import LLMManager
-from .human_intervention import HumanInterventionManager
-from .self_correction import SelfCorrectionEngine
-from .dynamic_environment import DynamicEnvironmentManager
-from .agent_tool_manager import global_tool_registry
+from ..orchestrator.states import KillChainState, AgentType
+from ..ray_integration.ray_agent_actor import RayAgentPool
+from ..ray_integration.ray_state_manager import RayStateManager
+from ..core.todo_manager import TodoManager
 from ..prompts.master_prompts import MasterPrompts
-from .todo_manager import TodoManager
 
 logger = logging.getLogger(__name__)
 
 
-class MasterControllerState(Enum):
-    """主控制器状态"""
-    INITIALIZING = "initializing"
-    PLANNING = "planning"
-    EXECUTING = "executing"
-    WAITING_HUMAN = "waiting_human"
-    SELF_CORRECTING = "self_correcting"
-    COMPLETED = "completed"
-    ERROR = "error"
-    PAUSED = "paused"
-
-
-class MasterController:
-    """主模型控制器"""
+class RayMasterController:
+    """
+    基于Ray的主控制器
+    负责协调整个渗透测试流程，使用Ray进行分布式调度
+    """
     
     def __init__(self, config: Dict[str, Any]):
+        from ..core.execution_manager import get_execution_manager
+        
         self.config = config
-        self.state = MasterControllerState.INITIALIZING
-        self.session_id = str(uuid.uuid4())
+        self.logger = logging.getLogger("ray_master_controller")
+        self.running_sessions: Dict[str, asyncio.Task] = {}
+        self.execution_manager = get_execution_manager()
         
-        # 核心组件
-        self.llm_manager = LLMManager(config.get("llm_models", {}))
-        self.human_intervention = HumanInterventionManager(config.get("human_intervention", {}))
-        self.self_correction = SelfCorrectionEngine(config.get("self_correction", {}))
-        self.dynamic_env = DynamicEnvironmentManager(config.get("dynamic_env", {}))
-        # 使用全局工具注册表
-        self.tool_registry = global_tool_registry
+        # 确保 Ray 已初始化（应该已经在框架初始化时完成）
+        if not self.execution_manager.is_ray_initialized():
+            self.logger.warning("Ray not initialized, initializing now...")
+            ray_config = config.get("ray", {})
+            self.execution_manager.initialize_ray(ray_config)
         
-        # Prompt管理器
-        self.prompts = MasterPrompts()
+        # Agent池
+        self.agent_pool = RayAgentPool(config)
+        
+        # 状态管理器
+        self.state_manager = RayStateManager()
         
         # TODO管理器
         self.todo_manager = TodoManager()
         
-        # 防超长配置
-        self.max_todo_execution_time = config.get("max_todo_execution_time", 1800)  # 30分钟
-        self.todo_timeout_threshold = config.get("todo_timeout_threshold", 3600)   # 1小时总超时
-        self.max_parallel_todos = config.get("max_parallel_todos", 3)              # 最大并行TODO数
+        # 主控LLM（用于生成任务列表）
+        self.master_llm = None
+        self._init_master_llm()
         
-        # 执行上下文
-        self.execution_context = {
-            "session_id": self.session_id,
-            "start_time": datetime.now().isoformat(),
-            "current_stage": KillChainState.INITIALIZED,
-            "execution_history": [],
-            "human_feedback": [],
-            "correction_history": [],
-            "environment_state": {},
-            "tool_usage": []
-        }
-        
-        # 回调函数
-        self.callbacks = {
-            "on_stage_change": [],
-            "on_human_intervention": [],
-            "on_self_correction": [],
-            "on_tool_usage": []
+        # Kill Chain映射
+        self.kill_chain_mapping = {
+            KillChainState.RECONNAISSANCE: AgentType.RECON_AGENT,
+            KillChainState.WEAPONIZATION: AgentType.WEAPONIZE_AGENT,
+            KillChainState.DELIVERY: AgentType.DELIVERY_AGENT,
+            KillChainState.EXPLOITATION: AgentType.EXPLOIT_AGENT,
+            KillChainState.INSTALLATION: AgentType.INSTALL_AGENT,
+            KillChainState.COMMAND_CONTROL: AgentType.C2_AGENT,
+            KillChainState.ACTIONS_ON_OBJECTIVES: AgentType.OBJECTIVES_AGENT
         }
     
-    async def initialize(self) -> bool:
-        """初始化主控制器"""
+    def _init_master_llm(self):
+        """初始化主控LLM"""
         try:
-            logger.info(f"初始化主控制器 - Session ID: {self.session_id}")
+            from langchain_openai import ChatOpenAI
+            import os
+            from pathlib import Path
             
-            # 初始化各个组件
-            await self.llm_manager.initialize()
-            await self.human_intervention.initialize()
-            await self.self_correction.initialize()
-            await self.dynamic_env.initialize()
-            # 全局工具注册表已在导入时初始化
+            # 从配置读取LLM设置
+            llm_config = self.config.get("llm_models", {}).get("master_model", {})
+            if not llm_config:
+                llm_config = self.config.get("master_model", {})
             
-            # 初始化TODO管理器
-            await self.todo_manager.initialize()
+            # 尝试从 llm_runtime.json 读取 API Key
+            api_key = llm_config.get("api_key")
+            base_url = llm_config.get("base_url")
             
-            self.state = MasterControllerState.PLANNING
-            logger.info("主控制器初始化完成")
-            return True
+            if not api_key:
+                # 尝试从环境变量读取
+                api_key = os.getenv("OPENAI_API_KEY")
+            
+            if not api_key:
+                # 尝试从 llm_runtime.json 读取
+                try:
+                    runtime_config_path = Path(__file__).parent.parent.parent / "configs" / "llm_runtime.json"
+                    if runtime_config_path.exists():
+                        with open(runtime_config_path) as f:
+                            runtime_config = json.load(f)
+                            api_key = runtime_config.get("api_key")
+                            
+                            # 构建 base_url
+                            if not base_url and runtime_config.get("host"):
+                                protocol = runtime_config.get("protocol", "https")
+                                host = runtime_config.get("host")
+                                port = runtime_config.get("port", 443)
+                                base_url = f"{protocol}://{host}:{port}/v1"
+                            
+                            # 如果配置中没有model_name，从runtime_config读取
+                            if not llm_config.get("model_name") and not llm_config.get("model"):
+                                model_name = runtime_config.get("model_name")
+                                if model_name:
+                                    llm_config["model_name"] = model_name
+                except Exception as e:
+                    self.logger.warning(f"Failed to read llm_runtime.json: {e}")
+            
+            if not api_key:
+                self.logger.warning("未配置 OpenAI API Key，主控LLM将无法使用")
+                print("⚠️  警告：未配置 OpenAI API Key，主控LLM将无法使用", flush=True)
+                return
+            
+            # 创建 ChatOpenAI 实例
+            model_name = llm_config.get("model_name") or llm_config.get("model", "gpt-4")
+            kwargs = {
+                "model": model_name,
+                "temperature": llm_config.get("temperature", 0.7),
+                "max_tokens": llm_config.get("max_tokens", 4096),
+                "api_key": api_key
+            }
+            
+            if base_url:
+                kwargs["base_url"] = base_url
+            
+            self.master_llm = ChatOpenAI(**kwargs)
+            self.logger.info(f"主控LLM初始化成功 - Model: {model_name}, Base URL: {base_url}")
+            print(f"✅ 主控LLM初始化成功 - Model: {model_name}", flush=True)
             
         except Exception as e:
-            logger.error(f"主控制器初始化失败: {e}")
-            self.state = MasterControllerState.ERROR
-            return False
+            self.logger.error(f"主控LLM初始化失败: {e}")
+            self.master_llm = None
     
-    async def start_penetration_test(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
+    async def register_agent(
+        self,
+        agent_class: type,
+        agent_type: AgentType,
+        agent_config: Dict[str, Any],
+        num_cpus: float = 1.0,
+        num_gpus: float = 0.0
+    ):
+        """
+        注册Agent到Ray Actor池
+        
+        Args:
+            agent_class: Agent类（不是实例）
+            agent_type: Agent类型
+            agent_config: Agent配置
+            num_cpus: CPU资源分配
+            num_gpus: GPU资源分配
+        """
+        try:
+            actor = await self.agent_pool.create_actor(
+                agent_class,
+                agent_type,
+                agent_config,
+                num_cpus=num_cpus,
+                num_gpus=num_gpus
+            )
+            self.logger.info(f"Registered agent: {agent_type.value}")
+            return actor
+        except Exception as e:
+            self.logger.error(f"Failed to register agent {agent_type.value}: {e}")
+            raise
+    
+    async def start_penetration_test(
+        self,
+        target: str,
+        options: Dict[str, Any] = None,
+        parallel: bool = False,
+        async_mode: bool = False
+    ) -> Dict[str, Any]:
         """
         启动渗透测试
         
         Args:
-            target: 目标地址
-            options: 测试选项
+            target: 目标地址（可能是 "auto_extract" 表示让LLM自动提取）
+            options: 测试选项（包含 raw_description）
+            parallel: 是否并行执行（部分阶段）
             
         Returns:
             Dict[str, Any]: 执行结果
         """
         try:
-            self.state = MasterControllerState.PLANNING
+            # 生成session_id
+            import uuid
+            session_id = str(uuid.uuid4())
             
-            # 更新执行上下文
-            self.execution_context.update({
+            print(f"\n{'=' * 72}", flush=True)
+            print(f"🔄 创建会话: {session_id}", flush=True)
+            self.logger.info(f"Creating session: {session_id}")
+            
+            # 初始化TODO管理器
+            print(f"🔄 初始化TODO管理器...", flush=True)
+            await self.todo_manager.initialize()
+            print(f"✅ TODO管理器初始化完成", flush=True)
+            
+            # 如果target是"auto_extract"，使用原始描述
+            raw_description = (options or {}).get("raw_description", "")
+            if target == "auto_extract" and raw_description:
+                print(f"📝 使用原始描述，让主控LLM自动提取目标: {raw_description[:50]}...", flush=True)
+            
+            # 初始化会话状态
+            print(f"🔄 初始化会话状态...", flush=True)
+            await self.state_manager.put_session_state(session_id, {
                 "target": target,
                 "options": options or {},
-                "current_stage": KillChainState.RECONNAISSANCE
+                "start_time": datetime.now().isoformat(),
+                "status": "planning",
+                "parallel": parallel,
+                "raw_description": raw_description,
+                "session_id": session_id
             })
             
-            # 生成执行计划
-            execution_plan = await self._generate_execution_plan(target, options)
+            # 初始化全局上下文（目标会在LLM生成计划后更新）
+            print(f"🔄 初始化全局上下文...", flush=True)
+            await self.state_manager.put_global_context(session_id, {
+                "target": target if target != "auto_extract" else "",
+                "discovered_services": [],
+                "identified_vulnerabilities": [],
+                "exploitation_results": [],
+                "current_access_level": "none"
+            })
             
-            # 执行计划
-            result = await self._execute_plan(execution_plan)
+            # 步骤1: 生成完整的任务列表（LLM会提取目标并生成计划）
+            print(f"🔄 正在调用主控LLM生成完整的任务列表...", flush=True)
+            if target == "auto_extract":
+                raw_desc = (options or {}).get("raw_description", "")
+                print(f"   主控LLM将自动从描述中提取目标并生成执行计划", flush=True)
+                if raw_desc:
+                    print(f"   原始描述: {raw_desc[:100]}...", flush=True)
+            print(f"   开始调用LLM API...", flush=True)
+            try:
+                execution_plan = await self._generate_execution_plan(target, options or {}, session_id)
+                print(f"   ✅ 执行计划生成完成", flush=True)
+            except Exception as e:
+                print(f"   ❌ 执行计划生成失败: {e}", flush=True)
+                self.logger.error(f"执行计划生成失败: {e}", exc_info=True)
+                raise
             
-            return result
+            if not execution_plan or not execution_plan.get("stages"):
+                raise ValueError("未能生成有效的执行计划")
+            
+            # 从执行计划中获取提取的目标
+            extracted_target = execution_plan.get("target") or target
+            final_target = extracted_target or target
+            if final_target == "auto_extract":
+                # fallback 到原始输入，至少保证向下游传递字符串
+                final_target = (options or {}).get("raw_description", "").strip() or target
+            
+            # 如果主控成功解析出了更准确的目标，提示并更新状态
+            if final_target and final_target != target:
+                if target == "auto_extract":
+                    print(f"✅ 主控LLM已提取目标: {final_target}", flush=True)
+                else:
+                    print(f"ℹ️ 主控LLM规范化目标: {final_target}", flush=True)
+            
+            await self.state_manager.update_session_state(session_id, {
+                "target": final_target
+            })
+            await self.state_manager.update_global_context(session_id, {
+                "target": final_target
+            })
+            
+            # 步骤2: 将任务列表保存到TodoManager
+            print(f"🔄 正在保存任务列表到TodoManager...", flush=True)
+            await self._save_execution_plan_to_todos(execution_plan, session_id)
+            
+            # 更新会话状态，保存执行计划
+            await self.state_manager.update_session_state(session_id, {
+                "status": "running",
+                "execution_plan": execution_plan,
+                "target": final_target
+            })
+            
+            print(f"✅ 任务列表生成完成，共 {len(execution_plan.get('stages', []))} 个阶段", flush=True)
+            self.logger.info(f"Execution plan generated - {len(execution_plan.get('stages', []))} stages, target: {final_target}")
+            
+            # 步骤3: 根据模式启动执行
+            if async_mode:
+                print("▶️ 会话进入异步执行模式，可实时查看执行状态", flush=True)
+                execution_task = asyncio.create_task(
+                    self._run_execution_pipeline(session_id, final_target, options or {}, parallel)
+                )
+                self.running_sessions[session_id] = execution_task
+                execution_task.add_done_callback(lambda task, sid=session_id: self.running_sessions.pop(sid, None))
+                return {
+                    "success": True,
+                    "session_id": session_id,
+                    "target": final_target,
+                    "execution_plan": execution_plan,
+                    "status": "running",
+                    "async_mode": True
+                }
+            
+            execution_summary = await self._run_execution_pipeline(session_id, final_target, options or {}, parallel)
+            execution_summary.update({
+                "session_id": session_id,
+                "target": final_target,
+                "execution_plan": execution_plan
+            })
+            return execution_summary
             
         except Exception as e:
-            logger.error(f"渗透测试启动失败: {e}")
-            self.state = MasterControllerState.ERROR
+            self.logger.error(f"Penetration test failed: {e}")
+            if "session_id" in locals():
+                await self.state_manager.update_session_state(session_id, {
+                    "status": "failed",
+                    "error": str(e)
+                })
+            
             return {
                 "success": False,
-                "error": str(e),
-                "session_id": self.session_id
+                "error": str(e)
+            }
+    async def _run_execution_pipeline(
+        self,
+        session_id: str,
+        target: str,
+        options: Dict[str, Any],
+        parallel: bool
+    ) -> Dict[str, Any]:
+        """执行Kill Chain并在结束时更新状态"""
+        try:
+            print(f"🔄 开始执行任务列表...", flush=True)
+            if parallel:
+                results = await self._execute_from_todos_parallel(session_id, target, options)
+            else:
+                results = await self._execute_from_todos_sequential(session_id, target, options)
+            
+            await self.state_manager.update_session_state(session_id, {
+                "status": "completed",
+                "end_time": datetime.now().isoformat(),
+                "results": results
+            })
+            self.logger.info(f"Session {session_id} completed successfully")
+            return {
+                "success": True,
+                "results": results
+            }
+        except Exception as exc:
+            self.logger.error(f"Execution pipeline failed for session {session_id}: {exc}", exc_info=True)
+            await self.state_manager.update_session_state(session_id, {
+                "status": "error",
+                "end_time": datetime.now().isoformat(),
+                "error": str(exc)
+            })
+            return {
+                "success": False,
+                "error": str(exc)
             }
     
-    async def _generate_execution_plan(self, target: str, options: Dict[str, Any]) -> Dict[str, Any]:
-        """生成执行计划"""
+    async def _generate_execution_plan(
+        self,
+        target: str,
+        options: Dict[str, Any],
+        session_id: str
+    ) -> Dict[str, Any]:
+        """
+        使用主控LLM生成完整的执行计划
+        
+        Args:
+            target: 目标地址
+            options: 测试选项
+            session_id: 会话ID
+            
+        Returns:
+            Dict[str, Any]: 执行计划（包含stages和todos）
+        """
         try:
-            # 使用主模型生成执行计划
-            plan_prompt = self._build_planning_prompt(target, options)
+            if not self.master_llm:
+                raise ValueError("主控LLM未初始化，无法生成执行计划")
             
-            # 调用主模型
-            plan_response = await self.llm_manager.call_master_model(
-                "planning",
-                plan_prompt,
-                context=self.execution_context
-            )
+            # 准备上下文
+            context = {
+                "environment_state": {},
+                "available_tools": ["nmap", "dns_enum", "sql_injection", "cmd_executer"]
+            }
             
-            # 解析计划
-            execution_plan = self._parse_execution_plan(plan_response)
+            # 获取规划提示词
+            print(f"   📝 准备提示词...", flush=True)
+            self.logger.info("准备规划提示词...")
+            planning_prompt = MasterPrompts.get_planning_prompt(target, options, context)
+            system_prompt = MasterPrompts.get_master_system_prompt()
+            print(f"   ✅ 提示词准备完成，系统提示词长度: {len(system_prompt)}, 规划提示词长度: {len(planning_prompt)}", flush=True)
+            self.logger.info(f"提示词准备完成，系统提示词长度: {len(system_prompt)}, 规划提示词长度: {len(planning_prompt)}")
             
-            # 验证计划
-            if not self._validate_plan(execution_plan):
-                raise ValueError("生成的执行计划无效")
+            # 调用LLM生成计划
+            from langchain_core.messages import SystemMessage, HumanMessage
             
+            print(f"   📦 构建消息对象...", flush=True)
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=planning_prompt)
+            ]
+            print(f"   ✅ 消息对象构建完成", flush=True)
+            
+            # 检查 master_llm 是否已初始化
+            if not self.master_llm:
+                error_msg = "主控LLM未初始化，无法生成执行计划"
+                self.logger.error(error_msg)
+                print(f"   ❌ {error_msg}", flush=True)
+                raise ValueError(error_msg)
+            
+            self.logger.info("调用主控LLM生成执行计划...")
+            print(f"🔄 正在调用主控LLM生成执行计划...", flush=True)
+            print(f"   目标: {target}", flush=True)
+            if target == "auto_extract":
+                raw_desc = (options or {}).get("raw_description", "")
+                if raw_desc:
+                    print(f"   原始描述: {raw_desc[:100]}...", flush=True)
+            
+            print(f"   请稍候，LLM正在思考中...", flush=True)
+            self.logger.info("开始调用LLM API...")
+            
+            try:
+                # 添加超时控制（2分钟）
+                try:
+                    print(f"   📡 正在发送请求到LLM API...", flush=True)
+                    self.logger.info("发送请求到LLM API...")
+                    response = await asyncio.wait_for(
+                        self.master_llm.ainvoke(messages),
+                        timeout=120.0
+                    )
+                    print(f"   ✅ LLM API响应已接收", flush=True)
+                    self.logger.info("LLM API响应已接收")
+                    
+                    content = response.content if hasattr(response, 'content') else str(response)
+                    print(f"   ✅ LLM响应接收成功，长度: {len(content)} 字符", flush=True)
+                    self.logger.info(f"LLM响应接收成功，长度: {len(content)} 字符")
+                except KeyboardInterrupt:
+                    error_msg = "用户中断LLM调用"
+                    self.logger.warning(error_msg)
+                    print(f"   ⚠️  {error_msg}", flush=True)
+                    raise
+            except asyncio.TimeoutError:
+                error_msg = "LLM调用超时（超过2分钟）"
+                self.logger.error(error_msg)
+                print(f"   ❌ {error_msg}", flush=True)
+                print(f"   提示: 可能是网络问题或LLM服务响应慢，请检查网络连接", flush=True)
+                raise ValueError(error_msg)
+            except Exception as e:
+                error_msg = f"LLM调用失败: {e}"
+                self.logger.error(error_msg, exc_info=True)
+                print(f"   ❌ {error_msg}", flush=True)
+                import traceback
+                error_trace = traceback.format_exc()
+                self.logger.error(error_trace)
+                print(f"   详细错误信息已记录到日志", flush=True)
+                print(f"   错误类型: {type(e).__name__}", flush=True)
+                raise
+            
+            # 解析JSON响应
+            # 尝试提取JSON（可能包含markdown代码块）
+            print(f"🔄 正在解析LLM返回的JSON...", flush=True)
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+            else:
+                json_str = content
+            
+            try:
+                execution_plan = json.loads(json_str)
+                print(f"✅ JSON解析成功", flush=True)
+            except json.JSONDecodeError as e:
+                self.logger.error(f"JSON解析失败，原始内容前500字符: {content[:500]}")
+                print(f"❌ JSON解析失败，尝试提取JSON片段...", flush=True)
+                # 尝试更宽松的JSON提取
+                json_match = re.search(r'\{[\s\S]*"stages"[\s\S]*\}', content, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                    execution_plan = json.loads(json_str)
+                    print(f"✅ 使用备用方法解析JSON成功", flush=True)
+                else:
+                    raise
+            
+            # 验证执行计划格式
+            if "target" not in execution_plan:
+                execution_plan["target"] = target
+            if "stages" not in execution_plan:
+                raise ValueError("执行计划中缺少stages字段")
+            
+            self.logger.info(f"执行计划生成成功，包含 {len(execution_plan.get('stages', []))} 个阶段")
             return execution_plan
             
-        except Exception as e:
-            logger.error(f"执行计划生成失败: {e}")
-            raise
-    
-    async def _execute_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        """执行计划"""
-        try:
-            self.state = MasterControllerState.EXECUTING
-            
-            stages = plan.get("stages", [])
-            results = []
-            
-            for stage in stages:
-                # 检查是否需要人工干预
-                if await self.human_intervention.should_intervene(stage, self.execution_context):
-                    self.state = MasterControllerState.WAITING_HUMAN
-                    human_feedback = await self.human_intervention.get_feedback(stage)
-                    self.execution_context["human_feedback"].append(human_feedback)
-                    
-                    # 根据人工反馈调整阶段
-                    stage = self._adjust_stage_with_feedback(stage, human_feedback)
-                
-                # 执行阶段
-                stage_result = await self._execute_stage(stage)
-                results.append(stage_result)
-                
-                # 检查是否需要自我纠错
-                if await self.self_correction.should_correct(stage_result, self.execution_context):
-                    self.state = MasterControllerState.SELF_CORRECTING
-                    correction = await self.self_correction.correct(stage_result, self.execution_context)
-                    self.execution_context["correction_history"].append(correction)
-                    
-                    # 重新执行修正后的阶段
-                    if correction.get("retry", False):
-                        stage_result = await self._execute_stage(correction.get("corrected_stage", stage))
-                        results[-1] = stage_result
-                
-                # 更新执行上下文
-                self.execution_context["execution_history"].append(stage_result)
-                
-                # 触发回调
-                await self._trigger_callbacks("on_stage_change", stage_result)
-            
-            self.state = MasterControllerState.COMPLETED
-            
-            return {
-                "success": True,
-                "session_id": self.session_id,
-                "results": results,
-                "execution_context": self.execution_context
-            }
-            
-        except Exception as e:
-            logger.error(f"计划执行失败: {e}")
-            self.state = MasterControllerState.ERROR
-            raise
-    
-    async def _execute_stage(self, stage: Dict[str, Any]) -> Dict[str, Any]:
-        """执行单个阶段"""
-        try:
-            stage_type = stage.get("type")
-            stage_config = stage.get("config", {})
-            
-            # 准备环境
-            await self.dynamic_env.prepare_stage_environment(stage_type, stage_config)
-            
-            # 选择子模型
-            sub_model = await self.sub_model_manager.select_model(stage_type, stage_config)
-            
-            # 执行任务
-            result = await sub_model.execute(stage_config, self.execution_context)
-            
-            # 记录工具使用
-            if result.get("tools_used"):
-                self.execution_context["tool_usage"].extend(result["tools_used"])
-                await self._trigger_callbacks("on_tool_usage", result["tools_used"])
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"阶段执行失败: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "stage": stage
-            }
-    
-    def _build_planning_prompt(self, target: str, options: Dict[str, Any]) -> str:
-        """构建计划生成提示词"""
-        context = {
-            "environment_state": self.execution_context.get("environment_state", {}),
-            "available_tools": list(self.tool_registry.get_all_public_tools().keys())
-        }
-        return self.prompts.get_planning_prompt(target, options, context)
-    
-    def _parse_execution_plan(self, response: str) -> Dict[str, Any]:
-        """解析执行计划"""
-        try:
-            # 尝试解析JSON响应
-            if isinstance(response, str):
-                plan = json.loads(response)
-            else:
-                plan = response
-            
-            return plan
-            
         except json.JSONDecodeError as e:
-            logger.error(f"计划解析失败: {e}")
-            # 返回默认计划
-            return self._get_default_plan()
+            self.logger.error(f"解析LLM返回的JSON失败: {e}")
+            self.logger.error(f"LLM返回内容: {content[:500]}")
+            raise ValueError(f"无法解析执行计划JSON: {e}")
+        except Exception as e:
+            self.logger.error(f"生成执行计划失败: {e}")
+            raise
     
-    def _get_default_plan(self) -> Dict[str, Any]:
-        """获取默认执行计划"""
-        return {
-            "stages": [
-                {
-                    "type": "reconnaissance",
-                    "name": "侦察阶段",
-                    "config": {
-                        "target": self.execution_context.get("target"),
-                        "tools": ["nmap", "nslookup", "whois"]
-                    }
-                },
-                {
-                    "type": "weaponization",
-                    "name": "武器化阶段",
-                    "config": {
-                        "vulnerabilities": [],
-                        "payload_type": "basic"
-                    }
-                }
-            ]
-        }
-    
-    def _validate_plan(self, plan: Dict[str, Any]) -> bool:
-        """验证执行计划"""
-        required_fields = ["stages"]
-        return all(field in plan for field in required_fields)
-    
-    def _adjust_stage_with_feedback(self, stage: Dict[str, Any], feedback: Dict[str, Any]) -> Dict[str, Any]:
-        """根据人工反馈调整阶段"""
-        # 合并人工反馈到阶段配置
-        if "config" in feedback:
-            stage["config"].update(feedback["config"])
-        
-        if "tools" in feedback:
-            stage["config"]["tools"] = feedback["tools"]
-        
-        return stage
-    
-    async def _trigger_callbacks(self, event_type: str, data: Any) -> None:
-        """触发回调函数"""
-        callbacks = self.callbacks.get(event_type, [])
-        for callback in callbacks:
-            try:
-                if asyncio.iscoroutinefunction(callback):
-                    await callback(data)
-                else:
-                    callback(data)
-            except Exception as e:
-                logger.error(f"回调函数执行失败: {e}")
-    
-    def register_callback(self, event_type: str, callback: Callable) -> None:
-        """注册回调函数"""
-        if event_type in self.callbacks:
-            self.callbacks[event_type].append(callback)
-    
-    def get_status(self) -> Dict[str, Any]:
-        """获取当前状态"""
-        return {
-            "state": self.state.value,
-            "session_id": self.session_id,
-            "execution_context": self.execution_context,
-            "todo_status": self.todo_manager.get_status() if hasattr(self.todo_manager, 'get_status') else {},
-            "components": {
-                "llm_manager": self.llm_manager.get_status(),
-                "human_intervention": self.human_intervention.get_status(),
-                "self_correction": self.self_correction.get_status(),
-                "dynamic_env": self.dynamic_env.get_status(),
-                "tool_registry": {
-                    "public_tools": len(self.tool_registry.get_all_public_tools()),
-                    "agent_managers": len(self.tool_registry.agent_managers)
-                }
-            }
-        }
-    
-    async def create_execution_todos(self, target: str, plan: Dict[str, Any]) -> bool:
+    async def _save_execution_plan_to_todos(
+        self,
+        execution_plan: Dict[str, Any],
+        session_id: str
+    ):
         """
-        根据执行计划创建TODO列表
+        将执行计划保存到TodoManager
         
         Args:
-            target: 目标地址
-            plan: 执行计划
-            
-        Returns:
-            bool: 是否创建成功
+            execution_plan: 执行计划
+            session_id: 会话ID
         """
         try:
-            todos = []
+            all_todos = []
             
-            # 遍历计划中的阶段
-            stages = plan.get("stages", [])
-            for i, stage in enumerate(stages):
-                stage_type = stage.get("type", f"stage_{i}")
-                stage_name = stage.get("name", f"阶段{i+1}")
+            for stage in execution_plan.get("stages", []):
+                stage_id = stage.get("id", "")
+                stage_type = stage.get("type", "")
+                stage_name = stage.get("name", "")
                 stage_config = stage.get("config", {})
-                estimated_time = stage_config.get("estimated_time", self.max_todo_execution_time)
+                stage_todos = stage.get("todos", [])
                 
-                # 如果预计时间超过阈值，需要分解任务
-                if estimated_time > self.max_todo_execution_time:
-                    sub_todos = await self._decompose_long_task(stage, target)
-                    todos.extend(sub_todos)
-                else:
-                    todo = {
-                        "id": f"{stage_type}_{i}",
-                        "title": stage_name,
-                        "description": stage.get("description", f"执行{stage_name}"),
-                        "type": stage_type,
-                        "config": stage_config,
-                        "estimated_time": estimated_time,
-                        "priority": stage.get("priority", 3),
-                        "dependencies": stage.get("dependencies", []),
-                        "status": "pending"
+                # 为每个stage的todo创建TodoItem
+                for todo in stage_todos:
+                    todo_item = {
+                        "id": todo.get("id", f"{stage_id}_{len(all_todos)}"),
+                        "title": todo.get("name", todo.get("title", "未命名任务")),
+                        "description": todo.get("description", ""),
+                        "status": "pending",
+                        "phase": stage_type,
+                        "tool": todo.get("tool"),
+                        "priority": todo.get("priority", 0),
+                        "dependencies": todo.get("dependencies", []),
+                        "estimated_duration": todo.get("estimated_duration", 0),
+                        "type": todo.get("type", "generic"),
+                        "config": {
+                            **stage_config,
+                            **todo.get("config", {})
+                        },
+                        "parent_stage": stage_id
                     }
-                    todos.append(todo)
+                    all_todos.append(todo_item)
             
-            # 创建TODO列表
-            success = await self.todo_manager.create_batch_todos(todos)
+            # 保存到TodoManager
+            list_name = f"execution_plan_{session_id}"
+            success = await self.todo_manager.create_todo_list(list_name, all_todos)
             
             if success:
-                logger.info(f"成功创建 {len(todos)} 个TODO任务")
-            
-            return success
-            
+                self.logger.info(f"任务列表已保存，共 {len(all_todos)} 个任务")
+            else:
+                raise ValueError("保存任务列表到TodoManager失败")
+                
         except Exception as e:
-            logger.error(f"创建执行TODO失败: {e}")
-            return False
+            self.logger.error(f"保存执行计划到TODO失败: {e}")
+            raise
     
-    async def _decompose_long_task(self, stage: Dict[str, Any], target: str) -> List[Dict[str, Any]]:
-        """
-        分解超长任务
-        
-        Args:
-            stage: 阶段信息
-            target: 目标地址
-            
-        Returns:
-            List[Dict[str, Any]]: 分解后的子任务列表
-        """
-        stage_type = stage.get("type")
-        stage_config = stage.get("config", {})
-        
-        # 使用LLM分解任务
-        decompose_prompt = f"""
-        请将以下超长任务分解为多个子任务，每个子任务不超过{self.max_todo_execution_time}秒：
-        
-        阶段类型: {stage_type}
-        阶段配置: {json.dumps(stage_config, ensure_ascii=False, indent=2)}
-        目标: {target}
-        
-        请返回JSON格式的子任务列表，每个子任务包含：
-        - id: 任务ID
-        - title: 任务标题
-        - description: 任务描述
-        - estimated_time: 预计执行时间（秒）
-        - dependencies: 依赖的其他子任务ID
-        - priority: 优先级(1-5)
-        """
+    async def _execute_from_todos_sequential(
+        self,
+        session_id: str,
+        target: str,
+        options: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """从TodoManager读取任务并顺序执行"""
+        results = []
         
         try:
-            # 调用主模型进行任务分解
-            response = await self.llm_manager.call_master_model(
-                "task_decomposition",
-                decompose_prompt,
-                context=self.execution_context
-            )
+            # 获取执行计划
+            session_state = await self.state_manager.get_session_state(session_id)
+            execution_plan = session_state.get("execution_plan", {})
+            stages = execution_plan.get("stages", [])
             
-            if isinstance(response, str):
-                decomposed_tasks = json.loads(response)
-            else:
-                decomposed_tasks = response
+            if not stages:
+                self.logger.warning("执行计划中没有阶段，使用默认Kill Chain")
+                return await self._execute_kill_chain_sequential(session_id, target, options)
             
-            # 添加stage类型到每个子任务
-            for task in decomposed_tasks:
-                task["type"] = stage_type
-                task["parent_stage"] = stage.get("id", stage_type)
-            
-            return decomposed_tasks
-            
+            # 按顺序执行每个阶段
+            for stage in stages:
+                stage_id = stage.get("id", "")
+                stage_type = stage.get("type", "")
+                stage_name = stage.get("name", "")
+                stage_config = stage.get("config", {})
+                stage_todos = stage.get("todos", [])
+                
+                self.logger.info(f"执行阶段: {stage_name} ({stage_type})")
+                print(f"🔄 执行阶段: {stage_name}...", flush=True)
+                
+                # 获取对应的Agent类型
+                kill_chain_state = self._map_stage_type_to_kill_chain(stage_type)
+                if not kill_chain_state:
+                    self.logger.warning(f"无法映射阶段类型: {stage_type}")
+                    continue
+                
+                agent_type = self.kill_chain_mapping.get(kill_chain_state)
+                if not agent_type:
+                    self.logger.warning(f"没有对应的Agent类型: {kill_chain_state}")
+                    continue
+                
+                # 获取Agent Actor
+                actor = self.agent_pool.get_actor(agent_type)
+                if not actor:
+                    self.logger.warning(f"没有可用的Agent Actor: {agent_type}")
+                    continue
+                
+                # 准备执行上下文，包含任务列表
+                context = [{
+                    "session_id": session_id,
+                    "stage": stage_type,
+                    "stage_id": stage_id,
+                    "stage_config": stage_config,
+                    "todos": stage_todos,
+                    "global_context": await self.state_manager.get_global_context(session_id)
+                }]
+                
+                # 准备目标信息，包含阶段配置
+                target_info = {
+                    "target": stage_config.get("target", target),
+                    **(options or {}),
+                    **stage_config
+                }
+                
+                # 执行Agent（使用执行管理器统一处理）
+                print(f"🔄 将任务和目标发送给 {agent_type.value}...", flush=True)
+                future = actor.execute.remote(target_info, context)
+                result = await self.execution_manager.run_ray_get(future)
+                
+                # 存储结果
+                await self.state_manager.put_agent_result(session_id, agent_type.value, result)
+                results.append({
+                    "stage": stage_type,
+                    "stage_id": stage_id,
+                    "agent": agent_type.value,
+                    "result": result
+                })
+                
+                # 更新全局上下文
+                if result.get("success") and result.get("data"):
+                    await self._update_global_context(session_id, kill_chain_state, result["data"])
+                
+                # 更新TODO状态
+                for todo in stage_todos:
+                    todo_id = todo.get("id")
+                    if todo_id:
+                        if result.get("success"):
+                            await self.todo_manager.mark_todo_completed(todo_id)
+                        else:
+                            await self.todo_manager.mark_todo_failed(todo_id, result.get("error", "执行失败"))
+                
+                # 检查是否应该继续
+                if not result.get("success") and not options.get("safe_mode", True):
+                    self.logger.warning(f"阶段 {stage_name} 失败，停止执行")
+                    break
+                    
         except Exception as e:
-            logger.error(f"任务分解失败: {e}")
-            # 返回默认分解
-            return [
+            self.logger.error(f"从TODO执行失败: {e}")
+            results.append({
+                "success": False,
+                "error": str(e)
+            })
+        
+        return results
+    
+    async def _execute_from_todos_parallel(
+        self,
+        session_id: str,
+        target: str,
+        options: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """从TodoManager读取任务并并行执行（部分阶段）"""
+        # 暂时使用顺序执行，后续可以优化为真正的并行
+        return await self._execute_from_todos_sequential(session_id, target, options)
+    
+    def _map_stage_type_to_kill_chain(self, stage_type: str) -> Optional[KillChainState]:
+        """将阶段类型映射到Kill Chain状态"""
+        mapping = {
+            "reconnaissance": KillChainState.RECONNAISSANCE,
+            "weaponization": KillChainState.WEAPONIZATION,
+            "delivery": KillChainState.DELIVERY,
+            "exploitation": KillChainState.EXPLOITATION,
+            "installation": KillChainState.INSTALLATION,
+            "command_control": KillChainState.COMMAND_CONTROL,
+            "actions_on_objectives": KillChainState.ACTIONS_ON_OBJECTIVES
+        }
+        return mapping.get(stage_type.lower())
+    
+    async def _execute_kill_chain_sequential(
+        self,
+        session_id: str,
+        target: str,
+        options: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """顺序执行Kill Chain"""
+        results = []
+        
+        # Kill Chain阶段
+        stages = [
+            (KillChainState.RECONNAISSANCE, "侦察阶段"),
+            (KillChainState.WEAPONIZATION, "武器化阶段"),
+            (KillChainState.DELIVERY, "投递阶段"),
+            (KillChainState.EXPLOITATION, "利用阶段"),
+            (KillChainState.INSTALLATION, "安装阶段"),
+            (KillChainState.COMMAND_CONTROL, "命令控制阶段"),
+            (KillChainState.ACTIONS_ON_OBJECTIVES, "目标行为阶段")
+        ]
+        
+        for stage, stage_name in stages:
+            try:
+                self.logger.info(f"Executing stage: {stage_name}")
+                
+                # 获取对应的Agent类型
+                agent_type = self.kill_chain_mapping.get(stage)
+                if not agent_type:
+                    self.logger.warning(f"No agent for stage: {stage}")
+                    continue
+                
+                # 获取Agent Actor
+                actor = self.agent_pool.get_actor(agent_type)
+                if not actor:
+                    self.logger.warning(f"No actor for agent type: {agent_type}")
+                    continue
+                
+                # 准备执行上下文
+                context = [{
+                    "session_id": session_id,
+                    "stage": stage.value,
+                    "global_context": await self.state_manager.get_global_context(session_id)
+                }]
+                
+                # 执行Agent（使用执行管理器统一处理）
+                print(f"🔄 执行 {stage_name}...", flush=True)
+                future = actor.execute.remote(
+                    {"target": target, **(options or {})},
+                    context
+                )
+                result = await self.execution_manager.run_ray_get(future)
+                
+                # 存储结果
+                await self.state_manager.put_agent_result(session_id, agent_type.value, result)
+                results.append({
+                    "stage": stage.value,
+                    "agent": agent_type.value,
+                    "result": result
+                })
+                
+                # 更新全局上下文
+                if result.get("success") and result.get("data"):
+                    await self._update_global_context(session_id, stage, result["data"])
+                
+                # 检查是否应该继续
+                if not result.get("success") and not options.get("safe_mode", True):
+                    self.logger.warning(f"Stage {stage_name} failed, stopping execution")
+                    break
+                
+            except Exception as e:
+                self.logger.error(f"Stage {stage_name} execution error: {e}")
+                results.append({
+                    "stage": stage.value,
+                    "success": False,
+                    "error": str(e)
+                })
+        
+        return results
+    
+    async def _execute_kill_chain_parallel(
+        self,
+        session_id: str,
+        target: str,
+        options: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        并行执行Kill Chain（部分阶段可以并行）
+        
+        策略：
+        1. 侦察阶段（串行）
+        2. 武器化和投递（可以并行准备）
+        3. 利用阶段（串行）
+        4. 安装和C2建立（可以并行）
+        5. 目标行为（串行）
+        """
+        results = []
+        
+        try:
+            # 阶段1: 侦察（必须串行）
+            recon_result = await self._execute_stage(
+                session_id,
+                target,
+                options,
+                KillChainState.RECONNAISSANCE,
+                AgentType.RECON_AGENT
+            )
+            results.append(recon_result)
+            
+            if not recon_result["result"].get("success"):
+                return results
+            
+            # 阶段2: 武器化和投递（并行）
+            parallel_tasks = [
                 {
-                    "id": f"{stage_type}_part1",
-                    "title": f"{stage.get('name', stage_type)} - 第1部分",
-                    "description": "任务的第一部分",
-                    "type": stage_type,
-                    "estimated_time": self.max_todo_execution_time // 2,
-                    "priority": 3,
-                    "dependencies": [],
-                    "status": "pending"
+                    "agent_type": AgentType.WEAPONIZE_AGENT,
+                    "target_info": {"target": target, **(options or {})},
+                    "context": [{"session_id": session_id, "stage": KillChainState.WEAPONIZATION.value}]
                 },
                 {
-                    "id": f"{stage_type}_part2", 
-                    "title": f"{stage.get('name', stage_type)} - 第2部分",
-                    "description": "任务的第二部分",
-                    "type": stage_type,
-                    "estimated_time": self.max_todo_execution_time // 2,
-                    "priority": 3,
-                    "dependencies": [f"{stage_type}_part1"],
-                    "status": "pending"
+                    "agent_type": AgentType.DELIVERY_AGENT,
+                    "target_info": {"target": target, **(options or {})},
+                    "context": [{"session_id": session_id, "stage": KillChainState.DELIVERY.value}]
                 }
             ]
-    
-    async def execute_with_todo_management(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
-        """
-        使用TODO管理执行渗透测试
-        
-        Args:
-            target: 目标地址
-            options: 测试选项
             
-        Returns:
-            Dict[str, Any]: 执行结果
-        """
-        try:
-            start_time = datetime.now()
-            self.state = MasterControllerState.PLANNING
+            parallel_results = await self.agent_pool.execute_parallel(parallel_tasks)
+            for r in parallel_results:
+                results.append({"stage": "parallel", "result": r})
             
-            # 更新执行上下文
-            self.execution_context.update({
-                "target": target,
-                "options": options or {},
-                "start_time": start_time.isoformat()
-            })
-            
-            # 生成执行计划
-            logger.info("生成执行计划...")
-            execution_plan = await self._generate_execution_plan(target, options)
-            
-            # 创建TODO列表
-            logger.info("创建TODO列表...")
-            todo_created = await self.create_execution_todos(target, execution_plan)
-            if not todo_created:
-                raise Exception("TODO列表创建失败")
-            
-            # 基于TODO执行
-            logger.info("开始基于TODO执行...")
-            self.state = MasterControllerState.EXECUTING
-            
-            execution_results = []
-            completed_todos = 0
-            total_todos = await self.todo_manager.get_total_count()
-            
-            while True:
-                # 检查总执行时间
-                current_time = datetime.now()
-                total_elapsed = (current_time - start_time).total_seconds()
-                
-                if total_elapsed > self.todo_timeout_threshold:
-                    logger.warning(f"执行超时 ({total_elapsed}秒)，停止执行")
-                    break
-                
-                # 获取下一批可执行的TODO
-                next_todos = await self.todo_manager.get_next_executable_todos(self.max_parallel_todos)
-                
-                if not next_todos:
-                    logger.info("所有TODO执行完成")
-                    break
-                
-                # 并行执行TODO
-                batch_results = await self._execute_todo_batch(next_todos)
-                execution_results.extend(batch_results)
-                
-                # 更新统计
-                completed_in_batch = len([r for r in batch_results if r.get("success")])
-                completed_todos += completed_in_batch
-                
-                # 检查是否需要中断
-                if not self._should_continue_execution(batch_results):
-                    logger.info("检测到停止条件，终止执行")
-                    break
-                
-                # 进度报告
-                progress = (completed_todos / total_todos) * 100 if total_todos > 0 else 0
-                logger.info(f"执行进度: {progress:.1f}% ({completed_todos}/{total_todos})")
-            
-            self.state = MasterControllerState.COMPLETED
-            
-            # 生成执行总结
-            execution_summary = await self._generate_execution_summary(execution_results, start_time)
-            
-            return {
-                "success": True,
-                "session_id": self.session_id,
-                "target": target,
-                "execution_plan": execution_plan,
-                "execution_results": execution_results,
-                "execution_summary": execution_summary,
-                "todo_statistics": await self.todo_manager.get_statistics(),
-                "total_execution_time": (datetime.now() - start_time).total_seconds()
-            }
-            
-        except Exception as e:
-            logger.error(f"TODO管理执行失败: {e}")
-            self.state = MasterControllerState.ERROR
-            return {
-                "success": False,
-                "error": str(e),
-                "session_id": self.session_id,
-                "partial_results": execution_results if 'execution_results' in locals() else []
-            }
-    
-    async def _execute_todo_batch(self, todos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        并行执行一批TODO
-        
-        Args:
-            todos: TODO列表
-            
-        Returns:
-            List[Dict[str, Any]]: 执行结果列表
-        """
-        tasks = []
-        for todo in todos:
-            task = asyncio.create_task(self._execute_single_todo(todo))
-            tasks.append(task)
-        
-        # 等待所有任务完成
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 处理异常结果
-        processed_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                processed_results.append({
-                    "todo_id": todos[i]["id"],
-                    "success": False,
-                    "error": str(result),
-                    "todo": todos[i]
-                })
-            else:
-                processed_results.append(result)
-        
-        return processed_results
-    
-    async def _execute_single_todo(self, todo: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        执行单个TODO
-        
-        Args:
-            todo: TODO信息
-            
-        Returns:
-            Dict[str, Any]: 执行结果
-        """
-        todo_id = todo["id"]
-        start_time = datetime.now()
-        
-        try:
-            # 标记TODO开始执行
-            await self.todo_manager.mark_todo_started(todo_id)
-            
-            logger.info(f"开始执行TODO: {todo_id} - {todo['title']}")
-            
-            # 根据TODO类型选择执行方法
-            todo_type = todo.get("type", "unknown")
-            
-            # 设置超时
-            timeout = min(todo.get("estimated_time", self.max_todo_execution_time), self.max_todo_execution_time)
-            
-            # 执行TODO任务
-            result = await asyncio.wait_for(
-                self._perform_todo_task(todo),
-                timeout=timeout
+            # 阶段3: 利用（串行）
+            exploit_result = await self._execute_stage(
+                session_id,
+                target,
+                options,
+                KillChainState.EXPLOITATION,
+                AgentType.EXPLOIT_AGENT
             )
+            results.append(exploit_result)
             
-            # 计算实际执行时间
-            actual_time = (datetime.now() - start_time).total_seconds()
-            
-            # 更新TODO状态
-            if result.get("success", False):
-                await self.todo_manager.mark_todo_completed(todo_id, actual_time)
-                logger.info(f"TODO执行成功: {todo_id} (耗时: {actual_time:.1f}秒)")
-            else:
-                await self.todo_manager.mark_todo_failed(todo_id, result.get("error", "执行失败"))
-                logger.error(f"TODO执行失败: {todo_id} - {result.get('error', '未知错误')}")
-            
-            return {
-                "todo_id": todo_id,
-                "success": result.get("success", False),
-                "data": result.get("data", {}),
-                "error": result.get("error"),
-                "execution_time": actual_time,
-                "todo": todo
-            }
-            
-        except asyncio.TimeoutError:
-            # 超时处理
-            await self.todo_manager.mark_todo_failed(todo_id, "执行超时")
-            logger.error(f"TODO执行超时: {todo_id}")
-            
-            return {
-                "todo_id": todo_id,
-                "success": False,
-                "error": "执行超时",
-                "execution_time": (datetime.now() - start_time).total_seconds(),
-                "todo": todo
-            }
+            # 继续其他阶段...
             
         except Exception as e:
-            # 异常处理
-            await self.todo_manager.mark_todo_failed(todo_id, str(e))
-            logger.error(f"TODO执行异常: {todo_id} - {e}")
-            
+            self.logger.error(f"Parallel execution error: {e}")
+        
+        return results
+    
+    async def _execute_stage(
+        self,
+        session_id: str,
+        target: str,
+        options: Dict[str, Any],
+        stage: KillChainState,
+        agent_type: AgentType
+    ) -> Dict[str, Any]:
+        """执行单个阶段"""
+        actor = self.agent_pool.get_actor(agent_type)
+        if not actor:
             return {
-                "todo_id": todo_id,
-                "success": False,
-                "error": str(e),
-                "execution_time": (datetime.now() - start_time).total_seconds(),
-                "todo": todo
-            }
-    
-    async def _perform_todo_task(self, todo: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        执行具体的TODO任务
-        
-        Args:
-            todo: TODO信息
-            
-        Returns:
-            Dict[str, Any]: 执行结果
-        """
-        todo_type = todo.get("type", "unknown")
-        todo_config = todo.get("config", {})
-        
-        # 根据TODO类型调用相应的执行方法
-        if todo_type == "reconnaissance":
-            return await self._execute_stage(KillChainState.RECONNAISSANCE, todo_config)
-        elif todo_type == "weaponization":
-            return await self._execute_stage(KillChainState.WEAPONIZATION, todo_config) 
-        elif todo_type == "delivery":
-            return await self._execute_stage(KillChainState.DELIVERY, todo_config)
-        elif todo_type == "exploitation":
-            return await self._execute_stage(KillChainState.EXPLOITATION, todo_config)
-        elif todo_type == "installation":
-            return await self._execute_stage(KillChainState.INSTALLATION, todo_config)
-        elif todo_type == "command_control":
-            return await self._execute_stage(KillChainState.COMMAND_CONTROL, todo_config)
-        elif todo_type == "actions_on_objectives":
-            return await self._execute_stage(KillChainState.ACTIONS_ON_OBJECTIVES, todo_config)
-        else:
-            # 自定义任务或未知类型
-            return await self._execute_custom_todo(todo)
-    
-    async def _execute_stage(self, stage: KillChainState, config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        执行杀伤链阶段（简化版，调用原有的_execute_stage方法）
-        
-        Args:
-            stage: 杀伤链阶段
-            config: 配置信息
-            
-        Returns:
-            Dict[str, Any]: 执行结果
-        """
-        # 这里可以调用原有的阶段执行逻辑
-        # 或者实现新的基于TODO的阶段执行
-        return {
-            "success": True,
-            "data": {
                 "stage": stage.value,
-                "config": config,
-                "message": f"阶段 {stage.value} 执行完成"
+                "agent": agent_type.value,
+                "success": False,
+                "error": "Actor not found"
             }
-        }
-    
-    async def _execute_custom_todo(self, todo: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        执行自定义TODO
         
-        Args:
-            todo: TODO信息
-            
-        Returns:
-            Dict[str, Any]: 执行结果
-        """
-        # 自定义TODO执行逻辑
+        context = [{
+            "session_id": session_id,
+            "stage": stage.value,
+            "global_context": await self.state_manager.get_global_context(session_id)
+        }]
+        
+        print(f"🔄 执行阶段: {stage.value}...", flush=True)
+        future = actor.execute.remote(
+            {"target": target, **(options or {})},
+            context
+        )
+        result = await self.execution_manager.run_ray_get(future)
+        
+        await self.state_manager.put_agent_result(session_id, agent_type.value, result)
+        
+        if result.get("success") and result.get("data"):
+            await self._update_global_context(session_id, stage, result["data"])
+        
         return {
-            "success": True,
-            "data": {
-                "todo_id": todo["id"],
-                "message": f"自定义TODO {todo['title']} 执行完成"
-            }
+            "stage": stage.value,
+            "agent": agent_type.value,
+            "result": result
         }
     
-    def _should_continue_execution(self, batch_results: List[Dict[str, Any]]) -> bool:
-        """
-        判断是否应该继续执行
+    async def _update_global_context(
+        self,
+        session_id: str,
+        stage: KillChainState,
+        data: Dict[str, Any]
+    ):
+        """更新全局上下文"""
+        updates = {}
         
-        Args:
-            batch_results: 批次执行结果
-            
-        Returns:
-            bool: 是否继续执行
-        """
-        # 计算失败率
-        total_tasks = len(batch_results)
-        if total_tasks == 0:
-            return False
+        if stage == KillChainState.RECONNAISSANCE:
+            if "services" in data:
+                updates["discovered_services"] = data["services"]
+            if "vulnerabilities" in data:
+                updates["identified_vulnerabilities"] = data["vulnerabilities"]
+        elif stage == KillChainState.EXPLOITATION:
+            if "exploitation_results" in data:
+                updates["exploitation_results"] = data["exploitation_results"]
         
-        failed_tasks = len([r for r in batch_results if not r.get("success", False)])
-        failure_rate = failed_tasks / total_tasks
-        
-        # 如果失败率过高，考虑停止
-        if failure_rate > 0.8:  # 80%失败率
-            logger.warning(f"失败率过高 ({failure_rate*100:.1f}%)，考虑停止执行")
-            return False
-        
-        return True
+        if updates:
+            await self.state_manager.update_global_context(session_id, updates)
     
-    async def _generate_execution_summary(self, execution_results: List[Dict[str, Any]], 
-                                        start_time: datetime) -> Dict[str, Any]:
-        """
-        生成执行总结
-        
-        Args:
-            execution_results: 执行结果列表
-            start_time: 开始时间
-            
-        Returns:
-            Dict[str, Any]: 执行总结
-        """
-        total_tasks = len(execution_results)
-        successful_tasks = len([r for r in execution_results if r.get("success", False)])
-        failed_tasks = total_tasks - successful_tasks
-        
-        total_time = (datetime.now() - start_time).total_seconds()
-        
-        summary_prompt = self.prompts.get_progress_summary_prompt({
-            "session_id": self.session_id,
-            "target": self.execution_context.get("target"),
-            "start_time": start_time.isoformat(),
-            "current_state": self.state.value,
-            "all_todos": execution_results,
-            "discovered_services": self.execution_context.get("discovered_services", []),
-            "identified_vulnerabilities": self.execution_context.get("identified_vulnerabilities", []),
-            "successful_exploits": self.execution_context.get("exploitation_results", [])
-        })
-        
-        try:
-            # 生成AI总结
-            ai_summary = await self.llm_manager.call_master_model(
-                "execution_summary",
-                summary_prompt,
-                context=self.execution_context
-            )
-            
-            return {
-                "ai_summary": ai_summary,
-                "statistics": {
-                    "total_tasks": total_tasks,
-                    "successful_tasks": successful_tasks,
-                    "failed_tasks": failed_tasks,
-                    "success_rate": successful_tasks / total_tasks if total_tasks > 0 else 0,
-                    "total_execution_time": total_time
-                },
-                "execution_results": execution_results
-            }
-            
-        except Exception as e:
-            logger.error(f"生成执行总结失败: {e}")
-            return {
-                "ai_summary": "总结生成失败",
-                "statistics": {
-                    "total_tasks": total_tasks,
-                    "successful_tasks": successful_tasks,
-                    "failed_tasks": failed_tasks,
-                    "success_rate": successful_tasks / total_tasks if total_tasks > 0 else 0,
-                    "total_execution_time": total_time
-                },
-                "execution_results": execution_results
-            }
+    async def get_session_status(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """获取会话状态"""
+        return await self.state_manager.get_session_state(session_id)
+    
+    async def list_sessions(self) -> List[str]:
+        """列出所有会话"""
+        return await self.state_manager.list_sessions()
+    
+    def shutdown(self):
+        """关闭Ray和所有资源"""
+        for session_id, task in list(self.running_sessions.items()):
+            if not task.done():
+                task.cancel()
+            self.running_sessions.pop(session_id, None)
+        self.agent_pool.shutdown()
+        # Ray 关闭由执行管理器统一管理
+        self.logger.info("Ray Master Controller shutdown")
