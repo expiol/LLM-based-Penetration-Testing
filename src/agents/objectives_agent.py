@@ -1,5 +1,5 @@
 """
-基于LangChain的武器化Agent
+基于LangChain的目标行为Agent
 """
 from typing import Dict, Any, List
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -9,44 +9,43 @@ from ..orchestrator.states import AgentType
 from ..prompts.agent_prompts import AgentPrompts
 
 
-class LangChainWeaponizeAgent(LangChainBaseAgent):
+class LangChainObjectivesAgent(LangChainBaseAgent):
     """
-    基于LangChain的武器化Agent
-    负责准备攻击载荷和工具
+    基于LangChain的目标行为Agent
+    负责执行最终的攻击目标和数据收集任务
     """
     
     def __init__(self, config: Dict[str, Any] = None):
         super().__init__(
-            name="LangChainWeaponizeAgent",
-            agent_type=AgentType.WEAPONIZE_AGENT,
+            name="LangChainObjectivesAgent",
+            agent_type=AgentType.OBJECTIVES_AGENT,
             safe_mode=config.get("safe_mode", True) if config else True,
             config=config
         )
     
     def get_system_prompt(self) -> str:
         """
-        获取武器化Agent的系统提示词
+        获取目标行为Agent的系统提示词
         使用 AgentPrompts 中的统一 prompt
         """
         # 尝试从当前上下文获取信息（如果已设置）
-        vulnerabilities: List[Dict[str, Any]] = []
-        target_info: Dict[str, Any] = {}
+        c2_results: Dict[str, Any] = {}
+        targets: List[str] = []
         
         if hasattr(self, '_current_global_context') and self._current_global_context:
-            # 从全局上下文中获取已识别的漏洞
-            vulnerabilities = self._current_global_context.get("identified_vulnerabilities", [])
+            # 从全局上下文中获取C2结果
+            c2_results = self._current_global_context.get("c2_results", {})
         
         if hasattr(self, '_current_target_info') and self._current_target_info:
-            target_info = self._current_target_info
-            target_info["target"] = target_info.get("target", "目标待指定")
-        else:
-            target_info = {"target": "目标待指定"}
+            target = self._current_target_info.get("target", "")
+            if target:
+                targets = [target]
         
         # 使用 AgentPrompts 中的方法
-        return AgentPrompts.get_weaponize_agent_prompt(vulnerabilities, target_info)
+        return AgentPrompts.get_objectives_agent_prompt(c2_results, targets)
     
     def _create_prompt(self) -> ChatPromptTemplate:
-        """创建武器化Agent的Prompt模板"""
+        """创建目标行为Agent的Prompt模板"""
         return ChatPromptTemplate.from_messages([
             ("system", self.get_system_prompt()),
             MessagesPlaceholder(variable_name="chat_history", optional=True),

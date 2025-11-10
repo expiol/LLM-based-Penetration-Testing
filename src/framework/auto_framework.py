@@ -154,21 +154,73 @@ class AutoPentestFramework:
         """创建并注册所有Agent"""
         try:
             from ..agents.recon_agent import LangChainReconAgent
+            from ..agents.weaponize_agent import LangChainWeaponizeAgent
+            from ..agents.delivery_agent import LangChainDeliveryAgent
+            from ..agents.exploit_agent import LangChainExploitAgent
+            from ..agents.install_agent import LangChainInstallAgent
+            from ..agents.c2_agent import LangChainC2Agent
+            from ..agents.objectives_agent import LangChainObjectivesAgent
             from ..orchestrator.states import AgentType
             
-            # 注册Recon Agent（传递类和配置，不是实例）
-            recon_config = self.config.get("agents", {}).get("recon", {})
-            await self.master_controller.register_agent(
-                agent_class=LangChainReconAgent,
-                agent_type=AgentType.RECON_AGENT,
-                agent_config=recon_config,
-                num_cpus=recon_config.get("num_cpus", 1.0),
-                num_gpus=recon_config.get("num_gpus", 0.0)
-            )
+            # Agent注册映射 - 注册所有已实现的Agent
+            agent_registry = [
+                {
+                    "class": LangChainReconAgent,
+                    "type": AgentType.RECON_AGENT,
+                    "config_key": "recon"
+                },
+                {
+                    "class": LangChainWeaponizeAgent,
+                    "type": AgentType.WEAPONIZE_AGENT,
+                    "config_key": "weaponize"
+                },
+                {
+                    "class": LangChainDeliveryAgent,
+                    "type": AgentType.DELIVERY_AGENT,
+                    "config_key": "delivery"
+                },
+                {
+                    "class": LangChainExploitAgent,
+                    "type": AgentType.EXPLOIT_AGENT,
+                    "config_key": "exploit"
+                },
+                {
+                    "class": LangChainInstallAgent,
+                    "type": AgentType.INSTALL_AGENT,
+                    "config_key": "install"
+                },
+                {
+                    "class": LangChainC2Agent,
+                    "type": AgentType.C2_AGENT,
+                    "config_key": "c2"
+                },
+                {
+                    "class": LangChainObjectivesAgent,
+                    "type": AgentType.OBJECTIVES_AGENT,
+                    "config_key": "objectives"
+                },
+            ]
             
-            self.agents["recon"] = "LangChainReconAgent"  # 只记录名称
+            # 注册所有可用的Agent
+            for agent_info in agent_registry:
+                try:
+                    agent_config = self.config.get("agents", {}).get(agent_info["config_key"], {})
+                    await self.master_controller.register_agent(
+                        agent_class=agent_info["class"],
+                        agent_type=agent_info["type"],
+                        agent_config=agent_config,
+                        num_cpus=agent_config.get("num_cpus", 1.0),
+                        num_gpus=agent_config.get("num_gpus", 0.0)
+                    )
+                    
+                    self.agents[agent_info["config_key"]] = agent_info["class"].__name__
+                    self.logger.info(f"✅ Registered {agent_info['type'].value}")
+                    
+                except Exception as e:
+                    self.logger.warning(f"Failed to register {agent_info['type'].value}: {e}")
+                    # 继续注册其他Agent，不中断
             
-            self.logger.info(f"Registered {len(self.agents)} agents")
+            self.logger.info(f"Registered {len(self.agents)} agents total")
             
         except Exception as e:
             self.logger.error(f"Agent creation/registration failed: {e}")
@@ -192,30 +244,41 @@ class AutoPentestFramework:
         Returns:
             Dict[str, Any]: 执行结果
         """
+        print(f"🔄 start_automated_test() 被调用，target={target}, options={options}", flush=True)
+        
         if not self._initialized:
+            print("⚠️  框架未初始化，正在初始化...", flush=True)
             await self.initialize()
+            print("✅ 框架初始化完成", flush=True)
         
         try:
             self.logger.info(f"Starting automated penetration test - Target: {target}")
+            print(f"📋 开始启动渗透测试，目标: {target}", flush=True)
             
             # 确保配置选项
             options = options or {}
             options.setdefault("safe_mode", True)
             options.setdefault("parallel", False)
+            print(f"📋 测试选项已设置: {options}", flush=True)
             
             # 调用Ray Master Controller执行测试
+            print(f"🔄 准备调用 master_controller.start_penetration_test()...", flush=True)
             result = await self.master_controller.start_penetration_test(
                 target=target,
                 options=options,
                 parallel=options.get("parallel", False),
                 async_mode=options.get("async_mode", False)
             )
+            print(f"✅ master_controller.start_penetration_test() 返回", flush=True)
             
             self.logger.info(f"Test completed - Success: {result.get('success')}")
             return result
             
         except Exception as e:
             self.logger.error(f"Automated test failed: {e}")
+            print(f"❌ start_automated_test() 失败: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e),

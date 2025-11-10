@@ -148,6 +148,12 @@ class MasterPrompts:
 - 任务ID和名称
 - 具体执行步骤
 - 预计执行时间（避免超长任务）
+- **超时时间（timeout）**：根据任务类型和复杂度，为每个任务指定合理的超时时间（秒）
+  - 快速扫描（如端口扫描1-1000）：300-600秒
+  - 深度扫描（如全端口扫描）：600-1800秒
+  - 服务识别和版本探测：300-600秒
+  - 漏洞利用：600-1200秒
+  - 其他任务：根据实际情况设定
 - 依赖关系
 - 优先级等级
 - 成功标准
@@ -184,7 +190,14 @@ class MasterPrompts:
         {{
           "id": "recon_port_scan",
           "name": "端口扫描",
-          "description": "使用nmap扫描目标开放端口"
+          "description": "使用nmap扫描目标开放端口",
+          "config": {{
+            "tool": "nmap",
+            "timeout": 600,
+            "target": "提取的目标IP地址或域名",
+            "ports": "1-1000",
+            "scan_type": "tcp_connect"
+          }}
         }}
       ]
     }}
@@ -193,15 +206,35 @@ class MasterPrompts:
 
 ### 关键要求
 1. **target字段**：必须包含提取的目标IP地址或域名（例如："192.168.66.1"）
-2. **stages数组**：必须包含至少一个阶段对象
+2. **stages数组**：必须包含完整的7个Kill Chain阶段，即使某些阶段可能暂时没有具体任务：
+   - reconnaissance（侦察阶段）- 必须包含
+   - weaponization（武器化阶段）- 必须包含
+   - delivery（投递阶段）- 必须包含
+   - exploitation（利用阶段）- 必须包含
+   - installation（安装阶段）- 必须包含
+   - command_control（命令控制阶段）- 必须包含
+   - actions_on_objectives（目标行为阶段）- 必须包含
 3. **每个stage必须包含**：
    - id: 唯一标识符（格式：阶段类型_序号）
-   - type: 阶段类型（reconnaissance/weaponization/delivery/exploitation/installation/command_control/actions_on_objectives）
+   - type: 阶段类型（必须使用上述7种类型之一）
    - name: 阶段名称
    - description: 阶段描述
    - config: 配置对象（必须包含target字段）
-   - todos: TODO列表（数组）
-4. **只返回JSON，不要添加任何markdown标记或说明文字**
+   - todos: TODO列表（数组，至少包含1个任务）
+4. **每个todo必须包含**：
+   - id: 任务唯一标识符
+   - name: 任务名称
+   - description: 任务描述
+   - config: 任务配置对象，**必须包含timeout字段**（超时时间，单位：秒）
+     - timeout: 根据任务复杂度设定，例如：快速扫描300-600秒，深度扫描600-1800秒
+     - tool: 使用的工具名称（如"nmap"）
+     - 其他工具特定参数（如target、ports等）
+5. **只返回JSON，不要添加任何markdown标记或说明文字**
+
+**重要**：
+- 必须返回完整的7个阶段，每个阶段至少包含1个TODO任务
+- 每个todo的config中必须包含timeout字段，根据任务类型合理设定超时时间
+- 如果某个阶段暂时无法执行，可以创建占位任务（如"等待前置阶段结果"），但阶段本身必须存在
 
 请严格按照上述格式返回JSON。"""
 

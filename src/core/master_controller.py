@@ -64,56 +64,30 @@ class RayMasterController:
         }
     
     def _init_master_llm(self):
-        """初始化主控LLM"""
+        """初始化主控LLM - 从配置读取"""
         try:
             from langchain_openai import ChatOpenAI
-            import os
-            from pathlib import Path
             
-            # 从配置读取LLM设置
+            # 从配置读取主控LLM设置（已经由 build_framework_config 从 llm_runtime.json 构建）
             llm_config = self.config.get("llm_models", {}).get("master_model", {})
             if not llm_config:
                 llm_config = self.config.get("master_model", {})
             
-            # 尝试从 llm_runtime.json 读取 API Key
+            if not llm_config:
+                self.logger.warning("未找到主控LLM配置")
+                print("⚠️  警告：未找到主控LLM配置", flush=True)
+                return
+            
             api_key = llm_config.get("api_key")
             base_url = llm_config.get("base_url")
+            model_name = llm_config.get("model_name") or llm_config.get("model", "gpt-4")
             
             if not api_key:
-                # 尝试从环境变量读取
-                api_key = os.getenv("OPENAI_API_KEY")
-            
-            if not api_key:
-                # 尝试从 llm_runtime.json 读取
-                try:
-                    runtime_config_path = Path(__file__).parent.parent.parent / "configs" / "llm_runtime.json"
-                    if runtime_config_path.exists():
-                        with open(runtime_config_path) as f:
-                            runtime_config = json.load(f)
-                            api_key = runtime_config.get("api_key")
-                            
-                            # 构建 base_url
-                            if not base_url and runtime_config.get("host"):
-                                protocol = runtime_config.get("protocol", "https")
-                                host = runtime_config.get("host")
-                                port = runtime_config.get("port", 443)
-                                base_url = f"{protocol}://{host}:{port}/v1"
-                            
-                            # 如果配置中没有model_name，从runtime_config读取
-                            if not llm_config.get("model_name") and not llm_config.get("model"):
-                                model_name = runtime_config.get("model_name")
-                                if model_name:
-                                    llm_config["model_name"] = model_name
-                except Exception as e:
-                    self.logger.warning(f"Failed to read llm_runtime.json: {e}")
-            
-            if not api_key:
-                self.logger.warning("未配置 OpenAI API Key，主控LLM将无法使用")
-                print("⚠️  警告：未配置 OpenAI API Key，主控LLM将无法使用", flush=True)
+                self.logger.warning("未配置主控LLM API Key")
+                print("⚠️  警告：未配置主控LLM API Key", flush=True)
                 return
             
             # 创建 ChatOpenAI 实例
-            model_name = llm_config.get("model_name") or llm_config.get("model", "gpt-4")
             kwargs = {
                 "model": model_name,
                 "temperature": llm_config.get("temperature", 0.7),
@@ -415,16 +389,22 @@ class RayMasterController:
             self.logger.info("开始调用LLM API...")
             
             try:
-                # 添加超时控制（2分钟）
+                # 添加超时控制（5分钟，因为某些LLM可能响应较慢）
                 try:
                     print(f"   📡 正在发送请求到LLM API...", flush=True)
                     self.logger.info("发送请求到LLM API...")
+                    
+                    # 确保输出立即刷新
+                    import sys
+                    sys.stdout.flush()
+                    
                     response = await asyncio.wait_for(
                         self.master_llm.ainvoke(messages),
-                        timeout=120.0
+                        timeout=300.0  # 5分钟超时
                     )
                     print(f"   ✅ LLM API响应已接收", flush=True)
                     self.logger.info("LLM API响应已接收")
+                    sys.stdout.flush()
                     
                     content = response.content if hasattr(response, 'content') else str(response)
                     print(f"   ✅ LLM响应接收成功，长度: {len(content)} 字符", flush=True)
@@ -614,6 +594,17 @@ class RayMasterController:
                 
                 # 执行Agent（使用执行管理器统一处理）
                 print(f"🔄 将任务和目标发送给 {agent_type.value}...", flush=True)
+                print(f"📋 当前阶段任务: {stage_name}", flush=True)
+                if stage_todos:
+                    print(f"   待执行任务数: {len(stage_todos)}", flush=True)
+                    for idx, todo in enumerate(stage_todos[:3], 1):
+                        todo_name = todo.get("name", todo.get("title", "未命名任务"))
+                        todo_id = todo.get("id")
+                        print(f"   {idx}. {todo_name}", flush=True)
+                        # 标记任务为进行中
+                        if todo_id:
+                            await self.todo_manager.mark_todo_started(todo_id)
+                
                 future = actor.execute.remote(target_info, context)
                 result = await self.execution_manager.run_ray_get(future)
                 
@@ -629,6 +620,24 @@ class RayMasterController:
                 # 更新全局上下文
                 if result.get("success") and result.get("data"):
                     await self._update_global_context(session_id, kill_chain_state, result["data"])
+                    
+                    # 实时显示结果摘要
+                    data = result.get("data", {})
+                    if kill_chain_state == KillChainState.RECONNAISSANCE:
+                        if "open_ports" in data:
+                            ports = data.get("open_ports", [])
+                            print(f"✅ 侦察完成: 发现 {len(ports)} 个开放端口", flush=True)
+                        if "services" in data:
+                            services = data.get("services", [])
+                            print(f"✅ 侦察完成: 识别 {len(services)} 个服务", flush=True)
+                    elif kill_chain_state == KillChainState.WEAPONIZATION:
+                        if "payloads" in data:
+                            payloads = data.get("payloads", [])
+                            print(f"✅ 武器化完成: 准备 {len(payloads)} 个载荷", flush=True)
+                    elif kill_chain_state == KillChainState.EXPLOITATION:
+                        if "exploitation_results" in data:
+                            exploits = data.get("exploitation_results", [])
+                            print(f"✅ 利用完成: {len(exploits)} 个利用结果", flush=True)
                 
                 # 更新TODO状态
                 for todo in stage_todos:
@@ -639,10 +648,47 @@ class RayMasterController:
                         else:
                             await self.todo_manager.mark_todo_failed(todo_id, result.get("error", "执行失败"))
                 
-                # 检查是否应该继续
-                if not result.get("success") and not options.get("safe_mode", True):
-                    self.logger.warning(f"阶段 {stage_name} 失败，停止执行")
-                    break
+                # 确保所有进行中的任务在阶段完成后被标记为完成或失败
+                list_name = f"execution_plan_{session_id}"
+                all_todos = await self.todo_manager.get_todo_list(list_name)
+                for todo in all_todos:
+                    if todo.get("status") == "in_progress" and todo.get("parent_stage") == stage_id:
+                        # 如果任务还在进行中但阶段已完成，根据结果更新状态
+                        if result.get("success"):
+                            await self.todo_manager.mark_todo_completed(todo.get("id"))
+                        else:
+                            await self.todo_manager.mark_todo_failed(todo.get("id"), result.get("error", "阶段执行失败"))
+                
+                # 检查阶段是否完成，如果信息不足，暂停并请求更多信息
+                if not result.get("success"):
+                    error_msg = result.get("error", "执行失败")
+                    print(f"⚠️  阶段 {stage_name} 执行失败: {error_msg}", flush=True)
+                    
+                    # 如果是信息不足，暂停并等待用户补充
+                    if "信息不足" in error_msg or "需要更多信息" in error_msg or "insufficient" in error_msg.lower():
+                        print(f"⏸️  信息收集不足，暂停执行等待补充信息...", flush=True)
+                        await self.state_manager.update_session_state(session_id, {
+                            "status": "paused",
+                            "error": error_msg,
+                            "paused_at": datetime.now().isoformat()
+                        })
+                        # 不继续执行，等待用户补充信息
+                        break
+                    
+                    # 如果安全模式，继续执行；否则停止
+                    if not options.get("safe_mode", True):
+                        self.logger.warning(f"阶段 {stage_name} 失败，停止执行")
+                        break
+                else:
+                    # 检查信息是否充足（特别是侦察阶段）
+                    if kill_chain_state == KillChainState.RECONNAISSANCE:
+                        global_context = await self.state_manager.get_global_context(session_id)
+                        services = global_context.get("discovered_services", [])
+                        if not services or len(services) == 0:
+                            print(f"⚠️  侦察阶段完成，但未发现服务，可能需要更多信息", flush=True)
+                            # 可以选择暂停或继续
+                    
+                    print(f"✅ 阶段 {stage_name} 完成", flush=True)
                     
         except Exception as e:
             self.logger.error(f"从TODO执行失败: {e}")
@@ -891,6 +937,165 @@ class RayMasterController:
     async def list_sessions(self) -> List[str]:
         """列出所有会话"""
         return await self.state_manager.list_sessions()
+    
+    async def get_current_executing_task(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        获取当前正在执行的任务
+        
+        Args:
+            session_id: 会话ID
+            
+        Returns:
+            Dict[str, Any]: 当前执行的任务信息，如果没有则返回None
+        """
+        try:
+            # 获取会话状态
+            session_state = await self.state_manager.get_session_state(session_id)
+            if not session_state:
+                return None
+            
+            # 获取所有进行中的任务
+            list_name = f"execution_plan_{session_id}"
+            all_todos = await self.todo_manager.get_todo_list(list_name)
+            in_progress_todos = [todo for todo in all_todos if todo.get("status") == "in_progress"]
+            
+            if in_progress_todos:
+                # 返回第一个进行中的任务（通常只有一个）
+                current_todo = in_progress_todos[0]
+                return {
+                    "todo_id": current_todo.get("id"),
+                    "title": current_todo.get("title"),
+                    "description": current_todo.get("description"),
+                    "phase": current_todo.get("phase"),
+                    "tool": current_todo.get("tool"),
+                    "config": current_todo.get("config", {}),
+                    "started_at": current_todo.get("updated_at")
+                }
+            
+            return None
+        except Exception as e:
+            self.logger.error(f"获取当前执行任务失败: {e}")
+            return None
+    
+    async def get_all_tasks(self, session_id: str) -> Dict[str, Any]:
+        """
+        获取所有任务列表
+        
+        Args:
+            session_id: 会话ID
+            
+        Returns:
+            Dict[str, Any]: 包含所有任务的状态信息
+        """
+        try:
+            list_name = f"execution_plan_{session_id}"
+            all_todos = await self.todo_manager.get_todo_list(list_name)
+            progress = await self.todo_manager.get_progress(list_name)
+            
+            # 按状态分组
+            tasks_by_status = {
+                "pending": [],
+                "in_progress": [],
+                "completed": [],
+                "failed": [],
+                "cancelled": []
+            }
+            
+            for todo in all_todos:
+                status = todo.get("status", "pending")
+                if status in tasks_by_status:
+                    tasks_by_status[status].append({
+                        "id": todo.get("id"),
+                        "title": todo.get("title"),
+                        "description": todo.get("description"),
+                        "phase": todo.get("phase"),
+                        "tool": todo.get("tool"),
+                        "priority": todo.get("priority", 0)
+                    })
+            
+            return {
+                "progress": progress,
+                "tasks_by_status": tasks_by_status,
+                "total_tasks": len(all_todos)
+            }
+        except Exception as e:
+            self.logger.error(f"获取任务列表失败: {e}")
+            return {
+                "progress": {},
+                "tasks_by_status": {},
+                "total_tasks": 0
+            }
+    
+    async def interrupt_and_replan(
+        self,
+        session_id: str,
+        additional_info: str
+    ) -> Dict[str, Any]:
+        """
+        中断当前执行并重新规划
+        
+        Args:
+            session_id: 会话ID
+            additional_info: 用户补充的信息
+            
+        Returns:
+            Dict[str, Any]: 重新规划的结果
+        """
+        try:
+            # 1. 暂停当前会话
+            await self.state_manager.update_session_state(session_id, {
+                "status": "paused",
+                "paused_at": datetime.now().isoformat(),
+                "additional_info": additional_info
+            })
+            
+            # 2. 获取当前会话状态
+            session_state = await self.state_manager.get_session_state(session_id)
+            original_target = session_state.get("target", "")
+            original_options = session_state.get("options", {})
+            
+            # 3. 合并原始描述和补充信息
+            original_description = original_options.get("raw_description", "")
+            combined_description = f"{original_description}\n\n补充信息: {additional_info}"
+            
+            # 4. 更新选项
+            new_options = {
+                **original_options,
+                "raw_description": combined_description
+            }
+            
+            # 5. 重新生成执行计划
+            print(f"🔄 根据补充信息重新生成执行计划...", flush=True)
+            new_execution_plan = await self._generate_execution_plan(
+                "auto_extract",
+                new_options,
+                session_id
+            )
+            
+            # 6. 更新TODO列表
+            await self._save_execution_plan_to_todos(new_execution_plan, session_id)
+            
+            # 7. 更新会话状态
+            await self.state_manager.update_session_state(session_id, {
+                "status": "ready",
+                "execution_plan": new_execution_plan,
+                "options": new_options
+            })
+            
+            print(f"✅ 重新规划完成，共 {len(new_execution_plan.get('stages', []))} 个阶段", flush=True)
+            
+            return {
+                "success": True,
+                "execution_plan": new_execution_plan,
+                "message": "重新规划完成"
+            }
+            
+        except Exception as e:
+            self.logger.error(f"中断和重新规划失败: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
     def shutdown(self):
         """关闭Ray和所有资源"""

@@ -6,6 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from .base_agent import LangChainBaseAgent
 from ..orchestrator.states import AgentType
+from ..prompts.agent_prompts import AgentPrompts
 
 
 class LangChainReconAgent(LangChainBaseAgent):
@@ -23,32 +24,29 @@ class LangChainReconAgent(LangChainBaseAgent):
         )
     
     def get_system_prompt(self) -> str:
-        """获取侦察Agent的系统提示词"""
-        return """你是一个专业的渗透测试侦察专家。你的主要职责是：
-
-1. **信息收集**: 收集目标的各种公开信息
-2. **端口扫描**: 识别目标开放的端口和服务
-3. **服务识别**: 确定运行的服务类型和版本
-4. **DNS枚举**: 收集DNS记录和子域名信息
-5. **漏洞发现**: 识别潜在的安全漏洞
-
-**工作原则**:
-- 始终遵守法律和道德规范
-- 在安全模式下，只使用被动和非侵入式的方法
-- 详细记录所有发现的信息
-- 评估攻击面和优先目标
-- 为下一阶段提供准确的情报
-
-**执行流程**:
-1. 首先执行DNS信息收集
-2. 进行端口扫描（根据安全模式选择扫描方式）
-3. 识别开放端口上的服务
-4. 收集服务版本和banner信息
-5. 枚举子域名（如果目标是域名）
-6. 评估收集到的信息是否充足
-7. 生成侦察报告
-
-请根据目标信息和可用工具，系统地执行侦察任务。"""
+        """
+        获取侦察Agent的系统提示词
+        使用 AgentPrompts 中的统一 prompt
+        """
+        # 尝试从当前上下文获取信息（如果已设置）
+        target = ""
+        context = {}
+        
+        if hasattr(self, '_current_target_info') and self._current_target_info:
+            target = self._current_target_info.get("target", "")
+        
+        if hasattr(self, '_current_global_context') and self._current_global_context:
+            context = self._current_global_context
+        
+        # 如果有完整信息，使用完整版 prompt；否则使用基础版本
+        if target:
+            return AgentPrompts.get_recon_agent_prompt(target, context)
+        else:
+            # 返回基础版本（初始化时使用）
+            return AgentPrompts.get_recon_agent_prompt("目标待指定", {
+                "recon_depth": "standard",
+                "time_limit": 1800
+            })
     
     def _create_prompt(self) -> ChatPromptTemplate:
         """创建侦察Agent的Prompt模板"""

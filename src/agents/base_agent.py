@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentCallbackHandler(AsyncCallbackHandler):
-    """Agent执行回调处理器"""
+    """Agent执行回调处理器 - 实时显示任务执行详情"""
     
     def __init__(self, agent_name: str, session_id: Optional[str] = None):
         self.agent_name = agent_name
@@ -30,30 +30,105 @@ class AgentCallbackHandler(AsyncCallbackHandler):
         self.execution_logs: List[Dict[str, Any]] = []
     
     async def on_agent_action(self, action, **kwargs):
-        """当Agent执行动作时"""
-        logger.info(f"Agent {self.agent_name} executing action: {action.tool}")
+        """当Agent执行动作时 - 实时显示"""
+        tool_name = action.tool
+        tool_input = action.tool_input
+        
+        # 构建友好的任务描述
+        task_desc = self._format_task_description(tool_name, tool_input)
+        # 只在工具开始执行时显示一次，避免重复刷屏
+        if not hasattr(self, '_last_tool_action') or self._last_tool_action != f"{tool_name}_{task_desc}":
+            print(f"\n🔧 [{self.agent_name}] 正在执行: {task_desc}", flush=True)
+            self._last_tool_action = f"{tool_name}_{task_desc}"
+        
+        logger.info(f"Agent {self.agent_name} executing action: {tool_name}")
         self.execution_logs.append({
             "type": "action",
-            "tool": action.tool,
-            "input": action.tool_input,
+            "tool": tool_name,
+            "input": tool_input,
             "timestamp": datetime.now().isoformat()
         })
+    
+    def _format_task_description(self, tool_name: str, tool_input: Any) -> str:
+        """格式化任务描述，使其更易读"""
+        if isinstance(tool_input, dict):
+            # 处理包装格式的参数
+            actual_input = tool_input.get("parameters", tool_input)
+            
+            # 根据工具类型生成描述
+            if tool_name == "nmap" or tool_name == "nmap_scan":
+                target = actual_input.get("target", tool_input.get("target", "未知目标"))
+                ports = actual_input.get("ports", tool_input.get("ports", "默认端口"))
+                return f"使用nmap扫描 {target} 的端口 {ports}"
+            elif tool_name == "subdomain_enumeration":
+                domain = actual_input.get("domain", tool_input.get("domain", "未知域名"))
+                return f"枚举 {domain} 的子域名"
+            elif tool_name == "sql_injection_test":
+                url = actual_input.get("url", tool_input.get("url", "未知URL"))
+                return f"测试 {url} 的 SQL 注入漏洞"
+            else:
+                # 通用描述
+                params_str = ", ".join([f"{k}={v}" for k, v in actual_input.items() if k != "target"][:2])
+                target = actual_input.get("target", tool_input.get("target", ""))
+                if target:
+                    return f"{tool_name} 处理 {target}" + (f" ({params_str})" if params_str else "")
+                return f"{tool_name}" + (f" ({params_str})" if params_str else "")
+        return f"{tool_name}"
     
     async def on_agent_finish(self, finish, **kwargs):
         """当Agent完成时"""
         logger.info(f"Agent {self.agent_name} finished")
+        output = finish.return_values
+        if output:
+            result_summary = self._format_result_summary(output)
+            if result_summary:
+                print(f"✅ [{self.agent_name}] 完成: {result_summary}", flush=True)
+        
         self.execution_logs.append({
             "type": "finish",
-            "output": finish.return_values,
+            "output": output,
             "timestamp": datetime.now().isoformat()
         })
     
+    def _format_result_summary(self, output: Any) -> str:
+        """格式化结果摘要"""
+        if isinstance(output, dict):
+            if "open_ports" in output:
+                ports = output.get("open_ports", [])
+                return f"发现 {len(ports)} 个开放端口"
+            if "subdomains" in output:
+                subdomains = output.get("subdomains", [])
+                return f"发现 {len(subdomains)} 个子域名"
+            if "vulnerabilities" in output:
+                vulns = output.get("vulnerabilities", [])
+                return f"发现 {len(vulns)} 个潜在漏洞"
+            if "success" in output:
+                return "任务执行成功" if output.get("success") else "任务执行失败"
+        return ""
+    
     async def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs):
-        """当工具开始执行时"""
-        logger.debug(f"Tool started: {serialized.get('name')}")
+        """当工具开始执行时 - 实时显示（只显示一次，避免刷屏）"""
+        tool_name = serialized.get('name', 'unknown')
+        # 只在工具第一次启动时显示，避免重复刷屏
+        tool_key = f"{tool_name}_{input_str[:50]}"
+        if not hasattr(self, '_started_tools'):
+            self._started_tools = set()
+        if tool_key not in self._started_tools:
+            print(f"  ⚙️  工具启动: {tool_name}", flush=True)
+            self._started_tools.add(tool_key)
+        logger.debug(f"Tool started: {tool_name}")
     
     async def on_tool_end(self, output: str, **kwargs):
-        """当工具执行完成时"""
+        """当工具执行完成时 - 实时显示结果摘要（只显示一次）"""
+        # 只显示前100个字符，避免输出过长
+        output_preview = output[:100] + "..." if len(output) > 100 else output
+        # 只在工具完成时显示一次
+        if not hasattr(self, '_completed_tools'):
+            self._completed_tools = set()
+        output_key = f"{output_preview[:50]}"
+        if output_key not in self._completed_tools:
+            print(f"  ✓ 工具完成，结果: {output_preview}", flush=True)
+            self._completed_tools.add(output_key)
         logger.debug(f"Tool completed: {output[:100]}")
 
 
@@ -108,53 +183,32 @@ class LangChainBaseAgent(ABC):
         self._current_target_info: Dict[str, Any] = {}
     
     def _create_default_llm(self) -> BaseLLM:
-        """创建默认的LLM"""
+        """创建默认的LLM - 从配置读取子Agent的LLM配置"""
         import os
-        import json
-        from pathlib import Path
         
-        # 从配置读取LLM设置
+        # 从配置读取LLM设置（已经由 build_framework_config 从 llm_runtime.json 构建）
         llm_config = self.config.get("llm", {})
         
-        # 尝试从 llm_runtime.json 读取 API Key
         api_key = llm_config.get("api_key")
         base_url = llm_config.get("base_url")
+        model_name = llm_config.get("model_name") or llm_config.get("model", "gpt-4")
         
+        # 如果配置中没有，尝试从环境变量读取
         if not api_key:
-            # 尝试从环境变量读取
             api_key = os.getenv("OPENAI_API_KEY")
-        
-        if not api_key:
-            # 尝试从 llm_runtime.json 读取
-            try:
-                runtime_config_path = Path(__file__).parent.parent.parent / "configs" / "llm_runtime.json"
-                if runtime_config_path.exists():
-                    with open(runtime_config_path) as f:
-                        runtime_config = json.load(f)
-                        api_key = runtime_config.get("api_key")
-                        
-                        # 构建 base_url
-                        if not base_url and runtime_config.get("host"):
-                            protocol = runtime_config.get("protocol", "https")
-                            host = runtime_config.get("host")
-                            port = runtime_config.get("port", 443)
-                            base_url = f"{protocol}://{host}:{port}/v1"
-            except Exception as e:
-                self.logger.warning(f"Failed to read llm_runtime.json: {e}")
         
         # 如果还是没有 API Key，给出友好提示
         if not api_key:
             raise ValueError(
-                "未配置 OpenAI API Key！\n"
+                "未配置子Agent OpenAI API Key！\n"
                 "请设置环境变量或在配置文件中配置：\n"
                 "1. 环境变量: export OPENAI_API_KEY='your-key'\n"
-                "2. configs/framework_config.yaml 中配置 llm.api_key\n"
-                "3. configs/llm_runtime.json 中配置 api_key"
+                "2. configs/llm_runtime.json 中配置 sub_agents.api_key"
             )
         
         # 创建 ChatOpenAI 实例
         kwargs = {
-            "model": llm_config.get("model", "gpt-4"),
+            "model": model_name,
             "temperature": llm_config.get("temperature", 0.7),
             "max_tokens": llm_config.get("max_tokens", 2048),
             "api_key": api_key
@@ -265,20 +319,31 @@ class LangChainBaseAgent(ABC):
             
             # 设置thread-local context（供工具调用时使用）
             from .tools_adapter import _context_storage
+            # 获取当前任务的todos，以便工具可以访问timeout配置
+            todos = session_context.get("todos", [])
             _context_storage.agent_context = {
                 "session_id": session_id,
                 "agent_type": self.agent_type.value,
                 "global_context": global_context,
                 "target": target_info.get("target", ""),
                 "stage": session_context.get("stage", ""),
-                "stage_id": session_context.get("stage_id", "")
+                "stage_id": session_context.get("stage_id", ""),
+                "todos": todos  # 添加todos，工具可以从这里读取timeout
             }
             
             # 准备输入
+            # Memory期望只有一个输入key，所以将所有信息合并到input中
+            prepared_input = self._prepare_input(target_info, context)
+            
+            # 将target和safe_mode信息也包含在input中，而不是作为单独的key
+            full_input = f"""{prepared_input}
+
+目标: {target_info.get("target", "")}
+安全模式: {'启用' if self.safe_mode else '禁用'}
+"""
+            
             input_data = {
-                "input": self._prepare_input(target_info, context),
-                "target": target_info.get("target", ""),
-                "safe_mode": self.safe_mode
+                "input": full_input
             }
             
             # 执行Agent

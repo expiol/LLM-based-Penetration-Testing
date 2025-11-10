@@ -75,7 +75,15 @@ class AgentPrompts:
 - 使用被动侦察方法，避免触发告警
 - 控制扫描速度，避免DoS
 - 记录所有发现，为后续阶段提供依据
-- 遵守授权范围，不扫描非目标系统"""
+- 遵守授权范围，不扫描非目标系统
+
+### 动态调整策略
+**重要**：当工具执行失败时，必须尝试其他方法完成任务：
+- 如果nmap扫描失败，尝试使用其他扫描工具或方法
+- 如果某个端口扫描失败，尝试不同的扫描类型（tcp_connect, tcp_syn, udp等）
+- 如果服务识别失败，尝试手动探测或使用其他工具
+- 如果所有扫描方法都失败，分析失败原因并提供替代方案
+- 不要因为一个工具失败就放弃任务，要灵活调整策略"""
 
     @staticmethod
     def get_weaponize_agent_prompt(vulnerabilities: List[Dict[str, Any]], 
@@ -147,7 +155,14 @@ class AgentPrompts:
 - 确保载荷仅用于授权测试
 - 避免造成系统损害
 - 不在载荷中包含恶意功能
-- 遵守测试范围和限制"""
+- 遵守测试范围和限制
+
+### 动态调整策略
+**重要**：当工具执行失败时，必须尝试其他方法完成任务：
+- 如果漏洞分析工具失败，尝试手动分析或使用其他工具
+- 如果载荷生成失败，尝试使用现成的载荷或修改现有载荷
+- 如果某个方法不可行，立即尝试替代方案
+- 不要因为一个工具失败就放弃任务，要灵活调整策略"""
 
     @staticmethod
     def get_delivery_agent_prompt(payloads: List[Dict[str, Any]], 
@@ -219,7 +234,14 @@ Web应用: {target_info.get('web_applications', [])}
 - 使用匿名化技术
 - 避免留下明显痕迹
 - 控制投递频率和强度
-- 准备应急中断机制"""
+- 准备应急中断机制
+
+### 动态调整策略
+**重要**：当工具执行失败时，必须尝试其他方法完成任务：
+- 如果某个投递方法失败，尝试其他投递向量（Web、邮件、物理等）
+- 如果HTTP投递失败，尝试TCP/UDP套接字投递
+- 如果所有投递方法都失败，分析失败原因并提供替代方案
+- 不要因为一个工具失败就放弃任务，要灵活调整策略"""
 
     @staticmethod
     def get_exploit_agent_prompt(delivery_results: List[Dict[str, Any]], 
@@ -296,7 +318,15 @@ Web应用: {target_info.get('web_applications', [])}
 - 避免系统崩溃或损坏
 - 控制利用的影响范围
 - 记录所有利用活动
-- 准备快速撤退机制"""
+- 准备快速撤退机制
+
+### 动态调整策略
+**重要**：当工具执行失败时，必须尝试其他方法完成任务：
+- 如果漏洞利用失败，尝试其他利用方法或工具
+- 如果某个漏洞无法利用，尝试其他已识别的漏洞
+- 如果权限提升失败，尝试其他提权方法
+- 如果所有利用方法都失败，分析失败原因并提供替代方案
+- 不要因为一个工具失败就放弃任务，要灵活调整策略"""
 
     @staticmethod
     def get_install_agent_prompt(exploit_results: Dict[str, Any], 
@@ -316,7 +346,7 @@ Web应用: {target_info.get('web_applications', [])}
 ### 目标环境
 目标系统: {target_info.get('target', 'unknown')}
 当前权限: {exploit_results.get('privilege_level', 'unknown')}
-系统类型: {exploit_results.get('system_information', {}).get('os_type', 'unknown')}
+系统类型: {exploit_results.get('system_information', {{}}).get('os_type', 'unknown') if exploit_results.get('system_information') else 'unknown'}
 
 ### 利用成果
 利用结果: {exploit_results}
@@ -380,7 +410,14 @@ Web应用: {target_info.get('web_applications', [])}
 - 仅在授权范围内操作
 - 避免损害系统功能
 - 记录所有安装的组件
-- 准备完整的清理程序"""
+- 准备完整的清理程序
+
+### 动态调整策略
+**重要**：当工具执行失败时，必须尝试其他方法完成任务：
+- 如果某个持久化方法失败，尝试其他持久化机制
+- 如果服务安装失败，尝试注册表或计划任务持久化
+- 如果所有持久化方法都失败，分析失败原因并提供替代方案
+- 不要因为一个工具失败就放弃任务，要灵活调整策略"""
 
     @staticmethod
     def get_c2_agent_prompt(install_results: Dict[str, Any], 
@@ -462,7 +499,14 @@ Web应用: {target_info.get('web_applications', [])}
 - 避免明文传输敏感数据
 - 控制通信频率
 - 监控网络异常
-- 准备应急销毁机制"""
+- 准备应急销毁机制
+
+### 动态调整策略
+**重要**：当工具执行失败时，必须尝试其他方法完成任务：
+- 如果某个C2协议失败，尝试其他通信协议（HTTP、DNS、TCP等）
+- 如果通信建立失败，尝试不同的加密方式或认证机制
+- 如果所有C2方法都失败，分析失败原因并提供替代方案
+- 不要因为一个工具失败就放弃任务，要灵活调整策略"""
 
     @staticmethod
     def get_objectives_agent_prompt(c2_results: Dict[str, Any], 
@@ -551,4 +595,12 @@ C2状态: {c2_results.get('communication_status', 'unknown')}
 - 保护个人隐私数据
 - 避免业务中断
 - 安全处理敏感信息
-- 及时报告关键发现"""
+- 及时报告关键发现
+
+### 动态调整策略
+**重要**：当工具执行失败时，必须尝试其他方法完成任务：
+- 如果数据收集失败，尝试其他收集方法或工具
+- 如果横向移动失败，尝试其他移动路径或方法
+- 如果权限提升失败，尝试其他提权技术
+- 如果所有方法都失败，分析失败原因并提供替代方案
+- 不要因为一个工具失败就放弃任务，要灵活调整策略"""

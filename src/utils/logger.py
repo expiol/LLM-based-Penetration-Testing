@@ -1,11 +1,50 @@
 import logging
 import json
+import os
+from pathlib import Path
 from concurrent_log_handler import ConcurrentRotatingFileHandler
 from datetime import datetime, timedelta
 
 from src.utils.thread_local_storage import get_data
-from src.service.mapping.header_param_mapping import HeaderParamMapping
-from configs.settings import *
+
+# 日志配置（从环境变量或使用默认值）
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+SERVICE_NAME = os.environ.get("SERVICE_NAME", "llm-pen-test")
+LOGGING_PATH = os.environ.get("LOGGING_PATH", str(BASE_DIR / "logs"))
+LOGGING_NAME = os.environ.get("LOGGING_NAME", "LLM-PENTEST")
+LOGGING_MAXBYTES = int(os.environ.get("LOGGING_MAXBYTES", 20 * 1024 * 1024))  # 20MB
+LOGGING_BACKUP_COUNT = int(os.environ.get("LOGGING_BACKUP_COUNT", 10))
+
+
+class HeaderParamMapping:
+    """HTTP Header 参数映射常量"""
+    
+    # 会话ID
+    SID = "X-Session-ID"
+    
+    # 用户ID
+    UID = "X-User-ID"
+    
+    # 请求顺序号
+    ORDER = "X-Request-Order"
+    
+    # 扩展信息
+    EXT = "X-Ext-Info"
+    
+    # 组织信息
+    ORG = "X-Org-ID"
+    
+    # 请求ID
+    REQUEST_ID = "X-Request-ID"
+    
+    # 追踪ID
+    TRACE_ID = "X-Trace-ID"
+    
+    # 模型名称
+    MODEL_NAME = "X-Model-Name"
+    
+    # 安全模式
+    SAFE_MODE = "X-Safe-Mode"
 
 
 class JsonFormatter(logging.Formatter):

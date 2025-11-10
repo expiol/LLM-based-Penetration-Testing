@@ -47,6 +47,19 @@ class NmapTool(ToolInterface):
             service_detection = parameters.get("service_detection", True)
             os_detection = parameters.get("os_detection", False)
             
+            # 从context中读取timeout，如果存在则使用它（LLM指定的超时时间）
+            # 优先级：context.timeout > parameters.timeout > self.timeout（默认值）
+            dynamic_timeout = None
+            if context:
+                dynamic_timeout = context.get("timeout")
+            if not dynamic_timeout:
+                dynamic_timeout = parameters.get("timeout")
+            
+            # 使用动态timeout或默认timeout
+            scan_timeout = dynamic_timeout if dynamic_timeout else self.timeout
+            if dynamic_timeout:
+                self.logger.info(f"使用LLM指定的超时时间: {scan_timeout}秒")
+            
             if not target:
                 return {"success": False, "error": "未指定目标"}
             
@@ -97,7 +110,7 @@ class NmapTool(ToolInterface):
             self.logger.info(f"执行Nmap扫描: {' '.join(cmd)}")
             
             # 执行扫描
-            result = await self._run_command(cmd)
+            result = await self._run_command(cmd, timeout=scan_timeout)
             
             # 如果失败且错误信息包含权限相关，尝试降级
             if not result.get("success", False):
@@ -113,7 +126,7 @@ class NmapTool(ToolInterface):
                         cmd.remove("-O")
                     
                     self.logger.info(f"重试Nmap扫描（降级模式）: {' '.join(cmd)}")
-                    result = await self._run_command(cmd)
+                    result = await self._run_command(cmd, timeout=scan_timeout)
                     scan_type = "tcp_connect"
             
             if result.get("success", False):
@@ -165,25 +178,28 @@ class NmapTool(ToolInterface):
             "udp_scanning"
         ]
     
-    async def _run_command(self, cmd: List[str]) -> Dict[str, Any]:
+    async def _run_command(self, cmd: List[str], timeout: float = None) -> Dict[str, Any]:
         """运行命令"""
         try:
+            # 使用传入的timeout或默认timeout
+            scan_timeout = timeout if timeout else self.timeout
+            
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             
-            # 设置超时
+            # 设置超时（使用动态timeout或默认timeout）
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(), 
-                    timeout=self.timeout
+                    timeout=scan_timeout
                 )
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
-                return {"success": False, "error": f"扫描超时 ({self.timeout}秒)"}
+                return {"success": False, "error": f"扫描超时 ({scan_timeout}秒)"}
             
             return {
                 "success": process.returncode == 0,

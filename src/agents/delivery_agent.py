@@ -1,5 +1,5 @@
 """
-基于LangChain的武器化Agent
+基于LangChain的投递Agent
 """
 from typing import Dict, Any, List
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -9,32 +9,32 @@ from ..orchestrator.states import AgentType
 from ..prompts.agent_prompts import AgentPrompts
 
 
-class LangChainWeaponizeAgent(LangChainBaseAgent):
+class LangChainDeliveryAgent(LangChainBaseAgent):
     """
-    基于LangChain的武器化Agent
-    负责准备攻击载荷和工具
+    基于LangChain的投递Agent
+    负责将武器化载荷投递到目标系统
     """
     
     def __init__(self, config: Dict[str, Any] = None):
         super().__init__(
-            name="LangChainWeaponizeAgent",
-            agent_type=AgentType.WEAPONIZE_AGENT,
+            name="LangChainDeliveryAgent",
+            agent_type=AgentType.DELIVERY_AGENT,
             safe_mode=config.get("safe_mode", True) if config else True,
             config=config
         )
     
     def get_system_prompt(self) -> str:
         """
-        获取武器化Agent的系统提示词
+        获取投递Agent的系统提示词
         使用 AgentPrompts 中的统一 prompt
         """
         # 尝试从当前上下文获取信息（如果已设置）
-        vulnerabilities: List[Dict[str, Any]] = []
+        payloads: List[Dict[str, Any]] = []
         target_info: Dict[str, Any] = {}
         
         if hasattr(self, '_current_global_context') and self._current_global_context:
-            # 从全局上下文中获取已识别的漏洞
-            vulnerabilities = self._current_global_context.get("identified_vulnerabilities", [])
+            # 从全局上下文中获取已准备的载荷
+            payloads = self._current_global_context.get("payloads", [])
         
         if hasattr(self, '_current_target_info') and self._current_target_info:
             target_info = self._current_target_info
@@ -43,10 +43,11 @@ class LangChainWeaponizeAgent(LangChainBaseAgent):
             target_info = {"target": "目标待指定"}
         
         # 使用 AgentPrompts 中的方法
-        return AgentPrompts.get_weaponize_agent_prompt(vulnerabilities, target_info)
+        # 注意：get_delivery_agent_prompt 接受 payloads 和 target_info
+        return AgentPrompts.get_delivery_agent_prompt(payloads, target_info)
     
     def _create_prompt(self) -> ChatPromptTemplate:
-        """创建武器化Agent的Prompt模板"""
+        """创建投递Agent的Prompt模板"""
         return ChatPromptTemplate.from_messages([
             ("system", self.get_system_prompt()),
             MessagesPlaceholder(variable_name="chat_history", optional=True),

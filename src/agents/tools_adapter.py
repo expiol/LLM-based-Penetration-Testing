@@ -19,8 +19,16 @@ _context_storage = threading.local()
 
 
 class ToolInputSchema(BaseModel):
-    """工具输入的基础Schema"""
-    parameters: Dict[str, Any] = Field(description="工具执行参数")
+    """工具输入的基础Schema - 支持两种格式：
+    1. 直接传入参数: {"target": "192.168.1.1", "ports": "1-1000"}
+    2. 包装格式: {"parameters": {"target": "192.168.1.1"}, "context": {...}}
+    """
+    # 允许任意字段，因为不同工具的参数不同
+    class Config:
+        extra = "allow"
+    
+    # 可选字段：如果使用包装格式
+    parameters: Optional[Dict[str, Any]] = Field(default=None, description="工具执行参数（包装格式）")
     context: Optional[Dict[str, Any]] = Field(default=None, description="执行上下文")
 
 
@@ -67,22 +75,68 @@ class LangChainToolAdapter(BaseTool):
     
     async def _arun(
         self,
-        parameters: Dict[str, Any],
-        context: Optional[Dict[str, Any]] = None,
-        run_manager: Optional[AsyncCallbackManagerForToolRun] = None,
+        *args,
+        **kwargs
     ) -> str:
         """异步执行工具"""
         try:
-            if run_manager:
-                await run_manager.on_tool_start(
-                    {"name": self.name, "description": self.description},
-                    {"parameters": parameters, "context": context}
-                )
+            # 注意：AsyncCallbackManagerForToolRun 没有 on_tool_start/on_tool_end 方法
+            # 这些方法在回调处理器中，run_manager只用于传递回调
+            # 如果需要记录工具执行，应该在回调处理器中处理
             
-            # 处理参数：LangChain可能会将参数包装在parameters字段中
-            actual_params = parameters
-            if isinstance(parameters, dict) and "parameters" in parameters:
-                actual_params = parameters["parameters"]
+            # LangChain可能以多种方式调用：
+            # 1. _arun(parameters_dict) - 位置参数
+            # 2. _arun(parameters=dict, context=dict, run_manager=obj) - 关键字参数
+            # 3. _arun(target="xxx", ports="1-1000") - 直接关键字参数
+            
+            # 处理参数
+            parameters = None
+            context = None
+            run_manager = None
+            
+            if args and len(args) > 0:
+                # 位置参数：第一个是parameters
+                parameters = args[0] if isinstance(args[0], dict) else {}
+                if len(args) > 1:
+                    context = args[1] if isinstance(args[1], dict) else None
+                if len(args) > 2:
+                    run_manager = args[2]
+            
+            # 从关键字参数中提取
+            if "parameters" in kwargs:
+                parameters = kwargs["parameters"]
+            if "context" in kwargs:
+                context = kwargs.get("context")
+            if "run_manager" in kwargs:
+                run_manager = kwargs.get("run_manager")
+            
+            # 如果没有parameters，尝试从kwargs中提取（LangChain可能直接传递工具参数）
+            if not parameters:
+                # 排除特殊字段，其余都是工具参数
+                parameters = {k: v for k, v in kwargs.items() 
+                            if k not in ["context", "run_manager", "parameters"]}
+            
+            # 如果parameters是None，使用空字典
+            if parameters is None:
+                parameters = {}
+            
+            # 处理参数：LangChain可能有两种格式
+            # 1. 直接传入参数: {"target": "192.168.1.1", "ports": "1-1000"}
+            # 2. 包装格式: {"parameters": {"target": "192.168.1.1"}, "context": {...}}
+            actual_params = {}
+            if isinstance(parameters, dict):
+                if "parameters" in parameters and parameters["parameters"]:
+                    # 包装格式：从parameters字段提取
+                    actual_params = parameters["parameters"]
+                else:
+                    # 直接格式：排除context字段，其余都是参数
+                    actual_params = {k: v for k, v in parameters.items() if k != "context"}
+            
+            # 如果actual_params为空，说明可能是验证错误，尝试使用整个parameters
+            if not actual_params and isinstance(parameters, dict):
+                actual_params = {k: v for k, v in parameters.items() if k != "context"}
+            
+            logger.debug(f"Tool {self.name} parsed parameters: {actual_params}")
             
             # 构建工具执行上下文
             tool_context = context or {}
@@ -93,6 +147,19 @@ class LangChainToolAdapter(BaseTool):
                 if agent_context:
                     tool_context.update(agent_context)
                     logger.debug(f"Tool {self.name} using agent context: session_id={agent_context.get('session_id')}")
+                    
+                    # 从todos中查找当前工具的timeout配置
+                    todos = agent_context.get("todos", [])
+                    for todo in todos:
+                        todo_config = todo.get("config", {})
+                        todo_tool = todo_config.get("tool") or todo.get("tool")
+                        # 如果todo配置的工具名称匹配，提取timeout
+                        if todo_tool == self.name:
+                            todo_timeout = todo_config.get("timeout")
+                            if todo_timeout:
+                                tool_context["timeout"] = todo_timeout
+                                logger.info(f"Tool {self.name} using timeout from todo config: {todo_timeout}秒")
+                                break
             except:
                 pass
             
@@ -110,8 +177,8 @@ class LangChainToolAdapter(BaseTool):
             logger.info(f"Tool {self.name} executing with parameters: {actual_params}")
             result = await self.original_tool.execute(actual_params, tool_context)
             
-            if run_manager:
-                await run_manager.on_tool_end(str(result))
+            # 注意：AsyncCallbackManagerForToolRun 没有 on_tool_end 方法
+            # 工具执行完成，结果会在回调处理器中处理
             
             # 返回字符串格式的结果
             if result.get("success"):
@@ -160,10 +227,45 @@ class LangChainToolRegistry:
             if not original_tool:
                 return
             
+            # 构建详细的工具描述，包含参数信息
+            description = tool_info.get("description", f"Tool: {tool_name}")
+            params_info = original_tool.get_parameters()
+            
+            # 添加参数说明到描述中
+            if params_info:
+                required = params_info.get("required", [])
+                optional = params_info.get("optional", {})
+                
+                param_desc = "\n\n参数说明:\n"
+                if required:
+                    param_desc += "必需参数:\n"
+                    for param in required:
+                        param_desc += f"  - {param}: (必需)\n"
+                
+                if optional:
+                    param_desc += "可选参数:\n"
+                    # 处理两种格式：列表或字典
+                    if isinstance(optional, list):
+                        # 列表格式：["param1", "param2"]
+                        for param in optional:
+                            # 尝试从params_info中获取该参数的详细信息
+                            param_detail = params_info.get(param, {})
+                            if isinstance(param_detail, dict):
+                                desc = param_detail.get("description", "")
+                                param_desc += f"  - {param}: {desc}\n"
+                            else:
+                                param_desc += f"  - {param}\n"
+                    elif isinstance(optional, dict):
+                        # 字典格式：{"param1": "description1", "param2": "description2"}
+                        for param, desc in optional.items():
+                            param_desc += f"  - {param}: {desc}\n"
+                
+                description = description + param_desc
+            
             # 创建LangChain Tool适配器
             langchain_tool = LangChainToolAdapter(
                 name=tool_name,
-                description=tool_info.get("description", f"Tool: {tool_name}"),
+                description=description,
                 original_tool=original_tool
             )
             

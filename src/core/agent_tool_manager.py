@@ -372,11 +372,15 @@ class AgentToolManager:
         """自动发现并注册默认公有工具"""
         try:
             # 默认公有工具列表
+            # 从agent配置中获取超时时间
+            agent_timeout = self.config.get("timeout") or self.config.get("scan_timeout", 300)
             default_public_tools = [
                 {
                     "module": "src.tools.public.nmap_tool",
                     "class": "NmapTool",
-                    "config": {}
+                    "config": {
+                        "timeout": agent_timeout  # 使用agent配置的超时时间
+                    }
                 },
                 {
                     "module": "src.tools.public.cmd_executer",
@@ -519,7 +523,14 @@ class AgentToolManager:
             module = await asyncio.to_thread(importlib.import_module, module_name)
             tool_class = getattr(module, class_name)
             
+            # 合并agent配置和工具配置
             tool_instance_config = tool_config.get("config", {})
+            # 如果工具配置中没有timeout，从agent配置中获取
+            if "timeout" not in tool_instance_config:
+                agent_timeout = self.config.get("timeout") or self.config.get("scan_timeout")
+                if agent_timeout:
+                    tool_instance_config["timeout"] = agent_timeout
+            
             return tool_class(tool_instance_config)
             
         except Exception as e:
