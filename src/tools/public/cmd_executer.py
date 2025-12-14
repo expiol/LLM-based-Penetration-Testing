@@ -78,6 +78,15 @@ class CommandExecutorTool(ToolInterface):
             timeout = parameters.get("timeout", self.timeout)
             environment_vars = parameters.get("environment", {})
             
+            # 立即更新执行状态，让UI可以看到
+            if command:
+                self._update_execution_status(
+                    str(command),
+                    "执行系统命令",
+                    "AGENT"
+                )
+                self._add_output_line(f"准备执行: {str(command)[:80]}")
+            
             if not command:
                 return {"success": False, "error": "未指定命令"}
             
@@ -267,46 +276,42 @@ class CommandExecutorTool(ToolInterface):
             return {"success": False, "error": f"环境准备失败: {str(e)}"}
     
     async def _run_command(self, command, working_directory: str = None, timeout: int = None, env: Dict[str, str] = None) -> Dict[str, Any]:
-        """运行命令的核心方法"""
+        """运行命令的核心方法 - 使用基类的通用流式执行方法"""
         try:
             # 如果是字符串命令，转换为列表
             if isinstance(command, str):
-                command = command.split()
+                import shlex
+                try:
+                    command_list = shlex.split(command)
+                except ValueError:
+                    command_list = command.split()
+            else:
+                command_list = list(command)
             
             # 设置默认值
             if working_directory is None:
                 working_directory = self.environment_config.get("workspace_directory", str(DEFAULT_WORKSPACE))
             if timeout is None:
                 timeout = self.timeout
-            if env is None:
-                env = os.environ.copy()
             
-            # 执行命令
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=working_directory,
-                env=env
+            # 使用基类的通用流式命令执行方法
+            result = await self.run_command_with_streaming(
+                cmd=command_list,
+                timeout=timeout,
+                working_directory=working_directory,
+                env=env,
+                description="执行命令"
             )
             
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=timeout
-                )
-                
-                return {
-                    "success": process.returncode == 0,
-                    "stdout": stdout.decode('utf-8') if stdout else "",
-                    "stderr": stderr.decode('utf-8') if stderr else "",
-                    "return_code": process.returncode,
-                    "command": " ".join(command)
-                }
-                
-            except asyncio.TimeoutError:
-                process.kill()
-                return {"success": False, "error": f"命令执行超时 ({timeout}秒)"}
+            # 转换返回值格式以保持向后兼容
+            return {
+                "success": result.get("success", False),
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", ""),
+                "return_code": result.get("returncode", -1),
+                "command": result.get("command", ""),
+                "error": result.get("error")
+            }
                 
         except Exception as e:
             return {"success": False, "error": f"命令执行失败: {str(e)}"}

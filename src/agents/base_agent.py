@@ -7,6 +7,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+import threading
 
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.memory import ConversationBufferWindowMemory
@@ -21,25 +22,316 @@ from .tools_adapter import langchain_tool_registry, LangChainToolAdapter
 logger = logging.getLogger(__name__)
 
 
+# ===== 全局执行状态管理器 =====
+import json
+import tempfile
+import os
+from pathlib import Path
+
+# 共享状态文件路径（所有进程都可以访问）
+_STATE_FILE_PATH = Path(tempfile.gettempdir()) / "pentest_execution_state.json"
+
+
+class ExecutionStateManager:
+    """
+    全局执行状态管理器 - 用于实时UI获取当前执行信息
+    使用文件共享状态，支持跨进程访问（Ray Actor 和主进程）
+    """
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self.show_output = True  # 是否显示输出
+        self.max_output_lines = 100  # 增加输出行数
+        self._data_lock = threading.Lock()
+        self._state_file = _STATE_FILE_PATH
+        # 初始化状态文件
+        self._init_state_file()
+    
+    def _init_state_file(self):
+        """初始化状态文件"""
+        try:
+            if not self._state_file.exists():
+                self._write_state({
+                    "agent": "",
+                    "tool": "",
+                    "command": "",
+                    "description": "",
+                    "output_lines": [],
+                    "show_output": True,
+                    "timestamp": ""
+                })
+        except Exception:
+            pass
+    
+    def _write_state(self, state: Dict[str, Any]):
+        """写入状态到文件"""
+        try:
+            import time
+            state["timestamp"] = time.time()
+            # 确保目录存在
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            # 写入临时文件然后重命名，确保原子性
+            temp_file = self._state_file.with_suffix('.tmp')
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(state, f, ensure_ascii=False)
+            temp_file.replace(self._state_file)
+            # 调试日志
+            if state.get("command") or state.get("output_lines"):
+                logger.debug(f"状态已写入: tool={state.get('tool')}, lines={len(state.get('output_lines', []))}")
+        except Exception as e:
+            logger.warning(f"写入状态文件失败: {e}")
+    
+    def _read_state(self) -> Dict[str, Any]:
+        """从文件读取状态"""
+        default_state = {
+            "agent": "",
+            "tool": "",
+            "command": "",
+            "description": "",
+            "output_lines": [],
+            "show_output": True
+        }
+        try:
+            if self._state_file.exists():
+                with open(self._state_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if content.strip():
+                        state = json.loads(content)
+                        # 确保所有必要的字段都存在
+                        for key in default_state:
+                            if key not in state:
+                                state[key] = default_state[key]
+                        return state
+        except json.JSONDecodeError as e:
+            logger.debug(f"JSON解析失败，重置状态: {e}")
+        except Exception as e:
+            logger.debug(f"读取状态文件失败: {e}")
+        return default_state
+    
+    def set_current_execution(self, agent: str, tool: str, command: str, description: str = ""):
+        """设置当前执行的命令"""
+        with self._data_lock:
+            import time
+            current_state = self._read_state()
+            
+            # 如果Agent切换了，添加分隔符
+            if current_state.get("agent") and current_state.get("agent") != agent:
+                # Agent切换，保留之前的输出但添加分隔符
+                output_lines = current_state.get("output_lines", [])
+                output_lines.append(f"--- {current_state.get('agent')} 执行完成，切换到 {agent} ---")
+                # 限制输出行数
+                if len(output_lines) > self.max_output_lines:
+                    output_lines = output_lines[-self.max_output_lines:]
+            else:
+                # 同一Agent，保留输出
+                output_lines = current_state.get("output_lines", [])
+            
+            state = {
+                "agent": agent,
+                "tool": tool,
+                "command": command,
+                "description": description,
+                "output_lines": output_lines,  # 保留之前的输出
+                "show_output": self.show_output,
+                "execution_id": f"{agent}_{int(time.time())}"  # 添加执行ID
+            }
+            self._write_state(state)
+    
+    def add_output_line(self, line: str):
+        """添加输出行"""
+        if not self.show_output:
+            return
+        with self._data_lock:
+            # 清理行尾空白
+            line = line.rstrip()
+            if line:  # 只添加非空行
+                state = self._read_state()
+                output_lines = state.get("output_lines", [])
+                output_lines.append(line)
+                # 限制行数
+                if len(output_lines) > self.max_output_lines:
+                    output_lines = output_lines[-self.max_output_lines:]
+                state["output_lines"] = output_lines
+                self._write_state(state)
+    
+    def toggle_output(self):
+        """切换输出显示"""
+        with self._data_lock:
+            self.show_output = not self.show_output
+            state = self._read_state()
+            state["show_output"] = self.show_output
+            self._write_state(state)
+        return self.show_output
+    
+    def get_state(self) -> Dict[str, Any]:
+        """获取当前状态"""
+        with self._data_lock:
+            state = self._read_state()
+            state["show_output"] = self.show_output
+            return state
+    
+    def clear(self):
+        """清除状态"""
+        with self._data_lock:
+            self._write_state({
+                "agent": "",
+                "tool": "",
+                "command": "",
+                "description": "",
+                "output_lines": [],
+                "show_output": self.show_output
+            })
+
+
+# 全局实例
+execution_state = ExecutionStateManager()
+
+
 class AgentCallbackHandler(AsyncCallbackHandler):
-    """Agent执行回调处理器 - 实时显示任务执行详情"""
+    """Agent执行回调处理器 - 实时更新执行状态，跟踪多轮LLM交互"""
     
     def __init__(self, agent_name: str, session_id: Optional[str] = None):
         self.agent_name = agent_name
         self.session_id = session_id
         self.execution_logs: List[Dict[str, Any]] = []
+        self.iteration_count = 0  # LLM交互轮数
+        self._started_tools = set()
+        self._completed_tools = set()
+    
+    async def on_llm_start(self, serialized: Dict[str, Any], prompts: List[str], **kwargs):
+        """当LLM开始推理时 - 跟踪每轮交互"""
+        self.iteration_count += 1
+        
+        # 提取提示词的关键信息
+        prompt_preview = ""
+        task_type = ""
+        if prompts:
+            prompt_text = prompts[0] if isinstance(prompts[0], str) else str(prompts[0])
+            # 提取关键信息
+            if "nmap" in prompt_text.lower() or "扫描" in prompt_text or "scan" in prompt_text.lower():
+                prompt_preview = "分析扫描任务"
+                task_type = "扫描分析"
+            elif "工具" in prompt_text or "tool" in prompt_text.lower() or "action" in prompt_text.lower():
+                prompt_preview = "选择工具"
+                task_type = "工具选择"
+            elif "结果" in prompt_text or "result" in prompt_text.lower() or "output" in prompt_text.lower():
+                prompt_preview = "分析工具执行结果"
+                task_type = "结果分析"
+            elif "完成" in prompt_text or "finish" in prompt_text.lower():
+                prompt_preview = "总结任务完成情况"
+                task_type = "任务总结"
+            else:
+                prompt_preview = prompt_text[:50] + "..." if len(prompt_text) > 50 else prompt_text
+                task_type = "推理中"
+        
+        # 显示LLM推理信息，包含Agent名称和任务类型
+        execution_state.add_output_line(f"🤖 [{self.agent_name}] LLM推理 (第{self.iteration_count}轮): {task_type}")
+        logger.info(f"Agent {self.agent_name} LLM iteration {self.iteration_count}: {task_type}")
+        
+        self.execution_logs.append({
+            "type": "llm_start",
+            "iteration": self.iteration_count,
+            "task_type": task_type,
+            "prompt_preview": prompt_preview,
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    async def on_llm_end(self, response, **kwargs):
+        """当LLM完成推理时"""
+        # 提取LLM的决策和工具调用
+        decision_summary = ""
+        try:
+            # 尝试从response中提取内容
+            if hasattr(response, 'generations') and response.generations:
+                for gen in response.generations:
+                    if gen and len(gen) > 0:
+                        content = gen[0].text if hasattr(gen[0], 'text') else str(gen[0])
+                        # 检查是否包含工具调用
+                        if "tool_calls" in content.lower() or "action" in content.lower():
+                            # 提取工具名
+                            tool_match = re.search(r'(?:tool|action)[_ ]?name["\']?\s*[:=]\s*["\']?(\w+)', content, re.IGNORECASE)
+                            if tool_match:
+                                decision_summary = f"决定使用工具: {tool_match.group(1)}"
+                            else:
+                                decision_summary = "决定调用工具"
+                        elif "final answer" in content.lower() or "完成" in content:
+                            decision_summary = "完成当前任务"
+                        else:
+                            # 提取前50个字符作为摘要
+                            decision_summary = content[:80].replace('\n', ' ')
+                            if len(content) > 80:
+                                decision_summary += "..."
+            
+            # 如果没有从generations提取到，尝试从其他属性
+            if not decision_summary:
+                if hasattr(response, 'content'):
+                    content = str(response.content)
+                    decision_summary = content[:80].replace('\n', ' ')
+                elif hasattr(response, 'text'):
+                    decision_summary = response.text[:80].replace('\n', ' ')
+            
+            if decision_summary:
+                execution_state.add_output_line(f"💭 LLM决策: {decision_summary}")
+                logger.info(f"LLM decision: {decision_summary}")
+            else:
+                execution_state.add_output_line(f"✅ LLM推理完成 (第{self.iteration_count}轮)")
+                
+        except Exception as e:
+            logger.debug(f"无法解析LLM响应: {e}")
+            execution_state.add_output_line(f"✅ LLM推理完成 (第{self.iteration_count}轮)")
+        
+        self.execution_logs.append({
+            "type": "llm_end",
+            "iteration": self.iteration_count,
+            "decision": decision_summary,
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    async def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], **kwargs):
+        """当Agent链开始执行时"""
+        if serialized.get("name") == "AgentExecutor":
+            execution_state.add_output_line(f"🚀 Agent {self.agent_name} 开始执行任务")
+            logger.info(f"Agent {self.agent_name} chain started")
+    
+    async def on_chain_end(self, outputs: Dict[str, Any], **kwargs):
+        """当Agent链结束执行时"""
+        if "output" in outputs:
+            execution_state.add_output_line(f"🏁 Agent {self.agent_name} 任务完成")
+            logger.info(f"Agent {self.agent_name} chain ended")
     
     async def on_agent_action(self, action, **kwargs):
-        """当Agent执行动作时 - 实时显示"""
+        """当Agent执行动作时 - 更新全局状态"""
         tool_name = action.tool
         tool_input = action.tool_input
         
         # 构建友好的任务描述
         task_desc = self._format_task_description(tool_name, tool_input)
-        # 只在工具开始执行时显示一次，避免重复刷屏
-        if not hasattr(self, '_last_tool_action') or self._last_tool_action != f"{tool_name}_{task_desc}":
-            print(f"\n🔧 [{self.agent_name}] 正在执行: {task_desc}", flush=True)
-            self._last_tool_action = f"{tool_name}_{task_desc}"
+        
+        # 更新全局执行状态（供实时UI使用）
+        command = self._extract_command(tool_name, tool_input)
+        execution_state.set_current_execution(
+            agent=self.agent_name,
+            tool=tool_name,
+            command=command,
+            description=task_desc
+        )
+        
+        # 实时显示Agent决策
+        execution_state.add_output_line(f"🎯 Agent决定使用工具: {tool_name}")
+        if task_desc:
+            execution_state.add_output_line(f"📝 任务: {task_desc}")
         
         logger.info(f"Agent {self.agent_name} executing action: {tool_name}")
         self.execution_logs.append({
@@ -48,6 +340,25 @@ class AgentCallbackHandler(AsyncCallbackHandler):
             "input": tool_input,
             "timestamp": datetime.now().isoformat()
         })
+    
+    def _extract_command(self, tool_name: str, tool_input: Any) -> str:
+        """从工具输入提取实际命令"""
+        if isinstance(tool_input, dict):
+            actual_input = tool_input.get("parameters", tool_input)
+            
+            if tool_name in ["nmap", "nmap_scan"]:
+                target = actual_input.get("target", "")
+                ports = actual_input.get("ports", "")
+                scan_type = actual_input.get("scan_type", "-sV")
+                if ports:
+                    return f"nmap {scan_type} -p {ports} {target}"
+                return f"nmap {scan_type} {target}"
+            elif tool_name == "subdomain_enumeration":
+                domain = actual_input.get("domain", "")
+                return f"subdomain-enum {domain}"
+            elif tool_name in ["cmd_exec", "execute_command"]:
+                return actual_input.get("command", str(tool_input))
+        return f"{tool_name}"
     
     def _format_task_description(self, tool_name: str, tool_input: Any) -> str:
         """格式化任务描述，使其更易读"""
@@ -107,29 +418,122 @@ class AgentCallbackHandler(AsyncCallbackHandler):
         return ""
     
     async def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs):
-        """当工具开始执行时 - 实时显示（只显示一次，避免刷屏）"""
+        """当工具开始执行时 - 实时更新状态"""
         tool_name = serialized.get('name', 'unknown')
-        # 只在工具第一次启动时显示，避免重复刷屏
         tool_key = f"{tool_name}_{input_str[:50]}"
-        if not hasattr(self, '_started_tools'):
-            self._started_tools = set()
+        
         if tool_key not in self._started_tools:
-            print(f"  ⚙️  工具启动: {tool_name}", flush=True)
+            # 解析输入参数，显示更友好的信息
+            try:
+                input_data = json.loads(input_str) if input_str.startswith('{') else {"input": input_str}
+                target = input_data.get("target", input_data.get("url", ""))
+                if target:
+                    execution_state.add_output_line(f"⚙️ 启动 {tool_name}: {target}")
+                else:
+                    execution_state.add_output_line(f"⚙️ 启动工具: {tool_name}")
+            except:
+                execution_state.add_output_line(f"⚙️ 启动工具: {tool_name}")
+            
             self._started_tools.add(tool_key)
-        logger.debug(f"Tool started: {tool_name}")
+            
+        logger.info(f"Tool started: {tool_name}, input: {input_str[:100]}")
+        
+        self.execution_logs.append({
+            "type": "tool_start",
+            "tool": tool_name,
+            "input": input_str[:500],
+            "timestamp": datetime.now().isoformat()
+        })
     
     async def on_tool_end(self, output: str, **kwargs):
-        """当工具执行完成时 - 实时显示结果摘要（只显示一次）"""
-        # 只显示前100个字符，避免输出过长
-        output_preview = output[:100] + "..." if len(output) > 100 else output
-        # 只在工具完成时显示一次
-        if not hasattr(self, '_completed_tools'):
-            self._completed_tools = set()
-        output_key = f"{output_preview[:50]}"
-        if output_key not in self._completed_tools:
-            print(f"  ✓ 工具完成，结果: {output_preview}", flush=True)
-            self._completed_tools.add(output_key)
-        logger.debug(f"Tool completed: {output[:100]}")
+        """当工具执行完成时 - 结构化过滤输出并实时更新"""
+        # 使用输出解析器过滤和结构化输出
+        try:
+            from ..core.output_parser import output_manager
+            
+            # 获取最后使用的工具名（从最近的action或tool_start）
+            last_tool = None
+            for log in reversed(self.execution_logs):
+                if log.get("type") in ["action", "tool_start"]:
+                    last_tool = log.get("tool")
+                    break
+            
+            if last_tool:
+                # 结构化解析输出
+                parsed = output_manager.parse_output(last_tool, output)
+                summary = parsed.get("_summary", "")
+                
+                # 显示摘要和关键信息
+                if summary:
+                    execution_state.add_output_line(f"✅ {last_tool} 完成: {summary}")
+                    
+                    # 对于nmap，额外显示关键发现
+                    if last_tool in ["nmap", "nmap_scan"]:
+                        open_ports = parsed.get("open_ports", [])
+                        services = parsed.get("services", [])
+                        if open_ports:
+                            execution_state.add_output_line(f"📌 发现开放端口: {', '.join(map(str, open_ports[:10]))}")
+                        if services:
+                            unique_services = list(set(s.get("service", "unknown") for s in services))
+                            if unique_services:
+                                execution_state.add_output_line(f"📌 发现服务: {', '.join(unique_services[:5])}")
+                else:
+                    # 如果没有摘要，尝试提取关键信息
+                    if len(output) > 500:
+                        # 对于长输出，只显示前几行和后几行
+                        lines = output.split('\n')
+                        if len(lines) > 10:
+                            preview = '\n'.join(lines[:3] + ['...'] + lines[-3:])
+                        else:
+                            preview = output[:200]
+                        execution_state.add_output_line(f"✅ {last_tool} 完成: {preview}")
+                    else:
+                        execution_state.add_output_line(f"✅ {last_tool} 完成: {output[:150]}")
+                
+                # 记录解析后的结构化数据
+                self.execution_logs.append({
+                    "type": "tool_end",
+                    "tool": last_tool,
+                    "output": output[:2000],  # 保留更多输出用于后续分析
+                    "parsed": parsed,
+                    "summary": summary,
+                    "timestamp": datetime.now().isoformat()
+                })
+            else:
+                # 没有工具名，显示原始输出（截断）
+                output_preview = output[:150] + "..." if len(output) > 150 else output
+                execution_state.add_output_line(f"✅ 工具执行完成: {output_preview}")
+                self.execution_logs.append({
+                    "type": "tool_end",
+                    "output": output[:1000],
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+        except Exception as e:
+            logger.error(f"输出解析失败: {e}", exc_info=True)
+            # 解析失败时，至少显示基本信息
+            output_preview = output[:150] + "..." if len(output) > 150 else output
+            execution_state.add_output_line(f"✅ 工具执行完成: {output_preview}")
+            self.execution_logs.append({
+                "type": "tool_end",
+                "output": output[:1000],
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            })
+        
+        logger.info(f"Tool completed, output length: {len(output)}")
+    
+    async def on_tool_error(self, error: Exception, **kwargs):
+        """当工具执行出错时"""
+        error_msg = str(error)[:100]
+        execution_state.add_output_line(f"❌ 工具错误: {error_msg}")
+        logger.error(f"Tool error: {error}")
+        
+        self.execution_logs.append({
+            "type": "tool_error",
+            "error": str(error),
+            "timestamp": datetime.now().isoformat()
+        })
 
 
 class LangChainBaseAgent(ABC):
@@ -271,19 +675,25 @@ class LangChainBaseAgent(ABC):
                 prompt=self.prompt
             )
             
-            # 创建Agent Executor
+            # 从配置获取执行参数
+            max_iterations = self.config.get("max_iterations", 15)  # 增加迭代次数
+            max_execution_time = self.config.get("max_execution_time", 600)  # 10分钟超时
+            
+            # 创建Agent Executor - 支持多轮LLM交互
             self.agent_executor = AgentExecutor(
                 agent=agent,
                 tools=self.tools,
                 memory=self.memory,
                 verbose=True,
-                max_iterations=10,
-                max_execution_time=300,  # 5分钟超时
-                handle_parsing_errors=True
+                max_iterations=max_iterations,  # 允许更多迭代
+                max_execution_time=max_execution_time,
+                handle_parsing_errors=True,
+                return_intermediate_steps=True,  # 返回中间步骤，便于分析
+                early_stopping_method="generate"  # 让LLM决定何时停止
             )
             
             self._initialized = True
-            self.logger.info(f"Agent {self.name} initialized successfully")
+            self.logger.info(f"Agent {self.name} initialized: max_iterations={max_iterations}, timeout={max_execution_time}s")
             
         except Exception as e:
             self.logger.error(f"Agent {self.name} initialization failed: {e}")
@@ -309,8 +719,18 @@ class LangChainBaseAgent(ABC):
             session_id = session_context.get("session_id")
             global_context = session_context.get("global_context", {})
             
-            # 创建回调处理器
-            self.callback_handler = AgentCallbackHandler(self.name, session_id)
+            # 创建回调处理器（使用agent_type.value作为显示名称）
+            agent_display_name = self.agent_type.value.replace("_", " ").title()  # recon_agent -> Recon Agent
+            self.callback_handler = AgentCallbackHandler(agent_display_name, session_id)
+            
+            # 在Agent开始执行时，立即更新执行状态
+            execution_state.set_current_execution(
+                agent=agent_display_name,
+                tool="",
+                command="",
+                description=f"{agent_display_name} 开始执行任务"
+            )
+            execution_state.add_output_line(f"🚀 {agent_display_name} 开始执行任务")
             
             # 保存执行上下文到类属性和thread-local storage，供工具调用时使用
             self._current_session_id = session_id
@@ -364,6 +784,14 @@ class LangChainBaseAgent(ABC):
             
             # 处理结果
             execution_result = self._process_result(result, target_info, context)
+            
+            # Agent执行完成，更新状态
+            agent_display_name = self.agent_type.value.replace("_", " ").title()
+            if execution_result.get("success"):
+                execution_state.add_output_line(f"✅ {agent_display_name} 任务执行成功")
+            else:
+                error = execution_result.get("error", "未知错误")
+                execution_state.add_output_line(f"❌ {agent_display_name} 任务执行失败: {error[:100]}")
             
             # 清理thread-local context
             try:
@@ -442,18 +870,98 @@ class LangChainBaseAgent(ABC):
         """处理Agent执行结果"""
         output = result.get("output", "")
         
-        # 判断是否成功
-        success = not ("error" in output.lower() or "failed" in output.lower())
+        execution_logs = self.callback_handler.execution_logs if self.callback_handler else []
+        tools_used = [log["tool"] for log in execution_logs if log.get("type") == "action"]
+        
+        # 使用LLM判断任务是否成功
+        success, extracted_data, error_msg = self._evaluate_result_with_llm(output, target_info, tools_used)
+        
+        self.logger.info(f"LLM评估结果: success={success}, tools_used={tools_used}")
         
         return self.create_result(
             success=success,
             data={
                 "output": output,
-                "execution_logs": self.callback_handler.execution_logs if self.callback_handler else [],
-                "tools_used": [log["tool"] for log in (self.callback_handler.execution_logs if self.callback_handler else []) if log["type"] == "action"]
+                "execution_logs": execution_logs,
+                "tools_used": tools_used,
+                **extracted_data  # 合并LLM提取的结构化数据
             },
-            error=None if success else output
+            error=error_msg if not success else None
         )
+    
+    def _evaluate_result_with_llm(
+        self, 
+        output: str, 
+        target_info: Dict[str, Any],
+        tools_used: List[str]
+    ) -> tuple:
+        """
+        使用LLM评估任务执行结果
+        
+        Returns:
+            tuple: (success: bool, extracted_data: dict, error_msg: str)
+        """
+        try:
+            # 构建评估提示
+            evaluation_prompt = f"""请分析以下渗透测试任务的执行结果，判断任务是否成功完成。
+
+## 目标信息
+目标: {target_info.get('target', '未知')}
+Agent类型: {self.agent_type.value}
+使用的工具: {', '.join(tools_used) if tools_used else '无'}
+
+## 任务输出
+{output[:3000]}  # 限制长度避免token过多
+
+## 请以JSON格式返回评估结果：
+{{
+    "success": true/false,  // 任务是否成功完成
+    "reason": "判断理由",
+    "findings": {{  // 从输出中提取的关键发现
+        "open_ports": [],  // 发现的开放端口列表
+        "services": [],  // 发现的服务列表
+        "vulnerabilities": [],  // 发现的漏洞
+        "other_info": {{}}  // 其他重要信息
+    }},
+    "error": null  // 如果失败，描述失败原因
+}}
+
+判断标准：
+1. 如果工具成功执行并返回了有意义的结果（即使没有发现漏洞），视为成功
+2. 如果扫描完成但目标不可达或被过滤，仍视为成功（任务本身完成了）
+3. 只有在工具执行出错、权限不足、网络不可达等情况才视为失败
+4. 请从输出中提取结构化的发现数据
+
+请只返回JSON，不要有其他内容。"""
+
+            # 使用同步方式调用LLM（因为这个方法可能在同步上下文中被调用）
+            from langchain_core.messages import HumanMessage
+            
+            response = self.llm.invoke([HumanMessage(content=evaluation_prompt)])
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            # 解析JSON响应
+            import re
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
+            if json_match:
+                evaluation = json.loads(json_match.group(0))
+                success = evaluation.get("success", False)
+                findings = evaluation.get("findings", {})
+                error = evaluation.get("error")
+                reason = evaluation.get("reason", "")
+                
+                self.logger.info(f"LLM评估: success={success}, reason={reason}")
+                
+                return success, findings, error
+            else:
+                # 无法解析，默认成功（如果有工具执行）
+                self.logger.warning(f"无法解析LLM评估结果: {response_text[:200]}")
+                return len(tools_used) > 0, {}, None
+                
+        except Exception as e:
+            self.logger.error(f"LLM评估失败: {e}")
+            # 评估失败时，如果有工具执行就认为成功
+            return len(tools_used) > 0, {}, None
     
     def create_result(self, success: bool, data: Dict[str, Any] = None, error: str = None) -> Dict[str, Any]:
         """创建标准化的执行结果"""

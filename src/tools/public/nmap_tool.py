@@ -38,6 +38,41 @@ class NmapTool(ToolInterface):
         
         return self._has_root_privileges
         
+    def _build_command_string(self, parameters: Dict[str, Any]) -> str:
+        """构建命令字符串（供基类使用）"""
+        target = parameters.get("target", "")
+        ports = parameters.get("ports", "1-1000")
+        scan_type = parameters.get("scan_type", "tcp_syn")
+        service_detection = parameters.get("service_detection", True)
+        os_detection = parameters.get("os_detection", False)
+        
+        cmd_parts = ["nmap"]
+        
+        # 扫描类型
+        if scan_type == "tcp_syn":
+            cmd_parts.append("-sS")
+        elif scan_type == "tcp_connect":
+            cmd_parts.append("-sT")
+        elif scan_type == "udp":
+            cmd_parts.append("-sU")
+        
+        # 服务检测
+        if service_detection:
+            cmd_parts.extend(["-sV", "--version-intensity", "5"])
+        
+        # 操作系统检测
+        if os_detection:
+            cmd_parts.append("-O")
+        
+        # 端口范围
+        cmd_parts.extend(["-p", str(ports)])
+        
+        # 目标
+        if target:
+            cmd_parts.append(target)
+        
+        return " ".join(cmd_parts)
+    
     async def execute(self, parameters: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
         """执行Nmap扫描"""
         try:
@@ -62,6 +97,16 @@ class NmapTool(ToolInterface):
             
             if not target:
                 return {"success": False, "error": "未指定目标"}
+            
+            # 立即更新执行状态，让UI可以看到
+            # agent类型会自动从thread-local context获取
+            self._update_execution_status(
+                f"nmap -p {ports} {target}",
+                f"扫描目标 {target} 的端口 {ports}"
+            )
+            self._add_output_line(f"🔍 开始Nmap扫描: {target}")
+            self._add_output_line(f"📌 端口范围: {ports}")
+            self._add_output_line(f"📌 扫描类型: {scan_type}")
             
             # 检查root权限，如果使用tcp_syn但没有权限，自动降级到tcp_connect
             has_root = await self._check_root_privileges()
@@ -107,7 +152,9 @@ class NmapTool(ToolInterface):
             # 目标
             cmd.append(target)
             
-            self.logger.info(f"执行Nmap扫描: {' '.join(cmd)}")
+            # 构建完整命令字符串
+            full_command = " ".join(cmd)
+            self.logger.info(f"执行Nmap扫描: {full_command}")
             
             # 执行扫描
             result = await self._run_command(cmd, timeout=scan_timeout)
@@ -131,21 +178,26 @@ class NmapTool(ToolInterface):
             
             if result.get("success", False):
                 # 解析XML结果
-                parsed_result = self._parse_nmap_xml(result.get("stdout", ""))
+                stdout = result.get("stdout", "")
+                parsed_result = self._parse_nmap_xml(stdout)
+                
+                # 返回结果（输出捕获由基类处理）
                 return {
                     "success": True,
                     "tool": self.name,
                     "target": target,
                     "scan_type": scan_type,
                     "result": parsed_result,
-                    "raw_output": result.get("stdout", ""),
+                    "raw_output": stdout,
+                    "command": full_command,  # 包含命令，供基类使用
                     "privilege_note": "使用tcp_connect扫描（无需root权限）" if scan_type == "tcp_connect" else None
                 }
             else:
+                # 返回错误（错误捕获由基类处理）
                 return {
                     "success": False,
                     "error": result.get("stderr", "Nmap扫描失败"),
-                    "command": " ".join(cmd)
+                    "command": full_command  # 包含命令，供基类使用
                 }
                 
         except Exception as e:
@@ -179,37 +231,15 @@ class NmapTool(ToolInterface):
         ]
     
     async def _run_command(self, cmd: List[str], timeout: float = None) -> Dict[str, Any]:
-        """运行命令"""
-        try:
-            # 使用传入的timeout或默认timeout
-            scan_timeout = timeout if timeout else self.timeout
-            
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            # 设置超时（使用动态timeout或默认timeout）
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), 
-                    timeout=scan_timeout
-                )
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                return {"success": False, "error": f"扫描超时 ({scan_timeout}秒)"}
-            
-            return {
-                "success": process.returncode == 0,
-                "stdout": stdout.decode('utf-8', errors='ignore') if stdout else "",
-                "stderr": stderr.decode('utf-8', errors='ignore') if stderr else "",
-                "returncode": process.returncode
-            }
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        """运行命令 - 使用基类的通用流式执行方法"""
+        scan_timeout = timeout if timeout else self.timeout
+        
+        # 使用基类的通用流式命令执行方法
+        return await self.run_command_with_streaming(
+            cmd=cmd,
+            timeout=scan_timeout,
+            description=f"Nmap扫描"
+        )
     
     def _parse_nmap_xml(self, xml_output: str) -> Dict[str, Any]:
         """解析Nmap XML输出"""

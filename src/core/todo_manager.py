@@ -256,13 +256,16 @@ class TodoManager:
                 failed = len([t for t in todo_list if t.status == "failed"])
                 in_progress = len([t for t in todo_list if t.status == "in_progress"])
                 
+                # 进度应该包括已完成和失败的任务（都算作已处理）
+                processed = completed + failed
                 return {
                     "list_name": list_name,
                     "total": total,
                     "completed": completed,
                     "failed": failed,
                     "in_progress": in_progress,
-                    "progress_percentage": (completed / total * 100) if total > 0 else 0
+                    "processed": processed,  # 已处理的任务数（包括完成和失败）
+                    "progress_percentage": (processed / total * 100) if total > 0 else 0
                 }
             else:
                 # 全局进度

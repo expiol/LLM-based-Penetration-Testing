@@ -59,3 +59,6 @@ langgraph==0.2.45
 ray[default]==2.39.0
 ray[data]==2.39.0
 ray[serve]==2.39.0
+
+# 终端UI优化
+rich==13.7.0

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import json
 import re
+import os
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 import ray
@@ -17,6 +18,15 @@ from ..core.todo_manager import TodoManager
 from ..prompts.master_prompts import MasterPrompts
 
 logger = logging.getLogger(__name__)
+
+# 静默模式控制 - 当设置为True时抑制调试输出
+QUIET_MODE = os.environ.get("PENTEST_QUIET_MODE", "0") == "1"
+
+
+def _print(msg: str, *args, **kwargs):
+    """条件输出 - 静默模式下不输出"""
+    if not QUIET_MODE:
+        print(msg, *args, **kwargs)
 
 
 class RayMasterController:
@@ -100,7 +110,7 @@ class RayMasterController:
             
             self.master_llm = ChatOpenAI(**kwargs)
             self.logger.info(f"主控LLM初始化成功 - Model: {model_name}, Base URL: {base_url}")
-            print(f"✅ 主控LLM初始化成功 - Model: {model_name}", flush=True)
+            _print(f"✅ 主控LLM初始化成功 - Model: {model_name}", flush=True)
             
         except Exception as e:
             self.logger.error(f"主控LLM初始化失败: {e}")
@@ -161,22 +171,22 @@ class RayMasterController:
             import uuid
             session_id = str(uuid.uuid4())
             
-            print(f"\n{'=' * 72}", flush=True)
-            print(f"🔄 创建会话: {session_id}", flush=True)
+            _print(f"\n{'=' * 72}", flush=True)
+            _print(f"🔄 创建会话: {session_id}", flush=True)
             self.logger.info(f"Creating session: {session_id}")
             
             # 初始化TODO管理器
-            print(f"🔄 初始化TODO管理器...", flush=True)
+            _print(f"🔄 初始化TODO管理器...", flush=True)
             await self.todo_manager.initialize()
-            print(f"✅ TODO管理器初始化完成", flush=True)
+            _print(f"✅ TODO管理器初始化完成", flush=True)
             
             # 如果target是"auto_extract"，使用原始描述
             raw_description = (options or {}).get("raw_description", "")
             if target == "auto_extract" and raw_description:
-                print(f"📝 使用原始描述，让主控LLM自动提取目标: {raw_description[:50]}...", flush=True)
+                _print(f"📝 使用原始描述，让主控LLM自动提取目标: {raw_description[:50]}...", flush=True)
             
             # 初始化会话状态
-            print(f"🔄 初始化会话状态...", flush=True)
+            _print(f"🔄 初始化会话状态...", flush=True)
             await self.state_manager.put_session_state(session_id, {
                 "target": target,
                 "options": options or {},
@@ -188,7 +198,7 @@ class RayMasterController:
             })
             
             # 初始化全局上下文（目标会在LLM生成计划后更新）
-            print(f"🔄 初始化全局上下文...", flush=True)
+            _print(f"🔄 初始化全局上下文...", flush=True)
             await self.state_manager.put_global_context(session_id, {
                 "target": target if target != "auto_extract" else "",
                 "discovered_services": [],
@@ -198,18 +208,18 @@ class RayMasterController:
             })
             
             # 步骤1: 生成完整的任务列表（LLM会提取目标并生成计划）
-            print(f"🔄 正在调用主控LLM生成完整的任务列表...", flush=True)
+            _print(f"🔄 正在调用主控LLM生成完整的任务列表...", flush=True)
             if target == "auto_extract":
                 raw_desc = (options or {}).get("raw_description", "")
-                print(f"   主控LLM将自动从描述中提取目标并生成执行计划", flush=True)
+                _print(f"   主控LLM将自动从描述中提取目标并生成执行计划", flush=True)
                 if raw_desc:
-                    print(f"   原始描述: {raw_desc[:100]}...", flush=True)
-            print(f"   开始调用LLM API...", flush=True)
+                    _print(f"   原始描述: {raw_desc[:100]}...", flush=True)
+            _print(f"   开始调用LLM API...", flush=True)
             try:
                 execution_plan = await self._generate_execution_plan(target, options or {}, session_id)
-                print(f"   ✅ 执行计划生成完成", flush=True)
+                _print(f"   ✅ 执行计划生成完成", flush=True)
             except Exception as e:
-                print(f"   ❌ 执行计划生成失败: {e}", flush=True)
+                _print(f"   ❌ 执行计划生成失败: {e}", flush=True)
                 self.logger.error(f"执行计划生成失败: {e}", exc_info=True)
                 raise
             
@@ -226,9 +236,9 @@ class RayMasterController:
             # 如果主控成功解析出了更准确的目标，提示并更新状态
             if final_target and final_target != target:
                 if target == "auto_extract":
-                    print(f"✅ 主控LLM已提取目标: {final_target}", flush=True)
+                    _print(f"✅ 主控LLM已提取目标: {final_target}", flush=True)
                 else:
-                    print(f"ℹ️ 主控LLM规范化目标: {final_target}", flush=True)
+                    _print(f"ℹ️ 主控LLM规范化目标: {final_target}", flush=True)
             
             await self.state_manager.update_session_state(session_id, {
                 "target": final_target
@@ -238,7 +248,7 @@ class RayMasterController:
             })
             
             # 步骤2: 将任务列表保存到TodoManager
-            print(f"🔄 正在保存任务列表到TodoManager...", flush=True)
+            _print(f"🔄 正在保存任务列表到TodoManager...", flush=True)
             await self._save_execution_plan_to_todos(execution_plan, session_id)
             
             # 更新会话状态，保存执行计划
@@ -248,12 +258,12 @@ class RayMasterController:
                 "target": final_target
             })
             
-            print(f"✅ 任务列表生成完成，共 {len(execution_plan.get('stages', []))} 个阶段", flush=True)
+            _print(f"✅ 任务列表生成完成，共 {len(execution_plan.get('stages', []))} 个阶段", flush=True)
             self.logger.info(f"Execution plan generated - {len(execution_plan.get('stages', []))} stages, target: {final_target}")
             
             # 步骤3: 根据模式启动执行
             if async_mode:
-                print("▶️ 会话进入异步执行模式，可实时查看执行状态", flush=True)
+                _print("▶️ 会话进入异步执行模式，可实时查看执行状态", flush=True)
                 execution_task = asyncio.create_task(
                     self._run_execution_pipeline(session_id, final_target, options or {}, parallel)
                 )
@@ -297,7 +307,7 @@ class RayMasterController:
     ) -> Dict[str, Any]:
         """执行Kill Chain并在结束时更新状态"""
         try:
-            print(f"🔄 开始执行任务列表...", flush=True)
+            _print(f"🔄 开始执行任务列表...", flush=True)
             if parallel:
                 results = await self._execute_from_todos_parallel(session_id, target, options)
             else:
@@ -353,45 +363,45 @@ class RayMasterController:
             }
             
             # 获取规划提示词
-            print(f"   📝 准备提示词...", flush=True)
+            _print(f"   📝 准备提示词...", flush=True)
             self.logger.info("准备规划提示词...")
             planning_prompt = MasterPrompts.get_planning_prompt(target, options, context)
             system_prompt = MasterPrompts.get_master_system_prompt()
-            print(f"   ✅ 提示词准备完成，系统提示词长度: {len(system_prompt)}, 规划提示词长度: {len(planning_prompt)}", flush=True)
+            _print(f"   ✅ 提示词准备完成，系统提示词长度: {len(system_prompt)}, 规划提示词长度: {len(planning_prompt)}", flush=True)
             self.logger.info(f"提示词准备完成，系统提示词长度: {len(system_prompt)}, 规划提示词长度: {len(planning_prompt)}")
             
             # 调用LLM生成计划
             from langchain_core.messages import SystemMessage, HumanMessage
             
-            print(f"   📦 构建消息对象...", flush=True)
+            _print(f"   📦 构建消息对象...", flush=True)
             messages = [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=planning_prompt)
             ]
-            print(f"   ✅ 消息对象构建完成", flush=True)
+            _print(f"   ✅ 消息对象构建完成", flush=True)
             
             # 检查 master_llm 是否已初始化
             if not self.master_llm:
                 error_msg = "主控LLM未初始化，无法生成执行计划"
                 self.logger.error(error_msg)
-                print(f"   ❌ {error_msg}", flush=True)
+                _print(f"   ❌ {error_msg}", flush=True)
                 raise ValueError(error_msg)
             
             self.logger.info("调用主控LLM生成执行计划...")
-            print(f"🔄 正在调用主控LLM生成执行计划...", flush=True)
-            print(f"   目标: {target}", flush=True)
+            _print(f"🔄 正在调用主控LLM生成执行计划...", flush=True)
+            _print(f"   目标: {target}", flush=True)
             if target == "auto_extract":
                 raw_desc = (options or {}).get("raw_description", "")
                 if raw_desc:
-                    print(f"   原始描述: {raw_desc[:100]}...", flush=True)
+                    _print(f"   原始描述: {raw_desc[:100]}...", flush=True)
             
-            print(f"   请稍候，LLM正在思考中...", flush=True)
+            _print(f"   请稍候，LLM正在思考中...", flush=True)
             self.logger.info("开始调用LLM API...")
             
             try:
                 # 添加超时控制（5分钟，因为某些LLM可能响应较慢）
                 try:
-                    print(f"   📡 正在发送请求到LLM API...", flush=True)
+                    _print(f"   📡 正在发送请求到LLM API...", flush=True)
                     self.logger.info("发送请求到LLM API...")
                     
                     # 确保输出立即刷新
@@ -402,38 +412,38 @@ class RayMasterController:
                         self.master_llm.ainvoke(messages),
                         timeout=300.0  # 5分钟超时
                     )
-                    print(f"   ✅ LLM API响应已接收", flush=True)
+                    _print(f"   ✅ LLM API响应已接收", flush=True)
                     self.logger.info("LLM API响应已接收")
                     sys.stdout.flush()
                     
                     content = response.content if hasattr(response, 'content') else str(response)
-                    print(f"   ✅ LLM响应接收成功，长度: {len(content)} 字符", flush=True)
+                    _print(f"   ✅ LLM响应接收成功，长度: {len(content)} 字符", flush=True)
                     self.logger.info(f"LLM响应接收成功，长度: {len(content)} 字符")
                 except KeyboardInterrupt:
                     error_msg = "用户中断LLM调用"
                     self.logger.warning(error_msg)
-                    print(f"   ⚠️  {error_msg}", flush=True)
+                    _print(f"   ⚠️  {error_msg}", flush=True)
                     raise
             except asyncio.TimeoutError:
                 error_msg = "LLM调用超时（超过2分钟）"
                 self.logger.error(error_msg)
-                print(f"   ❌ {error_msg}", flush=True)
-                print(f"   提示: 可能是网络问题或LLM服务响应慢，请检查网络连接", flush=True)
+                _print(f"   ❌ {error_msg}", flush=True)
+                _print(f"   提示: 可能是网络问题或LLM服务响应慢，请检查网络连接", flush=True)
                 raise ValueError(error_msg)
             except Exception as e:
                 error_msg = f"LLM调用失败: {e}"
                 self.logger.error(error_msg, exc_info=True)
-                print(f"   ❌ {error_msg}", flush=True)
+                _print(f"   ❌ {error_msg}", flush=True)
                 import traceback
                 error_trace = traceback.format_exc()
                 self.logger.error(error_trace)
-                print(f"   详细错误信息已记录到日志", flush=True)
-                print(f"   错误类型: {type(e).__name__}", flush=True)
+                _print(f"   详细错误信息已记录到日志", flush=True)
+                _print(f"   错误类型: {type(e).__name__}", flush=True)
                 raise
             
             # 解析JSON响应
             # 尝试提取JSON（可能包含markdown代码块）
-            print(f"🔄 正在解析LLM返回的JSON...", flush=True)
+            _print(f"🔄 正在解析LLM返回的JSON...", flush=True)
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
@@ -442,16 +452,16 @@ class RayMasterController:
             
             try:
                 execution_plan = json.loads(json_str)
-                print(f"✅ JSON解析成功", flush=True)
+                _print(f"✅ JSON解析成功", flush=True)
             except json.JSONDecodeError as e:
                 self.logger.error(f"JSON解析失败，原始内容前500字符: {content[:500]}")
-                print(f"❌ JSON解析失败，尝试提取JSON片段...", flush=True)
+                _print(f"❌ JSON解析失败，尝试提取JSON片段...", flush=True)
                 # 尝试更宽松的JSON提取
                 json_match = re.search(r'\{[\s\S]*"stages"[\s\S]*\}', content, re.DOTALL)
                 if json_match:
                     json_str = json_match.group(0)
                     execution_plan = json.loads(json_str)
-                    print(f"✅ 使用备用方法解析JSON成功", flush=True)
+                    _print(f"✅ 使用备用方法解析JSON成功", flush=True)
                 else:
                     raise
             
@@ -556,7 +566,7 @@ class RayMasterController:
                 stage_todos = stage.get("todos", [])
                 
                 self.logger.info(f"执行阶段: {stage_name} ({stage_type})")
-                print(f"🔄 执行阶段: {stage_name}...", flush=True)
+                _print(f"🔄 执行阶段: {stage_name}...", flush=True)
                 
                 # 获取对应的Agent类型
                 kill_chain_state = self._map_stage_type_to_kill_chain(stage_type)
@@ -593,20 +603,62 @@ class RayMasterController:
                 }
                 
                 # 执行Agent（使用执行管理器统一处理）
-                print(f"🔄 将任务和目标发送给 {agent_type.value}...", flush=True)
-                print(f"📋 当前阶段任务: {stage_name}", flush=True)
+                _print(f"🔄 将任务和目标发送给 {agent_type.value}...", flush=True)
+                _print(f"📋 当前阶段任务: {stage_name}", flush=True)
                 if stage_todos:
-                    print(f"   待执行任务数: {len(stage_todos)}", flush=True)
+                    _print(f"   待执行任务数: {len(stage_todos)}", flush=True)
                     for idx, todo in enumerate(stage_todos[:3], 1):
                         todo_name = todo.get("name", todo.get("title", "未命名任务"))
                         todo_id = todo.get("id")
-                        print(f"   {idx}. {todo_name}", flush=True)
+                        _print(f"   {idx}. {todo_name}", flush=True)
                         # 标记任务为进行中
                         if todo_id:
                             await self.todo_manager.mark_todo_started(todo_id)
                 
-                future = actor.execute.remote(target_info, context)
-                result = await self.execution_manager.run_ray_get(future)
+                # 执行Agent，带超时和重试
+                max_retries = 2
+                retry_count = 0
+                result = None
+                
+                while retry_count < max_retries:
+                    try:
+                        future = actor.execute.remote(target_info, context)
+                        # 设置执行超时（默认10分钟）
+                        execution_timeout = stage_config.get("timeout", 600)
+                        result = await self.execution_manager.run_ray_get(future, timeout=execution_timeout)
+                        break  # 成功，退出重试循环
+                    except asyncio.TimeoutError:
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            _print(f"⚠️ 执行超时，正在重试 ({retry_count}/{max_retries})...", flush=True)
+                            self.logger.warning(f"Agent {agent_type.value} 执行超时，重试 {retry_count}/{max_retries}")
+                        else:
+                            result = {
+                                "success": False,
+                                "error": f"执行超时 ({execution_timeout}秒)",
+                                "agent": agent_type.value
+                            }
+                            _print(f"❌ 执行超时，已达最大重试次数", flush=True)
+                    except Exception as e:
+                        retry_count += 1
+                        error_msg = str(e)
+                        self.logger.error(f"Agent {agent_type.value} 执行错误: {error_msg}")
+                        if retry_count < max_retries:
+                            _print(f"⚠️ 执行错误: {error_msg[:50]}...，正在重试 ({retry_count}/{max_retries})...", flush=True)
+                        else:
+                            result = {
+                                "success": False,
+                                "error": error_msg,
+                                "agent": agent_type.value
+                            }
+                            _print(f"❌ 执行失败: {error_msg[:80]}", flush=True)
+                
+                if result is None:
+                    result = {
+                        "success": False,
+                        "error": "未知执行错误",
+                        "agent": agent_type.value
+                    }
                 
                 # 存储结果
                 await self.state_manager.put_agent_result(session_id, agent_type.value, result)
@@ -626,18 +678,18 @@ class RayMasterController:
                     if kill_chain_state == KillChainState.RECONNAISSANCE:
                         if "open_ports" in data:
                             ports = data.get("open_ports", [])
-                            print(f"✅ 侦察完成: 发现 {len(ports)} 个开放端口", flush=True)
+                            _print(f"✅ 侦察完成: 发现 {len(ports)} 个开放端口", flush=True)
                         if "services" in data:
                             services = data.get("services", [])
-                            print(f"✅ 侦察完成: 识别 {len(services)} 个服务", flush=True)
+                            _print(f"✅ 侦察完成: 识别 {len(services)} 个服务", flush=True)
                     elif kill_chain_state == KillChainState.WEAPONIZATION:
                         if "payloads" in data:
                             payloads = data.get("payloads", [])
-                            print(f"✅ 武器化完成: 准备 {len(payloads)} 个载荷", flush=True)
+                            _print(f"✅ 武器化完成: 准备 {len(payloads)} 个载荷", flush=True)
                     elif kill_chain_state == KillChainState.EXPLOITATION:
                         if "exploitation_results" in data:
                             exploits = data.get("exploitation_results", [])
-                            print(f"✅ 利用完成: {len(exploits)} 个利用结果", flush=True)
+                            _print(f"✅ 利用完成: {len(exploits)} 个利用结果", flush=True)
                 
                 # 更新TODO状态
                 for todo in stage_todos:
@@ -680,15 +732,39 @@ class RayMasterController:
                         self.logger.warning(f"阶段 {stage_name} 失败，停止执行")
                         break
                 else:
-                    # 检查信息是否充足（特别是侦察阶段）
-                    if kill_chain_state == KillChainState.RECONNAISSANCE:
-                        global_context = await self.state_manager.get_global_context(session_id)
-                        services = global_context.get("discovered_services", [])
-                        if not services or len(services) == 0:
-                            print(f"⚠️  侦察阶段完成，但未发现服务，可能需要更多信息", flush=True)
-                            # 可以选择暂停或继续
+                    _print(f"✅ 阶段 {stage_name} 执行完成，正在评估结果...", flush=True)
                     
-                    print(f"✅ 阶段 {stage_name} 完成", flush=True)
+                    # 使用主Agent LLM评估子Agent执行结果
+                    evaluation = await self._evaluate_stage_result(
+                        session_id=session_id,
+                        stage_type=stage_type,
+                        stage_name=stage_name,
+                        result=result,
+                        target=target
+                    )
+                    
+                    if evaluation.get("need_more_info"):
+                        # 主Agent认为信息不足，需要继续调用Agent
+                        _print(f"🔄 主Agent评估：信息不足，需要补充执行", flush=True)
+                        
+                        # 动态添加新任务
+                        new_tasks = evaluation.get("new_tasks", [])
+                        if new_tasks:
+                            await self._add_dynamic_tasks(session_id, stage_id, new_tasks)
+                            _print(f"📋 已添加 {len(new_tasks)} 个新任务", flush=True)
+                            
+                            # 继续执行新任务（递归调用当前阶段）
+                            continue
+                    
+                    elif evaluation.get("switch_agent"):
+                        # 需要切换到其他Agent
+                        new_agent_type = evaluation.get("switch_to_agent")
+                        _print(f"🔀 主Agent决定切换到 {new_agent_type}", flush=True)
+                        # 这里可以添加切换Agent的逻辑
+                    
+                    else:
+                        # 阶段完成，继续下一阶段
+                        _print(f"✅ 阶段 {stage_name} 评估通过", flush=True)
                     
         except Exception as e:
             self.logger.error(f"从TODO执行失败: {e}")
@@ -698,6 +774,143 @@ class RayMasterController:
             })
         
         return results
+    
+    async def _evaluate_stage_result(
+        self,
+        session_id: str,
+        stage_type: str,
+        stage_name: str,
+        result: Dict[str, Any],
+        target: str
+    ) -> Dict[str, Any]:
+        """
+        使用主Agent LLM评估子Agent执行结果
+        决定是否需要更多信息或切换Agent
+        """
+        try:
+            # 导入输出解析器
+            from .output_parser import output_manager
+            
+            # 获取全局上下文
+            global_context = await self.state_manager.get_global_context(session_id)
+            
+            # 结构化解析子Agent的输出
+            agent_output = result.get("data", {}).get("output", "")
+            tools_used = result.get("data", {}).get("tools_used", [])
+            
+            # 过滤输出，保留有用信息
+            filtered_outputs = []
+            for tool in tools_used:
+                filtered = output_manager.filter_for_llm(tool, agent_output, max_length=1500)
+                if filtered:
+                    filtered_outputs.append(f"【{tool}输出】\n{filtered}")
+            
+            filtered_output_text = "\n\n".join(filtered_outputs) if filtered_outputs else agent_output[:2000]
+            
+            # 构建评估提示
+            evaluation_prompt = f"""你是渗透测试的主控Agent，负责评估子Agent的执行结果并决定下一步行动。
+
+## 当前阶段
+阶段类型: {stage_type}
+阶段名称: {stage_name}
+目标: {target}
+
+## 子Agent执行结果
+执行状态: {"成功" if result.get("success") else "失败"}
+使用的工具: {', '.join(tools_used) if tools_used else '无'}
+
+## 子Agent输出（已过滤）
+{filtered_output_text}
+
+## 当前已收集的信息
+{json.dumps(global_context, ensure_ascii=False, indent=2)[:1500]}
+
+## 请评估并返回JSON格式的决策：
+{{
+    "evaluation": "对执行结果的评估说明",
+    "information_sufficient": true/false,  // 当前阶段收集的信息是否足够进入下一阶段
+    "need_more_info": true/false,  // 是否需要继续收集信息
+    "new_tasks": [  // 如果需要更多信息，列出新任务
+        {{
+            "name": "任务名称",
+            "description": "任务描述",
+            "tool": "建议使用的工具",
+            "priority": 1
+        }}
+    ],
+    "switch_agent": false,  // 是否需要切换到其他Agent
+    "switch_to_agent": null,  // 如果需要切换，指定Agent类型
+    "key_findings": [  // 关键发现摘要
+        "发现1",
+        "发现2"
+    ],
+    "next_stage_ready": true/false  // 是否可以进入下一阶段
+}}
+
+评估标准：
+1. 侦察阶段：至少需要发现开放端口和服务信息
+2. 武器化阶段：需要识别可利用的漏洞
+3. 其他阶段：根据实际情况判断
+
+请只返回JSON，不要有其他内容。"""
+
+            # 调用主Agent LLM进行评估
+            from langchain_core.messages import HumanMessage
+            response = await self.master_llm.ainvoke([HumanMessage(content=evaluation_prompt)])
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            # 解析JSON响应
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
+            if json_match:
+                evaluation = json.loads(json_match.group(0))
+                self.logger.info(f"主Agent评估结果: {evaluation.get('evaluation', '')[:100]}")
+                
+                # 更新全局上下文中的关键发现
+                key_findings = evaluation.get("key_findings", [])
+                if key_findings:
+                    await self.state_manager.update_global_context(session_id, {
+                        f"{stage_type}_findings": key_findings
+                    })
+                
+                return evaluation
+            else:
+                self.logger.warning(f"无法解析主Agent评估结果: {response_text[:200]}")
+                return {"need_more_info": False, "next_stage_ready": True}
+                
+        except Exception as e:
+            self.logger.error(f"评估阶段结果失败: {e}")
+            # 评估失败时默认继续
+            return {"need_more_info": False, "next_stage_ready": True, "error": str(e)}
+    
+    async def _add_dynamic_tasks(
+        self,
+        session_id: str,
+        stage_id: str,
+        new_tasks: List[Dict[str, Any]]
+    ):
+        """动态添加新任务到当前阶段"""
+        try:
+            list_name = f"execution_plan_{session_id}"
+            
+            for idx, task in enumerate(new_tasks):
+                task_id = f"{stage_id}_dynamic_{idx}_{datetime.now().strftime('%H%M%S')}"
+                todo_item = {
+                    "id": task_id,
+                    "title": task.get("name", "动态任务"),
+                    "description": task.get("description", ""),
+                    "status": "pending",
+                    "tool": task.get("tool"),
+                    "priority": task.get("priority", 0),
+                    "parent_stage": stage_id,
+                    "dynamic": True  # 标记为动态添加的任务
+                }
+                
+                # 添加到TODO列表
+                await self.todo_manager.add_todo(list_name, todo_item)
+                self.logger.info(f"动态添加任务: {task.get('name')}")
+                
+        except Exception as e:
+            self.logger.error(f"添加动态任务失败: {e}")
     
     async def _execute_from_todos_parallel(
         self,
@@ -766,7 +979,7 @@ class RayMasterController:
                 }]
                 
                 # 执行Agent（使用执行管理器统一处理）
-                print(f"🔄 执行 {stage_name}...", flush=True)
+                _print(f"🔄 执行 {stage_name}...", flush=True)
                 future = actor.execute.remote(
                     {"target": target, **(options or {})},
                     context
@@ -891,7 +1104,7 @@ class RayMasterController:
             "global_context": await self.state_manager.get_global_context(session_id)
         }]
         
-        print(f"🔄 执行阶段: {stage.value}...", flush=True)
+        _print(f"🔄 执行阶段: {stage.value}...", flush=True)
         future = actor.execute.remote(
             {"target": target, **(options or {})},
             context
@@ -1065,7 +1278,7 @@ class RayMasterController:
             }
             
             # 5. 重新生成执行计划
-            print(f"🔄 根据补充信息重新生成执行计划...", flush=True)
+            _print(f"🔄 根据补充信息重新生成执行计划...", flush=True)
             new_execution_plan = await self._generate_execution_plan(
                 "auto_extract",
                 new_options,
@@ -1082,7 +1295,7 @@ class RayMasterController:
                 "options": new_options
             })
             
-            print(f"✅ 重新规划完成，共 {len(new_execution_plan.get('stages', []))} 个阶段", flush=True)
+            _print(f"✅ 重新规划完成，共 {len(new_execution_plan.get('stages', []))} 个阶段", flush=True)
             
             return {
                 "success": True,

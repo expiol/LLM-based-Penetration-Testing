@@ -32,6 +32,251 @@ class ToolInterface(ABC):
         self.logger = logging.getLogger(f"tool.{name}")
         self.scope = ToolScope.PUBLIC  # 默认为公有工具
         self.allowed_agents: List[AgentType] = []  # 允许使用的Agent类型
+        self._execution_state = None  # 缓存执行状态管理器
+        
+    def _get_execution_state(self):
+        """获取执行状态管理器（懒加载）"""
+        if self._execution_state is None:
+            try:
+                from ..agents.base_agent import execution_state
+                self._execution_state = execution_state
+            except ImportError:
+                self._execution_state = None
+        return self._execution_state
+    
+    def _update_execution_status(self, command: str, description: str = "", agent: str = ""):
+        """更新执行状态（供所有工具使用）"""
+        exec_state = self._get_execution_state()
+        if exec_state:
+            # 尝试从thread-local context获取agent类型
+            actual_agent = agent
+            if not actual_agent:
+                try:
+                    from ..agents.tools_adapter import _context_storage
+                    if hasattr(_context_storage, 'agent_context'):
+                        actual_agent = _context_storage.agent_context.get("agent_type", "")
+                except Exception:
+                    pass
+            
+            exec_state.set_current_execution(
+                agent=actual_agent or "AGENT",
+                tool=self.name,
+                command=command,
+                description=description or f"执行 {self.name}"
+            )
+            self.logger.info(f"[状态更新] Agent={actual_agent}, 工具={self.name}, 命令={command[:50]}...")
+    
+    def _add_output_line(self, line: str):
+        """添加输出行到执行状态"""
+        exec_state = self._get_execution_state()
+        if exec_state and line and line.strip():
+            exec_state.add_output_line(line.strip())
+            self.logger.debug(f"[输出] {line.strip()[:80]}")
+    
+    def _should_show_output_line(self, line: str) -> bool:
+        """判断输出行是否应该显示（过滤无意义的内容）"""
+        line = line.strip()
+        if not line:
+            return False
+        
+        # 跳过纯XML标签行
+        if line.startswith('<?xml') or line.startswith('<!DOCTYPE'):
+            return False
+        if line.startswith('<') and line.endswith('>') and '/' in line:
+            # 闭合标签如 </host> </port>
+            if line.startswith('</') or '/>' in line:
+                return False
+            # 开始标签如 <verbose level="0"/>
+            if not any(keyword in line.lower() for keyword in ['port', 'service', 'state', 'script', 'output', 'host', 'address']):
+                return False
+        
+        # 过滤nmap的taskprogress更新（太频繁）
+        if '<taskprogress' in line:
+            return False
+        
+        # 保留有意义的信息
+        meaningful_keywords = [
+            'open', 'closed', 'filtered', 'port', 'service',
+            'http', 'ssh', 'ftp', 'smtp', 'mysql', 'dns',
+            'vuln', 'error', 'warning', 'found', 'detected',
+            'version', 'product', 'script', 'output',
+            '发现', '扫描', '完成', '失败', '成功'
+        ]
+        
+        line_lower = line.lower()
+        for keyword in meaningful_keywords:
+            if keyword in line_lower:
+                return True
+        
+        # 如果是端口信息，显示
+        if '/tcp' in line or '/udp' in line:
+            return True
+        
+        # 默认不显示
+        return False
+    
+    async def run_command_with_streaming(
+        self, 
+        cmd: List[str], 
+        timeout: float = 300,
+        working_directory: str = None,
+        env: Dict[str, str] = None,
+        description: str = "",
+        agent_type: str = ""
+    ) -> Dict[str, Any]:
+        """
+        通用的流式命令执行方法 - 所有工具都可以使用
+        支持实时输出捕获和执行状态更新
+        
+        Args:
+            cmd: 命令列表
+            timeout: 超时时间（秒）
+            working_directory: 工作目录
+            env: 环境变量
+            description: 命令描述
+            agent_type: Agent类型
+            
+        Returns:
+            Dict[str, Any]: 包含success, stdout, stderr, returncode, command的结果
+        """
+        import os
+        
+        try:
+            full_command = " ".join(cmd)
+            
+            # 更新执行状态（不再在这里调用，由调用者在execute开始时设置）
+            # 只添加命令执行日志
+            self._add_output_line(f"$ {full_command}")
+            self.logger.info(f"执行命令: {full_command}")
+            
+            # 准备环境变量
+            process_env = os.environ.copy()
+            if env:
+                process_env.update(env)
+            
+            # 创建子进程
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=working_directory,
+                env=process_env
+            )
+            
+            stdout_data = b""
+            stderr_data = b""
+            
+            async def read_streams():
+                """读取stdout和stderr流"""
+                nonlocal stdout_data, stderr_data
+                
+                # 创建读取任务
+                async def read_stdout():
+                    nonlocal stdout_data
+                    line_count = 0
+                    while True:
+                        try:
+                            line = await asyncio.wait_for(
+                                process.stdout.readline(),
+                                timeout=2.0
+                            )
+                            if not line:
+                                break
+                            stdout_data += line
+                            line_count += 1
+                            # 实时添加输出（过滤XML标签，只显示有意义的信息）
+                            line_text = line.decode('utf-8', errors='ignore').rstrip()
+                            if line_text:
+                                # 过滤掉纯XML标签行，保留有意义的内容
+                                if self._should_show_output_line(line_text):
+                                    self._add_output_line(line_text)
+                                # 每50行输出一个进度提示
+                                if line_count % 50 == 0:
+                                    self._add_output_line(f"... 已读取 {line_count} 行输出 ...")
+                        except asyncio.TimeoutError:
+                            if process.returncode is not None:
+                                break
+                            continue
+                        except Exception:
+                            break
+                
+                async def read_stderr():
+                    nonlocal stderr_data
+                    while True:
+                        try:
+                            line = await asyncio.wait_for(
+                                process.stderr.readline(),
+                                timeout=2.0
+                            )
+                            if not line:
+                                break
+                            stderr_data += line
+                            # 实时添加错误输出
+                            line_text = line.decode('utf-8', errors='ignore').rstrip()
+                            if line_text:
+                                self._add_output_line(f"[stderr] {line_text}")
+                        except asyncio.TimeoutError:
+                            if process.returncode is not None:
+                                break
+                            continue
+                        except Exception:
+                            break
+                
+                # 并行读取stdout和stderr
+                await asyncio.gather(read_stdout(), read_stderr())
+            
+            try:
+                await asyncio.wait_for(read_streams(), timeout=timeout)
+                await process.wait()
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                self._add_output_line(f"⚠️ 命令超时 ({timeout}秒)")
+                self.logger.warning(f"命令超时: {full_command}")
+                return {
+                    "success": False,
+                    "error": f"命令执行超时 ({timeout}秒)",
+                    "stdout": stdout_data.decode('utf-8', errors='ignore'),
+                    "stderr": stderr_data.decode('utf-8', errors='ignore'),
+                    "returncode": -1,
+                    "command": full_command
+                }
+            
+            stdout_str = stdout_data.decode('utf-8', errors='ignore')
+            stderr_str = stderr_data.decode('utf-8', errors='ignore')
+            success = process.returncode == 0
+            
+            # 添加完成状态
+            if success:
+                self._add_output_line(f"✓ 命令执行成功")
+            else:
+                self._add_output_line(f"✗ 命令退出码: {process.returncode}")
+                if stderr_str:
+                    # 只添加前几行错误信息
+                    for line in stderr_str.split('\n')[:3]:
+                        if line.strip():
+                            self._add_output_line(f"  {line.strip()}")
+            
+            return {
+                "success": success,
+                "stdout": stdout_str,
+                "stderr": stderr_str,
+                "returncode": process.returncode,
+                "command": full_command
+            }
+            
+        except Exception as e:
+            error_msg = str(e)
+            self._add_output_line(f"✗ 执行错误: {error_msg}")
+            self.logger.error(f"命令执行失败: {e}")
+            return {
+                "success": False,
+                "error": error_msg,
+                "stdout": "",
+                "stderr": error_msg,
+                "returncode": -1,
+                "command": " ".join(cmd) if cmd else ""
+            }
         
     @abstractmethod
     async def execute(self, parameters: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -65,6 +310,11 @@ class ToolInterface(ABC):
         elif self.scope == ToolScope.PRIVATE:
             return agent_type in self.allowed_agents
         return False
+    
+    def _build_command_string(self, parameters: Dict[str, Any]) -> str:
+        """构建命令字符串（供工具子类重写）"""
+        # 默认实现：尝试从工具返回结果中获取command字段
+        return f"{self.name}"
 
 
 class AgentToolManager:
@@ -220,10 +470,29 @@ class AgentToolManager:
                 except Exception as e:
                     self.logger.debug(f"记录工具执行日志失败: {e}")
             
+            # 更新执行状态（工具开始执行）- 优先于AgentCallbackHandler
+            self._update_execution_state(tool, parameters, "start")
+            self.logger.info(f"工具 {tool_name} 开始执行，已更新执行状态")
+            
             # 执行工具
             start_time = datetime.now()
-            result = await tool.execute(parameters, execution_context)
+            try:
+                result = await tool.execute(parameters, execution_context)
+                # 确保result是字典
+                if not isinstance(result, dict):
+                    result = {"success": False, "error": "工具返回了非字典结果", "tool": tool_name}
+            except Exception as e:
+                self.logger.error(f"工具 {tool_name} 执行异常: {e}")
+                result = {
+                    "success": False,
+                    "error": str(e),
+                    "tool": tool_name
+                }
             end_time = datetime.now()
+            
+            # 捕获工具输出并更新执行状态
+            self._capture_tool_output(tool, parameters, result)
+            self.logger.debug(f"工具 {tool_name} 执行完成，已捕获输出")
             
             # 完成工具执行记录
             if tool_exec_id and session_id:
@@ -270,6 +539,149 @@ class AgentToolManager:
             return f"subdomain_enum {target}"
         else:
             return f"{tool_name} {target}"
+    
+    def _update_execution_state(self, tool: ToolInterface, parameters: Dict[str, Any], action: str = "start"):
+        """更新全局执行状态"""
+        try:
+            from ..agents.base_agent import execution_state
+            
+            # 构建命令字符串（工具可以重写_build_command_string方法）
+            if hasattr(tool, '_build_command_string'):
+                command = tool._build_command_string(parameters)
+            else:
+                command = self._build_command_description(tool.name, parameters)
+            
+            # 构建描述
+            target = parameters.get("target") or parameters.get("domain") or parameters.get("url", "")
+            description = f"{tool.name} 处理 {target}" if target else f"执行 {tool.name}"
+            
+            if action == "start":
+                execution_state.set_current_execution(
+                    agent=self.agent_type.value,
+                    tool=tool.name,
+                    command=command,
+                    description=description
+                )
+                # 添加日志
+                execution_state.add_output_line(f"开始执行: {tool.name}")
+                self.logger.info(f"执行状态已更新: tool={tool.name}, command={command}")
+        except Exception as e:
+            self.logger.warning(f"更新执行状态失败: {e}", exc_info=True)
+    
+    def _capture_tool_output(self, tool: ToolInterface, parameters: Dict[str, Any], result: Dict[str, Any]):
+        """捕获工具输出并添加到执行状态 - 通用方法"""
+        try:
+            from ..agents.base_agent import execution_state
+            
+            # 如果工具执行成功，提取关键输出
+            if result.get("success"):
+                # 1. 从result中提取command（如果存在，优先使用实际执行的命令）
+                command = result.get("command")
+                if command:
+                    # 使用实际执行的命令更新状态
+                    execution_state.set_current_execution(
+                        agent=self.agent_type.value,
+                        tool=tool.name,
+                        command=command,
+                        description=execution_state.current_description or f"执行 {tool.name}"
+                    )
+                    execution_state.add_output_line(f"执行命令: {command}")
+                    self.logger.info(f"从结果中更新命令: {command}")
+                
+                # 2. 提取结构化结果并转换为可读输出
+                tool_result = result.get("result")
+                if tool_result:
+                    self._extract_and_add_output(tool.name, tool_result, execution_state)
+                    self.logger.debug(f"已提取结构化输出: {tool.name}")
+                
+                # 3. 提取raw_output（如果存在）
+                raw_output = result.get("raw_output")
+                if raw_output:
+                    # 解析raw_output的关键信息
+                    self._parse_raw_output(tool.name, raw_output, execution_state)
+                    self.logger.debug(f"已解析原始输出: {tool.name}")
+                
+                # 4. 添加成功消息
+                if not tool_result and not raw_output:
+                    execution_state.add_output_line(f"{tool.name} 执行成功")
+                    self.logger.debug(f"添加成功消息: {tool.name}")
+            else:
+                # 执行失败，添加错误信息
+                error = result.get("error", "工具执行失败")
+                execution_state.add_output_line(f"错误: {error}")
+                self.logger.warning(f"工具执行失败: {tool.name}, 错误: {error}")
+                
+        except Exception as e:
+            self.logger.error(f"捕获工具输出失败: {e}", exc_info=True)
+    
+    def _extract_and_add_output(self, tool_name: str, result: Any, execution_state):
+        """从结构化结果中提取并添加输出"""
+        try:
+            if isinstance(result, dict):
+                # Nmap结果
+                if "hosts" in result:
+                    for host in result.get("hosts", []):
+                        if host.get("ports"):
+                            ports = host["ports"]
+                            ports_info = ", ".join([f"{p.get('port')}/{p.get('protocol', 'tcp')}" for p in ports[:10]])
+                            execution_state.add_output_line(f"发现开放端口: {ports_info}")
+                            if len(ports) > 10:
+                                execution_state.add_output_line(f"... 还有 {len(ports) - 10} 个端口")
+                
+                # 子域名结果
+                if "subdomains" in result:
+                    subdomains = result.get("subdomains", [])
+                    execution_state.add_output_line(f"发现 {len(subdomains)} 个子域名")
+                    for subdomain in subdomains[:5]:
+                        execution_state.add_output_line(f"  - {subdomain}")
+                    if len(subdomains) > 5:
+                        execution_state.add_output_line(f"... 还有 {len(subdomains) - 5} 个子域名")
+                
+                # DNS结果
+                if "records" in result:
+                    records = result.get("records", [])
+                    execution_state.add_output_line(f"发现 {len(records)} 条DNS记录")
+                    for record in records[:5]:
+                        execution_state.add_output_line(f"  {record.get('type')}: {record.get('value')}")
+                
+                # 漏洞结果
+                if "vulnerabilities" in result:
+                    vulns = result.get("vulnerabilities", [])
+                    execution_state.add_output_line(f"发现 {len(vulns)} 个潜在漏洞")
+                    for vuln in vulns[:3]:
+                        execution_state.add_output_line(f"  - {vuln.get('name', 'Unknown')}")
+                
+                # 通用成功消息
+                if "message" in result:
+                    execution_state.add_output_line(result["message"])
+                    
+        except Exception as e:
+            self.logger.debug(f"提取输出失败: {e}")
+    
+    def _parse_raw_output(self, tool_name: str, raw_output: str, execution_state):
+        """解析原始输出并提取关键信息"""
+        try:
+            if not raw_output:
+                return
+            
+            # 根据工具类型解析输出
+            if tool_name == "nmap":
+                # Nmap XML输出已在上层处理，这里处理文本输出
+                lines = raw_output.split('\n')
+                for line in lines[:20]:  # 只处理前20行
+                    line = line.strip()
+                    if line and ("open" in line.lower() or "port" in line.lower()):
+                        execution_state.add_output_line(line[:80])  # 限制长度
+            else:
+                # 通用处理：提取前几行关键信息
+                lines = raw_output.split('\n')
+                for line in lines[:10]:  # 只处理前10行
+                    line = line.strip()
+                    if line and len(line) > 3:
+                        execution_state.add_output_line(line[:80])  # 限制长度
+                        
+        except Exception as e:
+            self.logger.debug(f"解析原始输出失败: {e}")
     
     def get_available_tools(self) -> List[str]:
         """获取可用工具列表"""

@@ -1,9 +1,102 @@
 """
 主控LLM提示词模板
 管理整个渗透测试项目的LLM prompts
+参考 harbinger 项目的攻击生命周期设计
 """
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+
+
+# 攻击生命周期阶段映射（参考 harbinger）
+ATTACK_PHASES = [
+    "initial reconnaissance",     # 初始侦察
+    "initial compromise",         # 初始入侵
+    "establish foothold",         # 建立立足点
+    "escalate privileges",        # 权限提升
+    "internal reconnaissance",    # 内部侦察
+    "move laterally",            # 横向移动
+    "maintain presence",         # 维持存在
+    "complete mission",          # 完成任务
+]
+
+# 攻击阶段别名映射
+ATTACK_PHASE_ALIASES = {
+    "information gathering": "initial reconnaissance",
+    "scanning": "initial reconnaissance",
+    "footprinting": "initial reconnaissance",
+    "profiling": "initial reconnaissance",
+    "osint collection": "initial reconnaissance",
+    "exploitation": "initial compromise",
+    "breach": "initial compromise",
+    "intrusion": "initial compromise",
+    "gaining access": "initial compromise",
+    "zero-day attack": "initial compromise",
+    "persistence": "establish foothold",
+    "anchoring": "establish foothold",
+    "backdooring": "establish foothold",
+    "command and control (c2) setup": "establish foothold",
+    "privilege escalation": "escalate privileges",
+    "gaining elevated access": "escalate privileges",
+    "root compromise": "escalate privileges",
+    "discovery": "internal reconnaissance",
+    "enumeration": "internal reconnaissance",
+    "network mapping": "internal reconnaissance",
+    "system analysis": "internal reconnaissance",
+    "lateral movement": "move laterally",
+    "pivoting": "move laterally",
+    "island hopping": "move laterally",
+    "spreading": "move laterally",
+    "command and control (c2)": "maintain presence",
+    "remote access": "maintain presence",
+    "staying hidden": "maintain presence",
+    "exfiltration": "complete mission",
+    "impact": "complete mission",
+    "data theft": "complete mission",
+    "disruption": "complete mission",
+    "denial of service": "complete mission",
+    "destruction": "complete mission",
+}
+
+# Kill Chain 到攻击阶段的映射
+KILL_CHAIN_TO_ATTACK_PHASE = {
+    "reconnaissance": "initial reconnaissance",
+    "weaponization": "initial compromise",
+    "delivery": "initial compromise", 
+    "exploitation": "escalate privileges",
+    "installation": "establish foothold",
+    "command_control": "maintain presence",
+    "actions_on_objectives": "complete mission",
+}
+
+# 检测风险等级
+class DetectionRisk:
+    """检测风险评估"""
+    LOW = 1       # 不太可能被检测
+    MEDIUM = 2    # 有一定检测风险
+    HIGH = 3      # 较高检测风险
+    VERY_HIGH = 4 # 很高检测风险
+    CERTAIN = 5   # 几乎肯定被检测
+    
+    @staticmethod
+    def get_risk_description(level: int) -> str:
+        descriptions = {
+            1: "低风险 - 不太可能被检测",
+            2: "中等风险 - 有一定检测可能",
+            3: "高风险 - 较高检测可能",
+            4: "很高风险 - 可能被检测",
+            5: "极高风险 - 几乎肯定被检测",
+        }
+        return descriptions.get(level, "未知风险")
+
+
+def normalize_attack_phase(phase: str) -> str:
+    """标准化攻击阶段名称"""
+    phase_lower = phase.lower().strip()
+    if phase_lower in ATTACK_PHASES:
+        return phase_lower
+    if phase_lower in ATTACK_PHASE_ALIASES:
+        return ATTACK_PHASE_ALIASES[phase_lower]
+    return "initial reconnaissance"  # 默认返回初始侦察
 
 
 class MasterPrompts:
@@ -459,3 +552,316 @@ Agent类型: {agent_type}
    - 工具和方法改进
 
 请提供详细的项目总结报告。"""
+
+    @staticmethod
+    def get_credential_extraction_prompt(text: str) -> str:
+        """
+        获取凭证提取提示词（参考 harbinger 的设计）
+        
+        Args:
+            text: 要分析的文本内容
+            
+        Returns:
+            str: 凭证提取提示词
+        """
+        return f"""分析以下文本并提取所有可验证的凭证信息。请高精度提取，最大程度减少误报。
+
+### 待分析文本
+{text}
+
+### 提取要求
+1. **精确匹配**：只提取明确存在的用户名/密码对，不要猜测或推断凭证
+2. **上下文分析**：利用上下文线索如 "username"、"password"、"login"、"credentials"、"account" 等标签
+3. **格式识别**：考虑不同的凭证格式，包括：
+   - 邮箱地址作为用户名
+   - 包含特殊字符的用户名
+   - 混淆的凭证
+   - Base64编码的凭证
+   - NTLM哈希
+   - Kerberos票据
+
+### 输出格式要求
+请严格按照以下JSON格式返回：
+{{
+    "found_credentials": true/false,
+    "credentials": [
+        {{
+            "username": "用户名部分",
+            "password": "密码或哈希值",
+            "domain": "域名（如果有）",
+            "credential_type": "plaintext/ntlm_hash/kerberos/other",
+            "source": "凭证来源描述",
+            "confidence": "high/medium/low"
+        }}
+    ]
+}}
+
+### 注意事项
+- 如果用户名包含 "@" 符号，将其解析为用户名和域名两部分
+- 不要编造、猜测或推断凭证
+- 每个凭证条目必须包含 username 和 password/hash 字段
+- 只返回JSON，不要添加任何说明文字"""
+
+    @staticmethod
+    def get_action_summary_prompt(command: str, arguments: str, output: str) -> str:
+        """
+        获取行动摘要提示词（参考 harbinger 的设计）
+        
+        Args:
+            command: 执行的命令
+            arguments: 命令参数
+            output: 命令输出
+            
+        Returns:
+            str: 行动摘要提示词
+        """
+        attack_phases_str = ", ".join(ATTACK_PHASES)
+        
+        return f"""你是一位网络安全专家，请为以下执行的操作和输出编写简短摘要。
+
+### 执行信息
+命令: {command}
+参数: {arguments}
+输出: {output[:2000] if len(output) > 2000 else output}{"... (输出已截断)" if len(output) > 2000 else ""}
+
+### 摘要要求
+1. **语态**：使用主动语态，以"红队"作为执行者
+2. **简洁**：一到两句话概括操作内容和结果
+3. **保密**：不要在摘要中包含密码等敏感信息
+4. **不要**：
+   - 使用 "尝试" 或 "试图" 等词
+   - 提及 GUID 标识符
+   - 提及 "safe" 相关信息
+
+### 输出格式要求
+请严格按照以下JSON格式返回：
+{{
+    "summary": "摘要文本",
+    "successful": true/false,
+    "error": true/false,
+    "status": "completed/error/in_progress",
+    "attack_phase": "攻击阶段（必须是以下之一：{attack_phases_str}）",
+    "detection_risk": 1-5（1=低风险，5=肯定被检测）
+}}
+
+只返回JSON，不要添加任何说明文字。"""
+
+    @staticmethod
+    def get_attack_path_summary_prompt(summaries: List[str]) -> str:
+        """
+        获取攻击路径摘要提示词
+        
+        Args:
+            summaries: 各个行动的摘要列表
+            
+        Returns:
+            str: 攻击路径摘要提示词
+        """
+        summaries_text = "\n".join([f"- {s}" for s in summaries])
+        
+        return f"""你是一位网络安全专家，请基于以下行动摘要编写一个攻击路径描述。
+
+### 行动摘要列表
+{summaries_text}
+
+### 要求
+1. 使用主动语态描述攻击过程
+2. 将其编写成一个引人入胜的故事
+3. 忽略失败的操作，只描述成功推进红队目标的重要步骤
+4. 突出关键的攻击阶段和里程碑
+5. 包含以下要素：
+   - 初始入口点
+   - 权限提升路径
+   - 横向移动过程
+   - 最终成果
+
+请提供一个完整、连贯的攻击路径描述。"""
+
+    @staticmethod
+    def get_detection_risk_assessment_prompt(
+        action: str, 
+        edr_info: str,
+        implant_info: str
+    ) -> str:
+        """
+        获取检测风险评估提示词
+        
+        Args:
+            action: 要执行的操作
+            edr_info: EDR/防护软件信息
+            implant_info: 植入程序信息
+            
+        Returns:
+            str: 检测风险评估提示词
+        """
+        return f"""你是一位网络安全专家，请评估以下操作被检测的可能性。
+
+### 操作信息
+{action}
+
+### EDR/防护软件信息
+{edr_info}
+
+### 植入程序/代理信息
+{implant_info}
+
+### 评估要求
+请根据以下因素评估检测风险：
+1. **EDR检测能力**：分析目标系统上的EDR是否能检测此类操作
+2. **操作特征**：操作是否会产生异常的网络流量、文件活动或进程行为
+3. **隐蔽性**：操作是否使用了隐蔽技术
+4. **历史数据**：类似操作的历史检测率
+
+### 输出格式要求
+请严格按照以下JSON格式返回：
+{{
+    "detection_risk": 1-5,
+    "reason": "详细的风险评估理由",
+    "mitigation_suggestions": ["降低风险的建议1", "建议2"],
+    "alternative_methods": ["替代方法1", "替代方法2"]
+}}
+
+风险等级说明：
+- 1: 低风险 - 不太可能被检测
+- 2: 中等风险 - 有一定检测可能
+- 3: 高风险 - 较高检测可能
+- 4: 很高风险 - 很可能被检测
+- 5: 极高风险 - 几乎肯定被检测
+
+只返回JSON，不要添加任何说明文字。"""
+
+    @staticmethod
+    def get_next_action_suggestion_prompt(
+        implant_info: str,
+        executed_tasks: List[str],
+        available_playbooks: List[Dict[str, Any]],
+        edr_info: str = ""
+    ) -> str:
+        """
+        获取下一步行动建议提示词（参考 harbinger 的设计）
+        
+        Args:
+            implant_info: 植入程序信息
+            executed_tasks: 已执行的任务列表
+            available_playbooks: 可用的Playbook列表
+            edr_info: EDR信息
+            
+        Returns:
+            str: 下一步行动建议提示词
+        """
+        tasks_text = "\n".join([f"- {t}" for t in executed_tasks]) if executed_tasks else "尚无已执行任务"
+        playbooks_text = json.dumps(available_playbooks, ensure_ascii=False, indent=2) if available_playbooks else "[]"
+        
+        return f"""你是一位网络安全专家，请根据当前情况建议下一步操作。
+
+### 植入程序/代理信息
+{implant_info}
+
+### 已执行任务
+{tasks_text}
+
+### 可用的Playbook/工具
+{playbooks_text}
+
+### EDR/防护软件信息
+{edr_info if edr_info else "未知"}
+
+### 建议要求
+1. **避免重复**：如果某个操作已成功执行，不需要再次执行
+2. **隐蔽性**：确保使用隐蔽技术，尽量融入环境
+3. **检测规避**：评估EDR是否可能检测到操作
+4. **逻辑顺序**：按照攻击生命周期的逻辑顺序建议操作
+
+### 一般操作顺序
+每个主机应执行：
+1. 初始侦察
+2. 检查主机上的有趣信息
+3. 禁用防御措施（如可行）
+4. 收集凭证
+5. 横向移动准备
+
+### 输出格式要求
+请严格按照以下JSON格式返回：
+{{
+    "suggested_actions": [
+        {{
+            "name": "操作名称",
+            "reason": "建议此操作的原因",
+            "playbook_id": "Playbook ID（如适用）",
+            "arguments": {{"参数名": "参数值"}},
+            "priority": 1-5,
+            "detection_risk": 1-5
+        }}
+    ],
+    "overall_assessment": "当前阶段的整体评估"
+}}
+
+如果没有建议的操作，返回空列表：{{"suggested_actions": [], "overall_assessment": "原因说明"}}
+
+只返回JSON，不要添加任何说明文字。"""
+
+    @staticmethod  
+    def get_report_generation_prompt(session_data: Dict[str, Any]) -> str:
+        """
+        获取报告生成提示词
+        
+        Args:
+            session_data: 会话数据
+            
+        Returns:
+            str: 报告生成提示词
+        """
+        return f"""请根据以下渗透测试数据生成一份专业的安全评估报告。
+
+### 测试信息
+目标: {session_data.get('target', 'unknown')}
+测试时间: {session_data.get('start_time', 'unknown')} - {session_data.get('end_time', 'unknown')}
+测试范围: {session_data.get('scope', '完整渗透测试')}
+
+### 发现的服务
+{json.dumps(session_data.get('discovered_services', []), ensure_ascii=False, indent=2)}
+
+### 发现的漏洞
+{json.dumps(session_data.get('vulnerabilities', []), ensure_ascii=False, indent=2)}
+
+### 获取的凭证
+{json.dumps(session_data.get('credentials', []), ensure_ascii=False, indent=2)}
+
+### 执行的攻击
+{json.dumps(session_data.get('attacks', []), ensure_ascii=False, indent=2)}
+
+### 报告结构要求
+请生成包含以下章节的报告：
+
+1. **执行摘要**
+   - 测试概述
+   - 关键发现
+   - 风险评级
+
+2. **测试范围和方法论**
+   - 测试目标
+   - 测试方法
+   - 使用的工具
+
+3. **详细发现**
+   - 高风险漏洞
+   - 中风险漏洞
+   - 低风险漏洞
+   - 信息泄露
+
+4. **攻击路径分析**
+   - 成功的攻击向量
+   - 权限提升路径
+   - 横向移动路径
+
+5. **修复建议**
+   - 紧急修复项
+   - 短期改进项
+   - 长期安全策略
+
+6. **技术附录**
+   - 详细技术数据
+   - 证据截图说明
+   - 使用的工具清单
+
+请使用Markdown格式生成报告。"""

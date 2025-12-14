@@ -34,6 +34,15 @@ class SubdomainEnumerationTool(ToolInterface):
             
             self.logger.info(f"开始子域名枚举: {domain}")
             
+            # 更新执行状态
+            self._update_execution_status(
+                f"subdomain_enum {domain}",
+                f"枚举 {domain} 的子域名",
+                "RECON_AGENT"
+            )
+            self._add_output_line(f"开始子域名枚举: {domain}")
+            self._add_output_line(f"使用方法: {', '.join(methods)}")
+            
             # 检查依赖
             if not DNS_AVAILABLE and "dns_brute" in methods:
                 self.logger.warning("dnspython未安装，DNS暴力破解功能不可用")
@@ -331,6 +340,15 @@ class DNSEnumerationTool(ToolInterface):
                 return {"success": False, "error": "未指定域名"}
             
             self.logger.info(f"开始DNS枚举: {domain}")
+            
+            # 更新执行状态
+            self._update_execution_status(
+                f"dns_enum {domain}",
+                f"查询 {domain} 的DNS记录",
+                "RECON_AGENT"
+            )
+            self._add_output_line(f"开始DNS枚举: {domain}")
+            self._add_output_line(f"查询记录类型: {', '.join(record_types)}")
             
             results = {}
             resolver = dns.resolver.Resolver()
