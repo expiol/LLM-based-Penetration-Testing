@@ -19,6 +19,7 @@ from langchain_openai import ChatOpenAI
 from ..orchestrator.states import AgentType
 from .tools_adapter import langchain_tool_registry, LangChainToolAdapter
 from ..utils.llm_retry import LLMRetryHandler, InputOptimizer, invoke_with_retry
+from ..utils.i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +91,9 @@ class ExecutionStateManager:
             temp_file.replace(self._state_file)
             # 调试日志
             if state.get("command") or state.get("output_lines"):
-                logger.debug(f"状态已写入: tool={state.get('tool')}, lines={len(state.get('output_lines', []))}")
+                logger.debug(t("agent.state_written", tool=state.get('tool'), lines=len(state.get('output_lines', []))))
         except Exception as e:
-            logger.warning(f"写入状态文件失败: {e}")
+            logger.warning(t("agent.write_state_failed", error=str(e)))
     
     def _read_state(self) -> Dict[str, Any]:
         """从文件读取状态"""
@@ -118,7 +119,7 @@ class ExecutionStateManager:
         except json.JSONDecodeError as e:
             logger.debug(f"JSON解析失败，重置状态: {e}")
         except Exception as e:
-            logger.debug(f"读取状态文件失败: {e}")
+            logger.debug(t("agent.read_state_file_failed", error=str(e)))
         return default_state
     
     def set_current_execution(self, agent: str, tool: str, command: str, description: str = ""):
@@ -322,7 +323,7 @@ class AgentCallbackHandler(AsyncCallbackHandler):
                 execution_state.add_output_line(f"✅ LLM推理完成 (第{self.iteration_count}轮)")
                 
         except Exception as e:
-            logger.debug(f"无法解析LLM响应: {e}")
+            logger.debug(t("agent.parse_llm_failed", error=str(e)))
             execution_state.add_output_line(f"✅ LLM推理完成 (第{self.iteration_count}轮)")
         
         self.execution_logs.append({
@@ -570,7 +571,7 @@ class AgentCallbackHandler(AsyncCallbackHandler):
                 })
                 
         except Exception as e:
-            logger.error(f"输出解析失败: {e}", exc_info=True)
+            logger.error(t("agent.output_parse_failed", error=str(e)), exc_info=True)
             # 解析失败时，至少显示基本信息
             output_preview = output[:150] + "..." if len(output) > 150 else output
             execution_state.add_output_line(f"✅ 工具执行完成: {output_preview}")
@@ -961,9 +962,9 @@ class LangChainBaseAgent(ABC):
         
         # 🔧 检查输入长度，如果过长则压缩
         if len(input_text) > self._max_input_length:
-            self.logger.warning(f"输入过长 ({len(input_text)} 字符)，正在压缩...")
+            self.logger.warning(t("agent.input_too_long", length=len(input_text)))
             input_text = self._compress_input(input_text, target, stage, todos)
-            self.logger.info(f"输入压缩后: {len(input_text)} 字符")
+            self.logger.info(t("agent.input_compressed", length=len(input_text)))
         
         return input_text
     
@@ -1032,7 +1033,7 @@ class LangChainBaseAgent(ABC):
         # 使用LLM判断任务是否成功
         success, extracted_data, error_msg = self._evaluate_result_with_llm(output, target_info, tools_used)
         
-        self.logger.info(f"LLM评估结果: success={success}, tools_used={tools_used}")
+        self.logger.info(t("agent.llm_eval_result", success=success, tools=tools_used))
         
         return self.create_result(
             success=success,
@@ -1106,16 +1107,16 @@ Agent类型: {self.agent_type.value}
                 error = evaluation.get("error")
                 reason = evaluation.get("reason", "")
                 
-                self.logger.info(f"LLM评估: success={success}, reason={reason}")
+                self.logger.info(t("agent.llm_eval_success", success=success, reason=reason))
                 
                 return success, findings, error
             else:
                 # 无法解析，默认成功（如果有工具执行）
-                self.logger.warning(f"无法解析LLM评估结果: {response_text[:200]}")
+                self.logger.warning(t("agent.cannot_parse_llm_eval", text=response_text[:200]))
                 return len(tools_used) > 0, {}, None
                 
         except Exception as e:
-            self.logger.error(f"LLM评估失败: {e}")
+            self.logger.error(t("agent.llm_eval_failed", error=str(e)))
             # 评估失败时，如果有工具执行就认为成功
             return len(tools_used) > 0, {}, None
     

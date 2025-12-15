@@ -159,7 +159,7 @@ class LangChainToolAdapter(BaseTool):
                             todo_timeout = todo_config.get("timeout")
                             if todo_timeout:
                                 tool_context["timeout"] = todo_timeout
-                                logger.info(f"Tool {self.name} using timeout from todo config: {todo_timeout}秒")
+                                logger.info(t("agent.tool_timeout_from_config", name=self.name, timeout=todo_timeout))
                                 break
             except:
                 pass

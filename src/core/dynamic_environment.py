@@ -13,6 +13,7 @@ import json
 import uuid
 from pathlib import Path
 from ..utils.unified_logger import get_logger
+from ..utils.i18n import t
 
 logger = get_logger("dynamic_environment")
 
@@ -71,7 +72,7 @@ class DynamicEnvironmentManager:
             else:
                 logger.warning(t("env.no_package_managers"))
             
-            logger.info("动态环境管理器初始化完成")
+            logger.info(t("env.init_complete"))
             
         except Exception as e:
             logger.error(t("env.init_failed", error=str(e)))
@@ -89,7 +90,7 @@ class DynamicEnvironmentManager:
             bool: 是否准备成功
         """
         try:
-            logger.info(f"为阶段 {stage_type} 准备环境")
+            logger.info(t("env.prepare_stage", stage=stage_type))
             
             # 获取阶段所需的环境配置
             environment_requirements = self._get_stage_requirements(stage_type, stage_config)
@@ -108,7 +109,7 @@ class DynamicEnvironmentManager:
             return True
             
         except Exception as e:
-            logger.error(f"环境准备失败: {e}")
+            logger.error(t("env.prepare_failed", error=str(e)))
             return False
     
     def _get_stage_requirements(self, stage_type: str, stage_config: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -155,7 +156,7 @@ class DynamicEnvironmentManager:
             action_type = action.get("action")
             action_id = str(uuid.uuid4())
             
-            logger.info(f"执行环境操作: {action_type}")
+            logger.info(t("env.execute_action", action=action_type))
             
             # 记录操作历史
             action_record = {
@@ -189,7 +190,7 @@ class DynamicEnvironmentManager:
             return result.get("success", False)
             
         except Exception as e:
-            logger.error(f"环境操作执行失败: {e}")
+            logger.error(t("env.action_failed", error=str(e)))
             return False
     
     async def _install_package(self, action: Dict[str, Any]) -> Dict[str, Any]:
@@ -203,7 +204,7 @@ class DynamicEnvironmentManager:
             
             # 检查是否已安装
             if await self._is_package_installed(package, package_manager):
-                logger.info(f"软件包 {package} 已安装")
+                logger.info(t("env.package_installed", package=package))
                 return {"success": True, "message": f"软件包 {package} 已安装"}
             
             # 构建安装命令
@@ -221,12 +222,12 @@ class DynamicEnvironmentManager:
             
             if result.get("success", False):
                 self.installed_packages.append(package)
-                logger.info(f"软件包 {package} 安装成功")
+                logger.info(t("env.package_install_success", package=package))
             
             return result
             
         except Exception as e:
-            logger.error(f"软件包安装失败: {e}")
+            logger.error(t("env.package_install_failed", error=str(e)))
             return {"success": False, "error": str(e)}
     
     async def _create_file(self, action: Dict[str, Any]) -> Dict[str, Any]:
@@ -261,12 +262,12 @@ class DynamicEnvironmentManager:
                     f.write(content)
             
             self.created_files.append(file_path)
-            logger.info(f"文件创建成功: {file_path}")
+            logger.info(t("env.file_created", path=file_path))
             
             return {"success": True, "message": f"文件创建成功: {file_path}"}
             
         except Exception as e:
-            logger.error(f"文件创建失败: {e}")
+            logger.error(t("env.file_create_failed", error=str(e)))
             return {"success": False, "error": str(e)}
     
     async def _execute_command(self, action: Dict[str, Any]) -> Dict[str, Any]:
@@ -289,7 +290,7 @@ class DynamicEnvironmentManager:
             return result
             
         except Exception as e:
-            logger.error(f"命令执行失败: {e}")
+            logger.error(t("env.execute_action_failed", error=str(e)))
             return {"success": False, "error": str(e)}
     
     async def _set_environment(self, action: Dict[str, Any]) -> Dict[str, Any]:
@@ -301,12 +302,12 @@ class DynamicEnvironmentManager:
                 os.environ[key] = str(value)
                 self.environment_variables[key] = str(value)
             
-            logger.info(f"环境变量设置成功: {list(variables.keys())}")
+            logger.info(t("env.vars_set", vars=', '.join(list(variables.keys()))))
             
             return {"success": True, "message": f"环境变量设置成功: {list(variables.keys())}"}
             
         except Exception as e:
-            logger.error(f"环境变量设置失败: {e}")
+            logger.error(t("env.vars_set_failed", error=str(e)))
             return {"success": False, "error": str(e)}
     
     async def _create_directory(self, action: Dict[str, Any]) -> Dict[str, Any]:
@@ -320,12 +321,12 @@ class DynamicEnvironmentManager:
             
             os.makedirs(directory_path, mode=permissions, exist_ok=True)
             
-            logger.info(f"目录创建成功: {directory_path}")
+            logger.info(t("env.dir_created", path=directory_path))
             
             return {"success": True, "message": f"目录创建成功: {directory_path}"}
             
         except Exception as e:
-            logger.error(f"目录创建失败: {e}")
+            logger.error(t("env.dir_create_failed", error=str(e)))
             return {"success": False, "error": str(e)}
     
     async def _download_file(self, action: Dict[str, Any]) -> Dict[str, Any]:
@@ -343,12 +344,12 @@ class DynamicEnvironmentManager:
             
             if result.get("success", False):
                 self.created_files.append(destination)
-                logger.info(f"文件下载成功: {destination}")
+                logger.info(t("env.file_downloaded", path=destination))
             
             return result
             
         except Exception as e:
-            logger.error(f"文件下载失败: {e}")
+            logger.error(t("env.file_download_failed", error=str(e)))
             return {"success": False, "error": str(e)}
     
     async def _run_command(self, command: List[str], working_directory: str = None, timeout: int = 300) -> Dict[str, Any]:
@@ -381,10 +382,10 @@ class DynamicEnvironmentManager:
                 
             except asyncio.TimeoutError:
                 process.kill()
-                return {"success": False, "error": "命令执行超时"}
+                return {"success": False, "error": t("env.cmd_timeout")}
                 
         except Exception as e:
-            logger.error(f"命令执行失败: {e}")
+            logger.error(t("env.run_command_failed", error=str(e)))
             return {"success": False, "error": str(e)}
     
     async def _is_package_installed(self, package: str, package_manager: str) -> bool:
@@ -403,7 +404,7 @@ class DynamicEnvironmentManager:
             return result.get("success", False)
             
         except Exception as e:
-            logger.error(f"检查软件包安装状态失败: {e}")
+            logger.error(t("env.check_package_failed", error=str(e)))
             return False
     
     def _is_command_allowed(self, command: str) -> bool:
@@ -425,7 +426,7 @@ class DynamicEnvironmentManager:
         try:
             configured_path.mkdir(parents=True, exist_ok=True)
             workspace_dir = configured_path
-            logger.info("工作空间路径: %s", workspace_dir)
+            logger.info(t("env.workspace_path", path=workspace_dir))
         except OSError as exc:
             fallback = Path(tempfile.gettempdir()) / "llm_pentest_workspace"
             fallback.mkdir(parents=True, exist_ok=True)
@@ -451,7 +452,7 @@ class DynamicEnvironmentManager:
                 if await asyncio.wait_for(self._is_command_available(manager), timeout=2.0):
                     available_managers.append(manager)
             except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"检查包管理器 {manager} 超时或失败: {e}")
+                logger.debug(t("env.check_manager_timeout", manager=manager, error=str(e)))
                 continue
         
         self.environment_state["available_package_managers"] = available_managers

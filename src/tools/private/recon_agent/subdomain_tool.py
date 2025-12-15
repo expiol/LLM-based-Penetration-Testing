@@ -12,6 +12,7 @@ except ImportError:
 import requests
 from typing import Dict, Any, List, Set
 from ....core.agent_tool_manager import ToolInterface
+from ....utils.i18n import t
 
 
 class SubdomainEnumerationTool(ToolInterface):
@@ -32,7 +33,7 @@ class SubdomainEnumerationTool(ToolInterface):
             if not domain:
                 return {"success": False, "error": "未指定域名"}
             
-            self.logger.info(f"开始子域名枚举: {domain}")
+            self.logger.info(t("tool.subdomain.start", domain=domain))
             
             # 更新执行状态（不传agent参数，让_update_execution_status从context自动获取并格式化）
             self._update_execution_status(
@@ -78,7 +79,7 @@ class SubdomainEnumerationTool(ToolInterface):
                         found_subdomains.update(subdomains)
                         
                 except Exception as e:
-                    self.logger.error(f"方法 {method} 执行失败: {e}")
+                    self.logger.error(t("tool.subdomain.method_failed", method=method, error=str(e)))
                     results[method] = {"error": str(e)}
             
             # 验证发现的子域名
@@ -98,7 +99,7 @@ class SubdomainEnumerationTool(ToolInterface):
             }
             
         except Exception as e:
-            self.logger.error(f"子域名枚举失败: {e}")
+            self.logger.error(t("tool.subdomain.enum_failed", error=str(e)))
             return {"success": False, "error": str(e)}
     
     async def _dns_bruteforce(self, domain: str) -> Set[str]:
@@ -173,7 +174,7 @@ class SubdomainEnumerationTool(ToolInterface):
                             found_subdomains.add(line)
                             
         except Exception as e:
-            self.logger.error(f"证书透明度查询失败: {e}")
+            self.logger.error(t("tool.subdomain.cert_failed", error=str(e)))
         
         return found_subdomains
     
@@ -190,7 +191,7 @@ class SubdomainEnumerationTool(ToolInterface):
             pass
             
         except Exception as e:
-            self.logger.error(f"搜索引擎查询失败: {e}")
+            self.logger.error(t("tool.subdomain.search_failed", error=str(e)))
         
         return found_subdomains
     
@@ -337,7 +338,7 @@ class DNSEnumerationTool(ToolInterface):
             if not domain:
                 return {"success": False, "error": "未指定域名"}
             
-            self.logger.info(f"开始DNS枚举: {domain}")
+            self.logger.info(t("tool.subdomain.start_dns", domain=domain))
             
             # 更新执行状态（不传agent参数，让_update_execution_status从context自动获取并格式化）
             self._update_execution_status(

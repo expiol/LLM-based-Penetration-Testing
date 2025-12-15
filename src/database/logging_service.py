@@ -13,6 +13,7 @@ from .models import (
     HumanIntervention, SelfCorrection, VulnerabilityDiscovery
 )
 from ..orchestrator.states import KillChainState, TaskStatus, AgentType
+from ..utils.i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +57,12 @@ class PentestLoggingService:
                 db.commit()
                 
                 self.current_session_id = session_id
-                logger.info(f"开始渗透测试会话: {session_id}, 目标: {target_url}")
+                logger.info(t("db.session_started", session_id=session_id, target=target_url))
                 
                 return session_id
                 
         except Exception as e:
-            logger.error(f"创建渗透测试会话失败: {e}")
+            logger.error(t("db.create_session_failed", error=str(e)))
             raise
     
     def update_session_stage(self, session_id: str, stage: KillChainState, status: TaskStatus = None):
@@ -86,10 +87,10 @@ class PentestLoggingService:
                     session.updated_at = datetime.utcnow()
                     
                     db.commit()
-                    logger.debug(f"更新会话 {session_id} 阶段为: {stage}")
+                    logger.debug(t("db.update_stage", session_id=session_id, stage=stage))
                 
         except Exception as e:
-            logger.error(f"更新会话阶段失败: {e}")
+            logger.error(t("db.update_session_stage_failed", error=str(e)))
     
     def complete_session(self, session_id: str, success: bool = True):
         """
@@ -111,11 +112,12 @@ class PentestLoggingService:
                     session.updated_at = datetime.utcnow()
                     
                     db.commit()
-                    logger.info(f"会话 {session_id} 完成，状态: {'成功' if success else '失败'}")
-        
+                logger.info(t("db.session_completed", 
+                            session_id=session_id, 
+                            status='成功' if success else '失败'))
+                
         except Exception as e:
-            logger.error(f"完成会话失败: {e}")
-    
+            logger.error(t("db.complete_session_failed", error=str(e)))
     def start_stage(self, session_id: str, stage: KillChainState, stage_name: str,
                    agent_type: AgentType, input_data: Dict[str, Any] = None) -> int:
         """
@@ -148,12 +150,12 @@ class PentestLoggingService:
                 db.refresh(stage_exec)
                 
                 self.current_stage_id = stage_exec.id
-                logger.info(f"开始阶段执行: {stage_name} (ID: {stage_exec.id})")
+                logger.info(t("db.start_stage_exec", stage=stage_name, id=stage_exec.id))
                 
                 return stage_exec.id
                 
         except Exception as e:
-            logger.error(f"开始阶段执行失败: {e}")
+            logger.error(t("db.start_stage_exec_failed", error=str(e)))
             raise
     
     def complete_stage(self, stage_id: int, success: bool, output_data: Dict[str, Any] = None,
@@ -190,11 +192,12 @@ class PentestLoggingService:
                         stage_exec.execution_time_seconds = int(execution_time)
                     
                     db.commit()
-                    logger.info(f"阶段执行 {stage_id} 完成，状态: {'成功' if success else '失败'}")
-        
+                logger.info(t("db.stage_exec_completed", 
+                            stage_id=stage_id, 
+                            status='成功' if success else '失败'))
+                
         except Exception as e:
-            logger.error(f"完成阶段执行失败: {e}")
-    
+            logger.error(t("db.complete_stage_failed", error=str(e)))
     def log_agent_action(self, session_id: str, agent_name: str, agent_type: AgentType,
                         log_level: str, log_type: str, message: str,
                         details: Dict[str, Any] = None, stage_id: int = None):
@@ -229,11 +232,7 @@ class PentestLoggingService:
                 db.commit()
         
         except Exception as e:
-            logger.error(f"记录Agent日志失败: {e}")
-    
-    def log_tool_execution(self, session_id: str, tool_name: str, command: str,
-                          parameters: Dict[str, Any] = None, stage_id: int = None,
-                          tool_version: str = None, safe_mode: bool = True,
+            logger.error(t("db.log_agent_failed", error=str(e)))
                           risk_level: str = "LOW") -> int:
         """
         记录工具执行开始
@@ -273,7 +272,7 @@ class PentestLoggingService:
                 return tool_exec.id
         
         except Exception as e:
-            logger.error(f"记录工具执行失败: {e}")
+            logger.error(t("db.tool_exec_failed", error=str(e)))
             return -1
     
     def complete_tool_execution(self, tool_exec_id: int, success: bool,
@@ -310,10 +309,7 @@ class PentestLoggingService:
                     db.commit()
         
         except Exception as e:
-            logger.error(f"完成工具执行记录失败: {e}")
-    
-    def log_human_intervention(self, session_id: str, trigger_reason: str,
-                              intervention_type: str, request_data: Dict[str, Any],
+            logger.error(t("db.complete_tool_failed", error=str(e)))
                               stage_id: int = None) -> int:
         """
         记录人工干预请求
@@ -346,7 +342,7 @@ class PentestLoggingService:
                 return intervention.id
         
         except Exception as e:
-            logger.error(f"记录人工干预失败: {e}")
+            logger.error(t("db.log_intervention_failed", error=str(e)))
             return -1
     
     def get_session_summary(self, session_id: str) -> Dict[str, Any]:
@@ -399,7 +395,7 @@ class PentestLoggingService:
                 }
         
         except Exception as e:
-            logger.error(f"获取会话摘要失败: {e}")
+            logger.error(t("db.get_summary_failed", error=str(e)))
             return {}
     
     def get_current_executing_tasks(self, session_id: str) -> List[Dict[str, Any]]:
@@ -437,7 +433,7 @@ class PentestLoggingService:
                 return tasks
                 
         except Exception as e:
-            logger.error(f"获取当前执行任务失败: {e}")
+            logger.error(t("db.get_current_task_failed", error=str(e)))
             return []
     
     def _generate_task_description(self, tool_name: str, parameters: Dict[str, Any], command: str) -> str:

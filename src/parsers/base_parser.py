@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from enum import Enum
+from ..utils.i18n import t
 
 
 class ParseResultType(Enum):
@@ -204,7 +205,7 @@ class ParserRegistry:
                     parser_results = parser.parse(text, context)
                     results.extend(parser_results)
                 except Exception as e:
-                    parser.logger.error(f"解析失败: {e}")
+                    parser.logger.error(t("parser.parse_failed", error=str(e)))
         return results
 
 

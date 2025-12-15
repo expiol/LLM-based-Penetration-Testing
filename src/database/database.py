@@ -72,11 +72,11 @@ class DatabaseManager:
             # 创建所有表
             Base.metadata.create_all(bind=self.engine)
             
-            logger.info(f"数据库初始化成功: {self.database_url}")
+            logger.info(t("db.init_success", url=self.database_url))
             return True
             
         except Exception as e:
-            logger.error(f"数据库初始化失败: {e}")
+            logger.error(t("db.init_failed", error=str(e)))
             return False
     
     @contextmanager
@@ -96,7 +96,7 @@ class DatabaseManager:
             session.commit()
         except Exception as e:
             session.rollback()
-            logger.error(f"数据库操作失败: {e}")
+            logger.error(t("db.operation_failed", error=str(e)))
             raise
         finally:
             session.close()
@@ -117,7 +117,7 @@ class DatabaseManager:
         """关闭数据库连接"""
         if self.engine:
             self.engine.dispose()
-            logger.info("数据库连接已关闭")
+            logger.info(t("db.closed"))
 
 
 # 全局数据库管理器实例

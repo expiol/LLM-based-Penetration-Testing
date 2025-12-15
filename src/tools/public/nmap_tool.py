@@ -10,6 +10,7 @@ import os
 import sys
 from typing import Dict, Any, List
 from ...core.agent_tool_manager import ToolInterface
+from ...utils.i18n import t
 
 
 class NmapTool(ToolInterface):
@@ -105,7 +106,7 @@ class NmapTool(ToolInterface):
             # 使用动态timeout或默认timeout
             scan_timeout = dynamic_timeout if dynamic_timeout else self.timeout
             if dynamic_timeout:
-                self.logger.info(f"使用LLM指定的超时时间: {scan_timeout}秒")
+                self.logger.info(t("tool.nmap.timeout", timeout=scan_timeout))
             
             if not target:
                 return {"success": False, "error": "未指定目标"}
@@ -165,7 +166,7 @@ class NmapTool(ToolInterface):
             
             # 构建完整命令字符串
             full_command = " ".join(cmd)
-            self.logger.info(f"执行Nmap扫描: {full_command}")
+            self.logger.info(t("tool.nmap.execute", command=full_command))
             
             # 执行扫描
             result = await self._run_command(cmd, timeout=scan_timeout)
@@ -174,7 +175,7 @@ class NmapTool(ToolInterface):
             if not result.get("success", False):
                 error_msg = result.get("stderr", "").lower()
                 if ("root" in error_msg or "privileges" in error_msg or "permission" in error_msg) and scan_type != "tcp_connect":
-                    self.logger.warning("检测到权限错误，尝试使用tcp_connect扫描")
+                    self.logger.warning(t("tool.nmap.permission_fallback"))
                     # 移除-sS或-sU，添加-sT
                     cmd = [c for c in cmd if c not in ["-sS", "-sU"]]
                     if "-sT" not in cmd:
@@ -183,7 +184,7 @@ class NmapTool(ToolInterface):
                     if "-O" in cmd:
                         cmd.remove("-O")
                     
-                    self.logger.info(f"重试Nmap扫描（降级模式）: {' '.join(cmd)}")
+                    self.logger.info(t("tool.nmap.retry", command=' '.join(cmd)))
                     result = await self._run_command(cmd, timeout=scan_timeout)
                     scan_type = "tcp_connect"
             
@@ -212,7 +213,7 @@ class NmapTool(ToolInterface):
                 }
                 
         except Exception as e:
-            self.logger.error(f"Nmap工具执行失败: {e}")
+            self.logger.error(t("tool.nmap.execute_failed", error=str(e)))
             return {"success": False, "error": str(e)}
     
     def get_description(self) -> str:
@@ -290,7 +291,7 @@ class NmapTool(ToolInterface):
             return result
             
         except Exception as e:
-            self.logger.error(f"解析Nmap XML失败: {e}")
+            self.logger.error(t("tool.nmap.parse_xml_failed", error=str(e)))
             return self._parse_nmap_text(xml_output)
     
     def _parse_host(self, host_elem) -> Dict[str, Any]:

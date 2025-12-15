@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..prompts.master_prompts import MasterPrompts
+from ..utils.i18n import t
 
 
 class ReportFormat(Enum):
@@ -443,6 +444,6 @@ class ReportGenerator:
         filepath = self.output_dir / f"{filename}{ext}"
         filepath.write_text(content, encoding="utf-8")
         
-        self.logger.info(f"报告已保存: {filepath}")
+        self.logger.info(t("report.saved", path=filepath))
         return filepath
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from enum import Enum
 
 from ..orchestrator.states import AgentType
+from ..utils.i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ class ToolInterface(ABC):
             # 更新执行状态（不再在这里调用，由调用者在execute开始时设置）
             # 只添加命令执行日志
             self._add_output_line(f"$ {full_command}")
-            self.logger.info(f"执行命令: {full_command}")
+            self.logger.info(t("tool.execute_cmd", command=full_command))
             
             # 准备环境变量
             process_env = os.environ.copy()
@@ -281,7 +282,7 @@ class ToolInterface(ABC):
                 process.kill()
                 await process.wait()
                 self._add_output_line(f"⚠️ 命令超时 ({timeout}秒)")
-                self.logger.warning(f"命令超时: {full_command}")
+                self.logger.warning(t("tool.timeout_warn", command=full_command))
                 return {
                     "success": False,
                     "error": f"命令执行超时 ({timeout}秒)",
@@ -317,7 +318,7 @@ class ToolInterface(ABC):
         except Exception as e:
             error_msg = str(e)
             self._add_output_line(f"✗ 执行错误: {error_msg}")
-            self.logger.error(f"命令执行失败: {e}")
+            self.logger.error(t("tool.stream_cmd_failed", error=str(e)))
             return {
                 "success": False,
                 "error": error_msg,
@@ -407,11 +408,11 @@ class AgentToolManager:
             await asyncio.sleep(0)  # 让出控制权
             
             tool_count = len(self.get_available_tools())
-            self.logger.info(f"Agent {self.agent_type.value} 工具管理器初始化完成")
-            self.logger.info(f"可用工具: {tool_count} 个")
+            self.logger.info(t("tool.manager_init", agent=self.agent_type.value))
+            self.logger.info(t("tool.available_count", count=tool_count))
             
         except Exception as e:
-            self.logger.error(f"工具管理器初始化失败: {e}")
+            self.logger.error(t("tool.manager_init_failed", error=str(e)))
             # 不抛出异常，允许继续初始化其他组件
             pass
     
@@ -435,11 +436,11 @@ class AgentToolManager:
             elif scope == ToolScope.PUBLIC:
                 self.public_tools[tool.name] = tool
             
-            self.logger.info(f"工具注册成功: {tool.name} ({scope.value})")
+            self.logger.info(t("tool.register_success", name=tool.name, scope=scope.value))
             return True
             
         except Exception as e:
-            self.logger.error(f"工具注册失败: {e}")
+            self.logger.error(t("tool.register_failed", error=str(e)))
             return False
     
     async def execute_tool(self, tool_name: str, parameters: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -459,7 +460,7 @@ class AgentToolManager:
             if not tool:
                 # 检查是否有替代工具
                 available_tools = self.get_available_tools()
-                self.logger.warning(f"工具 {tool_name} 不存在，可用工具: {available_tools}")
+                self.logger.warning(t("tool.not_found", name=tool_name, available=', '.join(available_tools)))
                 
                 # 尝试自动安装工具（如果是系统命令工具）
                 install_result = await self._try_install_tool(tool_name)
@@ -467,7 +468,7 @@ class AgentToolManager:
                     # 重新获取工具
                     tool = self._get_tool(tool_name)
                     if tool:
-                        self.logger.info(f"工具 {tool_name} 安装成功，已可用")
+                        self.logger.info(t("tool.install_success", name=tool_name))
                     else:
                         return {
                             "success": False, 
@@ -517,11 +518,11 @@ class AgentToolManager:
                         risk_level="LOW"
                     )
                 except Exception as e:
-                    self.logger.debug(f"记录工具执行日志失败: {e}")
+                    self.logger.debug(t("tool.log_exec_failed", error=str(e)))
             
             # 更新执行状态（工具开始执行）- 优先于AgentCallbackHandler
             self._update_execution_state(tool, parameters, "start")
-            self.logger.info(f"工具 {tool_name} 开始执行，已更新执行状态")
+            self.logger.info(t("tool.exec_started", name=tool_name))
             
             # 执行工具
             start_time = datetime.now()
@@ -531,7 +532,7 @@ class AgentToolManager:
                 if not isinstance(result, dict):
                     result = {"success": False, "error": "工具返回了非字典结果", "tool": tool_name}
             except Exception as e:
-                self.logger.error(f"工具 {tool_name} 执行异常: {e}")
+                self.logger.error(t("tool.exec_exception", name=tool_name, error=str(e)))
                 result = {
                     "success": False,
                     "error": str(e),
@@ -541,7 +542,7 @@ class AgentToolManager:
             
             # 捕获工具输出并更新执行状态
             self._capture_tool_output(tool, parameters, result)
-            self.logger.debug(f"工具 {tool_name} 执行完成，已捕获输出")
+            self.logger.debug(t("tool.exec_completed", name=tool_name))
             
             # 完成工具执行记录
             if tool_exec_id and session_id:
@@ -555,7 +556,7 @@ class AgentToolManager:
                         stderr=result.get("error", "")
                     )
                 except Exception as e:
-                    self.logger.debug(f"完成工具执行记录失败: {e}")
+                    self.logger.debug(t("tool.complete_log_failed", error=str(e)))
             
             # 记录使用历史
             usage_record = {
@@ -568,11 +569,11 @@ class AgentToolManager:
             }
             self.tool_usage_history.append(usage_record)
             
-            self.logger.info(f"工具执行完成: {tool_name} - 成功: {result.get('success', False)}")
+            self.logger.info(t("tool.exec_complete", name=tool_name, success=result.get('success', False)))
             return result
             
         except Exception as e:
-            self.logger.error(f"工具执行失败: {e}")
+            self.logger.error(t("tool.exec_failed", error=str(e)))
             return {"success": False, "error": str(e)}
     
     def _build_command_description(self, tool_name: str, parameters: Dict[str, Any]) -> str:
@@ -615,9 +616,9 @@ class AgentToolManager:
                 )
                 # 添加日志
                 execution_state.add_output_line(f"开始执行: {tool.name}")
-                self.logger.info(f"执行状态已更新: tool={tool.name}, command={command}")
+                self.logger.info(t("tool.state_updated", name=tool.name, command=command))
         except Exception as e:
-            self.logger.warning(f"更新执行状态失败: {e}", exc_info=True)
+            self.logger.warning(t("tool.update_state_failed", error=str(e)), exc_info=True)
     
     def _capture_tool_output(self, tool: ToolInterface, parameters: Dict[str, Any], result: Dict[str, Any]):
         """捕获工具输出并添加到执行状态 - 通用方法"""
@@ -637,7 +638,7 @@ class AgentToolManager:
                     description=execution_state.current_description or f"执行 {tool.name}"
                 )
                 # 🔧 移除这里的日志输出，避免重复：命令日志已在工具的run_command_with_streaming中输出
-                self.logger.info(f"从结果中更新命令: {command}")
+                self.logger.info(t("tool.cmd_updated", command=command))
             elif not result.get("success"):
                 # 如果失败且没有command，尝试从参数构建命令
                 try:
@@ -659,7 +660,7 @@ class AgentToolManager:
                         # 🔧 只在失败且之前没有命令日志时才添加
                         execution_state.add_output_line(f"🔧 执行命令: {command}")
                 except Exception as e:
-                    self.logger.warning(f"构建命令失败: {e}")
+                    self.logger.warning(t("tool.build_cmd_failed", error=str(e)))
             
             # 如果工具执行成功，提取关键输出
             if result.get("success"):
@@ -668,27 +669,27 @@ class AgentToolManager:
                 tool_result = result.get("result")
                 if tool_result:
                     self._extract_and_add_output(tool.name, tool_result, execution_state)
-                    self.logger.debug(f"已提取结构化输出: {tool.name}")
+                    self.logger.debug(t("tool.output_extracted", name=tool.name))
                 
                 # 3. 提取raw_output（如果存在）
                 raw_output = result.get("raw_output")
                 if raw_output:
                     # 解析raw_output的关键信息
                     self._parse_raw_output(tool.name, raw_output, execution_state)
-                    self.logger.debug(f"已解析原始输出: {tool.name}")
+                    self.logger.debug(t("tool.raw_output_parsed", name=tool.name))
                 
                 # 4. 添加成功消息
                 if not tool_result and not raw_output:
                     execution_state.add_output_line(f"{tool.name} 执行成功")
-                    self.logger.debug(f"添加成功消息: {tool.name}")
+                    self.logger.debug(t("tool.success_msg_added", name=tool.name))
             else:
                 # 执行失败，添加错误信息
                 error = result.get("error", "工具执行失败")
                 execution_state.add_output_line(f"错误: {error}")
-                self.logger.warning(f"工具执行失败: {tool.name}, 错误: {error}")
+                self.logger.warning(t("tool.exec_failed_warn", name=tool.name, error=error))
                 
         except Exception as e:
-            self.logger.error(f"捕获工具输出失败: {e}", exc_info=True)
+            self.logger.error(t("tool.capture_output_failed", error=str(e)), exc_info=True)
     
     def _extract_and_add_output(self, tool_name: str, result: Any, execution_state):
         """从结构化结果中提取并添加输出"""
@@ -732,7 +733,7 @@ class AgentToolManager:
                     execution_state.add_output_line(result["message"])
                     
         except Exception as e:
-            self.logger.debug(f"提取输出失败: {e}")
+            self.logger.debug(t("tool.extract_output_failed", error=str(e)))
     
     def _parse_raw_output(self, tool_name: str, raw_output: str, execution_state):
         """解析原始输出并提取关键信息"""
@@ -757,7 +758,7 @@ class AgentToolManager:
                         execution_state.add_output_line(line[:80])  # 限制长度
                         
         except Exception as e:
-            self.logger.debug(f"解析原始输出失败: {e}")
+            self.logger.debug(t("tool.parse_raw_failed", error=str(e)))
     
     def get_available_tools(self) -> List[str]:
         """获取可用工具列表"""
@@ -839,7 +840,7 @@ class AgentToolManager:
             for tool_name, tool in global_public_tools.items():
                 if tool_name not in self.public_tools:
                     self.public_tools[tool_name] = tool
-                    self.logger.info(f"从全局注册表加载公有工具: {tool_name}")
+                    self.logger.info(t("tool.load_from_global", name=tool_name))
             
             # 从配置文件加载额外的公有工具
             public_tools_config = self.config.get("public_tools", [])
@@ -854,7 +855,7 @@ class AgentToolManager:
                 await self._auto_discover_public_tools()
                     
         except Exception as e:
-            self.logger.error(f"加载公有工具失败: {e}")
+            self.logger.error(t("tool.load_public_failed", error=str(e)))
     
     async def _auto_discover_public_tools(self):
         """自动发现并注册默认公有工具"""
@@ -889,13 +890,13 @@ class AgentToolManager:
                         await self.register_tool(tool, ToolScope.PUBLIC)
                         # 同时注册到全局注册表
                         global_tool_registry.register_public_tool(tool)
-                        self.logger.info(f"自动发现并注册公有工具: {tool.name}")
+                        self.logger.info(t("tool.auto_discovered", name=tool.name))
                 except Exception as e:
-                    self.logger.warning(f"自动发现工具失败 {tool_config.get('class')}: {e}")
+                    self.logger.warning(t("tool.auto_discover_failed", cls=tool_config.get('class'), error=str(e)))
                     continue
                     
         except Exception as e:
-            self.logger.error(f"自动发现公有工具失败: {e}")
+            self.logger.error(t("tool.auto_discover_all_failed", error=str(e)))
     
     async def _load_private_tools(self):
         """加载Agent私有工具"""
@@ -929,10 +930,10 @@ class AgentToolManager:
                         tool_config = self.config.get("private_tools", {}).get(name, {})
                         tool_instance = obj(tool_config)
                         await self.register_tool(tool_instance, ToolScope.PRIVATE)
-                        self.logger.info(f"✅ 成功加载私有工具: {name}")
+                        self.logger.info(t("tool.private_loaded", name=name))
                         await asyncio.sleep(0)  # 让出控制权
                     except Exception as e:
-                        self.logger.error(f"加载工具 {name} 失败: {e}", exc_info=True)
+                        self.logger.error(t("tool.load_failed", name=name, error=str(e)), exc_info=True)
                         # 尝试安装缺失的依赖
                         await self._try_install_missing_dependencies(str(e))
                         continue
@@ -946,15 +947,15 @@ class AgentToolManager:
                     self.logger.debug(f"Agent {self.agent_type.value} 的私有工具模块 {private_tools_path} 不存在（这是正常的，如果该Agent还没有实现私有工具）")
                 else:
                     # 其他导入错误，可能是依赖问题
-                    self.logger.warning(f"导入 {self.agent_type.value} 的私有工具模块失败: {error_msg}")
+                    self.logger.warning(t("tool.import_private_failed", agent=self.agent_type.value, error=error_msg))
                     await self._try_install_missing_dependencies(error_msg)
             except Exception as e:
                 # 其他错误才显示为警告或错误
-                self.logger.warning(f"加载 {self.agent_type.value} 的私有工具模块失败: {e}")
+                self.logger.warning(t("tool.load_private_module_failed", agent=self.agent_type.value, error=str(e)))
                 await self._try_install_missing_dependencies(str(e))
                 
         except Exception as e:
-            self.logger.error(f"加载私有工具失败: {e}", exc_info=True)
+            self.logger.error(t("tool.load_private_all_failed", error=str(e)), exc_info=True)
     
     async def _try_install_missing_dependencies(self, error_msg: str):
         """尝试根据错误信息安装缺失的依赖"""
@@ -973,7 +974,7 @@ class AgentToolManager:
         if not missing_packages:
             return
         
-        self.logger.info(f"检测到缺失的依赖包: {missing_packages}，尝试自动安装...")
+        self.logger.info(t("tool.missing_deps", packages=', '.join(missing_packages)))
         
         for package in missing_packages:
             try:
@@ -986,16 +987,16 @@ class AgentToolManager:
                 stdout, stderr = await process.communicate()
                 
                 if process.returncode == 0:
-                    self.logger.info(f"成功安装依赖包: {package}")
+                    self.logger.info(t("tool.dep_installed", package=package))
                     # 重新加载模块
                     try:
                         importlib.reload(importlib.import_module(f"src.tools.private.{self.agent_type.value.lower()}"))
                     except:
                         pass
                 else:
-                    self.logger.warning(f"安装依赖包 {package} 失败: {stderr.decode('utf-8', errors='ignore')}")
+                    self.logger.warning(t("tool.dep_install_failed", package=package, error=stderr.decode('utf-8', errors='ignore')))
             except Exception as e:
-                self.logger.error(f"安装依赖包 {package} 时出错: {e}")
+                self.logger.error(t("tool.dep_install_error", package=package, error=str(e)))
     
     
     async def _create_tool_from_config(self, tool_config: Dict[str, Any]) -> Optional[ToolInterface]:
@@ -1022,7 +1023,7 @@ class AgentToolManager:
             return tool_class(tool_instance_config)
             
         except Exception as e:
-            self.logger.error(f"创建工具实例失败: {e}")
+            self.logger.error(t("tool.create_instance_failed", error=str(e)))
             return None
     
     async def _try_install_tool(self, tool_name: str) -> Dict[str, Any]:
@@ -1124,7 +1125,7 @@ class AgentToolManager:
         manager = package_info["manager"]
         
         try:
-            self.logger.info(f"尝试安装工具 {tool_name} (包: {package}, 管理器: {manager}, 系统: {system})")
+            self.logger.info(t("tool.try_install", name=tool_name, package=package, manager=manager, system=system))
             
             # 检查包管理器是否可用
             if is_windows:
@@ -1259,7 +1260,7 @@ class AgentToolManager:
                 }
                 
         except Exception as e:
-            self.logger.error(f"安装工具 {tool_name} 失败: {e}")
+            self.logger.error(t("tool.install_tool_failed", name=tool_name, error=str(e)))
             return {
                 "success": False,
                 "error": str(e)

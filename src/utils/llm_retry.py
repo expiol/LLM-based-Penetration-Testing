@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Callable, Union
 from datetime import datetime
+from .i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class LLMRetryHandler:
                     logger.warning(
                         f"LLM调用失败 (尝试 {attempt + 1}/{self.max_retries + 1}): {str(e)[:200]}"
                     )
-                    logger.info(f"将在 {delay:.2f} 秒后重试...")
+                    logger.info(t("llm.retry_delay", delay=delay))
                     await asyncio.sleep(delay)
                 else:
                     # 不可重试或已达到最大重试次数

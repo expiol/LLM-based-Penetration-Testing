@@ -10,6 +10,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from ...core.agent_tool_manager import ToolInterface
+from ...utils.i18n import t
 
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -329,7 +330,7 @@ class CommandExecutorTool(ToolInterface):
             return result.get("success", False)
             
         except Exception as e:
-            self.logger.error(f"检查软件包安装状态失败: {e}")
+            self.logger.error(t("tool.cmd.check_package_failed", error=str(e)))
             return False
     
     def _is_command_allowed(self, command: str) -> bool:

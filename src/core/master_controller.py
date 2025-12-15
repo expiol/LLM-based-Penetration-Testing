@@ -76,7 +76,7 @@ class RayMasterController:
         
         # 确保 Ray 已初始化（应该已经在框架初始化时完成）
         if not self.execution_manager.is_ray_initialized():
-            self.logger.warning("Ray not initialized, initializing now...")
+            self.logger.warning(t("master.ray_not_initialized"))
             ray_config = config.get("ray", {})
             self.execution_manager.initialize_ray(ray_config)
         
@@ -163,12 +163,12 @@ class RayMasterController:
                     incompatible_params = ['parallel_tool_calls', 'tool_choice', 'response_format']
                     for param in incompatible_params:
                         if param in self.master_llm.model_kwargs:
-                            self.logger.warning(f"移除可能不兼容的参数: {param}")
+                            self.logger.warning(t("master.removing_incompatible_param", param=param))
                             del self.master_llm.model_kwargs[param]
             logger.success(t("master.llm_init_success", model_name=model_name))
             
         except Exception as e:
-            self.logger.error(f"主控LLM初始化失败: {e}")
+            self.logger.error(t("master.llm_init_failed_text", error=str(e)))
             self.master_llm = None
     
     async def register_agent(
@@ -197,10 +197,10 @@ class RayMasterController:
                 num_cpus=num_cpus,
                 num_gpus=num_gpus
             )
-            self.logger.info(f"Registered agent: {agent_type.value}")
+            self.logger.info(t("master.registered_agent", agent=agent_type.value))
             return actor
         except Exception as e:
-            self.logger.error(f"Failed to register agent {agent_type.value}: {e}")
+            self.logger.error(t("master.register_agent_failed", agent=agent_type.value, error=str(e)))
             raise
     
     async def start_penetration_test(
@@ -228,7 +228,7 @@ class RayMasterController:
             
             _print(f"\n{'=' * 72}", flush=True)
             _print(t("master.creating_session", session_id=session_id), flush=True)
-            self.logger.info(f"Creating session: {session_id}")
+            self.logger.info(t("master.creating_session_id", session_id=session_id))
             
             # 初始化TODO管理器
             _print(t("master.init_todo_manager"), flush=True)
@@ -275,7 +275,7 @@ class RayMasterController:
                 _print(t("master.plan_generated"), flush=True)
             except Exception as e:
                 _print(t("master.plan_generation_failed", error=str(e)), flush=True)
-                self.logger.error(f"执行计划生成失败: {e}", exc_info=True)
+                self.logger.error(t("master.plan_generation_failed_log", error=str(e)), exc_info=True)
                 raise
             
             if not execution_plan or not execution_plan.get("stages"):
@@ -446,7 +446,7 @@ class RayMasterController:
                 _print(t("master.llm_not_initialized"), flush=True)
                 raise ValueError(error_msg)
             
-            self.logger.info("调用主控LLM生成执行计划...")
+            self.logger.info(t("master.calling_llm"))
             _print(t("master.calling_llm"), flush=True)
             _print(t("master.target_label", target=target), flush=True)
             if target == "auto_extract":
@@ -455,13 +455,13 @@ class RayMasterController:
                     _print(t("master.raw_description", desc=raw_desc[:100]), flush=True)
             
             _print(t("master.llm_thinking"), flush=True)
-            self.logger.info("开始调用LLM API...")
+            self.logger.info(t("master.calling_llm_api"))
             
             try:
                 # 使用重试机制调用LLM
                 async def _invoke_llm():
                     _print(t("master.sending_request"), flush=True)
-                    self.logger.info("发送请求到LLM API...")
+                    self.logger.info(t("master.sending_request"))
                     
                     # 确保输出立即刷新
                     import sys
@@ -474,12 +474,12 @@ class RayMasterController:
                     )
                     
                     _print(t("master.response_received"), flush=True)
-                    self.logger.info("LLM API响应已接收")
+                    self.logger.info(t("master.response_received"))
                     sys.stdout.flush()
                     
                     content = response.content if hasattr(response, 'content') else str(response)
                     _print(t("master.response_success", length=len(content)), flush=True)
-                    self.logger.info(f"LLM响应接收成功，长度: {len(content)} 字符")
+                    self.logger.info(t("master.response_success", length=len(content)))
                     return response
                 
                 # 使用重试处理器执行
@@ -525,7 +525,7 @@ class RayMasterController:
                 execution_plan = json.loads(json_str)
                 _print(t("master.json_parsed"), flush=True)
             except json.JSONDecodeError as e:
-                self.logger.error(f"JSON解析失败，原始内容前500字符: {content[:500]}")
+                self.logger.error(t("master.json_parse_failed_content", content=content[:500]))
                 _print(t("master.json_parse_failed"), flush=True)
                 # 尝试更宽松的JSON提取
                 json_match = re.search(r'\{[\s\S]*"stages"[\s\S]*\}', content, re.DOTALL)
@@ -540,17 +540,17 @@ class RayMasterController:
             if "target" not in execution_plan:
                 execution_plan["target"] = target
             if "stages" not in execution_plan:
-                raise ValueError("执行计划中缺少stages字段")
+                raise ValueError(t("master.missing_stages_field"))
             
-            self.logger.info(f"执行计划生成成功，包含 {len(execution_plan.get('stages', []))} 个阶段")
+            self.logger.info(t("master.plan_generated_stages", count=len(execution_plan.get('stages', []))))
             return execution_plan
             
         except json.JSONDecodeError as e:
-            self.logger.error(f"解析LLM返回的JSON失败: {e}")
-            self.logger.error(f"LLM返回内容: {content[:500]}")
-            raise ValueError(f"无法解析执行计划JSON: {e}")
+            self.logger.error(t("master.parse_json_failed", error=str(e)))
+            self.logger.error(t("master.llm_returned_content", content=content[:500]))
+            raise ValueError(t("master.unable_to_parse_plan", error=str(e)))
         except Exception as e:
-            self.logger.error(f"生成执行计划失败: {e}")
+            self.logger.error(t("master.exec_plan_gen_failed", error=str(e)))
             raise
     
     async def _save_execution_plan_to_todos(
@@ -601,12 +601,12 @@ class RayMasterController:
             success = await self.todo_manager.create_todo_list(list_name, all_todos)
             
             if success:
-                self.logger.info(f"任务列表已保存，共 {len(all_todos)} 个任务")
+                self.logger.info(t("master.todos_saved_count", count=len(all_todos)))
             else:
-                raise ValueError("保存任务列表到TodoManager失败")
+                raise ValueError(t("master.save_todos_failed"))
                 
         except Exception as e:
-            self.logger.error(f"保存执行计划到TODO失败: {e}")
+            self.logger.error(t("master.save_plan_to_todo_failed", error=str(e)))
             raise
     
     async def _execute_from_todos_sequential(
@@ -640,7 +640,7 @@ class RayMasterController:
             stages = execution_plan.get("stages", [])
             
             if not stages:
-                self.logger.warning("执行计划中没有阶段，使用默认Kill Chain")
+                self.logger.warning(t("master.no_stages_use_default"))
                 return await self._execute_kill_chain_sequential(session_id, target, options)
             
             # 🔧 严格的阶段顺序定义（Kill Chain 顺序）
@@ -678,7 +678,7 @@ class RayMasterController:
                             prev_stage_exists = any(s.get("type", "").lower() == prev_stage for s in stages)
                             if prev_stage_exists:
                                 _print(t("master.stage_waiting", stage_name=stage_name, prev_stage=prev_stage), flush=True)
-                                self.logger.warning(f"阶段 {stage_type} 需要等待前置阶段 {prev_stage} 完成")
+                                self.logger.warning(t("master.stage_wait_previous", stage=stage_type, prev_stage=prev_stage))
                                 # 跳过当前阶段，让前置阶段先执行
                                 # 这种情况不应该发生，因为stages应该是有序的
                                 # 但作为安全检查保留
@@ -705,7 +705,7 @@ class RayMasterController:
                     global_context = compressed_context
                     _print(t("master.context_compressed", size=len(json.dumps(global_context, ensure_ascii=False))), flush=True)
                 
-                self.logger.info(f"执行阶段: {stage_name} ({stage_type}), 重试次数: {stage_retry_count}")
+                self.logger.info(t("master.executing_stage_info", stage=stage_name, stage_type=stage_type, count=stage_retry_count))
                 
                 # 🔧 更新当前阶段状态
                 await self.state_manager.update_session_state(session_id, {
@@ -744,20 +744,20 @@ class RayMasterController:
                 # 获取对应的Agent类型
                 kill_chain_state = self._map_stage_type_to_kill_chain(stage_type)
                 if not kill_chain_state:
-                    self.logger.warning(f"无法映射阶段类型: {stage_type}")
+                    self.logger.warning(t("master.cannot_map_stage_type", stage_type=stage_type))
                     stage_index += 1
                     continue
                 
                 agent_type = self.kill_chain_mapping.get(kill_chain_state)
                 if not agent_type:
-                    self.logger.warning(f"没有对应的Agent类型: {kill_chain_state}")
+                    self.logger.warning(t("master.no_agent_type_for", agent_type=kill_chain_state))
                     stage_index += 1
                     continue
                 
                 # 获取Agent Actor
                 actor = self.agent_pool.get_actor(agent_type)
                 if not actor:
-                    self.logger.error(f"无法获取Agent Actor: {agent_type}")
+                    self.logger.error(t("master.cannot_get_agent_actor", agent_type=agent_type))
                     _print(t("master.cannot_get_agent"), flush=True)
                     stage_index += 1
                     continue
@@ -777,7 +777,7 @@ class RayMasterController:
                     execution_state.add_output_line(f"📍 开始阶段: {stage_name}")
                     execution_state.add_output_line(f"🤖 分配给: {agent_display_name}")
                 except Exception as e:
-                    self.logger.warning(f"清除执行状态失败: {e}")
+                    self.logger.warning(t("master.clear_exec_state_failed", error=str(e)))
                 
                 # 准备执行上下文，包含任务列表
                 context = [{
@@ -839,7 +839,7 @@ class RayMasterController:
                         retry_count += 1
                         if retry_count < max_retries:
                             _print(t("master.execution_timeout", retry=retry_count, max=max_retries), flush=True)
-                            self.logger.warning(f"Agent {agent_type.value} 执行超时，重试 {retry_count}/{max_retries}")
+                            self.logger.warning(t("master.agent_timeout_retry", agent=agent_type.value, retry=retry_count, max=max_retries))
                         else:
                             result = {
                                 "success": False,
@@ -855,12 +855,12 @@ class RayMasterController:
                         
                         # 检查是否是Actor死亡错误
                         if "Can't find actor" in error_msg or "actor is dead" in error_msg.lower():
-                            self.logger.error(f"Actor {agent_type.value} 已死亡，尝试重启")
+                            self.logger.error(t("master.actor_dead_restart", actor=agent_type.value))
                             _print(t("master.actor_dead"), flush=True)
                             # 重启Actor
                             await self._restart_actor(agent_type)
                         
-                        self.logger.error(f"Agent {agent_type.value} 执行错误: {error_msg}")
+                        self.logger.error(t("master.agent_exec_error", agent=agent_type.value, error=error_msg))
                         if retry_count < max_retries:
                             _print(t("master.execution_error", error=error_msg[:50], retry=retry_count, max=max_retries), flush=True)
                         else:
@@ -903,7 +903,7 @@ class RayMasterController:
                     "timestamp": datetime.now().isoformat()
                 }
                 attempt_history.append(attempt_info)
-                self.logger.info(f"记录尝试历史: {attempt_info}")
+                self.logger.info(t("master.record_attempt_history", info=str(attempt_info)))
                 
                 # 📊 更新阶段信息摘要（累积有用信息）
                 # 先获取全局上下文
@@ -929,7 +929,7 @@ class RayMasterController:
                         execution_state.add_output_line(f"📊 [步骤 #{len(attempt_history)}] 收集到有用信息: {useful_info}")
                         _print(t("master.useful_info", info=useful_info), flush=True)
                     except Exception as e:
-                        self.logger.warning(f"输出有用信息失败: {e}")
+                        self.logger.warning(t("master.output_useful_info_failed", error=str(e)))
                 
                 # 记录已尝试的工具
                 for tool in tools_used:
@@ -1094,7 +1094,7 @@ class RayMasterController:
                             try:
                                 await self.todo_manager.mark_todo_completed(todo_id)
                             except Exception as e:
-                                self.logger.warning(f"标记todo {todo_id} 完成失败: {e}")
+                                self.logger.warning(t("master.mark_todo_complete_failed", todo_id=todo_id, error=str(e)))
                     
                     if evaluation.get("need_more_info") and stage_retry_count < max_stage_retries:
                         # 主Agent认为信息不足，需要继续调用Agent
@@ -1203,7 +1203,9 @@ class RayMasterController:
                         except Exception:
                             pass
                         
-                        self.logger.info(f"阶段 {stage_type} 完成，结果摘要: {stage_results_summary.get(stage_type, '')[:100]}")
+                        self.logger.info(t("master.stage_complete_summary_result", 
+                                         stage=stage_type, 
+                                         summary=stage_results_summary.get(stage_type, '')[:100]))
                     
                     # 阶段完成，移动到下一阶段
                     _print(f"", flush=True)
@@ -1222,7 +1224,7 @@ class RayMasterController:
                     continue  # 继续执行下一阶段
                     
         except Exception as e:
-            self.logger.error(f"从TODO执行失败: {e}")
+            self.logger.error(t("master.exec_from_todo_failed", error=str(e)))
             results.append({
                 "success": False,
                 "error": str(e)
@@ -1540,7 +1542,8 @@ class RayMasterController:
             json_match = re.search(r'\{[\s\S]*\}', response_text)
             if json_match:
                 evaluation = json.loads(json_match.group(0))
-                self.logger.info(f"主Agent评估结果: {evaluation.get('evaluation', '')[:100]}")
+                self.logger.info(t("master.master_agent_eval_result", 
+                                 result=str(evaluation.get('evaluation', ''))[:100]))
                 
                 # 更新全局上下文中的关键发现
                 key_findings = evaluation.get("key_findings", [])
@@ -1551,12 +1554,12 @@ class RayMasterController:
                 
                 return evaluation
             else:
-                self.logger.warning(f"无法解析主Agent评估结果: {response_text[:200]}")
+                self.logger.warning(t("master.cannot_parse_eval", text=response_text[:200]))
                 # 🔧 修复：解析失败时，基于累积信息判断
                 return self._fallback_evaluation(stage_summary, result, stage_type)
                 
         except Exception as e:
-            self.logger.error(f"评估阶段结果失败: {e}")
+            self.logger.error(t("master.eval_stage_failed", error=str(e)))
             # 🔧 修复：评估失败时，基于累积信息判断，而不是默认继续
             return self._fallback_evaluation(stage_summary, result, stage_type, error=str(e))
     
@@ -1589,7 +1592,10 @@ class RayMasterController:
             if info.get("info") and info.get("info") != "无有用信息"
         )
         
-        self.logger.info(f"回退评估: 阶段={stage_type}, 累积信息={useful_info_count}条, 尝试次数={total_attempts}")
+        self.logger.info(t("master.fallback_eval", 
+                         stage=stage_type, 
+                         count=useful_info_count, 
+                         attempts=total_attempts))
         
         # 基于阶段类型和累积信息判断
         if stage_type == "reconnaissance":
@@ -1812,13 +1818,15 @@ class RayMasterController:
                         compressed["_llm_summary"] = llm_summary
                         
                 except Exception as e:
-                    self.logger.warning(f"LLM历史总结失败: {e}")
+                    self.logger.warning(t("master.llm_history_summary_failed", error=str(e)))
             
-            self.logger.info(f"上下文压缩完成: {original_size} -> {len(json.dumps(compressed, ensure_ascii=False))} 字符")
+            self.logger.info(t("master.context_compress_complete", 
+                             original=original_size, 
+                             compressed=len(json.dumps(compressed, ensure_ascii=False))))
             return compressed
             
         except Exception as e:
-            self.logger.error(f"上下文压缩失败: {e}")
+            self.logger.error(t("master.context_compress_failed", error=str(e)))
             # 返回简化的上下文
             return {
                 "target": global_context.get("target", ""),
@@ -1854,10 +1862,10 @@ class RayMasterController:
                 
                 # 添加到TODO列表
                 await self.todo_manager.add_todo(list_name, todo_item)
-                self.logger.info(f"动态添加任务: {task.get('name')}")
+                self.logger.info(t("master.dynamic_add_task", task=task.get('name')))
                 
         except Exception as e:
-            self.logger.error(f"添加动态任务失败: {e}")
+            self.logger.error(t("master.add_dynamic_task_failed", error=str(e)))
     
     async def _execute_from_todos_parallel(
         self,
@@ -2134,7 +2142,7 @@ class RayMasterController:
             
             return None
         except Exception as e:
-            self.logger.error(f"获取当前执行任务失败: {e}")
+            self.logger.error(t("master.get_current_task_failed", error=str(e)))
             return None
     
     async def get_all_tasks(self, session_id: str) -> Dict[str, Any]:
@@ -2179,7 +2187,7 @@ class RayMasterController:
                 "total_tasks": len(all_todos)
             }
         except Exception as e:
-            self.logger.error(f"获取任务列表失败: {e}")
+            self.logger.error(t("master.get_task_list_failed", error=str(e)))
             return {
                 "progress": {},
                 "tasks_by_status": {},
@@ -2223,7 +2231,7 @@ class RayMasterController:
                         ray.cancel(actor_future, force=True)
                         _print(t("master.agent_task_terminated"), flush=True)
                     except Exception as e:
-                        self.logger.warning(f"终止Agent任务时发生错误: {e}")
+                        self.logger.warning(t("master.terminate_agent_error", error=str(e)))
                     finally:
                         self.current_actor_futures.pop(session_id, None)
             
@@ -2237,7 +2245,7 @@ class RayMasterController:
                     except asyncio.CancelledError:
                         _print(t("master.execution_loop_cancelled"), flush=True)
                     except Exception as e:
-                        self.logger.warning(f"取消执行循环时发生错误: {e}")
+                        self.logger.warning(t("master.cancel_exec_loop_error", error=str(e)))
                     finally:
                         self.running_sessions.pop(session_id, None)
             
@@ -2347,7 +2355,7 @@ class RayMasterController:
             }
             
         except Exception as e:
-            self.logger.error(f"处理用户中断失败: {e}", exc_info=True)
+            self.logger.error(t("master.handle_user_interrupt_failed", error=str(e)), exc_info=True)
             return {
                 "success": False,
                 "error": str(e)
@@ -2408,7 +2416,7 @@ class RayMasterController:
             self.logger.debug(f"json_repair失败: {e}")
         
         # 全部失败
-        self.logger.error(f"无法解析JSON响应: {response_text[:200]}...")
+        self.logger.error(t("master.cannot_parse_json_response", text=response_text[:200]))
         return None
     
     async def _replan_with_new_info(
@@ -2473,7 +2481,7 @@ class RayMasterController:
             }
             
         except Exception as e:
-            self.logger.error(f"LLM重新规划失败: {e}", exc_info=True)
+            self.logger.error(t("master.llm_replan_failed", error=str(e)), exc_info=True)
             return {
                 "success": False,
                 "error": f"LLM调用失败: {str(e)}"
@@ -2705,7 +2713,7 @@ class RayMasterController:
             }
             
         except Exception as e:
-            self.logger.error(f"中断和重新规划失败: {e}")
+            self.logger.error(t("master.interrupt_replan_failed", error=str(e)))
             return {
                 "success": False,
                 "error": str(e)
@@ -2719,4 +2727,4 @@ class RayMasterController:
             self.running_sessions.pop(session_id, None)
         self.agent_pool.shutdown()
         # Ray 关闭由执行管理器统一管理
-        self.logger.info("Ray Master Controller shutdown")
+        self.logger.info(t("master.ray_shutdown"))
