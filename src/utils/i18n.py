@@ -355,6 +355,16 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "agent.tool_execution_complete": "✅ Tool execution complete: {preview}",
         "agent.tool_error": "❌ Tool error: {error}",
         
+        # Agent任务描述相关
+        "agent.unknown_target": "Unknown Target",
+        "agent.default_ports": "Default Ports",
+        "agent.unknown_domain": "Unknown Domain",
+        "agent.unknown_url": "Unknown URL",
+        "agent.process": "processing",
+        "agent.nmap_scan_desc": "Scan {target} ports {ports} using nmap",
+        "agent.subdomain_enum_desc": "Enumerate subdomains of {domain}",
+        "agent.sqli_test_desc": "Test {url} for SQL injection vulnerabilities",
+        
         # Base Agent additional messages
         "agent.write_state_failed": "Failed to write state file: {error}",
         "agent.output_parse_failed": "Output parsing failed: {error}",
@@ -857,6 +867,16 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "agent.tool_completed_preview": "✅ {tool_name} 完成: {preview}",
         "agent.tool_execution_complete": "✅ 工具执行完成: {preview}",
         "agent.tool_error": "❌ 工具错误: {error}",
+        
+        # Agent任务描述相关
+        "agent.unknown_target": "未知目标",
+        "agent.default_ports": "默认端口",
+        "agent.unknown_domain": "未知域名",
+        "agent.unknown_url": "未知URL",
+        "agent.process": "处理",
+        "agent.nmap_scan_desc": "使用nmap扫描 {target} 的端口 {ports}",
+        "agent.subdomain_enum_desc": "枚举 {domain} 的子域名",
+        "agent.sqli_test_desc": "测试 {url} 的 SQL 注入漏洞",
         
         # Base Agent additional messages
         "agent.write_state_failed": "写入状态文件失败: {error}",

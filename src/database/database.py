@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from contextlib import contextmanager
 
 from .models import Base, PenetrationTestSession, StageExecution, AgentLog
+from ..utils.i18n import t
 
 logger = logging.getLogger(__name__)
 

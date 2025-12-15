@@ -425,21 +425,21 @@ class AgentCallbackHandler(AsyncCallbackHandler):
             
             # 根据工具类型生成描述
             if tool_name == "nmap" or tool_name == "nmap_scan":
-                target = actual_input.get("target", tool_input.get("target", "未知目标"))
-                ports = actual_input.get("ports", tool_input.get("ports", "默认端口"))
-                return f"使用nmap扫描 {target} 的端口 {ports}"
+                target = actual_input.get("target", tool_input.get("target", t("agent.unknown_target")))
+                ports = actual_input.get("ports", tool_input.get("ports", t("agent.default_ports")))
+                return t("agent.nmap_scan_desc", target=target, ports=ports)
             elif tool_name == "subdomain_enumeration":
-                domain = actual_input.get("domain", tool_input.get("domain", "未知域名"))
-                return f"枚举 {domain} 的子域名"
+                domain = actual_input.get("domain", tool_input.get("domain", t("agent.unknown_domain")))
+                return t("agent.subdomain_enum_desc", domain=domain)
             elif tool_name == "sql_injection_test":
-                url = actual_input.get("url", tool_input.get("url", "未知URL"))
-                return f"测试 {url} 的 SQL 注入漏洞"
+                url = actual_input.get("url", tool_input.get("url", t("agent.unknown_url")))
+                return t("agent.sqli_test_desc", url=url)
             else:
                 # 通用描述
                 params_str = ", ".join([f"{k}={v}" for k, v in actual_input.items() if k != "target"][:2])
                 target = actual_input.get("target", tool_input.get("target", ""))
                 if target:
-                    return f"{tool_name} 处理 {target}" + (f" ({params_str})" if params_str else "")
+                    return f"{tool_name} {t('agent.process')} {target}" + (f" ({params_str})" if params_str else "")
                 return f"{tool_name}" + (f" ({params_str})" if params_str else "")
         return f"{tool_name}"
     
