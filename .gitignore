@@ -177,7 +177,8 @@ my-lock-file
 .vscode/
 tmp.txt
 logs/
-llm_runtime.json
+# 注意：configs/llm_runtime.json 已移除api_key，可以提交
+# 如果本地有包含真实api_key的配置文件，请确保不要提交
 
 # Workspace directory (runtime generated)
 workspace/
