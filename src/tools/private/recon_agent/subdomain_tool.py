@@ -184,8 +184,7 @@ class SubdomainEnumerationTool(ToolInterface):
         try:
             # 使用Google搜索
             query = f"site:{domain}"
-            # 注意：实际实现中需要处理搜索引擎的反爬虫机制
-            # 这里只是示例框架
+            # 注意：实现中需要处理搜索引擎的反爬虫机制
             
             # 可以添加其他搜索引擎的查询逻辑
             pass

@@ -97,6 +97,20 @@ class NmapTool(ToolInterface):
             
             if not target:
                 return {"success": False, "error": "未指定目标"}
+                        # 检查 nmap 二进制是否可用；不可用则尝试自动安装或降级回退
+                        if not self._is_nmap_available():
+                            self.logger.warning("nmap 二进制未找到，尝试自动安装或降级回退")
+                            install_ok = await self._auto_install_on_windows()
+                            if not install_ok and sys.platform != "win32":
+                                # 非 Windows 的简单提示；安装逻辑在 AgentToolManager 中处理（apt/brew/pip）
+                                self._add_output_line("⚠️ nmap 未安装，建议使用系统包管理器安装后重试")
+                            # 再次检查
+                            if self._is_nmap_available():
+                                self._add_output_line("✅ 已检测到 nmap，可继续执行扫描")
+                            else:
+                                self._add_output_line("↩️ 降级到基础TCP端口扫描（Python实现）")
+                                basic = await self._fallback_tcp_scan(target, ports, timeout=scan_timeout)
+                                return basic
             
             # 立即更新执行状态，让UI可以看到
             # agent类型会自动从thread-local context获取
@@ -197,7 +211,7 @@ class NmapTool(ToolInterface):
                 return {
                     "success": False,
                     "error": result.get("stderr", "Nmap扫描失败"),
-                    "command": full_command  # 包含命令，供基类使用
+                    "command": full_command
                 }
                 
         except Exception as e:

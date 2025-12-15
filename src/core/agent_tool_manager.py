@@ -78,7 +78,6 @@ class ToolInterface(ABC):
             self.logger.debug(f"[输出] {line.strip()[:80]}")
     
     def _should_show_output_line(self, line: str) -> bool:
-        """判断输出行是否应该显示（过滤无意义的内容）"""
         line = line.strip()
         if not line:
             return False
@@ -94,7 +93,7 @@ class ToolInterface(ABC):
             if not any(keyword in line.lower() for keyword in ['port', 'service', 'state', 'script', 'output', 'host', 'address']):
                 return False
         
-        # 过滤nmap的taskprogress更新（太频繁）
+        # 过滤nmap的taskprogress更新
         if '<taskprogress' in line:
             return False
         
@@ -1032,6 +1031,7 @@ class AgentToolManager:
         
         # 检测操作系统
         system = platform.system().lower()
+        is_windows = system == "windows"
         is_macos = system == "darwin"
         is_linux = system == "linux"
         
@@ -1041,7 +1041,9 @@ class AgentToolManager:
                 "package": "nmap",
                 "apt": {"package": "nmap", "manager": "apt"},
                 "brew": {"package": "nmap", "manager": "brew"},
-                "pip": {"package": "python-nmap", "manager": "pip"}
+                "pip": {"package": "python-nmap", "manager": "pip"},
+                "winget": {"package": "Nmap.Nmap", "manager": "winget"},
+                "choco": {"package": "nmap", "manager": "choco"}
             },
             "dns_enum": {
                 "apt": {"package": "dnsutils", "manager": "apt"},
@@ -1087,7 +1089,15 @@ class AgentToolManager:
         
         # 根据操作系统选择包管理器
         package_info = None
-        if is_macos:
+        if is_windows:
+            # Windows优先使用winget，其次choco，最后pip
+            if "winget" in tool_package_map[tool_name]:
+                package_info = tool_package_map[tool_name]["winget"]
+            elif "choco" in tool_package_map[tool_name]:
+                package_info = tool_package_map[tool_name]["choco"]
+            elif "pip" in tool_package_map[tool_name]:
+                package_info = tool_package_map[tool_name]["pip"]
+        elif is_macos:
             # macOS优先使用brew，其次pip
             if "brew" in tool_package_map[tool_name]:
                 package_info = tool_package_map[tool_name]["brew"]
@@ -1117,7 +1127,14 @@ class AgentToolManager:
             self.logger.info(f"尝试安装工具 {tool_name} (包: {package}, 管理器: {manager}, 系统: {system})")
             
             # 检查包管理器是否可用
-            check_cmd = ["which", manager] if manager != "pip" else ["python", "-m", "pip", "--version"]
+            if is_windows:
+                # Windows下使用 where 检查命令存在
+                if manager == "pip":
+                    check_cmd = ["python", "-m", "pip", "--version"]
+                else:
+                    check_cmd = ["where", manager]
+            else:
+                check_cmd = ["which", manager] if manager != "pip" else ["python", "-m", "pip", "--version"]
             check_process = await asyncio.create_subprocess_exec(
                 *check_cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -1182,6 +1199,42 @@ class AgentToolManager:
                     return {
                         "success": False,
                         "error": f"安装失败: {error_msg}"
+                    }
+            elif manager == "winget":
+                # Windows 使用 winget 安装
+                # 统一加上协议接受参数以减少交互
+                cmd = [
+                    "winget", "install", "--id", package, "-e",
+                    "--accept-package-agreements", "--accept-source-agreements"
+                ]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                if process.returncode == 0:
+                    return {"success": True, "message": f"成功安装 {package}"}
+                else:
+                    return {
+                        "success": False,
+                        "error": f"安装失败: {stderr.decode('utf-8', errors='ignore')}"
+                    }
+            elif manager == "choco":
+                # Windows 使用 Chocolatey 安装
+                cmd = ["choco", "install", package, "-y"]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                if process.returncode == 0:
+                    return {"success": True, "message": f"成功安装 {package}"}
+                else:
+                    return {
+                        "success": False,
+                        "error": f"安装失败: {stderr.decode('utf-8', errors='ignore')}"
                     }
             elif manager == "pip":
                 cmd = ["python", "-m", "pip", "install", package]

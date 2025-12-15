@@ -880,3 +880,181 @@ Agent类型: {agent_type}
    - 使用的工具清单
 
 请使用Markdown格式生成报告。"""
+
+    @staticmethod
+    def get_replan_with_interrupt_prompt(
+        current_plan: Dict[str, Any],
+        current_stage: str,
+        user_message: str,
+        global_context: Dict[str, Any],
+        stage_results: Dict[str, Any]
+    ) -> str:
+        """
+        获取基于用户中断信息的重新规划提示词
+        
+        Args:
+            current_plan: 当前执行计划
+            current_stage: 当前正在执行的阶段
+            user_message: 用户补充的信息
+            global_context: 全局上下文
+            stage_results: 各阶段已完成的结果
+            
+        Returns:
+            str: 重新规划提示词
+        """
+        return f"""你是渗透测试的主控Agent。用户在执行过程中提供了新的补充信息，你需要结合这些信息重新规划执行计划。
+
+## 🔴 用户中断 - 补充信息
+```
+{user_message}
+```
+
+## 📋 当前执行状态
+
+### 当前正在执行的阶段
+{current_stage}
+
+### 原始执行计划
+```json
+{json.dumps(current_plan, ensure_ascii=False, indent=2)}
+```
+
+### 已完成阶段的结果摘要
+```json
+{json.dumps(stage_results, ensure_ascii=False, indent=2)}
+```
+
+### 全局上下文（已收集的信息）
+```json
+{json.dumps(global_context, ensure_ascii=False, indent=2)}
+```
+
+## 🎯 重新规划任务
+
+请基于用户提供的新信息，重新评估和调整执行计划：
+
+### 1. 分析用户补充信息
+- 用户提供了什么新信息？
+- 这些信息对当前阶段有何影响？
+- 是否需要调整后续阶段？
+
+### 2. 决策选项
+
+#### 选项A：继续当前阶段（优先考虑）
+如果用户信息是对当前阶段的补充（如"发现新端口8080"），应该：
+- 在当前阶段添加新的任务
+- 保持后续阶段不变
+- 无需重新开始
+
+#### 选项B：调整当前和后续阶段
+如果用户信息改变了测试方向（如"目标是路由器"、"只测试Web应用"），应该：
+- 调整当前阶段的策略
+- 更新后续阶段的计划
+- 删除不相关的任务
+
+#### 选项C：回退重新开始
+仅在极端情况下（如"目标地址错了"、"换个目标"），才需要：
+- 重新生成完整计划
+- 从侦察阶段开始
+
+### 3. 任务优先级调整
+- 根据用户信息，哪些任务应该提高优先级？
+- 哪些任务可以降低优先级或移除？
+- 是否需要添加新的任务？
+
+## 📝 返回格式要求
+
+请返回JSON格式的更新计划：
+
+```json
+{{
+    "replan_action": "continue_current|adjust_plan|restart_from_beginning",
+    "action_reason": "选择此操作的详细原因",
+    "user_info_analysis": "对用户补充信息的分析",
+    
+    "current_stage_updates": {{
+        "stage_type": "{current_stage}",
+        "action": "continue|restart|modify",
+        "new_todos": [  // 需要添加的新任务
+            {{
+                "id": "todo_new_1",
+                "name": "任务名称",
+                "description": "任务描述",
+                "tool": "工具名称",
+                "priority": 1,
+                "estimated_duration": 300,
+                "config": {{
+                    "参数名": "参数值"
+                }}
+            }}
+        ],
+        "remove_todos": ["todo_id_1", "todo_id_2"],  // 需要移除的任务ID
+        "modify_todos": [  // 需要修改的任务
+            {{
+                "id": "todo_existing_1",
+                "changes": {{
+                    "priority": 2,
+                    "config": {{"新参数": "新值"}}
+                }}
+            }}
+        ]
+    }},
+    
+    "subsequent_stages_updates": [  // 后续阶段的调整
+        {{
+            "stage_type": "weaponization",
+            "action": "keep|modify|remove",
+            "reason": "保持/修改/移除的原因",
+            "new_todos": [],  // 如果需要修改
+            "remove_todos": []
+        }}
+    ],
+    
+    "new_stages": [],  // 如果需要添加新阶段（极少情况）
+    
+    "target_updated": false,  // 目标是否变化
+    "new_target": null,  // 新目标（如果有）
+    
+    "priority_adjustments": [  // 优先级调整说明
+        {{
+            "item": "端口8080扫描",
+            "old_priority": 3,
+            "new_priority": 1,
+            "reason": "用户特别关注此端口"
+        }}
+    ],
+    
+    "execution_strategy": "从当前阶段的哪个点继续执行的具体策略",
+    "estimated_impact": "此次调整对整体进度的预期影响"
+}}
+```
+
+## ⚠️ 重要原则
+
+1. **最小化中断**：优先选择"continue_current"，除非用户信息确实需要大幅调整
+2. **保留已完成工作**：已完成阶段的结果应该保留和利用
+3. **聚焦用户关注点**：用户提到的信息应该成为高优先级任务
+4. **避免重复工作**：不要重新执行已成功完成的任务
+5. **智能合并**：将用户信息与现有计划智能合并，而非简单替换
+
+## 💡 示例场景
+
+### 场景1：用户补充端口信息
+用户说："发现新端口8080开放"
+- 选择：continue_current
+- 在侦察阶段添加针对8080的详细扫描任务
+- 后续武器化阶段会自然利用这个信息
+
+### 场景2：用户补充目标类型
+用户说："这是一个Nginx服务器"
+- 选择：adjust_plan
+- 调整当前阶段：重点扫描Nginx相关漏洞
+- 调整后续阶段：添加Nginx特定的利用任务
+
+### 场景3：用户更正目标
+用户说："目标地址应该是192.168.1.100，不是192.168.1.1"
+- 选择：restart_from_beginning
+- 更新target
+- 重新生成完整计划
+
+请仅返回JSON，不要有其他说明文字。"""

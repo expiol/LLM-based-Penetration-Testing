@@ -707,10 +707,11 @@ class RayMasterController:
                     stage_index += 1
                     continue
                 
-                # 获取Agent Actor
-                actor = self.agent_pool.get_actor(agent_type)
+                # 获取Agent Actor（带健康检查）
+                actor = await self._get_healthy_actor(agent_type)
                 if not actor:
-                    self.logger.warning(f"没有可用的Agent Actor: {agent_type}")
+                    self.logger.error(f"无法获取健康的Agent Actor: {agent_type}")
+                    _print(f"❌ 无法获取可用的Agent，跳过此阶段", flush=True)
                     stage_index += 1
                     continue
                 
@@ -768,6 +769,12 @@ class RayMasterController:
                 
                 while retry_count < max_retries:
                     try:
+                        # 每次重试前检查Actor健康状态
+                        if retry_count > 0:
+                            actor = await self._get_healthy_actor(agent_type)
+                            if not actor:
+                                raise Exception("Actor不可用，需要重新创建")
+                        
                         future = actor.execute.remote(target_info, context)
                         # 设置执行超时（默认10分钟）
                         execution_timeout = stage_config.get("timeout", 600)
@@ -788,6 +795,14 @@ class RayMasterController:
                     except Exception as e:
                         retry_count += 1
                         error_msg = str(e)
+                        
+                        # 检查是否是Actor死亡错误
+                        if "Can't find actor" in error_msg or "actor is dead" in error_msg.lower():
+                            self.logger.error(f"Actor {agent_type.value} 已死亡，尝试重启")
+                            _print(f"⚠️ Agent Actor已失效，正在重新启动...", flush=True)
+                            # 重启Actor
+                            await self._restart_actor(agent_type)
+                        
                         self.logger.error(f"Agent {agent_type.value} 执行错误: {error_msg}")
                         if retry_count < max_retries:
                             _print(f"⚠️ 执行错误: {error_msg[:50]}...，正在重试 ({retry_count}/{max_retries})...", flush=True)
@@ -2006,13 +2021,376 @@ class RayMasterController:
                 "total_tasks": 0
             }
     
+    async def handle_interrupt(
+        self,
+        session_id: str,
+        user_message: str
+    ) -> Dict[str, Any]:
+        """
+        处理用户中断 - 智能地保留已完成工作并调整计划
+        
+        核心设计：
+        1. 不简单地重新开始，而是分析用户补充信息
+        2. 保留已完成阶段的结果
+        3. 调整当前和后续阶段的任务
+        4. 使用主控LLM智能决策：continue_current / adjust_plan / restart_from_beginning
+        
+        Args:
+            session_id: 会话ID
+            user_message: 用户补充的信息
+            
+        Returns:
+            Dict[str, Any]: 重新规划的结果
+        """
+        try:
+            _print(f"\n🔴 接收到用户中断信号...", flush=True)
+            _print(f"📝 用户补充信息: {user_message}", flush=True)
+            
+            # 1. 取消正在执行的任务（如果有）
+            if session_id in self.running_sessions:
+                task = self.running_sessions.get(session_id)
+                if task and not task.done():
+                    _print(f"⏸️  正在取消运行中的任务...", flush=True)
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        _print(f"✅ 任务已取消", flush=True)
+                    except Exception as e:
+                        self.logger.warning(f"取消任务时发生错误: {e}")
+            
+            # 2. 暂停会话状态
+            await self.state_manager.update_session_state(session_id, {
+                "status": "paused",
+                "paused_at": datetime.now().isoformat()
+            })
+            
+            # 3. 获取当前状态
+            session_state = await self.state_manager.get_session_state(session_id)
+            execution_plan = session_state.get("execution_plan", {})
+            current_stage_name = session_state.get("current_stage", "unknown")
+            global_context = await self.state_manager.get_global_context(session_id)
+            
+            # 4. 收集已完成阶段的结果摘要
+            stage_results = {}
+            stages = execution_plan.get("stages", [])
+            for stage in stages:
+                stage_type = stage.get("type", "")
+                if stage.get("status") == "completed":
+                    stage_results[stage_type] = {
+                        "status": "completed",
+                        "summary": stage.get("result_summary", "已完成")
+                    }
+            
+            _print(f"📊 当前进度: {len(stage_results)} 个阶段已完成", flush=True)
+            _print(f"🎯 当前阶段: {current_stage_name}", flush=True)
+            
+            # 5. 使用主控LLM进行智能重新规划
+            _print(f"\n🤖 正在分析用户补充信息并智能调整计划...", flush=True)
+            replan_result = await self._replan_with_new_info(
+                current_plan=execution_plan,
+                current_stage=current_stage_name,
+                user_message=user_message,
+                global_context=global_context,
+                stage_results=stage_results
+            )
+            
+            if not replan_result.get("success"):
+                error_msg = replan_result.get("error", "LLM重新规划失败")
+                _print(f"❌ {error_msg}", flush=True)
+                return {
+                    "success": False,
+                    "error": error_msg
+                }
+            
+            # 6. 应用重新规划的结果
+            replan_data = replan_result.get("replan_data", {})
+            action = replan_data.get("replan_action", "adjust_plan")
+            action_reason = replan_data.get("action_reason", "")
+            
+            _print(f"\n📋 重新规划决策: {action}", flush=True)
+            _print(f"💡 原因: {action_reason}", flush=True)
+            
+            # 7. 根据action类型执行不同的操作
+            if action == "restart_from_beginning":
+                # 完全重新开始
+                _print(f"\n🔄 将从头重新开始渗透测试...", flush=True)
+                new_target = replan_data.get("new_target", session_state.get("target"))
+                await self._handle_restart_from_beginning(
+                    session_id, new_target, user_message, replan_data
+                )
+            
+            elif action == "adjust_plan":
+                # 调整当前和后续阶段
+                _print(f"\n🔧 调整执行计划（保留已完成工作）...", flush=True)
+                await self._handle_adjust_plan(
+                    session_id, execution_plan, replan_data, stage_results
+                )
+            
+            else:  # continue_current
+                # 在当前阶段添加新任务
+                _print(f"\n➕ 在当前阶段添加新任务...", flush=True)
+                await self._handle_continue_current(
+                    session_id, execution_plan, replan_data
+                )
+            
+            # 8. 恢复会话状态
+            await self.state_manager.update_session_state(session_id, {
+                "status": "ready"
+            })
+            
+            _print(f"\n✅ 重新规划完成，准备继续执行", flush=True)
+            
+            return {
+                "success": True,
+                "action": action,
+                "reason": action_reason,
+                "message": "重新规划完成"
+            }
+            
+        except Exception as e:
+            self.logger.error(f"处理用户中断失败: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def _replan_with_new_info(
+        self,
+        current_plan: Dict[str, Any],
+        current_stage: str,
+        user_message: str,
+        global_context: Dict[str, Any],
+        stage_results: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        使用主控LLM基于用户补充信息重新规划
+        
+        Returns:
+            Dict containing:
+                - success: bool
+                - replan_data: Dict (LLM返回的JSON)
+                - error: str (如果失败)
+        """
+        if not self.master_llm:
+            return {
+                "success": False,
+                "error": "主控LLM未初始化"
+            }
+        
+        try:
+            # 获取重新规划的prompt
+            prompt = MasterPrompts.get_replan_with_interrupt_prompt(
+                current_plan=current_plan,
+                current_stage=current_stage,
+                user_message=user_message,
+                global_context=global_context,
+                stage_results=stage_results
+            )
+            
+            # 调用主控LLM
+            _print(f"🤖 调用主控LLM分析...", flush=True)
+            response = await self.master_llm.ainvoke(prompt)
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            # 解析JSON响应
+            replan_data = self._parse_json_response(response_text)
+            
+            if not replan_data:
+                return {
+                    "success": False,
+                    "error": "无法解析LLM响应为JSON"
+                }
+            
+            # 验证必需字段
+            required_fields = ["replan_action", "action_reason"]
+            missing = [f for f in required_fields if f not in replan_data]
+            if missing:
+                return {
+                    "success": False,
+                    "error": f"LLM响应缺少必需字段: {missing}"
+                }
+            
+            return {
+                "success": True,
+                "replan_data": replan_data
+            }
+            
+        except Exception as e:
+            self.logger.error(f"LLM重新规划失败: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"LLM调用失败: {str(e)}"
+            }
+    
+    async def _handle_restart_from_beginning(
+        self,
+        session_id: str,
+        new_target: str,
+        user_message: str,
+        replan_data: Dict[str, Any]
+    ):
+        """处理从头重新开始的情况"""
+        # 清空已完成的结果
+        await self.state_manager.update_global_context(session_id, {})
+        
+        # 更新目标和选项
+        session_state = await self.state_manager.get_session_state(session_id)
+        old_options = session_state.get("options", {})
+        new_options = {
+            **old_options,
+            "raw_description": f"{old_options.get('raw_description', '')}\n\n用户补充: {user_message}"
+        }
+        
+        await self.state_manager.update_session_state(session_id, {
+            "target": new_target,
+            "options": new_options
+        })
+        
+        # 重新生成完整的执行计划
+        new_execution_plan = await self._generate_execution_plan(
+            new_target, new_options, session_id
+        )
+        
+        # 保存到TODO
+        await self._save_execution_plan_to_todos(new_execution_plan, session_id)
+        
+        _print(f"📋 已生成新的执行计划，共 {len(new_execution_plan.get('stages', []))} 个阶段", flush=True)
+    
+    async def _handle_adjust_plan(
+        self,
+        session_id: str,
+        current_plan: Dict[str, Any],
+        replan_data: Dict[str, Any],
+        stage_results: Dict[str, Any]
+    ):
+        """处理调整计划的情况 - 保留已完成工作"""
+        stages = current_plan.get("stages", [])
+        
+        # 1. 更新当前阶段
+        current_stage_updates = replan_data.get("current_stage_updates", {})
+        if current_stage_updates:
+            stage_type = current_stage_updates.get("stage_type", "")
+            for stage in stages:
+                if stage.get("type") == stage_type:
+                    # 添加新任务
+                    new_todos = current_stage_updates.get("new_todos", [])
+                    if new_todos:
+                        existing_todos = stage.get("todos", [])
+                        stage["todos"] = existing_todos + new_todos
+                        _print(f"  ➕ 为阶段 {stage_type} 添加了 {len(new_todos)} 个新任务", flush=True)
+                    
+                    # 移除任务
+                    remove_todo_ids = current_stage_updates.get("remove_todos", [])
+                    if remove_todo_ids:
+                        stage["todos"] = [
+                            t for t in stage.get("todos", [])
+                            if t.get("id") not in remove_todo_ids
+                        ]
+                        _print(f"  ➖ 从阶段 {stage_type} 移除了 {len(remove_todo_ids)} 个任务", flush=True)
+                    
+                    # 修改任务
+                    modify_todos = current_stage_updates.get("modify_todos", [])
+                    for mod in modify_todos:
+                        todo_id = mod.get("id")
+                        changes = mod.get("changes", {})
+                        for todo in stage.get("todos", []):
+                            if todo.get("id") == todo_id:
+                                todo.update(changes)
+                                _print(f"  🔧 修改任务 {todo_id}", flush=True)
+                    
+                    break
+        
+        # 2. 更新后续阶段
+        subsequent_updates = replan_data.get("subsequent_stages_updates", [])
+        for update in subsequent_updates:
+            stage_type = update.get("stage_type", "")
+            action = update.get("action", "keep")
+            
+            if action == "remove":
+                # 移除阶段
+                stages = [s for s in stages if s.get("type") != stage_type]
+                _print(f"  ➖ 移除阶段 {stage_type}", flush=True)
+            
+            elif action == "modify":
+                # 修改阶段
+                for stage in stages:
+                    if stage.get("type") == stage_type:
+                        new_todos = update.get("new_todos", [])
+                        if new_todos:
+                            stage["todos"] = stage.get("todos", []) + new_todos
+                        
+                        remove_todo_ids = update.get("remove_todos", [])
+                        if remove_todo_ids:
+                            stage["todos"] = [
+                                t for t in stage.get("todos", [])
+                                if t.get("id") not in remove_todo_ids
+                            ]
+                        _print(f"  🔧 修改阶段 {stage_type}", flush=True)
+                        break
+        
+        # 3. 添加新阶段（如果有）
+        new_stages = replan_data.get("new_stages", [])
+        if new_stages:
+            stages.extend(new_stages)
+            _print(f"  ➕ 添加了 {len(new_stages)} 个新阶段", flush=True)
+        
+        # 4. 更新执行计划
+        current_plan["stages"] = stages
+        await self.state_manager.update_session_state(session_id, {
+            "execution_plan": current_plan
+        })
+        
+        # 5. 保存到TODO
+        await self._save_execution_plan_to_todos(current_plan, session_id)
+        
+        _print(f"📋 计划已调整，当前共 {len(stages)} 个阶段", flush=True)
+    
+    async def _handle_continue_current(
+        self,
+        session_id: str,
+        current_plan: Dict[str, Any],
+        replan_data: Dict[str, Any]
+    ):
+        """处理继续当前阶段的情况 - 只添加新任务"""
+        current_stage_updates = replan_data.get("current_stage_updates", {})
+        if not current_stage_updates:
+            _print(f"  ⚠️ 没有需要添加的新任务", flush=True)
+            return
+        
+        stage_type = current_stage_updates.get("stage_type", "")
+        new_todos = current_stage_updates.get("new_todos", [])
+        
+        if not new_todos:
+            _print(f"  ⚠️ 没有需要添加的新任务", flush=True)
+            return
+        
+        # 查找当前阶段并添加任务
+        stages = current_plan.get("stages", [])
+        for stage in stages:
+            if stage.get("type") == stage_type:
+                existing_todos = stage.get("todos", [])
+                stage["todos"] = existing_todos + new_todos
+                _print(f"  ➕ 为阶段 {stage_type} 添加了 {len(new_todos)} 个新任务", flush=True)
+                break
+        
+        # 更新执行计划
+        await self.state_manager.update_session_state(session_id, {
+            "execution_plan": current_plan
+        })
+        
+        # 保存到TODO
+        await self._save_execution_plan_to_todos(current_plan, session_id)
+    
     async def interrupt_and_replan(
         self,
         session_id: str,
         additional_info: str
     ) -> Dict[str, Any]:
         """
-        中断当前执行并重新规划
+        中断当前执行并重新规划（简化版 - 直接重新生成计划）
+        
+        注意：推荐使用 handle_interrupt() 方法，它会智能地保留已完成的工作
         
         Args:
             session_id: 会话ID
