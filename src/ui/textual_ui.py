@@ -10,20 +10,23 @@ from textual.reactive import reactive
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import asyncio
+from ..utils.i18n import t
 
 
 class TaskListWidget(Static):
     """任务列表组件 - 显示Kill Chain各阶段的任务"""
     
-    PHASE_NAMES = {
-        "reconnaissance": "1️⃣ 侦察",
-        "weaponization": "2️⃣ 武器化",
-        "delivery": "3️⃣ 投递",
-        "exploitation": "4️⃣ 利用",
-        "installation": "5️⃣ 安装",
-        "command_control": "6️⃣ 命令控制",
-        "actions_objectives": "7️⃣ 目标达成"
-    }
+    @property
+    def PHASE_NAMES(self):
+        return {
+            "reconnaissance": t("phase.reconnaissance"),
+            "weaponization": t("phase.weaponization"),
+            "delivery": t("phase.delivery"),
+            "exploitation": t("phase.exploitation"),
+            "installation": t("phase.installation"),
+            "command_control": t("phase.command_control"),
+            "actions_objectives": t("phase.actions_objectives")
+        }
     
     PHASE_ORDER = [
         "reconnaissance", "weaponization", "delivery",
@@ -35,16 +38,16 @@ class TaskListWidget(Static):
     def render(self) -> str:
         """渲染任务列表"""
         lines = []
-        lines.append("[bold cyan]📋 任务链 (Kill Chain)[/bold cyan]")
+        lines.append(f"[bold cyan]{t('task_list.title')}[/bold cyan]")
         lines.append("")
         
         if not self.tasks_info or not isinstance(self.tasks_info, dict):
-            lines.append("[dim]等待任务加载...[/dim]")
+            lines.append(f"[dim]{t('task_list.waiting')}[/dim]")
             return "\n".join(lines)
         
         tasks_by_status = self.tasks_info.get("tasks_by_status", {})
         if not tasks_by_status:
-            lines.append("[dim]暂无任务...[/dim]")
+            lines.append(f"[dim]{t('task_list.no_tasks')}[/dim]")
             return "\n".join(lines)
         
         all_tasks = []
@@ -63,12 +66,13 @@ class TaskListWidget(Static):
             phases[phase].append(task)
         
         # 按顺序渲染每个阶段
+        phase_names = self.PHASE_NAMES
         for phase_key in self.PHASE_ORDER:
             if phase_key not in phases:
                 continue
             
             phase_tasks = phases[phase_key]
-            phase_name = self.PHASE_NAMES.get(phase_key, phase_key)
+            phase_name = phase_names.get(phase_key, phase_key)
             
             # 计算阶段状态
             completed = sum(1 for t in phase_tasks if t.get("status") == "completed")
@@ -94,7 +98,7 @@ class TaskListWidget(Static):
             
             # 任务列表
             for task in phase_tasks:
-                task_title = task.get("title", "未命名任务")
+                task_title = task.get("title", t("task_list.unnamed_task"))
                 task_status = task.get("status", "pending")
                 
                 if task_status == "completed":
@@ -110,7 +114,8 @@ class TaskListWidget(Static):
                     symbol = "  ○"
                     style = "dim"
                 
-                lines.append(f"[{style}]{symbol} {task_title}[/{style}]")
+                status_text = f" {t('task_list.executing')}" if task_status == "in_progress" else ""
+                lines.append(f"[{style}]{symbol} {task_title}{status_text}[/{style}]")
             
             lines.append("")  # 空行分隔
         
@@ -128,37 +133,37 @@ class StatusWidget(Static):
     def render(self) -> str:
         """渲染状态信息"""
         lines = []
-        lines.append("[bold yellow]🔄 当前状态[/bold yellow]")
+        lines.append(f"[bold yellow]{t('status.current_status')}[/bold yellow]")
         lines.append("")
-        lines.append(f"[cyan]🎯 目标:[/cyan] [white]{self.target}[/white]")
-        lines.append(f"[dim]📋 会话: {self.session_id[:8] if self.session_id else 'N/A'}...[/dim]")
+        lines.append(f"[cyan]{t('status.target')}[/cyan] [white]{self.target}[/white]")
+        lines.append(f"[dim]{t('status.session')} {self.session_id[:8] if self.session_id else 'N/A'}...[/dim]")
         lines.append("")
         
         # 优先使用exec_state
         if self.exec_state and isinstance(self.exec_state, dict) and (self.exec_state.get("command") or self.exec_state.get("tool")):
-            lines.append("[yellow bold]⚙️  当前执行:[/yellow bold]")
+            lines.append(f"[yellow bold]{t('status.current_execution')}[/yellow bold]")
             lines.append("")
             
             agent = self.exec_state.get("agent", "")
             if agent:
-                lines.append(f"[cyan]Agent:[/cyan] [white]{agent}[/white]")
+                lines.append(f"[cyan]{t('status.agent')}[/cyan] [white]{agent}[/white]")
             
             tool = self.exec_state.get("tool", "")
             if tool:
-                lines.append(f"[green]🔧 工具:[/green] [bold white]{tool}[/bold white]")
+                lines.append(f"[green]{t('status.tool')}[/green] [bold white]{tool}[/bold white]")
             
             description = self.exec_state.get("description", "")
             if description:
                 # 限制长度
                 if len(description) > 50:
                     description = description[:50] + "..."
-                lines.append(f"[dim]📝 {description}[/dim]")
+                lines.append(f"[dim]{t('status.description')} {description}[/dim]")
             
             # 显示命令
             command = self.exec_state.get("command", "")
             if command:
                 lines.append("")
-                lines.append("[green bold]💻 命令:[/green bold]")
+                lines.append(f"[green bold]{t('status.command')}[/green bold]")
                 # 限制命令显示长度
                 if len(command) > 60:
                     lines.append(f"[green]{command[:60]}[/green]")
@@ -170,29 +175,29 @@ class StatusWidget(Static):
             output_lines = self.exec_state.get("output_lines", [])
             if output_lines and isinstance(output_lines, list):
                 lines.append("")
-                lines.append("[blue dim]📤 最近输出:[/blue dim]")
+                lines.append(f"[blue dim]{t('status.recent_output')}[/blue dim]")
                 for line in output_lines[-3:]:
                     if line:
                         display_line = str(line)[:55] + "..." if len(str(line)) > 55 else str(line)
                         lines.append(f"[dim]  {display_line}[/dim]")
         
         elif self.current_task and isinstance(self.current_task, dict):
-            lines.append("[yellow bold]⚙️  当前任务:[/yellow bold]")
+            lines.append(f"[yellow bold]{t('status.current_task')}[/yellow bold]")
             lines.append("")
             title = self.current_task.get('title', 'N/A')
             lines.append(f"[white]{title}[/white]")
             
             tool = self.current_task.get("tool", "")
             if tool:
-                lines.append(f"[green]🔧 工具:[/green] [white]{tool}[/white]")
+                lines.append(f"[green]{t('status.tool')}[/green] [white]{tool}[/white]")
             
             description = self.current_task.get("description", "")
             if description:
                 if len(description) > 55:
                     description = description[:55] + "..."
-                lines.append(f"[dim]📝 {description}[/dim]")
+                lines.append(f"[dim]{t('status.description')} {description}[/dim]")
         else:
-            lines.append("[dim]等待任务启动...[/dim]")
+            lines.append(f"[dim]{t('status.waiting')}[/dim]")
         
         return "\n".join(lines)
 
@@ -264,13 +269,6 @@ class PentestTUI(App):
     }
     """
     
-    BINDINGS = [
-        Binding("q", "quit", "退出", priority=True),
-        Binding("o", "toggle_output", "切换输出"),
-        Binding("r", "refresh", "刷新"),
-        ("ctrl+c", "interrupt", "中断")
-    ]
-    
     def __init__(self, framework, session_id: str, target: str):
         super().__init__()
         self.framework = framework
@@ -279,6 +277,14 @@ class PentestTUI(App):
         self._monitoring = True
         self._update_task = None
         self._last_command = ""
+        
+        # 设置绑定（使用i18n）
+        self.BINDINGS = [
+            Binding("q", "quit", t("binding.quit"), priority=True),
+            Binding("o", "toggle_output", t("binding.toggle_output")),
+            Binding("r", "refresh", t("binding.refresh")),
+            ("ctrl+c", "interrupt", t("binding.interrupt"))
+        ]
     
     def compose(self) -> ComposeResult:
         """构建UI组件"""
@@ -298,7 +304,7 @@ class PentestTUI(App):
         
         # 输入区
         with Container(id="input_container"):
-            yield Input(placeholder="💬 输入补充信息 (Enter发送 | q退出 | o切换输出)", id="user_input")
+            yield Input(placeholder=t("app.input_placeholder"), id="user_input")
         
         yield Footer()
     
@@ -310,7 +316,7 @@ class PentestTUI(App):
         self.user_input = self.query_one("#user_input", Input)
         
         # 设置RichLog标题
-        self.title = "LLM渗透测试框架 - 实时监控"
+        self.title = t("app.title")
         
         # 设置基本信息
         self.status_display.target = self.target
@@ -320,12 +326,12 @@ class PentestTUI(App):
         self._update_task = asyncio.create_task(self._update_loop())
         
         # 初始日志
-        self.rich_log.write("[bold blue]📝 实时日志 (自动滚动)[/bold blue]")
+        self.rich_log.write(f"[bold blue]{t('app.log_title')}[/bold blue]")
         self.rich_log.write("[dim]" + "─" * 60 + "[/dim]")
-        self.rich_log.write("[green bold]✅ 渗透测试监控已启动[/green bold]")
-        self.rich_log.write(f"[cyan]🎯 目标: {self.target}[/cyan]")
-        self.rich_log.write(f"[dim]📋 会话: {self.session_id}[/dim]")
-        self.rich_log.write("[dim]💡 提示: 在下方输入框输入补充信息后按Enter发送[/dim]")
+        self.rich_log.write(f"[green bold]{t('app.monitor_started')}[/green bold]")
+        self.rich_log.write(f"[cyan]🎯 {t('status.target')} {self.target}[/cyan]")
+        self.rich_log.write(f"[dim]📋 {t('status.session')} {self.session_id}[/dim]")
+        self.rich_log.write(f"[dim]{t('app.tip')}[/dim]")
         self.rich_log.write("[dim]" + "─" * 60 + "[/dim]")
     
     async def _update_loop(self) -> None:
@@ -359,14 +365,14 @@ class PentestTUI(App):
                         
                         if total > 0 and (completed + failed) >= total:
                             if completed == total:
-                                self.rich_log.write("[green bold]✅ 所有任务已完成！[/green bold]")
+                                self.rich_log.write(f"[green bold]{t('log.all_tasks_completed')}[/green bold]")
                             else:
-                                self.rich_log.write(f"[yellow]⚠️  任务结束: {completed} 成功, {failed} 失败[/yellow]")
+                                self.rich_log.write(f"[yellow]{t('log.tasks_ended', completed=completed, failed=failed)}[/yellow]")
                             self.active = False
                             break
                         
                     except Exception as e:
-                        self.rich_log.write(f"[red]❌ 获取任务状态失败: {e}[/red]")
+                        self.rich_log.write(f"[red]{t('log.get_status_failed', error=str(e))}[/red]")
                 
                 # 每次循环都检查执行状态输出
                 try:
@@ -393,7 +399,7 @@ class PentestTUI(App):
                     # 检测命令变化
                     command = exec_state.get("command", "")
                     if command and command != getattr(self, '_last_command', ''):
-                        self.rich_log.write(f"[green bold]🔧 执行命令:[/green bold] [green]{command}[/green]")
+                        self.rich_log.write(f"[green bold]{t('log.executing_command')}[/green bold] [green]{command}[/green]")
                         self._last_command = command
                     
                 except Exception:
@@ -405,7 +411,7 @@ class PentestTUI(App):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.rich_log.write(f"[red]❌ 更新循环异常: {e}[/red]")
+                self.rich_log.write(f"[red]{t('log.update_loop_error', error=str(e))}[/red]")
                 await asyncio.sleep(1)
     
     def _should_filter_log(self, line: str) -> bool:
@@ -431,18 +437,20 @@ class PentestTUI(App):
         try:
             from src.agents.base_agent import execution_state
             show = execution_state.toggle_output()
-            self.rich_log.write(f"[cyan]{'✅' if show else '⏸️ '} 输出显示: {'开启' if show else '关闭'}[/cyan]")
+            icon = '✅' if show else '⏸️ '
+            state = t("log.output_on") if show else t("log.output_off")
+            self.rich_log.write(f"[cyan]{t('log.output_toggled', icon=icon, state=state)}[/cyan]")
         except Exception as e:
-            self.rich_log.write(f"[red]❌ 切换输出失败: {e}[/red]")
+            self.rich_log.write(f"[red]{t('log.adjust_failed', error=str(e))}[/red]")
     
     def action_refresh(self) -> None:
         """手动刷新"""
-        self.rich_log.write("[cyan]🔄 手动刷新...[/cyan]")
+        self.rich_log.write(f"[cyan]{t('log.manual_refresh')}[/cyan]")
     
     def action_cancel_input(self) -> None:
         """取消输入"""
         self.user_input.value = ""
-        self.rich_log.write("[dim]⏸️  已取消输入[/dim]")
+        self.rich_log.write(f"[dim]{t('log.input_cancelled')}[/dim]")
     
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """处理用户输入"""
@@ -453,8 +461,15 @@ class PentestTUI(App):
         # 清空输入框
         self.user_input.value = ""
         
-        self.rich_log.write(f"[yellow bold]🔴 用户补充信息:[/yellow bold] [white]{user_message}[/white]")
-        self.rich_log.write("[cyan]🤖 正在分析并调整计划...[/cyan]")
+        # 特殊处理：用户输入q退出
+        if user_message.lower() in ['q', 'quit', 'exit']:
+            self.rich_log.write(f"[yellow bold]{t('log.user_exit')}[/yellow bold]")
+            self._monitoring = False
+            self.exit()
+            return
+        
+        self.rich_log.write(f"[yellow bold]{t('log.user_info')}[/yellow bold] [white]{user_message}[/white]")
+        self.rich_log.write(f"[cyan]{t('log.analyzing')}[/cyan]")
         
         try:
             # 调用handle_interrupt
@@ -466,21 +481,27 @@ class PentestTUI(App):
             if result.get("success"):
                 action = result.get("action", "adjust_plan")
                 reason = result.get("reason", "")
+                restarted = result.get("restarted", False)
                 
                 if action == "restart_from_beginning":
-                    self.rich_log.write(f"[yellow]🔄 将从头重新开始[/yellow]")
+                    self.rich_log.write(f"[yellow]{t('log.restart_from_beginning')}[/yellow]")
                 elif action == "adjust_plan":
-                    self.rich_log.write(f"[green]🔧 计划已调整（保留已完成工作）[/green]")
+                    self.rich_log.write(f"[green]{t('log.plan_adjusted')}[/green]")
                 else:
-                    self.rich_log.write(f"[green]➕ 已添加新任务到当前阶段[/green]")
+                    self.rich_log.write(f"[green]{t('log.new_task_added')}[/green]")
                 
-                self.rich_log.write(f"[dim]原因: {reason}[/dim]")
+                self.rich_log.write(f"[dim]{t('log.reason', reason=reason)}[/dim]")
+                
+                if restarted:
+                    self.rich_log.write(f"[green bold]{t('log.new_task_started')}[/green bold]")
+                else:
+                    self.rich_log.write(f"[dim]{t('log.system_ready')}[/dim]")
             else:
-                error = result.get("error", "未知错误")
-                self.rich_log.write(f"[red]❌ 调整失败: {error}[/red]")
+                error = result.get("error", t("common.unknown_error"))
+                self.rich_log.write(f"[red]{t('log.adjust_failed', error=error)}[/red]")
         
         except Exception as e:
-            self.rich_log.write(f"[red]❌ 处理输入失败: {e}[/red]")
+            self.rich_log.write(f"[red]{t('log.process_input_failed', error=str(e))}[/red]")
     
     async def on_unmount(self) -> None:
         """卸载时清理"""

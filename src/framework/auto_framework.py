@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+from ..utils.i18n import t
 
 from ..agents.base_agent import LangChainBaseAgent
 from ..agents.recon_agent import LangChainReconAgent
@@ -244,39 +245,35 @@ class AutoPentestFramework:
         Returns:
             Dict[str, Any]: 执行结果
         """
-        print(f"🔄 start_automated_test() 被调用，target={target}, options={options}", flush=True)
+        self.logger.debug(f"start_automated_test() called, target={target}, options={options}")
         
         if not self._initialized:
-            print("⚠️  框架未初始化，正在初始化...", flush=True)
+            self.logger.info(t("framework.not_initialized"))
             await self.initialize()
-            print("✅ 框架初始化完成", flush=True)
+            self.logger.info(t("framework.initialized"))
         
         try:
             self.logger.info(f"Starting automated penetration test - Target: {target}")
-            print(f"📋 开始启动渗透测试，目标: {target}", flush=True)
             
             # 确保配置选项
             options = options or {}
             options.setdefault("safe_mode", True)
             options.setdefault("parallel", False)
-            print(f"📋 测试选项已设置: {options}", flush=True)
             
             # 调用Ray Master Controller执行测试
-            print(f"🔄 准备调用 master_controller.start_penetration_test()...", flush=True)
             result = await self.master_controller.start_penetration_test(
                 target=target,
                 options=options,
                 parallel=options.get("parallel", False),
                 async_mode=options.get("async_mode", False)
             )
-            print(f"✅ master_controller.start_penetration_test() 返回", flush=True)
             
             self.logger.info(f"Test completed - Success: {result.get('success')}")
             return result
             
         except Exception as e:
             self.logger.error(f"Automated test failed: {e}")
-            print(f"❌ start_automated_test() 失败: {e}", flush=True)
+            self.logger.error(t("framework.test_failed", error=str(e)))
             import traceback
             traceback.print_exc()
             return {
@@ -347,7 +344,7 @@ class AutoPentestFramework:
                     sessions.append(session)
             return sessions
         except Exception as e:
-            self.logger.error(f"获取所有会话失败: {e}")
+            self.logger.error(t("framework.get_sessions_failed", error=str(e)))
             return []
     
     async def request_pause(self, session_id: str, reason: str = ""):

@@ -7,6 +7,10 @@ import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from dataclasses import dataclass, asdict, field
+from ..utils.i18n import t
+from ..utils.unified_logger import get_logger
+
+logger = get_logger("todo_manager")
 
 
 @dataclass
@@ -99,7 +103,7 @@ class TodoManager:
                 return True
                 
             except Exception as e:
-                print(f"创建TODO列表失败: {e}")
+                logger.error(t("todo.create_list_failed", error=str(e)))
                 return False
 
     async def create_batch_todos(self, todos: List[Dict[str, Any]], list_name: str = "execution_plan") -> bool:
@@ -128,11 +132,11 @@ class TodoManager:
                             
                             return True
                 
-                print(f"TODO项目不存在: {todo_id}")
+                logger.warning(t("todo.item_not_found", todo_id=todo_id))
                 return False
                 
             except Exception as e:
-                print(f"更新TODO状态失败: {e}")
+                logger.error(t("todo.update_status_failed", error=str(e)))
                 return False
     
     def _recalculate_stats_locked(self) -> None:
@@ -395,7 +399,7 @@ class TodoManager:
                 return True
                 
             except Exception as e:
-                print(f"添加TODO失败: {e}")
+                logger.error(t("todo.add_failed", error=str(e)))
                 return False
     
     async def remove_todo(self, todo_id: str) -> bool:
@@ -413,7 +417,7 @@ class TodoManager:
                 return False
                 
             except Exception as e:
-                print(f"删除TODO失败: {e}")
+                logger.error(t("todo.delete_failed", error=str(e)))
                 return False
     
     async def get_todo_by_id(self, todo_id: str) -> Optional[Dict[str, Any]]:
@@ -467,7 +471,7 @@ class TodoManager:
             return True
             
         except Exception as e:
-            print(f"导出TODO列表失败: {e}")
+            logger.error(t("todo.export_failed", error=str(e)))
             return False
     
     async def clear_completed_todos(self, list_name: str = None) -> int:

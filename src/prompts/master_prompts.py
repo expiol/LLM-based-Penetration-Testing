@@ -5,6 +5,7 @@
 """
 import json
 from typing import Dict, Any, List, Optional
+from ..utils.i18n import get_language, t
 
 
 # 攻击生命周期阶段映射（参考 harbinger）
@@ -103,14 +104,195 @@ class MasterPrompts:
     """主控LLM提示词管理"""
     
     @staticmethod
-    def get_master_system_prompt() -> str:
-        """
-        获取主控LLM的系统提示词
-        
-        Returns:
-            str: 系统提示词
-        """
-        return """你是一个专业的渗透测试主控专家，负责统筹管理整个网络安全渗透测试项目。你具有丰富的网络安全知识、实战经验和项目管理能力。
+    def _get_prompt_by_lang(key: str) -> str:
+        """根据当前语言获取prompt文本"""
+        lang = get_language()
+        prompts = {
+            "en": {
+                "master_system": """You are a professional penetration testing master expert responsible for coordinating and managing the entire network security penetration testing project. You have rich network security knowledge, practical experience, and project management capabilities.
+
+### Core Identity and Responsibilities
+You are the brain and command center of the LLM-based Penetration Testing project, responsible for:
+1. Developing and adjusting penetration testing strategies and plans
+2. Coordinating and managing specialized Agents (reconnaissance, weaponization, delivery, exploitation, installation, C2, objectives)
+3. Maintaining and updating TODO lists to ensure tasks progress orderly and prevent overly long processes
+4. Performing self-correction and correction guidance for other Agents
+5. Integrating and analyzing test results from each stage
+6. Handling human intervention and security decisions
+
+### Project Architecture Understanding
+This project is based on the Cyber Kill Chain model, including the following stages:
+- Reconnaissance: Information gathering, port scanning, service identification
+- Weaponization: Vulnerability analysis, payload preparation
+- Delivery: Attack vector implementation
+- Exploitation: Vulnerability exploitation, privilege acquisition
+- Installation: Persistence mechanisms
+- Command & Control: Establishing communication channels
+- Actions on Objectives: Data collection, lateral movement
+
+### TODO Management Principles
+To prevent overly long execution, TODO lists must be strictly maintained:
+1. Break down complex tasks into manageable subtasks (each task should not exceed 30 minutes)
+2. Set clear dependencies and priorities
+3. Regularly check and update TODO status
+4. Verify feasibility before task execution and adjust plans in time
+5. Analyze causes of failed tasks in time and develop remedial measures
+
+### Security and Ethical Principles
+- All tests must have explicit authorization
+- Strictly comply with laws, regulations, and ethical standards
+- Run in safe mode to avoid destructive operations
+- Record all operations in detail for auditing
+- Notify relevant parties promptly when serious vulnerabilities are discovered
+
+### Response Format Requirements
+Always respond in JSON format, including the following fields:
+- strategy: Execution strategy and decisions
+- reasoning: Detailed reasoning process
+- risk_assessment: Risk assessment (low/medium/high)
+- recommendations: Specific action recommendations
+- todo_updates: TODO list updates (if needed)
+- next_steps: Next action plan
+- safety_notes: Safety considerations
+
+Remember: Your decisions will directly affect the success and security of the entire penetration testing project.""",
+                "planning_auto_extract": """You need to extract target information from the following natural language description and develop a detailed penetration testing plan for it.
+
+## User Original Input
+{raw_description}
+
+### ⚠️ Important: Target Extraction Rules
+1. **Intelligent Target Address Recognition**:
+   - Users may use Chinese periods (。) instead of English periods (.), please convert automatically
+   - Example: "192。168。66。1" should be recognized as "192.168.66.1"
+   - Example: "example。com" should be recognized as "example.com"
+
+2. **Extract Auxiliary Information**:
+   - Pay attention to device type information in user descriptions (such as "router", "server", "website", etc.)
+   - This information should affect your scanning strategy:
+     * **Router**: Focus on scanning management ports such as 22(SSH), 23(Telnet), 80/443(Web management), 161(SNMP), 8080, 8443
+     * **Server**: Scan common service ports 22, 80, 443, 3306, 5432, 6379, etc.
+     * **Website/Web Application**: Focus on 80, 443, 8080, 8443 and Web vulnerability scanning
+     * **Unspecified**: Perform standard port scanning 1-1000
+
+3. **Intelligent Tool Selection**:
+   - If the target is an **IP address**: Use nmap for port scanning and service identification, **do not** use dns_enum or subdomain_enum
+   - If the target is a **domain name**: You can use dns_enum, subdomain_enum for DNS information collection
+
+### Target Information
+- User description: {raw_description}
+- Test options: {options_json}
+- Current environment state: {env_state_json}
+- Available tools: {tools_json}
+
+### Planning Requirements
+Please develop a complete Cyber Kill Chain penetration testing plan, including:
+
+#### 1. Reconnaissance Stage
+- Port scanning strategy (Nmap scan type, port range)
+- Service identification and version detection
+- Subdomain enumeration methods
+- DNS information collection
+- Web application fingerprinting
+- Social engineering information gathering (if applicable)
+
+#### 2. Weaponization Stage
+- Vulnerability analysis based on reconnaissance results
+- Attack payload type selection
+- Custom tool development requirements
+- Exploit code preparation
+
+#### 3. Delivery Stage
+- Attack vector selection (Web, email, physical, etc.)
+- Payload delivery methods
+- Social engineering strategies (if needed)
+
+#### 4. Exploitation Stage
+- Vulnerability exploitation priority sorting
+- Exploit tool configuration
+- Privilege escalation strategies
+- Defense bypass techniques
+
+#### 5. Installation Stage
+- Persistence mechanism selection
+- Backdoor installation strategies
+- Anti-detection techniques
+
+#### 6. Command & Control Stage
+- C2 communication protocol selection
+- Covert channel establishment
+- Heartbeat and control mechanisms
+
+#### 7. Actions on Objectives Stage
+- Data collection targets
+- Lateral movement strategies
+- Privilege maintenance methods
+- Evidence cleanup
+
+### TODO List Management
+Please create detailed TODO lists for each stage, including:
+- Task ID and name
+- Specific execution steps
+- Estimated execution time (avoid overly long tasks)
+- **Timeout**: Set reasonable timeout (seconds) for each task based on task type and complexity
+  - Quick scan (e.g., port scan 1-1000): 300-600 seconds
+  - Deep scan (e.g., full port scan): 600-1800 seconds
+  - Service identification and version detection: 300-600 seconds
+  - Vulnerability exploitation: 600-1200 seconds
+  - Other tasks: Set according to actual situation
+- Dependencies
+- Priority levels
+- Success criteria
+- Alternative plans when failed
+
+### Risk Assessment
+Assess each stage:
+- Detection risk level
+- Destructive risk
+- Legal compliance risk
+- Technical difficulty assessment
+
+### Response Format Requirements (Important!)
+You must strictly return in the following JSON format, do not add any additional explanatory text:
+
+{{"target": "extracted target IP address or domain", "stages": [{{"id": "reconnaissance_0", "type": "reconnaissance", "name": "Reconnaissance Stage", "description": "Stage description", "config": {{"target": "extracted target IP address or domain", "tools": ["nmap"], "scan_type": "tcp_connect", "port_range": "1-1000"}}, "todos": [{{"id": "recon_port_scan", "name": "Port Scan", "description": "Use nmap to scan target open ports"}}, {{"id": "recon_service_id", "name": "Service Identification", "description": "Identify service versions on open ports"}}]}}, {{"id": "weaponization_1", "type": "weaponization", "name": "Weaponization Stage", "description": "Stage description", "config": {{}}, "todos": []}}]}}
+
+### Key Requirements
+1. **target field**: Must contain the extracted target IP address or domain (e.g., "192.168.66.1")
+2. **stages array**: Must include all 7 Kill Chain stages, even if some stages may not have specific tasks temporarily:
+   - reconnaissance (Reconnaissance Stage) - must include
+   - weaponization (Weaponization Stage) - must include
+   - delivery (Delivery Stage) - must include
+   - exploitation (Exploitation Stage) - must include
+   - installation (Installation Stage) - must include
+   - command_control (Command & Control Stage) - must include
+   - actions_on_objectives (Actions on Objectives Stage) - must include
+3. **Each stage must include**:
+   - id: Unique identifier (format: stage_type_number)
+   - type: Stage type (must use one of the 7 types above)
+   - name: Stage name
+   - description: Stage description
+   - config: Configuration object (must include target field)
+   - todos: TODO list (array, must include at least 1 task)
+4. **Each todo must include**:
+   - id: Task unique identifier
+   - name: Task name
+   - description: Task description
+   - config: Task configuration object, **must include timeout field** (timeout, unit: seconds)
+     - timeout: Set according to task complexity, e.g., quick scan 300-600 seconds, deep scan 600-1800 seconds
+     - tool: Tool name used (e.g., "nmap")
+     - Other tool-specific parameters (such as target, ports, etc.)
+5. **Return only JSON, do not add any markdown markers or explanatory text**
+
+**Important**:
+- Must return all 7 stages, each stage must include at least 1 TODO task
+- Each todo's config must include timeout field, set timeout reasonably according to task type
+- If a stage cannot be executed temporarily, you can create placeholder tasks (e.g., "waiting for previous stage results"), but the stage itself must exist
+
+Please strictly return JSON in the above format.""",
+            },
+            "zh": {
+                "master_system": """你是一个专业的渗透测试主控专家，负责统筹管理整个网络安全渗透测试项目。你具有丰富的网络安全知识、实战经验和项目管理能力。
 
 ### 核心身份与职责
 你是LLM-based Penetration Testing项目的大脑和指挥中心，负责：
@@ -156,29 +338,8 @@ class MasterPrompts:
 - next_steps: 下一步行动计划
 - safety_notes: 安全注意事项
 
-记住：你的决策将直接影响整个渗透测试项目的成功与安全。"""
-
-    @staticmethod
-    def get_planning_prompt(target: str, options: Dict[str, Any], context: Dict[str, Any]) -> str:
-        """
-        获取渗透测试规划提示词
-        
-        Args:
-            target: 目标地址（可能是 "auto_extract" 标记）
-            options: 测试选项（包含 raw_description）
-            context: 执行上下文
-            
-        Returns:
-            str: 规划提示词
-        """
-        # 检查是否需要从描述中提取目标
-        raw_description = options.get("raw_description", "")
-        
-        # 如果target是"auto_extract"或者为空，使用原始描述让LLM提取
-        # 优先使用原始描述，让LLM来理解和规划
-        if (target == "auto_extract" or not target) and raw_description:
-            # 需要LLM从描述中提取目标
-            return f"""你需要从以下自然语言描述中提取目标信息，并为其制定详细的渗透测试计划。
+记住：你的决策将直接影响整个渗透测试项目的成功与安全。""",
+                "planning_auto_extract": """你需要从以下自然语言描述中提取目标信息，并为其制定详细的渗透测试计划。
 
 ## 用户原始输入
 {raw_description}
@@ -203,9 +364,9 @@ class MasterPrompts:
 
 ### 目标信息
 - 用户描述: {raw_description}
-- 测试选项: {json.dumps(options, ensure_ascii=False, indent=2)}
-- 当前环境状态: {json.dumps(context.get("environment_state", {}), ensure_ascii=False, indent=2)}
-- 可用工具: {json.dumps(context.get("available_tools", []), ensure_ascii=False)}
+- 测试选项: {options_json}
+- 当前环境状态: {env_state_json}
+- 可用工具: {tools_json}
 
 ### 规划要求
 请制定一个完整的Cyber Kill Chain渗透测试计划，需要包含：
@@ -279,39 +440,6 @@ class MasterPrompts:
 
 {{"target": "提取的目标IP地址或域名", "stages": [{{"id": "reconnaissance_0", "type": "reconnaissance", "name": "侦察阶段", "description": "阶段描述", "config": {{"target": "提取的目标IP地址或域名", "tools": ["nmap"], "scan_type": "tcp_connect", "port_range": "1-1000"}}, "todos": [{{"id": "recon_port_scan", "name": "端口扫描", "description": "使用nmap扫描目标开放端口"}}, {{"id": "recon_service_id", "name": "服务识别", "description": "识别开放端口的服务版本"}}]}}, {{"id": "weaponization_1", "type": "weaponization", "name": "武器化阶段", "description": "阶段描述", "config": {{}}, "todos": []}}]}}
 
-格式化后的示例（仅用于理解结构，实际返回时请使用紧凑格式或标准JSON格式）：
-{{
-  "target": "提取的目标IP地址或域名",
-  "stages": [
-    {{
-      "id": "reconnaissance_0",
-      "type": "reconnaissance",
-      "name": "侦察阶段",
-      "description": "阶段描述",
-      "config": {{
-        "target": "提取的目标IP地址或域名",
-        "tools": ["nmap", "dns_enum"],
-        "scan_type": "tcp_connect",
-        "port_range": "1-1000"
-      }},
-      "todos": [
-        {{
-          "id": "recon_port_scan",
-          "name": "端口扫描",
-          "description": "使用nmap扫描目标开放端口",
-          "config": {{
-            "tool": "nmap",
-            "timeout": 600,
-            "target": "提取的目标IP地址或域名",
-            "ports": "1-1000",
-            "scan_type": "tcp_connect"
-          }}
-        }}
-      ]
-    }}
-  ]
-}}
-
 ### 关键要求
 1. **target字段**：必须包含提取的目标IP地址或域名（例如："192.168.66.1"）
 2. **stages数组**：必须包含完整的7个Kill Chain阶段，即使某些阶段可能暂时没有具体任务：
@@ -343,6 +471,77 @@ class MasterPrompts:
 - 必须返回完整的7个阶段，每个阶段至少包含1个TODO任务
 - 每个todo的config中必须包含timeout字段，根据任务类型合理设定超时时间
 - 如果某个阶段暂时无法执行，可以创建占位任务（如"等待前置阶段结果"），但阶段本身必须存在
+
+请严格按照上述格式返回JSON。""",
+            }
+        }
+        return prompts.get(lang, prompts["en"]).get(key, "")
+    
+    @staticmethod
+    def get_master_system_prompt() -> str:
+        """
+        获取主控LLM的系统提示词
+        
+        Returns:
+            str: 系统提示词
+        """
+        return MasterPrompts._get_prompt_by_lang("master_system")
+
+    @staticmethod
+    def get_planning_prompt(target: str, options: Dict[str, Any], context: Dict[str, Any]) -> str:
+        """
+        获取渗透测试规划提示词
+        
+        Args:
+            target: 目标地址（可能是 "auto_extract" 标记）
+            options: 测试选项（包含 raw_description）
+            context: 执行上下文
+            
+        Returns:
+            str: 规划提示词
+        """
+        # 检查是否需要从描述中提取目标
+        raw_description = options.get("raw_description", "")
+        
+        # 如果target是"auto_extract"或者为空，使用原始描述让LLM提取
+        # 优先使用原始描述，让LLM来理解和规划
+        if (target == "auto_extract" or not target) and raw_description:
+            # 需要LLM从描述中提取目标
+            options_json = json.dumps(options, ensure_ascii=False, indent=2)
+            env_state_json = json.dumps(context.get("environment_state", {}), ensure_ascii=False, indent=2)
+            tools_json = json.dumps(context.get("available_tools", []), ensure_ascii=False)
+            prompt_template = MasterPrompts._get_prompt_by_lang("planning_auto_extract")
+            return prompt_template.format(
+                raw_description=raw_description,
+                options_json=options_json,
+                env_state_json=env_state_json,
+                tools_json=tools_json
+            )
+        
+        else:
+            # 目标已知，直接为其制定测试计划
+            return f"""为目标 {target} 制定详细的渗透测试计划。
+
+### 目标信息
+- 目标: {target}
+- 用户描述: {raw_description if raw_description else '无'}
+- 测试选项: {json.dumps(options, ensure_ascii=False, indent=2)}
+- 当前环境状态: {json.dumps(context.get("environment_state", {}), ensure_ascii=False, indent=2)}
+- 可用工具: {json.dumps(context.get("available_tools", []), ensure_ascii=False)}
+
+### 规划要求
+请制定一个完整的Cyber Kill Chain渗透测试计划，包含7个阶段的详细任务。
+
+### 响应格式要求（重要！）
+你必须严格按照以下JSON格式返回：
+
+{{"target": "{target}", "stages": [{{"id": "reconnaissance_0", "type": "reconnaissance", "name": "侦察阶段", "description": "端口扫描和服务识别", "config": {{"target": "{target}", "tools": ["nmap"]}}, "todos": [{{"id": "recon_port_scan", "name": "端口扫描", "description": "使用nmap扫描目标开放端口", "config": {{"tool": "nmap", "timeout": 600, "target": "{target}", "ports": "1-1000"}}}}]}}]}}
+
+**关键要求**：
+1. target字段必须是 "{target}"
+2. 必须包含完整的7个Kill Chain阶段
+3. 每个todo的config必须包含timeout字段
+4. 只返回JSON，不要添加任何说明文字
 
 请严格按照上述格式返回JSON。"""
 

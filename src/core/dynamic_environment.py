@@ -12,8 +12,9 @@ from datetime import datetime
 import json
 import uuid
 from pathlib import Path
+from ..utils.unified_logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("dynamic_environment")
 
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -55,26 +56,25 @@ class DynamicEnvironmentManager:
         """初始化动态环境管理器"""
         try:
             # 创建工作目录
-            print("    正在创建工作空间...", flush=True)
+            logger.info(t("env.creating_workspace"))
             await self._create_workspace()
             workspace_dir = self.environment_config.get("workspace_directory", "unknown")
-            print(f"    ✅ 工作空间创建成功: {workspace_dir}", flush=True)
+            logger.success(t("env.workspace_created", dir=workspace_dir))
             await asyncio.sleep(0)
             
             # 检查环境状态
-            print("    正在检查环境状态...", flush=True)
+            logger.info(t("env.checking_status"))
             await self._check_environment_status()
             available_managers = self.environment_state.get("available_package_managers", [])
             if available_managers:
-                print(f"    ✅ 环境检查完成，可用包管理器: {', '.join(available_managers)}", flush=True)
+                logger.success(t("env.check_complete", managers=", ".join(available_managers)))
             else:
-                print("    ⚠️  环境检查完成，未检测到包管理器", flush=True)
+                logger.warning(t("env.no_package_managers"))
             
             logger.info("动态环境管理器初始化完成")
             
         except Exception as e:
-            logger.error(f"动态环境管理器初始化失败: {e}")
-            print(f"    ❌ 动态环境管理器初始化失败: {e}")
+            logger.error(t("env.init_failed", error=str(e)))
             raise
     
     async def prepare_stage_environment(self, stage_type: str, stage_config: Dict[str, Any]) -> bool:

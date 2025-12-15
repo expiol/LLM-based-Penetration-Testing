@@ -19,6 +19,18 @@ class NmapTool(ToolInterface):
         super().__init__("nmap", config)
         self.timeout = config.get("timeout", 300)  # 5分钟超时
         self._has_root_privileges = None  # 缓存root权限检查结果
+    
+    def _is_nmap_available(self) -> bool:
+        """检查nmap是否可用"""
+        try:
+            result = subprocess.run(
+                ["nmap", "--version"],
+                capture_output=True,
+                timeout=5
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
         
     async def _check_root_privileges(self) -> bool:
         """检查是否有root权限"""
@@ -97,20 +109,15 @@ class NmapTool(ToolInterface):
             
             if not target:
                 return {"success": False, "error": "未指定目标"}
-                        # 检查 nmap 二进制是否可用；不可用则尝试自动安装或降级回退
-                        if not self._is_nmap_available():
-                            self.logger.warning("nmap 二进制未找到，尝试自动安装或降级回退")
-                            install_ok = await self._auto_install_on_windows()
-                            if not install_ok and sys.platform != "win32":
-                                # 非 Windows 的简单提示；安装逻辑在 AgentToolManager 中处理（apt/brew/pip）
-                                self._add_output_line("⚠️ nmap 未安装，建议使用系统包管理器安装后重试")
-                            # 再次检查
-                            if self._is_nmap_available():
-                                self._add_output_line("✅ 已检测到 nmap，可继续执行扫描")
-                            else:
-                                self._add_output_line("↩️ 降级到基础TCP端口扫描（Python实现）")
-                                basic = await self._fallback_tcp_scan(target, ports, timeout=scan_timeout)
-                                return basic
+            
+            # 检查nmap是否可用
+            if not self._is_nmap_available():
+                return {
+                    "success": False,
+                    "error": "nmap未安装或不在PATH中",
+                    "suggestion": "请使用系统包管理器安装nmap (apt-get install nmap / brew install nmap / yum install nmap)",
+                    "install_command": "sudo apt-get install -y nmap" if sys.platform.startswith("linux") else "brew install nmap" if sys.platform == "darwin" else "choco install nmap"
+                }
             
             # 立即更新执行状态，让UI可以看到
             # agent类型会自动从thread-local context获取
@@ -122,21 +129,11 @@ class NmapTool(ToolInterface):
             self._add_output_line(f"📌 端口范围: {ports}")
             self._add_output_line(f"📌 扫描类型: {scan_type}")
             
-            # 检查root权限，如果使用tcp_syn但没有权限，自动降级到tcp_connect
+            # 检查特殊扫描类型的权限需求
             has_root = await self._check_root_privileges()
-            if scan_type == "tcp_syn" and not has_root:
-                self.logger.warning("tcp_syn扫描需要root权限，自动降级到tcp_connect扫描")
-                scan_type = "tcp_connect"
-            
-            # UDP扫描也需要root权限
-            if scan_type == "udp" and not has_root:
-                self.logger.warning("UDP扫描需要root权限，自动降级到tcp_connect扫描")
-                scan_type = "tcp_connect"
-            
-            # 操作系统检测也需要root权限
-            if os_detection and not has_root:
-                self.logger.warning("操作系统检测需要root权限，已禁用")
-                os_detection = False
+            if (scan_type == "tcp_syn" or scan_type == "udp" or os_detection) and not has_root:
+                self._add_output_line(f"⚠️ 警告: {scan_type}扫描或OS检测需要root权限，可能无法正常执行")
+                self._add_output_line(f"💡 提示: 使用sudo运行或切换到tcp_connect扫描类型")
             
             # 构建Nmap命令
             cmd = ["nmap"]

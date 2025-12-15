@@ -447,9 +447,12 @@ class AgentCallbackHandler(AsyncCallbackHandler):
         logger.info(f"Agent {self.agent_name} finished")
         output = finish.return_values
         if output:
+            from ..utils.i18n import t
+            from ..utils.unified_logger import get_logger
+            agent_logger = get_logger(f"agent.{self.agent_name}")
             result_summary = self._format_result_summary(output)
             if result_summary:
-                print(f"✅ [{self.agent_name}] 完成: {result_summary}", flush=True)
+                agent_logger.success(t("agent.completed", agent_name=self.agent_name, summary=result_summary))
         
         self.execution_logs.append({
             "type": "finish",
@@ -459,18 +462,19 @@ class AgentCallbackHandler(AsyncCallbackHandler):
     
     def _format_result_summary(self, output: Any) -> str:
         """格式化结果摘要"""
+        from ..utils.i18n import t
         if isinstance(output, dict):
             if "open_ports" in output:
                 ports = output.get("open_ports", [])
-                return f"发现 {len(ports)} 个开放端口"
+                return t("agent.ports_found", count=len(ports))
             if "subdomains" in output:
                 subdomains = output.get("subdomains", [])
-                return f"发现 {len(subdomains)} 个子域名"
+                return t("agent.subdomains_found", count=len(subdomains))
             if "vulnerabilities" in output:
                 vulns = output.get("vulnerabilities", [])
-                return f"发现 {len(vulns)} 个潜在漏洞"
+                return t("agent.vulnerabilities_found", count=len(vulns))
             if "success" in output:
-                return "任务执行成功" if output.get("success") else "任务执行失败"
+                return t("agent.task_success") if output.get("success") else t("agent.task_failed")
         return ""
     
     async def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs):
@@ -667,12 +671,8 @@ class LangChainBaseAgent(ABC):
         
         # 如果还是没有 API Key，给出友好提示
         if not api_key:
-            raise ValueError(
-                "未配置子Agent OpenAI API Key！\n"
-                "请设置环境变量或在配置文件中配置：\n"
-                "1. 环境变量: export OPENAI_API_KEY='your-key'\n"
-                "2. configs/llm_runtime.json 中配置 sub_agents.api_key"
-            )
+            from ..utils.i18n import t
+            raise ValueError(t("agent.api_key_not_configured"))
         
         # 创建重试处理器
         max_retries = self.config.get("max_retries", 3)
@@ -798,13 +798,14 @@ class LangChainBaseAgent(ABC):
             self.callback_handler = AgentCallbackHandler(agent_display_name, session_id)
             
             # 在Agent开始执行时，立即更新执行状态
+            from ..utils.i18n import t
             execution_state.set_current_execution(
                 agent=agent_display_name,
                 tool="",
                 command="",
-                description=f"{agent_display_name} 开始执行任务"
+                description=t("agent.starting_task", agent_name=agent_display_name)
             )
-            execution_state.add_output_line(f"🚀 {agent_display_name} 开始执行任务")
+            execution_state.add_output_line(t("agent.starting_task", agent_name=agent_display_name))
             
             # 保存执行上下文到类属性和thread-local storage，供工具调用时使用
             self._current_session_id = session_id
@@ -833,7 +834,7 @@ class LangChainBaseAgent(ABC):
             full_input = f"""{prepared_input}
 
 目标: {target_info.get("target", "")}
-安全模式: {'启用' if self.safe_mode else '禁用'}
+安全模式: {t("agent.safe_mode_enabled") if self.safe_mode else t("agent.safe_mode_disabled")}
 """
             
             # 优化输入长度
@@ -873,12 +874,13 @@ class LangChainBaseAgent(ABC):
             execution_result = self._process_result(result, target_info, context)
             
             # Agent执行完成，更新状态
+            from ..utils.i18n import t
             agent_display_name = self.agent_type.value.replace("_", " ").title()
             if execution_result.get("success"):
-                execution_state.add_output_line(f"✅ {agent_display_name} 任务执行成功")
+                execution_state.add_output_line(t("agent.task_success_msg", agent_name=agent_display_name))
             else:
-                error = execution_result.get("error", "未知错误")
-                execution_state.add_output_line(f"❌ {agent_display_name} 任务执行失败: {error[:100]}")
+                error = execution_result.get("error", t("common.unknown_error"))
+                execution_state.add_output_line(t("agent.task_failed_msg", agent_name=agent_display_name, error=error[:100]))
             
             # 清理thread-local context
             try:

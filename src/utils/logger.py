@@ -5,8 +5,6 @@ from pathlib import Path
 from concurrent_log_handler import ConcurrentRotatingFileHandler
 from datetime import datetime, timedelta
 
-from src.utils.thread_local_storage import get_data
-
 # 日志配置（从环境变量或使用默认值）
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SERVICE_NAME = os.environ.get("SERVICE_NAME", "llm-pen-test")
@@ -16,81 +14,98 @@ LOGGING_MAXBYTES = int(os.environ.get("LOGGING_MAXBYTES", 20 * 1024 * 1024))  # 
 LOGGING_BACKUP_COUNT = int(os.environ.get("LOGGING_BACKUP_COUNT", 10))
 
 
-class HeaderParamMapping:
-    """HTTP Header 参数映射常量"""
-    
-    # 会话ID
-    SID = "X-Session-ID"
-    
-    # 用户ID
-    UID = "X-User-ID"
-    
-    # 请求顺序号
-    ORDER = "X-Request-Order"
-    
-    # 扩展信息
-    EXT = "X-Ext-Info"
-    
-    # 组织信息
-    ORG = "X-Org-ID"
-    
-    # 请求ID
-    REQUEST_ID = "X-Request-ID"
-    
-    # 追踪ID
-    TRACE_ID = "X-Trace-ID"
-    
-    # 模型名称
-    MODEL_NAME = "X-Model-Name"
-    
-    # 安全模式
-    SAFE_MODE = "X-Safe-Mode"
-
-
 class JsonFormatter(logging.Formatter):
+    """优化的JSON日志格式化器 - 针对渗透测试项目"""
 
     def formatTime(self, record, datefmt=None):
-        # 将UTC时间戳转换为datetime对象（UTC）
-        utc_dt = datetime.utcfromtimestamp(record.created)
-        # 将UTC时间转换为UTC+8时区的时间
-        local_dt = utc_dt + timedelta(hours=8)
+        # 将时间戳转换为UTC+8时区的datetime对象
+        from datetime import timezone
+        utc_dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        # 转换为UTC+8时区
+        local_tz = timezone(timedelta(hours=8))
+        local_dt = utc_dt.astimezone(local_tz)
         # 格式化日期和时间（包括毫秒）
         # 注意：%f 是微秒，我们需要切片来获取毫秒
         time_str = local_dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + '+0800'
         return time_str
 
-    def handle_request_headers(self, request_headers, header_str):
-        if request_headers is not None and request_headers.headers is not None:
-            if header_str == HeaderParamMapping.SID:
-                return request_headers.headers.get(HeaderParamMapping.SID)
-            if header_str == HeaderParamMapping.UID:
-                return request_headers.headers.get(HeaderParamMapping.UID)
-            if header_str == HeaderParamMapping.ORDER:
-                return request_headers.headers.get(HeaderParamMapping.ORDER)
-            if header_str == HeaderParamMapping.EXT:
-                return request_headers.headers.get(HeaderParamMapping.EXT)
-            if header_str == HeaderParamMapping.ORG:
-                return request_headers.headers.get(HeaderParamMapping.ORG)
-        return get_data(header_str)
+    def _get_pentest_context(self, record):
+        """从thread-local storage或execution_state获取渗透测试上下文"""
+        context = {}
+        
+        # 首先从record的extra字段获取（优先级最高，如果直接传递）
+        if hasattr(record, 'session_id') and record.session_id:
+            context['session_id'] = record.session_id
+        if hasattr(record, 'agent') and record.agent:
+            context['agent'] = record.agent
+        if hasattr(record, 'tool') and record.tool:
+            context['tool'] = record.tool
+        if hasattr(record, 'target') and record.target:
+            context['target'] = record.target
+        if hasattr(record, 'stage') and record.stage:
+            context['stage'] = record.stage
+        
+        # 如果extra中没有，尝试从thread-local storage获取
+        if not context:
+            try:
+                from src.agents.tools_adapter import _context_storage
+                
+                # 从agent_context获取
+                if hasattr(_context_storage, 'agent_context'):
+                    agent_ctx = _context_storage.agent_context
+                    if agent_ctx:
+                        if not context.get('session_id'):
+                            context['session_id'] = agent_ctx.get('session_id')
+                        if not context.get('agent'):
+                            context['agent'] = agent_ctx.get('agent_type')
+                        if not context.get('target'):
+                            context['target'] = agent_ctx.get('target')
+                        if not context.get('stage'):
+                            context['stage'] = agent_ctx.get('stage')
+                
+                # 从execution_state获取当前执行信息
+                try:
+                    from src.agents.base_agent import execution_state
+                    exec_state = execution_state.get_state()
+                    if exec_state:
+                        if not context.get('agent') and exec_state.get('agent'):
+                            context['agent'] = exec_state.get('agent')
+                        if not context.get('tool') and exec_state.get('tool'):
+                            context['tool'] = exec_state.get('tool')
+                except:
+                    pass
+                    
+            except ImportError:
+                # 如果导入失败，忽略
+                pass
+        
+        return context
 
     def format(self, record):
+        """格式化日志记录为JSON，包含渗透测试相关字段"""
         log_record = {
             "timestamp": self.formatTime(record, datefmt='%Y-%m-%dT%H:%M:%S%z'),
-            "application": SERVICE_NAME,
-            "category": record.__dict__.get('category', None),
-            "module": record.module,
             "level": record.levelname,
-            "file": record.filename + ":" + str(record.lineno),
-            "sid": self.handle_request_headers(record.__dict__.get('request_headers', None), HeaderParamMapping.SID),
-            "uid": self.handle_request_headers(record.__dict__.get('request_headers', None), HeaderParamMapping.UID),
-            "order": self.handle_request_headers(record.__dict__.get('request_headers', None), HeaderParamMapping.ORDER),
-            "ext": self.handle_request_headers(record.__dict__.get('request_headers', None), HeaderParamMapping.EXT),
-            "x-org": self.handle_request_headers(record.__dict__.get('request_headers', None), HeaderParamMapping.ORG),
+            "module": record.module,
+            "file": f"{record.filename}:{record.lineno}",
             "msg": record.getMessage(),
-            "url": record.__dict__.get('url', None),
-            "toolName": record.__dict__.get('toolName', None),
-            "direction": record.__dict__.get('direction', None),
         }
+        
+        # 获取渗透测试上下文信息
+        pentest_context = self._get_pentest_context(record)
+        
+        # 只在有值时才添加渗透测试相关字段
+        if pentest_context.get('session_id'):
+            log_record["session_id"] = pentest_context['session_id']
+        if pentest_context.get('agent'):
+            log_record["agent"] = pentest_context['agent']
+        if pentest_context.get('tool'):
+            log_record["tool"] = pentest_context['tool']
+        if pentest_context.get('target'):
+            log_record["target"] = pentest_context['target']
+        if pentest_context.get('stage'):
+            log_record["stage"] = pentest_context['stage']
+        
         return json.dumps(log_record, ensure_ascii=False)
 
 
