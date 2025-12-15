@@ -60,5 +60,6 @@ ray[default]==2.39.0
 ray[data]==2.39.0
 ray[serve]==2.39.0
 
-# 终端UI优化
-rich==13.7.0
+# 终端UI优化（Textual已包含rich作为依赖，无需单独安装）
+textual>=0.48.0  # 现代TUI框架，解决rich的抖动和滚动问题
+textual-dev>=1.3.0  # Textual开发工具

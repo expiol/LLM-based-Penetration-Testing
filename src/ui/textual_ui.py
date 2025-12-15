@@ -3,8 +3,8 @@
 解决rich库的抖动和滚动问题
 """
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Static, DataTable, RichLog, Label, Input
-from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
+from textual.widgets import Header, Footer, Static, RichLog, Input
+from textual.containers import Container, Horizontal, Vertical
 from textual.binding import Binding
 from textual.reactive import reactive
 from datetime import datetime
@@ -34,12 +34,18 @@ class TaskListWidget(Static):
     
     def render(self) -> str:
         """渲染任务列表"""
+        lines = []
+        lines.append("[bold cyan]📋 任务链 (Kill Chain)[/bold cyan]")
+        lines.append("")
+        
         if not self.tasks_info or not isinstance(self.tasks_info, dict):
-            return "[dim]等待任务加载...[/dim]"
+            lines.append("[dim]等待任务加载...[/dim]")
+            return "\n".join(lines)
         
         tasks_by_status = self.tasks_info.get("tasks_by_status", {})
         if not tasks_by_status:
-            return "[dim]暂无任务...[/dim]"
+            lines.append("[dim]暂无任务...[/dim]")
+            return "\n".join(lines)
         
         all_tasks = []
         
@@ -55,8 +61,6 @@ class TaskListWidget(Static):
             if phase not in phases:
                 phases[phase] = []
             phases[phase].append(task)
-        
-        lines = []
         
         # 按顺序渲染每个阶段
         for phase_key in self.PHASE_ORDER:
@@ -124,7 +128,9 @@ class StatusWidget(Static):
     def render(self) -> str:
         """渲染状态信息"""
         lines = []
-        lines.append(f"[cyan bold]🎯 目标:[/cyan bold] [white]{self.target}[/white]")
+        lines.append("[bold yellow]🔄 当前状态[/bold yellow]")
+        lines.append("")
+        lines.append(f"[cyan]🎯 目标:[/cyan] [white]{self.target}[/white]")
         lines.append(f"[dim]📋 会话: {self.session_id[:8] if self.session_id else 'N/A'}...[/dim]")
         lines.append("")
         
@@ -196,47 +202,65 @@ class PentestTUI(App):
     
     CSS = """
     Screen {
-        layout: grid;
-        grid-size: 2 3;
-        grid-rows: 1fr 1fr 4;
+        layout: vertical;
+    }
+    
+    #main_content {
+        height: 18;
+        layout: horizontal;
     }
     
     #tasks_panel {
-        width: 55%;
+        width: 60%;
+        height: 100%;
         border: solid cyan;
-        height: 50%;
     }
     
     #status_panel {
-        width: 45%;
+        width: 40%;
+        height: 100%;
         border: solid yellow;
-        height: 50%;
+    }
+    
+    #task_list {
+        height: 100%;
+        padding: 1;
+        overflow-y: auto;
+    }
+    
+    #status_widget {
+        height: 100%;
+        padding: 1;
+        overflow-y: auto;
     }
     
     #log_panel {
-        height: 35%;
+        height: 1fr;
         border: solid blue;
+        padding: 0;
+    }
+    
+    #log {
+        height: 100%;
+        border: none;
     }
     
     #input_container {
-        height: 4;
+        height: 3;
         border: solid green;
+    }
+    
+    #user_input {
+        width: 100%;
+        border: none;
     }
     
     RichLog {
         background: $surface;
-        scrollbar-gutter: stable;
     }
     
     Input {
         background: $surface;
-        border: solid $primary;
-    }
-    
-    .panel_title {
-        text-style: bold;
-        background: $boost;
-        padding: 0 1;
     }
     """
     
@@ -260,25 +284,21 @@ class PentestTUI(App):
         """构建UI组件"""
         yield Header()
         
-        # 主区域
+        # 主区域 - 任务列表和当前状态
         with Horizontal(id="main_content"):
             with Vertical(id="tasks_panel"):
-                yield Label("📋 [bold]任务链[/bold]", classes="panel_title")
-                yield ScrollableContainer(TaskListWidget(id="task_list"))
+                yield TaskListWidget(id="task_list")
             
             with Vertical(id="status_panel"):
-                yield Label("🔄 [bold]当前状态[/bold]", classes="panel_title")
-                yield ScrollableContainer(StatusWidget(id="status_widget"))
+                yield StatusWidget(id="status_widget")
         
         # 日志区（自动滚动）
         with Container(id="log_panel"):
-            yield Label("📝 [bold]实时日志[/bold]", classes="panel_title")
             yield RichLog(id="log", auto_scroll=True, highlight=True, markup=True)
         
         # 输入区
         with Container(id="input_container"):
-            yield Label("💬 [bold]输入补充信息[/bold] (按Enter发送, Esc取消)", classes="panel_title")
-            yield Input(placeholder="输入补充信息，如'发现8080端口开放'...", id="user_input")
+            yield Input(placeholder="💬 输入补充信息 (Enter发送 | q退出 | o切换输出)", id="user_input")
         
         yield Footer()
     
@@ -289,6 +309,9 @@ class PentestTUI(App):
         self.rich_log = self.query_one("#log", RichLog)
         self.user_input = self.query_one("#user_input", Input)
         
+        # 设置RichLog标题
+        self.title = "LLM渗透测试框架 - 实时监控"
+        
         # 设置基本信息
         self.status_display.target = self.target
         self.status_display.session_id = self.session_id
@@ -296,10 +319,14 @@ class PentestTUI(App):
         # 启动后台更新任务
         self._update_task = asyncio.create_task(self._update_loop())
         
+        # 初始日志
+        self.rich_log.write("[bold blue]📝 实时日志 (自动滚动)[/bold blue]")
+        self.rich_log.write("[dim]" + "─" * 60 + "[/dim]")
         self.rich_log.write("[green bold]✅ 渗透测试监控已启动[/green bold]")
         self.rich_log.write(f"[cyan]🎯 目标: {self.target}[/cyan]")
         self.rich_log.write(f"[dim]📋 会话: {self.session_id}[/dim]")
         self.rich_log.write("[dim]💡 提示: 在下方输入框输入补充信息后按Enter发送[/dim]")
+        self.rich_log.write("[dim]" + "─" * 60 + "[/dim]")
     
     async def _update_loop(self) -> None:
         """后台更新循环 - 定期刷新任务和状态"""
@@ -372,8 +399,8 @@ class PentestTUI(App):
                 except Exception:
                     pass  # 静默处理
                 
-                # 更短的刷新间隔（提高响应速度）
-                await asyncio.sleep(0.05)
+                # 平衡刷新间隔（既保证响应速度又不过度占用CPU）
+                await asyncio.sleep(0.2)
                 
             except asyncio.CancelledError:
                 break
