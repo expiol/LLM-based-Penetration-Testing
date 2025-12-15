@@ -213,10 +213,15 @@ class StructuredOutputManager:
         parser = self.parsers.get(tool_name, self.default_parser)
         return parser.get_summary(parsed_data)
     
-    def filter_for_llm(self, tool_name: str, raw_output: str, max_length: int = 2000) -> str:
+    def filter_for_llm(self, tool_name: str, raw_output: str, max_length: int = 4000) -> str:
         """
         过滤输出，只保留对LLM有用的信息
         用于返回给子Agent或主Agent
+        
+        Args:
+            tool_name: 工具名称
+            raw_output: 原始输出
+            max_length: 最大长度（字符数），默认4000（约1000 tokens）
         """
         parsed = self.parse_output(tool_name, raw_output)
         
@@ -231,40 +236,89 @@ class StructuredOutputManager:
         # 根据工具类型添加关键信息
         if tool_name in ["nmap", "nmap_scan"]:
             if parsed.get("open_ports"):
-                filtered_parts.append(f"【开放端口】{parsed['open_ports']}")
+                ports = parsed['open_ports']
+                if isinstance(ports, list):
+                    # 如果端口太多，只显示前20个
+                    if len(ports) > 20:
+                        ports_str = f"{ports[:20]}... (共{len(ports)}个端口)"
+                    else:
+                        ports_str = str(ports)
+                else:
+                    ports_str = str(ports)
+                filtered_parts.append(f"【开放端口】{ports_str}")
+            
             if parsed.get("services"):
+                services = parsed["services"]
+                # 限制服务数量，避免过长
+                max_services = 15
                 services_info = []
-                for svc in parsed["services"][:10]:  # 最多10个服务
+                for svc in services[:max_services]:
                     svc_str = f"{svc['port']}/{svc['protocol']}: {svc['service']}"
                     if svc.get('version'):
-                        svc_str += f" ({svc['version']})"
+                        version = svc['version']
+                        # 截断过长的版本信息
+                        if len(version) > 50:
+                            version = version[:50] + "..."
+                        svc_str += f" ({version})"
                     services_info.append(svc_str)
-                filtered_parts.append(f"【服务详情】\n" + "\n".join(services_info))
+                
+                services_text = "\n".join(services_info)
+                if len(services) > max_services:
+                    services_text += f"\n... (共{len(services)}个服务，仅显示前{max_services}个)"
+                
+                filtered_parts.append(f"【服务详情】\n{services_text}")
+            
             if parsed.get("os_info"):
-                filtered_parts.append(f"【操作系统】{parsed['os_info']}")
+                os_info = parsed['os_info']
+                # 截断过长的OS信息
+                if len(str(os_info)) > 200:
+                    os_info = str(os_info)[:200] + "..."
+                filtered_parts.append(f"【操作系统】{os_info}")
         
         elif tool_name in ["sql_injection", "sql_injection_test"]:
             if parsed.get("vulnerable"):
                 filtered_parts.append("【漏洞状态】发现SQL注入漏洞！")
             if parsed.get("databases_found"):
-                filtered_parts.append(f"【发现数据库】{parsed['databases_found']}")
+                dbs = parsed['databases_found']
+                if isinstance(dbs, list) and len(dbs) > 10:
+                    dbs_str = f"{dbs[:10]}... (共{len(dbs)}个数据库)"
+                else:
+                    dbs_str = str(dbs)
+                filtered_parts.append(f"【发现数据库】{dbs_str}")
         
         else:
             # 通用工具：取前N行有意义的输出
             lines = parsed.get("lines", [])
             meaningful_lines = [l for l in lines if l.strip() and not l.strip().startswith('#')]
             if meaningful_lines:
-                filtered_parts.append(f"【输出内容】\n" + "\n".join(meaningful_lines[:20]))
+                # 限制行数，避免过长
+                max_lines = 30
+                display_lines = meaningful_lines[:max_lines]
+                lines_text = "\n".join(display_lines)
+                if len(meaningful_lines) > max_lines:
+                    lines_text += f"\n... (共{len(meaningful_lines)}行，仅显示前{max_lines}行)"
+                filtered_parts.append(f"【输出内容】\n{lines_text}")
         
         result = "\n\n".join(filtered_parts)
         
-        # 截断过长内容
+        # 智能截断过长内容（保留结构）
         if len(result) > max_length:
-            result = result[:max_length] + "\n...[输出已截断]"
+            # 尝试保留摘要和关键信息
+            if summary and len(summary) < max_length // 2:
+                # 保留摘要，截断其他部分
+                remaining = max_length - len(summary) - 100  # 预留100字符给提示
+                other_parts = "\n\n".join(filtered_parts[1:]) if len(filtered_parts) > 1 else ""
+                if len(other_parts) > remaining:
+                    other_parts = other_parts[:remaining] + "\n...[内容已截断]"
+                result = f"【摘要】{summary}\n\n{other_parts}"
+            else:
+                # 简单截断
+                result = result[:max_length] + "\n...[输出已截断]"
         
         return result
 
 
 # 全局实例
 output_manager = StructuredOutputManager()
+
 

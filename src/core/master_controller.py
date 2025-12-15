@@ -16,6 +16,7 @@ from ..ray_integration.ray_agent_actor import RayAgentPool
 from ..ray_integration.ray_state_manager import RayStateManager
 from ..core.todo_manager import TodoManager
 from ..prompts.master_prompts import MasterPrompts
+from ..utils.llm_retry import LLMRetryHandler, InputOptimizer
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,8 @@ class RayMasterController:
         
         # 主控LLM（用于生成任务列表）
         self.master_llm = None
+        self._master_model_name: Optional[str] = None  # 保存模型名称用于输入优化
+        self._master_retry_handler: Optional[LLMRetryHandler] = None  # 重试处理器
         self._init_master_llm()
         
         # Kill Chain映射
@@ -92,10 +95,17 @@ class RayMasterController:
             base_url = llm_config.get("base_url")
             model_name = llm_config.get("model_name") or llm_config.get("model", "gpt-4")
             
+            # 保存模型名称用于输入优化
+            self._master_model_name = model_name
+            
             if not api_key:
                 self.logger.warning("未配置主控LLM API Key")
                 print("⚠️  警告：未配置主控LLM API Key", flush=True)
                 return
+            
+            # 创建重试处理器
+            max_retries = self.config.get("execution", {}).get("max_retry_attempts", 3)
+            self._master_retry_handler = LLMRetryHandler(max_retries=max_retries)
             
             # 创建 ChatOpenAI 实例
             kwargs = {
@@ -359,7 +369,7 @@ class RayMasterController:
             # 准备上下文
             context = {
                 "environment_state": {},
-                "available_tools": ["nmap", "dns_enum", "sql_injection", "cmd_executer"]
+                "available_tools": ["nmap", "dns_enum", "subdomain_enum", "sql_injection", "cmd_executer"]
             }
             
             # 获取规划提示词
@@ -369,6 +379,12 @@ class RayMasterController:
             system_prompt = MasterPrompts.get_master_system_prompt()
             _print(f"   ✅ 提示词准备完成，系统提示词长度: {len(system_prompt)}, 规划提示词长度: {len(planning_prompt)}", flush=True)
             self.logger.info(f"提示词准备完成，系统提示词长度: {len(system_prompt)}, 规划提示词长度: {len(planning_prompt)}")
+            
+            # 优化输入长度
+            if self._master_model_name:
+                optimizer = InputOptimizer(model_name=self._master_model_name)
+                system_prompt = optimizer.optimize_input(system_prompt)
+                planning_prompt = optimizer.optimize_input(planning_prompt)
             
             # 调用LLM生成计划
             from langchain_core.messages import SystemMessage, HumanMessage
@@ -399,8 +415,8 @@ class RayMasterController:
             self.logger.info("开始调用LLM API...")
             
             try:
-                # 添加超时控制（5分钟，因为某些LLM可能响应较慢）
-                try:
+                # 使用重试机制调用LLM
+                async def _invoke_llm():
                     _print(f"   📡 正在发送请求到LLM API...", flush=True)
                     self.logger.info("发送请求到LLM API...")
                     
@@ -408,10 +424,12 @@ class RayMasterController:
                     import sys
                     sys.stdout.flush()
                     
+                    # 添加超时控制（5分钟，因为某些LLM可能响应较慢）
                     response = await asyncio.wait_for(
                         self.master_llm.ainvoke(messages),
                         timeout=300.0  # 5分钟超时
                     )
+                    
                     _print(f"   ✅ LLM API响应已接收", flush=True)
                     self.logger.info("LLM API响应已接收")
                     sys.stdout.flush()
@@ -419,13 +437,23 @@ class RayMasterController:
                     content = response.content if hasattr(response, 'content') else str(response)
                     _print(f"   ✅ LLM响应接收成功，长度: {len(content)} 字符", flush=True)
                     self.logger.info(f"LLM响应接收成功，长度: {len(content)} 字符")
-                except KeyboardInterrupt:
-                    error_msg = "用户中断LLM调用"
-                    self.logger.warning(error_msg)
-                    _print(f"   ⚠️  {error_msg}", flush=True)
-                    raise
+                    return response
+                
+                # 使用重试处理器执行
+                if self._master_retry_handler:
+                    response = await self._master_retry_handler.retry_async(_invoke_llm)
+                else:
+                    response = await _invoke_llm()
+                
+                content = response.content if hasattr(response, 'content') else str(response)
+                
+            except KeyboardInterrupt:
+                error_msg = "用户中断LLM调用"
+                self.logger.warning(error_msg)
+                _print(f"   ⚠️  {error_msg}", flush=True)
+                raise
             except asyncio.TimeoutError:
-                error_msg = "LLM调用超时（超过2分钟）"
+                error_msg = "LLM调用超时（超过5分钟）"
                 self.logger.error(error_msg)
                 _print(f"   ❌ {error_msg}", flush=True)
                 _print(f"   提示: 可能是网络问题或LLM服务响应慢，请检查网络连接", flush=True)
@@ -558,32 +586,68 @@ class RayMasterController:
                 return await self._execute_kill_chain_sequential(session_id, target, options)
             
             # 按顺序执行每个阶段
-            for stage in stages:
+            stage_index = 0
+            while stage_index < len(stages):
+                stage = stages[stage_index]
                 stage_id = stage.get("id", "")
                 stage_type = stage.get("type", "")
                 stage_name = stage.get("name", "")
                 stage_config = stage.get("config", {})
                 stage_todos = stage.get("todos", [])
                 
-                self.logger.info(f"执行阶段: {stage_name} ({stage_type})")
-                _print(f"🔄 执行阶段: {stage_name}...", flush=True)
+                # 阶段重试计数器（最多重试3次）
+                stage_retry_count = stage.get("_retry_count", 0)
+                max_stage_retries = 3
+                
+                # 初始化尝试历史（记录已尝试的命令和工具）
+                if "_attempt_history" not in stage:
+                    stage["_attempt_history"] = []
+                
+                attempt_history = stage["_attempt_history"]
+                
+                self.logger.info(f"执行阶段: {stage_name} ({stage_type}), 重试次数: {stage_retry_count}")
+                if stage_retry_count > 0:
+                    _print(f"🔄 重试阶段: {stage_name} (第{stage_retry_count}次重试)...", flush=True)
+                    _print(f"📋 已尝试的方法: {len(attempt_history)} 种", flush=True)
+                else:
+                    _print(f"🔄 执行阶段: {stage_name}...", flush=True)
                 
                 # 获取对应的Agent类型
                 kill_chain_state = self._map_stage_type_to_kill_chain(stage_type)
                 if not kill_chain_state:
                     self.logger.warning(f"无法映射阶段类型: {stage_type}")
+                    stage_index += 1
                     continue
                 
                 agent_type = self.kill_chain_mapping.get(kill_chain_state)
                 if not agent_type:
                     self.logger.warning(f"没有对应的Agent类型: {kill_chain_state}")
+                    stage_index += 1
                     continue
                 
                 # 获取Agent Actor
                 actor = self.agent_pool.get_actor(agent_type)
                 if not actor:
                     self.logger.warning(f"没有可用的Agent Actor: {agent_type}")
+                    stage_index += 1
                     continue
+                
+                # 🔧 在开始新阶段前，清除旧的执行状态并设置正确的Agent名称
+                try:
+                    from src.agents.base_agent import execution_state
+                    # 格式化Agent名称（如 recon_agent -> Recon Agent）
+                    agent_display_name = agent_type.value.replace("_", " ").title()
+                    execution_state.clear()  # 清除旧状态
+                    execution_state.set_current_execution(
+                        agent=agent_display_name,
+                        tool="",
+                        command="",
+                        description=f"准备执行 {stage_name}"
+                    )
+                    execution_state.add_output_line(f"📍 开始阶段: {stage_name}")
+                    execution_state.add_output_line(f"🤖 分配给: {agent_display_name}")
+                except Exception as e:
+                    self.logger.warning(f"清除执行状态失败: {e}")
                 
                 # 准备执行上下文，包含任务列表
                 context = [{
@@ -669,7 +733,73 @@ class RayMasterController:
                     "result": result
                 })
                 
+                # 📝 记录本次尝试历史（用于避免重复尝试）
+                tools_used = result.get("data", {}).get("tools_used", [])
+                command = result.get("data", {}).get("command", "")
+                
+                # 提取本次执行的有用信息（无论成功失败都可能有用）
+                useful_info = self._extract_useful_info(result, stage_type)
+                
+                attempt_info = {
+                    "tools": tools_used,
+                    "command": command,
+                    "success": result.get("success", False),
+                    "error": result.get("error", ""),
+                    "useful_info": useful_info,  # 本次收集的有用信息
+                    "timestamp": datetime.now().isoformat()
+                }
+                attempt_history.append(attempt_info)
+                self.logger.info(f"记录尝试历史: {attempt_info}")
+                
+                # 📊 更新阶段信息摘要（累积有用信息）
+                # 先获取全局上下文
+                global_context = await self.state_manager.get_global_context(session_id)
+                stage_info_key = f"{stage_type}_info_summary"
+                current_summary = global_context.get(stage_info_key, {
+                    "collected_info": [],
+                    "tools_tried": [],
+                    "total_attempts": 0
+                })
+                
+                # 累积有用信息
+                if useful_info and useful_info != "无有用信息":
+                    current_summary["collected_info"].append({
+                        "attempt": len(attempt_history),
+                        "info": useful_info,
+                        "tools": tools_used
+                    })
+                    
+                    # 📝 实时输出本次收集的有用信息到日志
+                    try:
+                        from src.agents.base_agent import execution_state
+                        execution_state.add_output_line(f"📊 [步骤 #{len(attempt_history)}] 收集到有用信息: {useful_info}")
+                        _print(f"📊 本次执行收集到有用信息: {useful_info}", flush=True)
+                    except Exception as e:
+                        self.logger.warning(f"输出有用信息失败: {e}")
+                
+                # 记录已尝试的工具
+                for tool in tools_used:
+                    if tool not in current_summary["tools_tried"]:
+                        current_summary["tools_tried"].append(tool)
+                
+                current_summary["total_attempts"] = len(attempt_history)
+                
                 # 更新全局上下文
+                await self.state_manager.update_global_context(session_id, {
+                    stage_info_key: current_summary
+                })
+                
+                # 📋 显示累积信息摘要
+                if current_summary.get("collected_info"):
+                    accumulated_count = len(current_summary["collected_info"])
+                    try:
+                        from src.agents.base_agent import execution_state
+                        execution_state.add_output_line(f"📈 当前阶段已累积 {accumulated_count} 条有用信息")
+                        _print(f"📈 当前阶段已累积 {accumulated_count} 条有用信息", flush=True)
+                    except Exception:
+                        pass
+                
+                # 更新全局上下文（原有逻辑）
                 if result.get("success") and result.get("data"):
                     await self._update_global_context(session_id, kill_chain_state, result["data"])
                     
@@ -711,60 +841,119 @@ class RayMasterController:
                         else:
                             await self.todo_manager.mark_todo_failed(todo.get("id"), result.get("error", "阶段执行失败"))
                 
-                # 检查阶段是否完成，如果信息不足，暂停并请求更多信息
+                # 检查阶段是否完成，评估结果决定下一步
+                _print(f"📊 正在评估阶段 {stage_name} 的执行结果...", flush=True)
+                
+                # 📋 显示当前累积信息摘要（评估前）
+                global_context = await self.state_manager.get_global_context(session_id)
+                stage_info_key = f"{stage_type}_info_summary"
+                stage_summary = global_context.get(stage_info_key, {
+                    "collected_info": [],
+                    "tools_tried": [],
+                    "total_attempts": 0
+                })
+                
+                if stage_summary.get("collected_info"):
+                    try:
+                        from src.agents.base_agent import execution_state
+                        execution_state.add_output_line("─" * 60)
+                        execution_state.add_output_line("📋 当前阶段累积信息摘要:")
+                        for idx, info_item in enumerate(stage_summary["collected_info"], 1):
+                            attempt_num = info_item.get("attempt", 0)
+                            info = info_item.get("info", "")
+                            tools = ", ".join(info_item.get("tools", []))
+                            execution_state.add_output_line(f"  {idx}. [尝试 #{attempt_num}] ({tools}): {info}")
+                        execution_state.add_output_line("─" * 60)
+                        _print(f"📋 当前阶段已收集 {len(stage_summary['collected_info'])} 条有用信息", flush=True)
+                    except Exception:
+                        pass
+                
+                # 无论成功还是失败，都使用主Agent LLM评估结果
+                evaluation = await self._evaluate_stage_result(
+                    session_id=session_id,
+                    stage_type=stage_type,
+                    stage_name=stage_name,
+                    result=result,
+                    target=target,
+                    attempt_history=attempt_history  # 传递尝试历史
+                )
+                
+                # 📊 显示评估结论
+                evaluation_text = evaluation.get("evaluation", "")
+                if evaluation_text:
+                    try:
+                        from src.agents.base_agent import execution_state
+                        execution_state.add_output_line(f"🤖 主Agent评估结论: {evaluation_text[:200]}")
+                        _print(f"🤖 主Agent评估: {evaluation_text[:150]}...", flush=True)
+                    except Exception:
+                        pass
+                
                 if not result.get("success"):
                     error_msg = result.get("error", "执行失败")
-                    print(f"⚠️  阶段 {stage_name} 执行失败: {error_msg}", flush=True)
+                    _print(f"⚠️  阶段 {stage_name} 执行未成功: {error_msg}", flush=True)
                     
-                    # 如果是信息不足，暂停并等待用户补充
-                    if "信息不足" in error_msg or "需要更多信息" in error_msg or "insufficient" in error_msg.lower():
-                        print(f"⏸️  信息收集不足，暂停执行等待补充信息...", flush=True)
+                    # 检查是否需要重试
+                    if evaluation.get("should_retry") and stage_retry_count < max_stage_retries:
+                        retry_reason = evaluation.get("retry_reason", "需要使用其他方法")
+                        _print(f"🔄 主Agent评估：{retry_reason}", flush=True)
+                        
+                        # 动态添加重试任务
+                        new_tasks = evaluation.get("new_tasks", [])
+                        if new_tasks:
+                            await self._add_dynamic_tasks(session_id, stage_id, new_tasks)
+                            _print(f"📋 已添加 {len(new_tasks)} 个新任务进行重试", flush=True)
+                        
+                        # 增加重试计数并继续当前阶段
+                        stage["_retry_count"] = stage_retry_count + 1
+                        _print(f"🔁 开始第{stage_retry_count + 1}次重试...", flush=True)
+                        continue  # 保持stage_index，重试当前阶段
+                    
+                    elif stage_retry_count >= max_stage_retries:
+                        # 已达最大重试次数
+                        _print(f"⚠️ 已达最大重试次数({max_stage_retries}次)，跳过当前阶段", flush=True)
+                        stage_index += 1  # 移到下一阶段
+                        continue
+                    
+                    elif evaluation.get("can_proceed"):
+                        # 虽然失败但可以继续（比如部分信息已足够）
+                        _print(f"⚠️ 虽然有失败，但已获取足够信息，继续下一阶段", flush=True)
+                        stage_index += 1  # 移到下一阶段
+                        continue
+                    
+                    else:
+                        # 无法继续，需要暂停
+                        _print(f"⏸️  无法继续执行，暂停等待处理...", flush=True)
                         await self.state_manager.update_session_state(session_id, {
                             "status": "paused",
                             "error": error_msg,
                             "paused_at": datetime.now().isoformat()
                         })
-                        # 不继续执行，等待用户补充信息
-                        break
-                    
-                    # 如果安全模式，继续执行；否则停止
-                    if not options.get("safe_mode", True):
-                        self.logger.warning(f"阶段 {stage_name} 失败，停止执行")
                         break
                 else:
-                    _print(f"✅ 阶段 {stage_name} 执行完成，正在评估结果...", flush=True)
+                    _print(f"✅ 阶段 {stage_name} 执行完成", flush=True)
                     
-                    # 使用主Agent LLM评估子Agent执行结果
-                    evaluation = await self._evaluate_stage_result(
-                        session_id=session_id,
-                        stage_type=stage_type,
-                        stage_name=stage_name,
-                        result=result,
-                        target=target
-                    )
-                    
-                    if evaluation.get("need_more_info"):
+                    if evaluation.get("need_more_info") and stage_retry_count < max_stage_retries:
                         # 主Agent认为信息不足，需要继续调用Agent
-                        _print(f"🔄 主Agent评估：信息不足，需要补充执行", flush=True)
+                        _print(f"🔄 主Agent评估：需要更多信息", flush=True)
                         
                         # 动态添加新任务
                         new_tasks = evaluation.get("new_tasks", [])
                         if new_tasks:
                             await self._add_dynamic_tasks(session_id, stage_id, new_tasks)
                             _print(f"📋 已添加 {len(new_tasks)} 个新任务", flush=True)
-                            
-                            # 继续执行新任务（递归调用当前阶段）
-                            continue
+                        
+                        # 增加计数并继续收集信息
+                        stage["_retry_count"] = stage_retry_count + 1
+                        continue  # 保持stage_index，继续当前阶段
                     
                     elif evaluation.get("switch_agent"):
                         # 需要切换到其他Agent
                         new_agent_type = evaluation.get("switch_to_agent")
                         _print(f"🔀 主Agent决定切换到 {new_agent_type}", flush=True)
-                        # 这里可以添加切换Agent的逻辑
                     
-                    else:
-                        # 阶段完成，继续下一阶段
-                        _print(f"✅ 阶段 {stage_name} 评估通过", flush=True)
+                    # 阶段完成，移动到下一阶段
+                    _print(f"✅ 阶段 {stage_name} 评估通过", flush=True)
+                    stage_index += 1  # 移到下一阶段
                     
         except Exception as e:
             self.logger.error(f"从TODO执行失败: {e}")
@@ -775,17 +964,123 @@ class RayMasterController:
         
         return results
     
+    def _extract_useful_info(self, result: Dict[str, Any], stage_type: str) -> str:
+        """
+        从执行结果中提取有用信息（无论成功失败）
+        
+        Args:
+            result: Agent执行结果
+            stage_type: 阶段类型
+            
+        Returns:
+            str: 有用信息摘要
+        """
+        useful_info_parts = []
+        data = result.get("data", {})
+        
+        if stage_type == "reconnaissance":
+            # 侦察阶段：提取端口、服务、主机信息
+            if "hosts" in data:
+                for host in data.get("hosts", []):
+                    host_state = host.get("state", "unknown")
+                    if host_state != "unknown":
+                        useful_info_parts.append(f"主机状态: {host_state}")
+                    
+                    if host.get("ports"):
+                        ports = [f"{p.get('port')}/{p.get('protocol', 'tcp')}" for p in host["ports"]]
+                        if len(ports) > 10:
+                            useful_info_parts.append(f"发现 {len(ports)} 个开放端口: {', '.join(ports[:10])}...")
+                        else:
+                            useful_info_parts.append(f"发现 {len(ports)} 个开放端口: {', '.join(ports)}")
+                    
+                    if host.get("services"):
+                        services = []
+                        for s in host["services"][:10]:
+                            service_name = s.get("name", "unknown")
+                            service_version = s.get("version", "")
+                            if service_version:
+                                services.append(f"{service_name}({service_version})")
+                            else:
+                                services.append(service_name)
+                        if len(host["services"]) > 10:
+                            useful_info_parts.append(f"发现 {len(host['services'])} 个服务: {', '.join(services)}...")
+                        else:
+                            useful_info_parts.append(f"发现 {len(host['services'])} 个服务: {', '.join(services)}")
+                    
+                    if host.get("os"):
+                        useful_info_parts.append(f"操作系统: {host['os']}")
+            
+            # 检查是否有open_ports字段（另一种数据格式）
+            if "open_ports" in data:
+                ports = data.get("open_ports", [])
+                if ports:
+                    ports_str = ", ".join([str(p) for p in ports[:10]])
+                    if len(ports) > 10:
+                        useful_info_parts.append(f"发现 {len(ports)} 个开放端口: {ports_str}...")
+                    else:
+                        useful_info_parts.append(f"发现 {len(ports)} 个开放端口: {ports_str}")
+            
+            # 检查是否有services字段（另一种数据格式）
+            if "services" in data:
+                services = data.get("services", [])
+                if services:
+                    services_str = ", ".join([s.get("name", "unknown") for s in services[:10]])
+                    if len(services) > 10:
+                        useful_info_parts.append(f"发现 {len(services)} 个服务: {services_str}...")
+                    else:
+                        useful_info_parts.append(f"发现 {len(services)} 个服务: {services_str}")
+            
+            # 即使失败也可能有部分信息
+            if not result.get("success"):
+                # 检查是否有部分输出
+                if data.get("raw_output"):
+                    raw = str(data.get("raw_output", ""))[:200]
+                    if "host" in raw.lower() or "port" in raw.lower() or "up" in raw.lower():
+                        useful_info_parts.append(f"部分输出线索: {raw[:100]}...")
+                
+                # 检查错误信息中是否有有用线索
+                error = result.get("error", "")
+                if error and ("timeout" not in error.lower() and "connection refused" not in error.lower()):
+                    useful_info_parts.append(f"错误线索: {error[:80]}")
+        
+        elif stage_type == "weaponization":
+            # 武器化阶段：提取漏洞、载荷信息
+            if "vulnerabilities" in data:
+                vulns = data.get("vulnerabilities", [])
+                useful_info_parts.append(f"识别漏洞: {len(vulns)} 个")
+            if "payloads" in data:
+                payloads = data.get("payloads", [])
+                useful_info_parts.append(f"准备载荷: {len(payloads)} 个")
+        
+        elif stage_type == "exploitation":
+            # 利用阶段：提取利用结果
+            if "exploitation_results" in data:
+                exploits = data.get("exploitation_results", [])
+                useful_info_parts.append(f"利用结果: {len(exploits)} 个")
+        
+        # 通用：提取错误信息（可能包含有用线索）
+        if not result.get("success"):
+            error = result.get("error", "")
+            if error and len(error) < 150:
+                useful_info_parts.append(f"错误信息: {error}")
+        
+        return " | ".join(useful_info_parts) if useful_info_parts else "无有用信息"
+    
     async def _evaluate_stage_result(
         self,
         session_id: str,
         stage_type: str,
         stage_name: str,
         result: Dict[str, Any],
-        target: str
+        target: str,
+        attempt_history: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         使用主Agent LLM评估子Agent执行结果
         决定是否需要更多信息或切换Agent
+        
+        Args:
+            attempt_history: 已尝试的方法历史，用于避免重复
         """
         try:
             # 导入输出解析器
@@ -793,6 +1088,14 @@ class RayMasterController:
             
             # 获取全局上下文
             global_context = await self.state_manager.get_global_context(session_id)
+            
+            # 📊 获取阶段信息摘要（累积的有用信息）
+            stage_info_key = f"{stage_type}_info_summary"
+            stage_summary = global_context.get(stage_info_key, {
+                "collected_info": [],
+                "tools_tried": [],
+                "total_attempts": 0
+            })
             
             # 结构化解析子Agent的输出
             agent_output = result.get("data", {}).get("output", "")
@@ -807,6 +1110,44 @@ class RayMasterController:
             
             filtered_output_text = "\n\n".join(filtered_outputs) if filtered_outputs else agent_output[:2000]
             
+            # 获取错误信息（如果有）
+            error_msg = result.get("error", "") if not result.get("success") else ""
+            
+            # 📋 格式化累积信息摘要
+            accumulated_info_text = ""
+            if stage_summary.get("collected_info"):
+                accumulated_info_text = "\n## 📊 已累积的有用信息摘要\n"
+                for info_item in stage_summary["collected_info"]:
+                    attempt_num = info_item.get("attempt", 0)
+                    info = info_item.get("info", "")
+                    tools = ", ".join(info_item.get("tools", []))
+                    if info and info != "无有用信息":
+                        accumulated_info_text += f"尝试 #{attempt_num} ({tools}): {info}\n"
+                
+                if not accumulated_info_text.endswith("\n"):
+                    accumulated_info_text += "\n"
+            
+            # 格式化尝试历史
+            attempt_history_text = ""
+            if attempt_history:
+                attempt_history_text = "\n## ⚠️ 已尝试的方法历史（必须避免重复）\n"
+                for idx, attempt in enumerate(attempt_history, 1):
+                    tools_str = ", ".join(attempt.get("tools", []))
+                    command_str = attempt.get("command", "")[:100]
+                    status = "✅ 成功" if attempt.get("success") else "❌ 失败"
+                    useful_info = attempt.get("useful_info", "")
+                    attempt_history_text += f"{idx}. 工具: {tools_str}\n"
+                    if command_str:
+                        attempt_history_text += f"   命令: {command_str}\n"
+                    attempt_history_text += f"   结果: {status}\n"
+                    if useful_info and useful_info != "无有用信息":
+                        attempt_history_text += f"   有用信息: {useful_info}\n"
+                    attempt_history_text += "\n"
+            
+            # 已尝试的工具列表
+            tools_tried = stage_summary.get("tools_tried", [])
+            tools_tried_text = f"\n## 🔧 已尝试的工具列表\n{', '.join(tools_tried) if tools_tried else '无'}\n\n" if tools_tried else ""
+            
             # 构建评估提示
             evaluation_prompt = f"""你是渗透测试的主控Agent，负责评估子Agent的执行结果并决定下一步行动。
 
@@ -814,27 +1155,43 @@ class RayMasterController:
 阶段类型: {stage_type}
 阶段名称: {stage_name}
 目标: {target}
+总尝试次数: {stage_summary.get("total_attempts", 0)}
 
-## 子Agent执行结果
-执行状态: {"成功" if result.get("success") else "失败"}
+{tools_tried_text}
+
+{accumulated_info_text}
+
+{attempt_history_text}
+
+## 本次执行结果
+执行状态: {"✅ 成功" if result.get("success") else "❌ 失败"}
+{"错误信息: " + error_msg if error_msg else ""}
 使用的工具: {', '.join(tools_used) if tools_used else '无'}
 
-## 子Agent输出（已过滤）
+## 本次子Agent输出（已过滤）
 {filtered_output_text}
 
-## 当前已收集的信息
+## 全局上下文（完整信息）
 {json.dumps(global_context, ensure_ascii=False, indent=2)[:1500]}
 
 ## 请评估并返回JSON格式的决策：
 {{
-    "evaluation": "对执行结果的评估说明",
+    "evaluation": "对执行结果的详细评估说明",
     "information_sufficient": true/false,  // 当前阶段收集的信息是否足够进入下一阶段
-    "need_more_info": true/false,  // 是否需要继续收集信息
-    "new_tasks": [  // 如果需要更多信息，列出新任务
+    
+    // ===== 失败处理相关 =====
+    "should_retry": true/false,  // 如果执行失败，是否应该重试
+    "retry_reason": "重试的原因说明",  // 如果should_retry为true，说明原因
+    "can_proceed": true/false,  // 虽然失败但是否可以继续（比如已有部分有用信息）
+    
+    // ===== 成功后续处理 =====
+    "need_more_info": true/false,  // 是否需要继续收集更多信息
+    "new_tasks": [  // 如果需要重试或需要更多信息，列出新任务
         {{
             "name": "任务名称",
-            "description": "任务描述",
-            "tool": "建议使用的工具",
+            "description": "任务描述", 
+            "tool": "建议使用的工具（如nmap、其他参数等）",
+            "parameters": {{}},  // 具体参数
             "priority": 1
         }}
     ],
@@ -847,10 +1204,47 @@ class RayMasterController:
     "next_stage_ready": true/false  // 是否可以进入下一阶段
 }}
 
-评估标准：
-1. 侦察阶段：至少需要发现开放端口和服务信息
-2. 武器化阶段：需要识别可利用的漏洞
-3. 其他阶段：根据实际情况判断
+## ⚠️ 重要评估标准：
+
+### 🎯 核心原则：渐进式信息收集
+1. **基于累积信息判断**：不要只看单次执行结果，要综合"已累积的有用信息摘要"来判断
+2. **即使单次失败，如果累积信息足够，也可以继续**：例如，虽然某次nmap失败，但之前已经收集到端口信息，可以继续
+3. **每次重试都要补充新信息**：使用不同的工具或参数，获取之前没有的信息
+
+### 🔴 避免重复尝试（关键！）：
+1. **必须检查"已尝试的工具列表"和"已尝试的方法历史"**
+2. **每次重试必须使用不同的工具或方法**：
+   - 如果已尝试 `nmap`，下次可以：
+     * 使用 `masscan`（快速扫描）
+     * 使用 `nmap` 但换参数（如 `-Pn`, `-sS`, `-sU`, `-p-`）
+     * 使用其他侦察工具（如 `rustscan`, `zmap`）
+   - 如果已尝试特定端口范围，换其他范围
+   - 如果已尝试TCP扫描，尝试UDP扫描
+3. **如果所有合理工具和方法都已尝试，设置 should_retry=false**
+
+### 📊 基于累积信息判断是否可以继续：
+1. **侦察阶段**：
+   - 如果累积信息包含：开放端口、服务信息、主机状态 → `next_stage_ready=true`
+   - 如果只有部分信息（如只有端口但无服务）→ `need_more_info=true`，继续收集
+   - 如果完全没有有用信息 → `should_retry=true`，使用不同工具重试
+   
+2. **武器化阶段**：
+   - 如果累积信息包含：漏洞信息、可利用载荷 → `next_stage_ready=true`
+   - 如果只有部分信息 → `need_more_info=true`
+   
+3. **其他阶段**：根据实际情况判断
+
+### 🔄 重试策略（渐进式）：
+- **第1次重试**：使用不同的工具或参数（如nmap换参数，或换masscan）
+- **第2次重试**：使用更激进的参数或完全不同的工具
+- **第3次重试**：尝试边缘情况或特殊方法
+- **判断标准**：综合所有累积信息，如果足够就继续，不够就重试
+- **绝对不要重复相同的命令或工具！**
+
+### 💡 示例判断逻辑：
+- 场景1：nmap失败，但之前masscan已发现端口 → `can_proceed=true`，继续下一阶段
+- 场景2：nmap失败，累积信息为空 → `should_retry=true`，使用masscan重试
+- 场景3：nmap和masscan都失败，但累积信息显示目标可能离线 → `can_proceed=false`，暂停
 
 请只返回JSON，不要有其他内容。"""
 

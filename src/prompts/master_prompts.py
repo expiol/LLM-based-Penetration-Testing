@@ -180,11 +180,26 @@ class MasterPrompts:
             # 需要LLM从描述中提取目标
             return f"""你需要从以下自然语言描述中提取目标信息，并为其制定详细的渗透测试计划。
 
-用户描述：{raw_description}
+## 用户原始输入
+{raw_description}
 
-### 任务要求
-1. **目标提取**：从用户描述中准确提取目标地址（IP地址或域名）
-2. **计划制定**：基于提取的目标制定完整的渗透测试计划
+### ⚠️ 重要：目标提取规则
+1. **智能识别目标地址**：
+   - 用户可能使用中文句号（。）代替英文句点（.），请自动转换
+   - 例如："192。168。66。1" 应识别为 "192.168.66.1"
+   - 例如："example。com" 应识别为 "example.com"
+
+2. **提取辅助信息**：
+   - 注意用户描述中的设备类型信息（如"路由器"、"服务器"、"网站"等）
+   - 这些信息应该影响你的扫描策略：
+     * **路由器**：重点扫描 22(SSH), 23(Telnet), 80/443(Web管理), 161(SNMP), 8080, 8443 等管理端口
+     * **服务器**：扫描常用服务端口 22, 80, 443, 3306, 5432, 6379 等
+     * **网站/Web应用**：重点 80, 443, 8080, 8443 及Web漏洞扫描
+     * **未指定**：进行标准端口扫描 1-1000
+
+3. **智能工具选择**：
+   - 如果目标是**IP地址**：使用nmap进行端口扫描和服务识别，**不要**使用dns_enum或subdomain_enum
+   - 如果目标是**域名**：可以使用dns_enum、subdomain_enum进行DNS信息收集
 
 ### 目标信息
 - 用户描述: {raw_description}
@@ -262,7 +277,7 @@ class MasterPrompts:
 ### 响应格式要求（重要！）
 你必须严格按照以下JSON格式返回，不要添加任何额外的说明文字：
 
-{{"target": "提取的目标IP地址或域名", "stages": [{{"id": "reconnaissance_0", "type": "reconnaissance", "name": "侦察阶段", "description": "阶段描述", "config": {{"target": "提取的目标IP地址或域名", "tools": ["nmap", "dns_enum"], "scan_type": "tcp_connect", "port_range": "1-1000"}}, "todos": [{{"id": "recon_port_scan", "name": "端口扫描", "description": "使用nmap扫描目标开放端口"}}]}}, {{"id": "weaponization_1", "type": "weaponization", "name": "武器化阶段", "description": "阶段描述", "config": {{}}, "todos": []}}]}}
+{{"target": "提取的目标IP地址或域名", "stages": [{{"id": "reconnaissance_0", "type": "reconnaissance", "name": "侦察阶段", "description": "阶段描述", "config": {{"target": "提取的目标IP地址或域名", "tools": ["nmap"], "scan_type": "tcp_connect", "port_range": "1-1000"}}, "todos": [{{"id": "recon_port_scan", "name": "端口扫描", "description": "使用nmap扫描目标开放端口"}}, {{"id": "recon_service_id", "name": "服务识别", "description": "识别开放端口的服务版本"}}]}}, {{"id": "weaponization_1", "type": "weaponization", "name": "武器化阶段", "description": "阶段描述", "config": {{}}, "todos": []}}]}}
 
 格式化后的示例（仅用于理解结构，实际返回时请使用紧凑格式或标准JSON格式）：
 {{

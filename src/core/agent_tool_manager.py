@@ -54,12 +54,16 @@ class ToolInterface(ABC):
                 try:
                     from ..agents.tools_adapter import _context_storage
                     if hasattr(_context_storage, 'agent_context'):
-                        actual_agent = _context_storage.agent_context.get("agent_type", "")
+                        # 获取原始agent_type (如 "recon_agent")
+                        raw_agent = _context_storage.agent_context.get("agent_type", "")
+                        # 转换为显示格式 (如 "Recon Agent")，与base_agent.py保持一致
+                        if raw_agent:
+                            actual_agent = raw_agent.replace("_", " ").title()
                 except Exception:
                     pass
             
             exec_state.set_current_execution(
-                agent=actual_agent or "AGENT",
+                agent=actual_agent or "Agent",
                 tool=self.name,
                 command=command,
                 description=description or f"执行 {self.name}"
@@ -140,6 +144,8 @@ class ToolInterface(ABC):
             Dict[str, Any]: 包含success, stdout, stderr, returncode, command的结果
         """
         import os
+        import signal
+        import sys
         
         try:
             full_command = " ".join(cmd)
@@ -154,14 +160,36 @@ class ToolInterface(ABC):
             if env:
                 process_env.update(env)
             
-            # 创建子进程
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=working_directory,
-                env=process_env
-            )
+            # 定义preexec_fn，确保子进程完全独立于父进程的信号处理
+            def preexec_fn():
+                """在子进程中执行，设置新的会话和忽略SIGINT"""
+                # 创建新会话
+                os.setsid()
+                # 在子进程中忽略SIGINT，让nmap等工具能正常完成
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
+            
+            # 创建子进程，设置start_new_session=True使子进程不受父进程信号影响
+            # 使用preexec_fn进一步确保子进程不受信号影响（仅Unix系统）
+            if sys.platform != 'win32':
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=working_directory,
+                    env=process_env,
+                    start_new_session=True,  # 创建新会话
+                    preexec_fn=preexec_fn  # 子进程中忽略SIGINT
+                )
+            else:
+                # Windows系统
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=working_directory,
+                    env=process_env,
+                    creationflags=0x00000008  # DETACHED_PROCESS
+                )
             
             stdout_data = b""
             stderr_data = b""
@@ -174,11 +202,16 @@ class ToolInterface(ABC):
                 async def read_stdout():
                     nonlocal stdout_data
                     line_count = 0
+                    last_progress_time = asyncio.get_event_loop().time()
+                    last_heartbeat_time = asyncio.get_event_loop().time()
+                    last_heartbeat_line_count = 0
+                    heartbeat_interval = 15  # 心跳间隔：15秒
+                    
                     while True:
                         try:
                             line = await asyncio.wait_for(
                                 process.stdout.readline(),
-                                timeout=2.0
+                                timeout=1.0  # 更短的超时，更频繁检查
                             )
                             if not line:
                                 break
@@ -190,12 +223,29 @@ class ToolInterface(ABC):
                                 # 过滤掉纯XML标签行，保留有意义的内容
                                 if self._should_show_output_line(line_text):
                                     self._add_output_line(line_text)
-                                # 每50行输出一个进度提示
-                                if line_count % 50 == 0:
-                                    self._add_output_line(f"... 已读取 {line_count} 行输出 ...")
+                                # 每30行或每10秒输出一个进度提示（有实际输出时）
+                                current_time = asyncio.get_event_loop().time()
+                                if line_count % 30 == 0 or (current_time - last_progress_time) >= 10:
+                                    self._add_output_line(f"📊 扫描进行中... 已处理 {line_count} 行数据")
+                                    last_progress_time = current_time
+                                    last_heartbeat_time = current_time  # 有输出时重置心跳时间
+                                    last_heartbeat_line_count = line_count
                         except asyncio.TimeoutError:
+                            # 超时时检查进程状态
                             if process.returncode is not None:
                                 break
+                            
+                            # 只在长时间无输出时才输出心跳（避免刷屏）
+                            current_time = asyncio.get_event_loop().time()
+                            time_since_last_heartbeat = current_time - last_heartbeat_time
+                            
+                            # 条件：超过心跳间隔 且 行数没有变化（真正卡住了）
+                            if (time_since_last_heartbeat >= heartbeat_interval and 
+                                line_count == last_heartbeat_line_count):
+                                self._add_output_line(f"⏳ 扫描执行中... (已处理 {line_count} 行，等待更多输出...)")
+                                last_heartbeat_time = current_time
+                                last_heartbeat_line_count = line_count
+                            
                             continue
                         except Exception:
                             break
@@ -206,7 +256,7 @@ class ToolInterface(ABC):
                         try:
                             line = await asyncio.wait_for(
                                 process.stderr.readline(),
-                                timeout=2.0
+                                timeout=1.0
                             )
                             if not line:
                                 break
@@ -556,8 +606,10 @@ class AgentToolManager:
             description = f"{tool.name} 处理 {target}" if target else f"执行 {tool.name}"
             
             if action == "start":
+                # 统一使用显示格式的agent名称 (如 "Recon Agent")
+                agent_display_name = self.agent_type.value.replace("_", " ").title()
                 execution_state.set_current_execution(
-                    agent=self.agent_type.value,
+                    agent=agent_display_name,
                     tool=tool.name,
                     command=command,
                     description=description
@@ -573,20 +625,43 @@ class AgentToolManager:
         try:
             from ..agents.base_agent import execution_state
             
+            # 🔧 无论成功失败，都先更新命令（使用工具返回的实际执行命令）
+            command = result.get("command")
+            if command:
+                # 使用实际执行的完整命令更新状态（统一使用显示格式的agent名称）
+                agent_display_name = self.agent_type.value.replace("_", " ").title()
+                execution_state.set_current_execution(
+                    agent=agent_display_name,
+                    tool=tool.name,
+                    command=command,
+                    description=execution_state.current_description or f"执行 {tool.name}"
+                )
+                execution_state.add_output_line(f"🔧 执行命令: {command}")
+                self.logger.info(f"从结果中更新命令: {command}")
+            elif not result.get("success"):
+                # 如果失败且没有command，尝试从参数构建命令
+                try:
+                    if hasattr(tool, "_build_command_string"):
+                        command = tool._build_command_string(parameters)
+                    elif hasattr(tool, "build_command_string"):
+                        command = tool.build_command_string(parameters)
+                    else:
+                        command = self._build_command_description(tool.name, parameters)
+                    
+                    if command:
+                        agent_display_name = self.agent_type.value.replace("_", " ").title()
+                        execution_state.set_current_execution(
+                            agent=agent_display_name,
+                            tool=tool.name,
+                            command=command,
+                            description=execution_state.current_description or f"执行 {tool.name}"
+                        )
+                        execution_state.add_output_line(f"🔧 执行命令: {command}")
+                except Exception as e:
+                    self.logger.warning(f"构建命令失败: {e}")
+            
             # 如果工具执行成功，提取关键输出
             if result.get("success"):
-                # 1. 从result中提取command（如果存在，优先使用实际执行的命令）
-                command = result.get("command")
-                if command:
-                    # 使用实际执行的命令更新状态
-                    execution_state.set_current_execution(
-                        agent=self.agent_type.value,
-                        tool=tool.name,
-                        command=command,
-                        description=execution_state.current_description or f"执行 {tool.name}"
-                    )
-                    execution_state.add_output_line(f"执行命令: {command}")
-                    self.logger.info(f"从结果中更新命令: {command}")
                 
                 # 2. 提取结构化结果并转换为可读输出
                 tool_result = result.get("result")

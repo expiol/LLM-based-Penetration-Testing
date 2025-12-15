@@ -34,11 +34,10 @@ class SubdomainEnumerationTool(ToolInterface):
             
             self.logger.info(f"开始子域名枚举: {domain}")
             
-            # 更新执行状态
+            # 更新执行状态（不传agent参数，让_update_execution_status从context自动获取并格式化）
             self._update_execution_status(
                 f"subdomain_enum {domain}",
-                f"枚举 {domain} 的子域名",
-                "RECON_AGENT"
+                f"枚举 {domain} 的子域名"
             )
             self._add_output_line(f"开始子域名枚举: {domain}")
             self._add_output_line(f"使用方法: {', '.join(methods)}")
@@ -341,11 +340,10 @@ class DNSEnumerationTool(ToolInterface):
             
             self.logger.info(f"开始DNS枚举: {domain}")
             
-            # 更新执行状态
+            # 更新执行状态（不传agent参数，让_update_execution_status从context自动获取并格式化）
             self._update_execution_status(
                 f"dns_enum {domain}",
-                f"查询 {domain} 的DNS记录",
-                "RECON_AGENT"
+                f"查询 {domain} 的DNS记录"
             )
             self._add_output_line(f"开始DNS枚举: {domain}")
             self._add_output_line(f"查询记录类型: {', '.join(record_types)}")

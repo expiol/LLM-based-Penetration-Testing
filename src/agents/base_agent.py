@@ -18,6 +18,7 @@ from langchain_openai import ChatOpenAI
 
 from ..orchestrator.states import AgentType
 from .tools_adapter import langchain_tool_registry, LangChainToolAdapter
+from ..utils.llm_retry import LLMRetryHandler, InputOptimizer, invoke_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -126,11 +127,43 @@ class ExecutionStateManager:
             import time
             current_state = self._read_state()
             
-            # 如果Agent切换了，添加分隔符
-            if current_state.get("agent") and current_state.get("agent") != agent:
+            # 标准化Agent名称进行比较和存储
+            # 统一格式为 "Recon Agent" 这样的显示格式
+            def normalize_agent_name(name: str) -> str:
+                """标准化agent名称用于比较"""
+                if not name:
+                    return ""
+                # 统一转为小写，移除空格和下划线
+                return name.lower().replace(" ", "").replace("_", "").replace("-", "")
+            
+            def format_agent_name(name: str) -> str:
+                """格式化agent名称用于显示"""
+                if not name:
+                    return ""
+                # 统一格式化为 "Recon Agent" 样式
+                # 先标准化，然后格式化
+                normalized = name.lower().replace("-", "_")
+                # 移除多余的空格
+                normalized = " ".join(normalized.split())
+                # 如果是下划线格式如 recon_agent，转换为空格格式
+                if "_" in normalized:
+                    parts = normalized.split("_")
+                    return " ".join(p.title() for p in parts)
+                # 如果已经是空格格式，直接title
+                return normalized.title()
+            
+            current_agent_normalized = normalize_agent_name(current_state.get("agent", ""))
+            new_agent_normalized = normalize_agent_name(agent)
+            
+            # 格式化新的agent名称
+            formatted_agent = format_agent_name(agent)
+            
+            # 如果Agent切换了（标准化后不同），添加分隔符
+            if current_agent_normalized and new_agent_normalized and current_agent_normalized != new_agent_normalized:
                 # Agent切换，保留之前的输出但添加分隔符
                 output_lines = current_state.get("output_lines", [])
-                output_lines.append(f"--- {current_state.get('agent')} 执行完成，切换到 {agent} ---")
+                current_formatted = format_agent_name(current_state.get("agent", ""))
+                output_lines.append(f"--- {current_formatted} 执行完成，切换到 {formatted_agent} ---")
                 # 限制输出行数
                 if len(output_lines) > self.max_output_lines:
                     output_lines = output_lines[-self.max_output_lines:]
@@ -139,13 +172,13 @@ class ExecutionStateManager:
                 output_lines = current_state.get("output_lines", [])
             
             state = {
-                "agent": agent,
+                "agent": formatted_agent,  # 使用格式化后的名称
                 "tool": tool,
                 "command": command,
                 "description": description,
                 "output_lines": output_lines,  # 保留之前的输出
                 "show_output": self.show_output,
-                "execution_id": f"{agent}_{int(time.time())}"  # 添加执行ID
+                "execution_id": f"{new_agent_normalized}_{int(time.time())}"  # 使用标准化名称作为ID
             }
             self._write_state(state)
     
@@ -342,17 +375,40 @@ class AgentCallbackHandler(AsyncCallbackHandler):
         })
     
     def _extract_command(self, tool_name: str, tool_input: Any) -> str:
-        """从工具输入提取实际命令"""
+        """从工具输入提取实际命令（临时显示，实际命令会在工具执行后更新）"""
         if isinstance(tool_input, dict):
             actual_input = tool_input.get("parameters", tool_input)
             
             if tool_name in ["nmap", "nmap_scan"]:
                 target = actual_input.get("target", "")
                 ports = actual_input.get("ports", "")
-                scan_type = actual_input.get("scan_type", "-sV")
+                scan_type = actual_input.get("scan_type", "tcp_connect")
+                service_detection = actual_input.get("service_detection", True)
+                
+                # 构建更完整的命令字符串
+                cmd_parts = ["nmap"]
+                
+                # 扫描类型
+                if scan_type == "tcp_syn":
+                    cmd_parts.append("-sS")
+                elif scan_type == "tcp_connect":
+                    cmd_parts.append("-sT")
+                elif scan_type == "udp":
+                    cmd_parts.append("-sU")
+                
+                # 服务检测
+                if service_detection:
+                    cmd_parts.extend(["-sV", "--version-intensity", "5"])
+                
+                # 端口
                 if ports:
-                    return f"nmap {scan_type} -p {ports} {target}"
-                return f"nmap {scan_type} {target}"
+                    cmd_parts.extend(["-p", str(ports)])
+                
+                # 目标
+                if target:
+                    cmd_parts.append(target)
+                
+                return " ".join(cmd_parts)
             elif tool_name == "subdomain_enumeration":
                 domain = actual_input.get("domain", "")
                 return f"subdomain-enum {domain}"
@@ -585,6 +641,8 @@ class LangChainBaseAgent(ABC):
         self._current_session_id: Optional[str] = None
         self._current_global_context: Dict[str, Any] = {}
         self._current_target_info: Dict[str, Any] = {}
+        self._model_name: Optional[str] = None  # 保存模型名称用于输入优化
+        self._retry_handler: Optional[LLMRetryHandler] = None  # 重试处理器
     
     def _create_default_llm(self) -> BaseLLM:
         """创建默认的LLM - 从配置读取子Agent的LLM配置"""
@@ -596,6 +654,9 @@ class LangChainBaseAgent(ABC):
         api_key = llm_config.get("api_key")
         base_url = llm_config.get("base_url")
         model_name = llm_config.get("model_name") or llm_config.get("model", "gpt-4")
+        
+        # 保存模型名称用于输入优化
+        self._model_name = model_name
         
         # 如果配置中没有，尝试从环境变量读取
         if not api_key:
@@ -609,6 +670,10 @@ class LangChainBaseAgent(ABC):
                 "1. 环境变量: export OPENAI_API_KEY='your-key'\n"
                 "2. configs/llm_runtime.json 中配置 sub_agents.api_key"
             )
+        
+        # 创建重试处理器
+        max_retries = self.config.get("max_retries", 3)
+        self._retry_handler = LLMRetryHandler(max_retries=max_retries)
         
         # 创建 ChatOpenAI 实例
         kwargs = {
@@ -668,9 +733,20 @@ class LangChainBaseAgent(ABC):
             return
         
         try:
-            # 创建Agent
+            # 配置LLM以禁用并行工具调用
+            # 通过设置 parallel_tool_calls=False 来确保一次只调用一个工具
+            if hasattr(self.llm, 'bind_tools'):
+                # 绑定工具时禁用并行调用
+                llm_with_tools = self.llm.bind_tools(
+                    self.tools,
+                    parallel_tool_calls=False  # 禁用并行工具调用
+                )
+            else:
+                llm_with_tools = self.llm
+            
+            # 创建Agent - 使用绑定了工具的LLM
             agent = create_openai_tools_agent(
-                llm=self.llm,
+                llm=llm_with_tools,
                 tools=self.tools,
                 prompt=self.prompt
             )
@@ -693,7 +769,7 @@ class LangChainBaseAgent(ABC):
             )
             
             self._initialized = True
-            self.logger.info(f"Agent {self.name} initialized: max_iterations={max_iterations}, timeout={max_execution_time}s")
+            self.logger.info(f"Agent {self.name} initialized: max_iterations={max_iterations}, timeout={max_execution_time}s, parallel_tool_calls=False")
             
         except Exception as e:
             self.logger.error(f"Agent {self.name} initialization failed: {e}")
@@ -762,6 +838,11 @@ class LangChainBaseAgent(ABC):
 安全模式: {'启用' if self.safe_mode else '禁用'}
 """
             
+            # 优化输入长度
+            if self._model_name:
+                optimizer = InputOptimizer(model_name=self._model_name)
+                full_input = optimizer.optimize_input(full_input)
+            
             input_data = {
                 "input": full_input
             }
@@ -771,16 +852,24 @@ class LangChainBaseAgent(ABC):
             if session_id:
                 self.logger.info(f"Session ID: {session_id}")
             
-            result = await self.agent_executor.ainvoke(
-                input_data,
-                config={
-                    "callbacks": [self.callback_handler],
-                    "metadata": {
-                        "session_id": session_id,
-                        "agent_type": self.agent_type.value
+            # 使用重试机制执行Agent
+            async def _execute_agent():
+                return await self.agent_executor.ainvoke(
+                    input_data,
+                    config={
+                        "callbacks": [self.callback_handler],
+                        "metadata": {
+                            "session_id": session_id,
+                            "agent_type": self.agent_type.value
+                        }
                     }
-                }
-            )
+                )
+            
+            # 使用重试处理器执行
+            if self._retry_handler:
+                result = await self._retry_handler.retry_async(_execute_agent)
+            else:
+                result = await _execute_agent()
             
             # 处理结果
             execution_result = self._process_result(result, target_info, context)
