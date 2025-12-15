@@ -108,17 +108,35 @@ class RayMasterController:
             self._master_retry_handler = LLMRetryHandler(max_retries=max_retries)
             
             # 创建 ChatOpenAI 实例
+            # 🔧 禁用streaming和可能不兼容的参数：第三方API可能不支持某些参数
             kwargs = {
                 "model": model_name,
                 "temperature": llm_config.get("temperature", 0.7),
                 "max_tokens": llm_config.get("max_tokens", 4096),
-                "api_key": api_key
+                "api_key": api_key,
+                "streaming": False,  # 禁用streaming，避免第三方API不兼容
+                "timeout": llm_config.get("timeout", 60.0),  # 设置超时
             }
             
             if base_url:
                 kwargs["base_url"] = base_url
             
+            # 🔧 确保不传递可能不兼容的参数
+            # 某些第三方API不支持 parallel_tool_calls, tool_choice 等参数
+            # 通过 model_kwargs 显式控制，确保不传递这些参数
+            kwargs["model_kwargs"] = {}  # 显式设置为空，避免默认参数
+            
             self.master_llm = ChatOpenAI(**kwargs)
+            
+            # 🔧 验证并确保没有不兼容的参数
+            if hasattr(self.master_llm, 'model_kwargs'):
+                # 移除可能不兼容的参数
+                if self.master_llm.model_kwargs:
+                    incompatible_params = ['parallel_tool_calls', 'tool_choice', 'response_format']
+                    for param in incompatible_params:
+                        if param in self.master_llm.model_kwargs:
+                            self.logger.warning(f"移除可能不兼容的参数: {param}")
+                            del self.master_llm.model_kwargs[param]
             self.logger.info(f"主控LLM初始化成功 - Model: {model_name}, Base URL: {base_url}")
             _print(f"✅ 主控LLM初始化成功 - Model: {model_name}", flush=True)
             
@@ -572,8 +590,23 @@ class RayMasterController:
         target: str,
         options: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """从TodoManager读取任务并顺序执行"""
+        """
+        从TodoManager读取任务并顺序执行
+        
+        核心设计原则：
+        1. 主Agent（Master Controller）把控整个流程
+        2. 子Agent接收任务并执行工具调用
+        3. 子Agent返回结果给主Agent
+        4. 主Agent评估结果，决定是否进入下一阶段
+        5. 严格遵循 Kill Chain 顺序：侦察 -> 武器化 -> 投递 -> 利用 -> 安装 -> C2 -> 目标行为
+        """
         results = []
+        
+        # 阶段历史记录（用于总结和防止重复）
+        stage_history: Dict[str, Dict[str, Any]] = {}
+        
+        # 全局上下文历史（用于压缩）
+        context_history: List[Dict[str, Any]] = []
         
         try:
             # 获取执行计划
@@ -585,15 +618,45 @@ class RayMasterController:
                 self.logger.warning("执行计划中没有阶段，使用默认Kill Chain")
                 return await self._execute_kill_chain_sequential(session_id, target, options)
             
+            # 🔧 严格的阶段顺序定义（Kill Chain 顺序）
+            STAGE_ORDER = [
+                "reconnaissance",
+                "weaponization", 
+                "delivery",
+                "exploitation",
+                "installation",
+                "command_control",
+                "actions_on_objectives"
+            ]
+            
+            # 🔧 阶段完成状态跟踪
+            completed_stages: Dict[str, bool] = {s: False for s in STAGE_ORDER}
+            stage_results_summary: Dict[str, str] = {}  # 每个阶段的结果摘要
+            
             # 按顺序执行每个阶段
             stage_index = 0
             while stage_index < len(stages):
                 stage = stages[stage_index]
                 stage_id = stage.get("id", "")
-                stage_type = stage.get("type", "")
+                stage_type = stage.get("type", "").lower()
                 stage_name = stage.get("name", "")
                 stage_config = stage.get("config", {})
                 stage_todos = stage.get("todos", [])
+                
+                # 🔧 严格的阶段前置检查：确保按顺序执行
+                if stage_type in STAGE_ORDER:
+                    stage_order_index = STAGE_ORDER.index(stage_type)
+                    # 检查前置阶段是否完成
+                    for prev_stage in STAGE_ORDER[:stage_order_index]:
+                        if not completed_stages.get(prev_stage, False):
+                            # 前置阶段未完成，检查是否在stages列表中
+                            prev_stage_exists = any(s.get("type", "").lower() == prev_stage for s in stages)
+                            if prev_stage_exists:
+                                _print(f"⚠️ 阶段 {stage_name} 需要等待前置阶段 {prev_stage} 完成", flush=True)
+                                self.logger.warning(f"阶段 {stage_type} 需要等待前置阶段 {prev_stage} 完成")
+                                # 跳过当前阶段，让前置阶段先执行
+                                # 这种情况不应该发生，因为stages应该是有序的
+                                # 但作为安全检查保留
                 
                 # 阶段重试计数器（最多重试3次）
                 stage_retry_count = stage.get("_retry_count", 0)
@@ -605,12 +668,31 @@ class RayMasterController:
                 
                 attempt_history = stage["_attempt_history"]
                 
+                # 🔧 检查并压缩上下文历史（防止token过长）
+                global_context = await self.state_manager.get_global_context(session_id)
+                context_size = len(json.dumps(global_context, ensure_ascii=False))
+                if context_size > 10000:  # 上下文超过10KB时压缩
+                    _print(f"📦 上下文过长 ({context_size} 字符)，正在压缩历史...", flush=True)
+                    compressed_context = await self._compress_context_history(
+                        session_id, global_context, stage_results_summary
+                    )
+                    await self.state_manager.update_global_context(session_id, compressed_context)
+                    global_context = compressed_context
+                    _print(f"✅ 上下文已压缩至 {len(json.dumps(global_context, ensure_ascii=False))} 字符", flush=True)
+                
                 self.logger.info(f"执行阶段: {stage_name} ({stage_type}), 重试次数: {stage_retry_count}")
                 if stage_retry_count > 0:
                     _print(f"🔄 重试阶段: {stage_name} (第{stage_retry_count}次重试)...", flush=True)
                     _print(f"📋 已尝试的方法: {len(attempt_history)} 种", flush=True)
                 else:
                     _print(f"🔄 执行阶段: {stage_name}...", flush=True)
+                
+                # 🔧 显示当前阶段在 Kill Chain 中的位置
+                if stage_type in STAGE_ORDER:
+                    current_pos = STAGE_ORDER.index(stage_type) + 1
+                    total_stages = len(STAGE_ORDER)
+                    completed_count = sum(1 for s in STAGE_ORDER if completed_stages.get(s, False))
+                    _print(f"📍 Kill Chain 进度: {stage_type} ({current_pos}/{total_stages}), 已完成: {completed_count} 个阶段", flush=True)
                 
                 # 获取对应的Agent类型
                 kill_chain_state = self._map_stage_type_to_kill_chain(stage_type)
@@ -951,6 +1033,19 @@ class RayMasterController:
                         new_agent_type = evaluation.get("switch_to_agent")
                         _print(f"🔀 主Agent决定切换到 {new_agent_type}", flush=True)
                     
+                    # 🔧 阶段完成：更新完成状态和结果摘要
+                    if stage_type in STAGE_ORDER:
+                        completed_stages[stage_type] = True
+                        # 生成阶段结果摘要
+                        key_findings = evaluation.get("key_findings", [])
+                        if key_findings:
+                            stage_results_summary[stage_type] = "; ".join(key_findings[:5])
+                        else:
+                            stage_results_summary[stage_type] = f"阶段 {stage_name} 已完成"
+                        
+                        _print(f"✅ 阶段 {stage_name} 评估通过，标记为完成", flush=True)
+                        self.logger.info(f"阶段 {stage_type} 完成，结果摘要: {stage_results_summary.get(stage_type, '')[:100]}")
+                    
                     # 阶段完成，移动到下一阶段
                     _print(f"✅ 阶段 {stage_name} 评估通过", flush=True)
                     stage_index += 1  # 移到下一阶段
@@ -1206,10 +1301,15 @@ class RayMasterController:
 
 ## ⚠️ 重要评估标准：
 
-### 🎯 核心原则：渐进式信息收集
-1. **基于累积信息判断**：不要只看单次执行结果，要综合"已累积的有用信息摘要"来判断
-2. **即使单次失败，如果累积信息足够，也可以继续**：例如，虽然某次nmap失败，但之前已经收集到端口信息，可以继续
-3. **每次重试都要补充新信息**：使用不同的工具或参数，获取之前没有的信息
+### 🎯 核心原则：主Agent严格把控阶段流转
+1. **侦察阶段必须完成才能进入下一阶段**：
+   - 必须收集到**开放端口**或**服务信息**才算完成侦察
+   - 如果没有发现任何端口/服务，必须继续侦察或使用其他方法
+   - **绝对不允许在没有侦察信息的情况下进入武器化阶段**
+   
+2. **基于累积信息判断**：不要只看单次执行结果，要综合"已累积的有用信息摘要"来判断
+3. **即使单次失败，如果累积信息足够，也可以继续**：例如，虽然某次nmap失败，但之前已经收集到端口信息，可以继续
+4. **每次重试都要补充新信息**：使用不同的工具或参数，获取之前没有的信息
 
 ### 🔴 避免重复尝试（关键！）：
 1. **必须检查"已尝试的工具列表"和"已尝试的方法历史"**
@@ -1250,6 +1350,9 @@ class RayMasterController:
 
             # 调用主Agent LLM进行评估
             from langchain_core.messages import HumanMessage
+            
+            # 🔧 使用基本的ainvoke调用，不传递额外参数
+            # 参数兼容性已在初始化时处理
             response = await self.master_llm.ainvoke([HumanMessage(content=evaluation_prompt)])
             response_text = response.content if hasattr(response, 'content') else str(response)
             
@@ -1269,12 +1372,282 @@ class RayMasterController:
                 return evaluation
             else:
                 self.logger.warning(f"无法解析主Agent评估结果: {response_text[:200]}")
-                return {"need_more_info": False, "next_stage_ready": True}
+                # 🔧 修复：解析失败时，基于累积信息判断
+                return self._fallback_evaluation(stage_summary, result, stage_type)
                 
         except Exception as e:
             self.logger.error(f"评估阶段结果失败: {e}")
-            # 评估失败时默认继续
-            return {"need_more_info": False, "next_stage_ready": True, "error": str(e)}
+            # 🔧 修复：评估失败时，基于累积信息判断，而不是默认继续
+            return self._fallback_evaluation(stage_summary, result, stage_type, error=str(e))
+    
+    def _fallback_evaluation(
+        self,
+        stage_summary: Dict[str, Any],
+        result: Dict[str, Any],
+        stage_type: str,
+        error: str = None
+    ) -> Dict[str, Any]:
+        """
+        当LLM评估失败时的回退评估逻辑
+        基于累积信息判断是否可以继续，而不是默认继续
+        
+        Args:
+            stage_summary: 阶段信息摘要（累积的有用信息）
+            result: Agent执行结果
+            stage_type: 阶段类型
+            error: 错误信息（如果有）
+            
+        Returns:
+            Dict[str, Any]: 评估结果
+        """
+        collected_info = stage_summary.get("collected_info", [])
+        total_attempts = stage_summary.get("total_attempts", 0)
+        
+        # 检查是否有有用信息（排除"无有用信息"）
+        useful_info_count = sum(
+            1 for info in collected_info 
+            if info.get("info") and info.get("info") != "无有用信息"
+        )
+        
+        self.logger.info(f"回退评估: 阶段={stage_type}, 累积信息={useful_info_count}条, 尝试次数={total_attempts}")
+        
+        # 基于阶段类型和累积信息判断
+        if stage_type == "reconnaissance":
+            # 🔧 侦察阶段：必须有端口或服务信息才能继续
+            # 这是最关键的阶段，没有侦察信息绝对不能进入下一阶段
+            has_port_info = any(
+                "端口" in info.get("info", "") or "port" in info.get("info", "").lower() or
+                "发现" in info.get("info", "") and ("个" in info.get("info", "") or "开放" in info.get("info", ""))
+                for info in collected_info
+            )
+            has_service_info = any(
+                "服务" in info.get("info", "") or "service" in info.get("info", "").lower()
+                for info in collected_info
+            )
+            has_host_info = any(
+                "主机状态" in info.get("info", "") or "host" in info.get("info", "").lower()
+                for info in collected_info
+            )
+            
+            # 🔧 更严格的判断：必须有端口或服务信息
+            if has_port_info or has_service_info:
+                _print(f"📊 回退评估: 侦察阶段已收集到端口/服务信息，可以继续", flush=True)
+                return {
+                    "evaluation": f"[回退评估] 侦察阶段完成，已收集到{useful_info_count}条有用信息（端口/服务）",
+                    "information_sufficient": True,
+                    "should_retry": False,
+                    "can_proceed": True,
+                    "need_more_info": False,
+                    "next_stage_ready": True,
+                    "key_findings": [info.get("info", "") for info in collected_info if info.get("info") != "无有用信息"],
+                    "fallback": True
+                }
+            elif has_host_info and total_attempts >= 2:
+                # 有主机信息但没有端口信息，可能目标被过滤
+                _print(f"📊 回退评估: 侦察阶段只有主机信息，目标可能被防火墙过滤", flush=True)
+                return {
+                    "evaluation": f"[回退评估] 侦察阶段部分完成，有主机信息但无端口信息（可能被过滤）",
+                    "information_sufficient": False,
+                    "should_retry": True,
+                    "retry_reason": "尝试使用其他扫描方法（如-Pn跳过ping、使用UDP扫描等）",
+                    "can_proceed": False,
+                    "need_more_info": True,
+                    "next_stage_ready": False,
+                    "new_tasks": [
+                        {
+                            "name": "绕过防火墙扫描",
+                            "description": "使用-Pn参数跳过主机发现，直接扫描端口",
+                            "tool": "nmap",
+                            "parameters": {"scan_type": "tcp_connect", "skip_host_discovery": True}
+                        }
+                    ],
+                    "fallback": True
+                }
+            elif total_attempts < 3:
+                _print(f"📊 回退评估: 侦察阶段信息严重不足，必须重试 (尝试 {total_attempts}/3)", flush=True)
+                _print(f"⚠️ 侦察未完成，不允许进入武器化阶段！", flush=True)
+                return {
+                    "evaluation": f"[回退评估] 侦察阶段信息严重不足（无端口/服务信息），必须继续侦察",
+                    "information_sufficient": False,
+                    "should_retry": True,
+                    "retry_reason": "没有收集到任何端口或服务信息，无法进行后续阶段",
+                    "can_proceed": False,  # 🔧 绝对不允许继续
+                    "need_more_info": True,
+                    "next_stage_ready": False,  # 🔧 绝对不允许进入下一阶段
+                    "fallback": True
+                }
+            else:
+                _print(f"📊 回退评估: 侦察阶段已达最大重试次数且无有效信息，暂停", flush=True)
+                _print(f"⏸️ 暂停执行，等待人工干预", flush=True)
+                return {
+                    "evaluation": f"[回退评估] 侦察阶段已达最大重试次数({total_attempts})且无有效信息，需要人工干预",
+                    "information_sufficient": False,
+                    "should_retry": False,
+                    "can_proceed": False,  # 🔧 绝对不允许继续
+                    "need_more_info": False,
+                    "next_stage_ready": False,  # 🔧 绝对不允许进入下一阶段
+                    "fallback": True
+                }
+        
+        elif stage_type == "weaponization":
+            # 武器化阶段：需要依赖侦察阶段的信息
+            if useful_info_count == 0 and total_attempts >= 2:
+                _print(f"📊 回退评估: 武器化阶段无可用信息，暂停", flush=True)
+                return {
+                    "evaluation": f"[回退评估] 武器化阶段缺少必要的侦察信息，无法继续",
+                    "information_sufficient": False,
+                    "should_retry": False,
+                    "can_proceed": False,
+                    "need_more_info": False,
+                    "next_stage_ready": False,
+                    "fallback": True
+                }
+        
+        # 默认：如果有有用信息就继续，否则重试（最多3次）
+        if useful_info_count > 0:
+            return {
+                "evaluation": f"[回退评估] 已收集到{useful_info_count}条有用信息，可以继续",
+                "information_sufficient": True,
+                "should_retry": False,
+                "can_proceed": True,
+                "need_more_info": False,
+                "next_stage_ready": True,
+                "fallback": True
+            }
+        elif total_attempts < 3:
+            return {
+                "evaluation": f"[回退评估] 信息不足，需要重试",
+                "information_sufficient": False,
+                "should_retry": True,
+                "retry_reason": "累积信息不足",
+                "can_proceed": False,
+                "need_more_info": True,
+                "next_stage_ready": False,
+                "fallback": True
+            }
+        else:
+            return {
+                "evaluation": f"[回退评估] 已达最大重试次数，暂停等待人工干预",
+                "information_sufficient": False,
+                "should_retry": False,
+                "can_proceed": False,
+                "need_more_info": False,
+                "next_stage_ready": False,
+                "fallback": True
+            }
+    
+    async def _compress_context_history(
+        self,
+        session_id: str,
+        global_context: Dict[str, Any],
+        stage_results_summary: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """
+        压缩上下文历史，防止token过长
+        
+        策略：
+        1. 保留关键信息（目标、发现的服务、漏洞等）
+        2. 将详细的执行历史压缩为摘要
+        3. 使用LLM生成简洁的历史总结
+        
+        Args:
+            session_id: 会话ID
+            global_context: 当前全局上下文
+            stage_results_summary: 各阶段结果摘要
+            
+        Returns:
+            Dict[str, Any]: 压缩后的上下文
+        """
+        try:
+            # 保留核心信息
+            compressed = {
+                "target": global_context.get("target", ""),
+                "discovered_services": [],  # 只保留关键服务
+                "identified_vulnerabilities": [],  # 只保留关键漏洞
+                "current_access_level": global_context.get("current_access_level", "none"),
+                "_compressed": True,
+                "_compression_time": datetime.now().isoformat()
+            }
+            
+            # 压缩发现的服务（只保留关键信息）
+            services = global_context.get("discovered_services", [])
+            if services:
+                # 只保留每个服务的名称、端口和版本
+                compressed_services = []
+                for svc in services[:20]:  # 最多保留20个服务
+                    if isinstance(svc, dict):
+                        compressed_services.append({
+                            "name": svc.get("name", "unknown"),
+                            "port": svc.get("port", ""),
+                            "version": svc.get("version", "")
+                        })
+                    else:
+                        compressed_services.append(str(svc))
+                compressed["discovered_services"] = compressed_services
+            
+            # 压缩漏洞信息
+            vulns = global_context.get("identified_vulnerabilities", [])
+            if vulns:
+                compressed_vulns = []
+                for vuln in vulns[:10]:  # 最多保留10个漏洞
+                    if isinstance(vuln, dict):
+                        compressed_vulns.append({
+                            "name": vuln.get("name", "unknown"),
+                            "severity": vuln.get("severity", "unknown"),
+                            "cve": vuln.get("cve", "")
+                        })
+                    else:
+                        compressed_vulns.append(str(vuln))
+                compressed["identified_vulnerabilities"] = compressed_vulns
+            
+            # 添加阶段结果摘要
+            compressed["stage_summaries"] = stage_results_summary
+            
+            # 使用LLM生成历史总结（如果上下文非常大）
+            original_size = len(json.dumps(global_context, ensure_ascii=False))
+            if original_size > 20000 and self.master_llm:  # 超过20KB才使用LLM总结
+                try:
+                    from langchain_core.messages import HumanMessage
+                    
+                    summary_prompt = f"""请将以下渗透测试执行上下文压缩为简洁的摘要，保留关键发现：
+
+上下文内容（部分）：
+{json.dumps(global_context, ensure_ascii=False)[:5000]}
+
+请返回JSON格式的摘要：
+{{
+    "key_findings": ["关键发现1", "关键发现2"],
+    "important_services": ["重要服务1", "重要服务2"],
+    "important_vulnerabilities": ["重要漏洞1"],
+    "execution_progress": "执行进度描述"
+}}"""
+                    
+                    response = await self.master_llm.ainvoke([HumanMessage(content=summary_prompt)])
+                    response_text = response.content if hasattr(response, 'content') else str(response)
+                    
+                    # 解析LLM响应
+                    json_match = re.search(r'\{[\s\S]*\}', response_text)
+                    if json_match:
+                        llm_summary = json.loads(json_match.group(0))
+                        compressed["_llm_summary"] = llm_summary
+                        
+                except Exception as e:
+                    self.logger.warning(f"LLM历史总结失败: {e}")
+            
+            self.logger.info(f"上下文压缩完成: {original_size} -> {len(json.dumps(compressed, ensure_ascii=False))} 字符")
+            return compressed
+            
+        except Exception as e:
+            self.logger.error(f"上下文压缩失败: {e}")
+            # 返回简化的上下文
+            return {
+                "target": global_context.get("target", ""),
+                "discovered_services": global_context.get("discovered_services", [])[:10],
+                "identified_vulnerabilities": global_context.get("identified_vulnerabilities", [])[:5],
+                "current_access_level": global_context.get("current_access_level", "none"),
+                "_compressed": True,
+                "_compression_error": str(e)
+            }
     
     async def _add_dynamic_tasks(
         self,

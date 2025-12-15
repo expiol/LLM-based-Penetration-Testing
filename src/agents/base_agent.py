@@ -615,12 +615,15 @@ class LangChainBaseAgent(ABC):
         # LLM配置
         self.llm = llm or self._create_default_llm()
         
-        # Memory配置
+        # Memory配置 - 限制对话历史长度防止token过长
         self.memory = ConversationBufferWindowMemory(
             memory_key="chat_history",
             return_messages=True,
-            k=10  # 保留最近10轮对话
+            k=5  # 只保留最近5轮对话，防止历史过长
         )
+        
+        # 输入长度限制（字符数）
+        self._max_input_length = config.get("max_input_length", 8000) if config else 8000
         
         # 获取该Agent可用的工具
         self.tools = self._get_agent_tools()
@@ -676,11 +679,14 @@ class LangChainBaseAgent(ABC):
         self._retry_handler = LLMRetryHandler(max_retries=max_retries)
         
         # 创建 ChatOpenAI 实例
+        # 🔧 禁用streaming模式：第三方API在streaming模式下返回的tool_call_id格式不正确
+        # 会导致多个ID片段被拼接成超长ID，引发503错误
         kwargs = {
             "model": model_name,
             "temperature": llm_config.get("temperature", 0.7),
             "max_tokens": llm_config.get("max_tokens", 2048),
-            "api_key": api_key
+            "api_key": api_key,
+            "streaming": False  # 禁用streaming，避免tool_call_id拼接问题
         }
         
         if base_url:
@@ -733,20 +739,12 @@ class LangChainBaseAgent(ABC):
             return
         
         try:
-            # 配置LLM以禁用并行工具调用
-            # 通过设置 parallel_tool_calls=False 来确保一次只调用一个工具
-            if hasattr(self.llm, 'bind_tools'):
-                # 绑定工具时禁用并行调用
-                llm_with_tools = self.llm.bind_tools(
-                    self.tools,
-                    parallel_tool_calls=False  # 禁用并行工具调用
-                )
-            else:
-                llm_with_tools = self.llm
+            # 🔧 直接使用LLM，不使用bind_tools（避免第三方API不支持parallel_tool_calls参数）
+            # create_openai_tools_agent会自动处理工具绑定
             
-            # 创建Agent - 使用绑定了工具的LLM
+            # 创建Agent - 直接传递LLM和工具
             agent = create_openai_tools_agent(
-                llm=llm_with_tools,
+                llm=self.llm,
                 tools=self.tools,
                 prompt=self.prompt
             )
@@ -769,7 +767,7 @@ class LangChainBaseAgent(ABC):
             )
             
             self._initialized = True
-            self.logger.info(f"Agent {self.name} initialized: max_iterations={max_iterations}, timeout={max_execution_time}s, parallel_tool_calls=False")
+            self.logger.info(f"Agent {self.name} initialized: max_iterations={max_iterations}, timeout={max_execution_time}s")
             
         except Exception as e:
             self.logger.error(f"Agent {self.name} initialization failed: {e}")
@@ -906,7 +904,7 @@ class LangChainBaseAgent(ABC):
             return self.create_result(success=False, error=str(e))
     
     def _prepare_input(self, target_info: Dict[str, Any], context: List[Dict[str, Any]]) -> str:
-        """准备Agent输入"""
+        """准备Agent输入，包含长度检查和压缩"""
         target = target_info.get("target", "")
         session_context = context[0] if context else {}
         
@@ -914,6 +912,7 @@ class LangChainBaseAgent(ABC):
         todos = session_context.get("todos", [])
         stage_config = session_context.get("stage_config", {})
         stage = session_context.get("stage", "")
+        global_context = session_context.get("global_context", {})
         
         # 构建任务描述
         tasks_description = ""
@@ -930,10 +929,19 @@ class LangChainBaseAgent(ABC):
                     tasks_description += f" (使用工具: {todo_tool})"
                 tasks_description += "\n"
         
-        # 构建阶段配置信息
+        # 构建阶段配置信息（压缩）
         config_info = ""
         if stage_config:
-            config_info = f"\n阶段配置信息:\n{json.dumps(stage_config, ensure_ascii=False, indent=2)}\n"
+            # 只保留关键配置，避免太长
+            key_config = {k: v for k, v in stage_config.items() 
+                         if k in ["target", "ports", "scan_type", "timeout"]}
+            if key_config:
+                config_info = f"\n阶段配置: {json.dumps(key_config, ensure_ascii=False)}\n"
+        
+        # 构建全局上下文摘要（压缩历史信息）
+        context_summary = ""
+        if global_context:
+            context_summary = self._compress_global_context(global_context)
         
         input_text = f"""
 目标: {target}
@@ -941,6 +949,7 @@ class LangChainBaseAgent(ABC):
 安全模式: {'启用' if self.safe_mode else '禁用'}
 {tasks_description}
 {config_info}
+{context_summary}
 请根据你的职责和上述任务列表，使用可用工具完成相应的渗透测试任务。
 
 可用工具: {', '.join([tool.name for tool in self.tools])}
@@ -948,7 +957,63 @@ class LangChainBaseAgent(ABC):
 请按照任务列表的顺序执行，每个任务完成后报告结果。
         """.strip()
         
+        # 🔧 检查输入长度，如果过长则压缩
+        if len(input_text) > self._max_input_length:
+            self.logger.warning(f"输入过长 ({len(input_text)} 字符)，正在压缩...")
+            input_text = self._compress_input(input_text, target, stage, todos)
+            self.logger.info(f"输入压缩后: {len(input_text)} 字符")
+        
         return input_text
+    
+    def _compress_global_context(self, global_context: Dict[str, Any]) -> str:
+        """压缩全局上下文为简洁摘要"""
+        summary_parts = []
+        
+        # 只保留关键信息
+        services = global_context.get("discovered_services", [])
+        if services:
+            service_names = [s.get("name", str(s)) if isinstance(s, dict) else str(s) for s in services[:10]]
+            summary_parts.append(f"已发现服务: {', '.join(service_names)}")
+        
+        vulns = global_context.get("identified_vulnerabilities", [])
+        if vulns:
+            vuln_names = [v.get("name", str(v)) if isinstance(v, dict) else str(v) for v in vulns[:5]]
+            summary_parts.append(f"已发现漏洞: {', '.join(vuln_names)}")
+        
+        access_level = global_context.get("current_access_level", "none")
+        if access_level != "none":
+            summary_parts.append(f"当前权限: {access_level}")
+        
+        # 检查是否有LLM总结
+        llm_summary = global_context.get("_llm_summary", {})
+        if llm_summary:
+            key_findings = llm_summary.get("key_findings", [])
+            if key_findings:
+                summary_parts.append(f"关键发现: {'; '.join(key_findings[:3])}")
+        
+        if summary_parts:
+            return "\n### 上下文摘要\n" + "\n".join(summary_parts) + "\n"
+        return ""
+    
+    def _compress_input(self, input_text: str, target: str, stage: str, todos: List[Dict[str, Any]]) -> str:
+        """压缩过长的输入"""
+        # 生成最简化的输入
+        tasks_summary = ""
+        if todos:
+            task_names = [t.get("name", t.get("title", "任务"))[:30] for t in todos[:5]]
+            tasks_summary = f"任务: {', '.join(task_names)}"
+        
+        compressed = f"""
+目标: {target}
+阶段: {stage}
+{tasks_summary}
+
+可用工具: {', '.join([tool.name for tool in self.tools])}
+
+请执行上述任务。
+        """.strip()
+        
+        return compressed
     
     def _process_result(
         self,

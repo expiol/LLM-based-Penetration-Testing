@@ -2,6 +2,7 @@
 LangChain Tools适配器
 将现有的工具系统适配为LangChain Tools
 """
+import asyncio
 import logging
 from typing import Any, Dict, Optional, Type
 from langchain.tools import BaseTool
@@ -180,15 +181,103 @@ class LangChainToolAdapter(BaseTool):
             # 注意：AsyncCallbackManagerForToolRun 没有 on_tool_end 方法
             # 工具执行完成，结果会在回调处理器中处理
             
-            # 返回字符串格式的结果
+            # 🔧 智能过滤输出，保留关键信息，避免LLM输入过长导致503错误
+            from ..core.output_parser import output_manager
+            
+            # 返回字符串格式的结果（经过智能过滤）
             if result.get("success"):
+                # 获取原始输出和结构化数据
+                raw_output = result.get('raw_output', '')
                 result_data = result.get('result') or result.get('data', {})
-                if isinstance(result_data, dict):
-                    # 格式化字典输出
+                
+                # 🔧 针对不同工具进行智能信息提取
+                if self.name in ["nmap", "nmap_scan"] and result_data and isinstance(result_data, dict):
+                    # Nmap扫描：提取结构化的关键信息
+                    summary_parts = []
+                    
+                    # 扫描信息
+                    scan_info = result_data.get("scan_info", {})
+                    if scan_info:
+                        summary_parts.append(f"扫描类型: {scan_info.get('type', 'unknown')}, 协议: {scan_info.get('protocol', 'unknown')}")
+                    
+                    # 主机信息
+                    hosts = result_data.get("hosts", [])
+                    for host in hosts:
+                        # 地址
+                        addresses = host.get("addresses", [])
+                        addr_str = ", ".join([a.get("addr", "") for a in addresses if a.get("addr")])
+                        
+                        # 状态
+                        status = host.get("status", {})
+                        status_str = f"{status.get('state', 'unknown')} ({status.get('reason', '')})"
+                        summary_parts.append(f"\n【主机】{addr_str} - 状态: {status_str}")
+                        
+                        # 主机名
+                        hostnames = host.get("hostnames", [])
+                        if hostnames:
+                            names = [h.get("name", "") for h in hostnames if h.get("name")]
+                            if names:
+                                summary_parts.append(f"  主机名: {', '.join(names)}")
+                        
+                        # 端口和服务（这是最重要的信息）
+                        ports = host.get("ports", [])
+                        if ports:
+                            summary_parts.append(f"  发现 {len(ports)} 个端口:")
+                            for p in ports:  # 显示所有端口
+                                port_id = p.get("portid", "?")
+                                protocol = p.get("protocol", "tcp")
+                                state_info = p.get("state", {})
+                                state = state_info.get("state", "unknown")
+                                
+                                svc = p.get("service", {})
+                                svc_name = svc.get("name", "unknown")
+                                svc_product = svc.get("product", "")
+                                svc_version = svc.get("version", "")
+                                svc_extra = svc.get("extrainfo", "")
+                                
+                                # 构建服务信息字符串
+                                svc_str = svc_name
+                                if svc_product:
+                                    svc_str += f" {svc_product}"
+                                if svc_version:
+                                    svc_str += f" {svc_version}"
+                                if svc_extra:
+                                    svc_str += f" ({svc_extra})"
+                                
+                                summary_parts.append(f"    {port_id}/{protocol} [{state}] - {svc_str}")
+                        
+                        # OS信息
+                        os_info = host.get("os", {})
+                        if os_info and os_info.get("osmatch"):
+                            os_matches = os_info.get("osmatch", [])
+                            if os_matches:
+                                best_match = os_matches[0]
+                                summary_parts.append(f"  操作系统: {best_match.get('name', 'unknown')} (准确度: {best_match.get('accuracy', '?')}%)")
+                    
+                    # 扫描统计
+                    scan_summary = result_data.get("summary", {})
+                    if scan_summary:
+                        summary_parts.append(f"\n扫描耗时: {scan_summary.get('scan_time', '?')}秒")
+                    
+                    if summary_parts:
+                        return f"Success:\n" + "\n".join(summary_parts)
+                
+                # 其他工具：使用output_parser进行智能过滤
+                if raw_output:
+                    filtered_output = output_manager.filter_for_llm(self.name, raw_output, max_length=3000)
+                    if filtered_output and filtered_output.strip():
+                        return f"Success:\n{filtered_output}"
+                
+                # 如果有结构化数据但不是nmap
+                if result_data:
                     import json
-                    return f"Success: {json.dumps(result_data, ensure_ascii=False, indent=2)}"
-                else:
-                    return f"Success: {result_data}"
+                    json_str = json.dumps(result_data, ensure_ascii=False, indent=2)
+                    # 限制长度但保留结构
+                    if len(json_str) > 3000:
+                        json_str = json_str[:3000] + "\n...[数据已截断，完整结果请查看日志]"
+                    return f"Success:\n{json_str}"
+                
+                return "Success: 工具执行成功"
             else:
                 error_msg = result.get('error', 'Unknown error')
                 return f"Error: {error_msg}"

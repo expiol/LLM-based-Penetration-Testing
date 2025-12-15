@@ -626,6 +626,7 @@ class AgentToolManager:
             from ..agents.base_agent import execution_state
             
             # 🔧 无论成功失败，都先更新命令（使用工具返回的实际执行命令）
+            # 但只更新状态，不重复添加命令日志（命令日志已在工具执行时添加）
             command = result.get("command")
             if command:
                 # 使用实际执行的完整命令更新状态（统一使用显示格式的agent名称）
@@ -636,7 +637,7 @@ class AgentToolManager:
                     command=command,
                     description=execution_state.current_description or f"执行 {tool.name}"
                 )
-                execution_state.add_output_line(f"🔧 执行命令: {command}")
+                # 🔧 移除这里的日志输出，避免重复：命令日志已在工具的run_command_with_streaming中输出
                 self.logger.info(f"从结果中更新命令: {command}")
             elif not result.get("success"):
                 # 如果失败且没有command，尝试从参数构建命令
@@ -656,6 +657,7 @@ class AgentToolManager:
                             command=command,
                             description=execution_state.current_description or f"执行 {tool.name}"
                         )
+                        # 🔧 只在失败且之前没有命令日志时才添加
                         execution_state.add_output_line(f"🔧 执行命令: {command}")
                 except Exception as e:
                     self.logger.warning(f"构建命令失败: {e}")
