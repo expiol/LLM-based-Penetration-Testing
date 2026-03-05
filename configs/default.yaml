@@ -1,19 +1,44 @@
-tool:
-  default_ports: [22, 80, 443, 8080]
-  network_timeout: 1.0
-  http_timeout: 5.0
-  user_agent: "autopentest/0.1"
-  max_response_bytes: 1048576
-  retries: 2
-
-budget:
-  max_tool_calls: 64
-  max_runtime_seconds: 900
+runs_root: "runs"
 
 logging:
   level: "INFO"
 
+budget:
+  max_steps: 16
+  max_time_s: 900
+  max_tool_calls: 64
+
+timeouts:
+  command_timeout_s: 120
+  command_retries: 1
+  http_timeout_s: 5
+  nmap_host_timeout_s: 30
+
+http_probe_paths:
+  - "/"
+  - "/robots.txt"
+  - "/api"
+
+sqlmap_safe_flags:
+  - "--batch"
+  - "--risk=1"
+  - "--level=1"
+  - "--threads=1"
+  - "--timeout=10"
+  - "--retries=1"
+  - "--flush-session"
+
+nmap_ports: [80, 443, 3000, 8080]
+
 report:
   template_path: "data/templates/report.md"
+
+safety:
+  allow_hosts:
+    - "127.0.0.1"
+    - "localhost"
+    - "127.0.0.0/8"
+  allow_scopes:
+    - "local_lab"
 
 plugins: []

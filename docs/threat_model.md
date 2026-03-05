@@ -4,18 +4,18 @@ AutoPentest is intended for authorized security research only.
 
 ## Assumptions
 
-- Operators supply explicit scope declarations.
-- Targets are provided by the user and are authorized.
+- Operators supply explicit authorization with `--i-understand-and-am-authorized`.
+- Targets are limited to the local lab or approved scopes.
 
 ## Misuse risks
 
 - Running tools outside authorized scope.
-- Misinterpretation of results as exploitation.
+- Misinterpreting findings as exploit-ready results.
 - Data leakage via logs or artifacts.
 
 ## Mitigations
 
-- CLI requires explicit scope declaration.
-- Scope validation enforces target allowlists.
-- No exploit payloads or destructive actions are included.
+- Safety allowlist for command execution (`core/safety.py`).
+- Scope enforcement via target scope + host allowlist.
+- sqlmap runs in detection mode only (no dump/file/OS shell).
 - Evidence is stored locally and is user-controlled.

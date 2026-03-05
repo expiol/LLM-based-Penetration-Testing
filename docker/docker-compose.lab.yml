@@ -1,8 +1,28 @@
 services:
-  autopentest:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    volumes:
-      - ..:/app
-    command: ["doctor"]
+  dvwa:
+    image: vulnerables/web-dvwa
+    ports:
+      - "8080:80"
+    networks:
+      - lab_net
+    healthcheck:
+      test: ["CMD-SHELL", "php -r 'exit(@fsockopen(\"127.0.0.1\",80)?0:1);'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  juice-shop:
+    image: bkimminich/juice-shop
+    ports:
+      - "3000:3000"
+    networks:
+      - lab_net
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:3000',res=>process.exit(res.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  lab_net:
+    driver: bridge

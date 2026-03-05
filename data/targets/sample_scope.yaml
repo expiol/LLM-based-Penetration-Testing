@@ -1,9 +1,0 @@
-name: "local-only"
-allowed_hosts:
-  - "127.0.0.1"
-  - "localhost"
-allowed_networks:
-  - "127.0.0.0/8"
-allowed_urls:
-  - "http://127.0.0.1:80"
-notes: "Explicit scope limited to localhost."

@@ -1,10 +1,7 @@
-name: "local-sample"
-hosts:
-  - "127.0.0.1"
-ports:
-  - 22
-  - 80
-  - 443
-urls:
-  - "http://127.0.0.1:80"
-notes: "Localhost sample target for safe testing."
+target_id: "sample_local"
+scope: "local_lab"
+host: "127.0.0.1"
+base_url: "http://127.0.0.1:80"
+notes: "Sample localhost target for testing config parsing."
+allowed_tools: ["nmap", "http_probe"]
+ports: [80]

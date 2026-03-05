@@ -1,29 +1,41 @@
 # Architecture
 
-AutoPentest is a research platform for orchestrating multi-agent security assessment workflows. The system is organized around:
+AutoPentest is a research platform for orchestrating multi-agent security assessment workflows with reproducible evidence.
 
-- A LangGraph state machine that coordinates agents.
-- A plugin-based tool execution layer.
-- Evidence and artifact storage to ensure traceability.
-- Structured events for observability and evaluation.
+## Modules
 
-## Core components
-
-- `graph/workflow.py`: LangGraph state machine and transitions.
-- `agents/*`: recon, analysis, planning, validation, reporting agents.
-- `tools/registry.py` and `tools/runner.py`: tool registration and execution.
-- `memory/evidence_store.py`: evidence and artifact persistence.
-- `orchestrator/controller.py`: run lifecycle coordination.
-- `evaluation/*`: benchmark execution and metrics reporting.
+- `graph/workflow.py`: LangGraph StateGraph orchestration.
+- `agents/*`: recon, analysis, planning, validation, reporting.
+- `tools/*`: tool registry, command builders, parsers, and execution runner.
+- `core/*`: config, safety, logging, identifiers.
+- `orchestrator/controller.py`: run lifecycle, artifacts, summary, and verification.
+- `orchestrator/verifier.py`: success rules and doctor checks.
+- `evaluation/*`: benchmark execution and metrics.
 
 ## Data flow
 
-1. CLI validates scope and loads target config.
-2. Orchestrator builds run context and LangGraph workflow.
-3. Recon agent executes network and HTTP probes.
-4. Analysis agent generates initial findings from recon artifacts.
-5. Planning agent builds a validation plan.
-6. Validation agent executes safe checks and records evidence.
-7. Reporting agent generates Markdown report.
+```mermaid
+flowchart TD
+  CLI --> Controller
+  Controller --> Workflow
+  Workflow --> Tools
+  Tools --> Evidence
+  Workflow --> Artifacts
+  Controller --> Summary
+  Evidence --> Verifier
+  Artifacts --> Verifier
+  Verifier --> Summary
 
-All outputs are written under `runs/<run_id>/` for reproducibility.
+  subgraph Runs
+    Evidence[runs/<run_id>/evidence]
+    Artifacts[runs/<run_id>/artifacts]
+    Summary[runs/<run_id>/summary.json]
+    Events[runs/<run_id>/events.jsonl]
+  end
+```
+
+## Observability
+
+- `events.jsonl` records stage and tool_call events.
+- Evidence captures stdout/stderr and parsed output for reproducibility.
+- Artifacts contain recon results, validation plans, and session summary.

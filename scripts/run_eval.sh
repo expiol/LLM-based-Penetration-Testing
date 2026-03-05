@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-autopentest eval --benchmark data/benchmarks/sample_benchmark.yaml --scope data/targets/sample_scope.yaml
+autopentest eval \
+  --bench data/benchmarks/lab_benchmark.yaml \
+  --config configs/eval.yaml \
+  --i-understand-and-am-authorized

@@ -13,12 +13,12 @@ The state is a structured object with:
 - `findings`
 - `plans`
 - `evidence`
+- `artifacts`
 - `session_status`
-
-Additional fields (like `recon_artifact`) are included to support internal flow.
+- `recon_artifacts`
 
 ## Transition notes
 
-- Each agent stage records an event and updates the state.
-- Tool executions are captured as evidence with JSON artifacts.
-- Errors raise explicit exceptions and end the run with failure status.
+- Each agent emits a stage event in `events.jsonl`.
+- Tool executions emit `tool_call` events and persist evidence.
+- Artifacts are written after the workflow completes to keep paths stable.

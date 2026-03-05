@@ -2,13 +2,8 @@
 
 Run ID: {run_id}
 Generated: {generated_at}
-Scope: {scope_name}
-
-## Target
-
-Name: {target_name}
-Hosts: {target_hosts}
-URLs: {target_urls}
+Target ID: {target_id}
+Base URL: {base_url}
 
 ## Summary
 
