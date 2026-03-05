@@ -1,194 +1,78 @@
-# LLM-based Penetration Testing Framework
+# AutoPentest
 
-An intelligent penetration testing framework based on the Kill Chain model, powered by Large Language Models (LLMs). This framework automates the entire penetration testing process from reconnaissance to objective completion.
-
-## Features
-
-- **Automated Kill Chain Execution**: Follows the complete cyber kill chain model (Reconnaissance → Weaponization → Delivery → Exploitation → Installation → Command & Control → Actions on Objectives)
-- **LLM-Powered Planning**: Uses master LLM to generate and adjust execution plans intelligently
-- **Multi-Agent Architecture**: Specialized agents for each kill chain stage
-- **Real-time Monitoring**: Live TUI interface with Textual for real-time task tracking
-- **Smart Interruption**: Pause and replan during execution with user input
-- **Distributed Execution**: Built on Ray for scalable distributed task execution
-- **Bilingual Support**: Supports both English and Chinese (configurable)
-
-## Requirements
-
-- Python 3.8+
-- LLM API access (OpenAI-compatible API)
-- Network access for penetration testing tools
-
-## Installation
-
-1. Clone the repository:
-```bash
-git clone <repository-url>
-cd LLM-based-Penetration-Testing
-```
-
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-3. Configure LLM settings in `configs/llm_runtime.json`:
-```json
-{
-  "master_agent": {
-    "protocol": "https",
-    "host": "api.example.com",
-    "port": 443,
-    "api_key": "your-api-key",
-    "model_name": "gpt-4",
-    "temperature": 0.7,
-    "max_tokens": 4096
-  },
-  "ui": {
-    "language": "en"
-  }
-}
-```
-
-## Configuration
-
-### Language Settings
-
-The framework supports bilingual display (English/Chinese). Configure the language in `configs/llm_runtime.json`:
-
-```json
-{
-  "ui": {
-    "language": "en"  // or "zh" for Chinese
-  }
-}
-```
-
-Default language is English (`"en"`).
-
-## Usage
-
-### Basic Usage
-
-Start the framework:
-```bash
-python Pentest.py
-```
-
-Or directly specify a target:
-```bash
-python Pentest.py --target "192.168.1.100"
-```
-
-### Commands
-
-- `start <target>` - Start penetration testing on the target
-- `status` - View current session status
-- `help` - Show help information
-- `quit` - Exit the program
-
-### Interactive Mode
-
-During task execution, you can:
-- Enter additional information to pause and replan
-- Press `Ctrl+C` to pause monitoring (tasks continue in background)
-- Type `q` or `quit` to exit
-
-### UI Modes
-
-The framework supports two UI modes:
-
-1. **Textual TUI** (Recommended): Modern terminal UI with no jitter
-   - Automatically used if Textual is installed
-   - Install: `pip install textual textual-dev`
-
-2. **Simple Log Mode**: Fallback scrolling log mode
-   - Use `--simple` flag to force simple mode
+AutoPentest is a research platform for multi-agent, automated security assessment in authorized environments. It emphasizes orchestration, evidence chains, reproducibility, and experiment evaluation without exploit payloads or destructive actions.
 
 ## Architecture
 
-### Components
+```mermaid
+flowchart LR
+  START([START]) --> Recon[Recon Agent]
+  Recon --> Analysis[Analysis Agent]
+  Analysis --> Planning[Planning Agent]
+  Planning --> Validation[Validation Agent]
+  Validation --> Reporting[Reporting Agent]
+  Reporting --> END([END])
 
-- **Master Controller**: Orchestrates the entire kill chain execution
-- **Agent Pool**: Specialized agents for each stage (Recon, Weaponize, Delivery, Exploit, Install, C2, Objectives)
-- **Todo Manager**: Manages task lists and execution state
-- **State Manager**: Tracks global context and session state
-- **Tool Adapters**: Interfaces with penetration testing tools (nmap, etc.)
+  subgraph Tooling
+    NetworkScan[network_scan]
+    HttpProbe[http_probe]
+    VulnCheck[vulnerability_check]
+  end
 
-### Kill Chain Stages
-
-1. **Reconnaissance**: Information gathering and target discovery
-2. **Weaponization**: Payload and exploit preparation
-3. **Delivery**: Payload delivery mechanisms
-4. **Exploitation**: Vulnerability exploitation
-5. **Installation**: Persistence mechanisms
-6. **Command & Control**: C2 channel establishment
-7. **Actions on Objectives**: Final objective completion
-
-## Project Structure
-
-```
-LLM-based-Penetration-Testing/
-├── Pentest.py              # Main entry point
-├── configs/                 # Configuration files
-│   └── llm_runtime.json    # LLM and UI configuration
-├── src/
-│   ├── agents/             # Agent implementations
-│   ├── core/               # Core controllers and managers
-│   ├── framework/          # Framework initialization
-│   ├── ui/                 # User interface (Textual TUI)
-│   ├── utils/              # Utilities (including i18n)
-│   └── tools/              # Penetration testing tools
-├── pentest_events/         # Event storage and database
-└── requirements.txt         # Python dependencies
+  Recon --> NetworkScan
+  Recon --> HttpProbe
+  Validation --> VulnCheck
 ```
 
-## Internationalization
+## Quickstart
 
-The framework includes comprehensive internationalization support:
+```bash
+pip install -e .
+python -m autopentest doctor
 
-- **English (en)**: Default language
-- **Chinese (zh)**: Full Chinese translation
+autopentest run \
+  --target data/targets/sample_target.yaml \
+  --scope data/targets/sample_scope.yaml
 
-All UI elements, log messages, and user-facing text are translated. Language is configured in `configs/llm_runtime.json` under `ui.language`.
+autopentest report --run <RUN_ID>
 
-## Development
+autopentest eval \
+  --benchmark data/benchmarks/sample_benchmark.yaml \
+  --scope data/targets/sample_scope.yaml
+```
 
-### Adding New Translations
+## Outputs
 
-Translations are managed in `src/utils/i18n.py`. To add a new translation:
+- Runs are stored in `runs/<run_id>/`
+- Evidence: `runs/<run_id>/evidence/`
+- Artifacts: `runs/<run_id>/artifacts/`
+- Events: `runs/<run_id>/events.jsonl`
+- Report: `runs/<run_id>/report.md`
 
-1. Add the key to both `TRANSLATIONS["en"]` and `TRANSLATIONS["zh"]`
-2. Use `t("key.name")` in code to retrieve translations
+## Add a new agent
 
-### Extending Agents
+1. Create a new module in `src/autopentest/agents/`.
+2. Implement a `run(state, ctx)` function returning state updates.
+3. Register the node in `src/autopentest/graph/workflow.py` and connect edges.
+4. Update the state schema if new fields are introduced.
 
-New agents can be added by:
-1. Creating a new agent class in `src/agents/`
-2. Registering it in the agent pool
-3. Adding corresponding kill chain stage mapping
+## Add a new tool
 
-## Security Notes
+1. Implement a tool handler in `src/autopentest/tools/builtins.py` or a plugin module.
+2. Register it with `ToolRegistry.register`.
+3. Reference it from the planning/validation stages.
+4. Add any configuration in `configs/default.yaml`.
 
-⚠️ **Important**: This framework is designed for authorized penetration testing only. Ensure you have proper authorization before testing any target.
+## Run a benchmark
 
-- Use only in authorized environments
-- Review and understand all generated payloads before execution
-- Monitor all network activity
-- Follow responsible disclosure practices
+1. Define a benchmark in `data/benchmarks/*.yaml`.
+2. Execute:
 
-## License
+```bash
+autopentest eval --benchmark data/benchmarks/sample_benchmark.yaml --scope data/targets/sample_scope.yaml
+```
 
-See LICENSE file for details.
+## Notes
 
-## Contributing
-
-Contributions are welcome! Please ensure:
-- Code follows existing style
-- Tests are added for new features
-- Documentation is updated
-- Translations are added for new UI text
-
-## Support
-
-For issues and questions, please open an issue on the repository.
-
+- Scope declaration is required on every run to enforce authorized assessment.
+- The platform does not contain exploit payloads or destructive tooling.

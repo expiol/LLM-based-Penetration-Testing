@@ -1,0 +1,8 @@
+services:
+  autopentest:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ..:/app
+    command: ["doctor"]

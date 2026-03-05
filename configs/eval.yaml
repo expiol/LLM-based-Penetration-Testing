@@ -1,0 +1,19 @@
+tool:
+  default_ports: [22, 80, 443, 8080]
+  network_timeout: 1.0
+  http_timeout: 5.0
+  user_agent: "autopentest/0.1-eval"
+  max_response_bytes: 1048576
+  retries: 2
+
+budget:
+  max_tool_calls: 128
+  max_runtime_seconds: 1200
+
+logging:
+  level: "INFO"
+
+report:
+  template_path: "data/templates/report.md"
+
+plugins: []

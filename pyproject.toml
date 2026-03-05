@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autopentest"
+version = "0.1.0"
+description = "Multi-agent automated security assessment research platform"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "AutoPentest Contributors" }]
+dependencies = [
+  "langgraph",
+  "pydantic>=2.0",
+  "typer>=0.9.0",
+  "structlog",
+  "rich",
+  "httpx",
+  "tenacity",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff",
+  "mypy",
+  "pytest",
+  "pre-commit",
+  "types-PyYAML",
+]
+
+[project.scripts]
+autopentest = "autopentest.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+autopentest = ["py.typed"]
