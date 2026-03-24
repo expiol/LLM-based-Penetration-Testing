@@ -1,7 +1,0 @@
-target_id: "juice_shop_local"
-scope: "local_lab"
-host: "127.0.0.1"
-base_url: "http://127.0.0.1:3000"
-notes: "Local OWASP Juice Shop lab target for authorized testing."
-allowed_tools: ["nmap", "http_probe"]
-ports: [3000]

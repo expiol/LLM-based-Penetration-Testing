@@ -1,7 +1,0 @@
-target_id: "dvwa_local"
-scope: "local_lab"
-host: "127.0.0.1"
-base_url: "http://127.0.0.1:8080"
-notes: "Local DVWA lab target for authorized testing."
-allowed_tools: ["nmap", "http_probe", "sqlmap"]
-ports: [8080]

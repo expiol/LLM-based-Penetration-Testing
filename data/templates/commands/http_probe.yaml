@@ -1,5 +1,0 @@
-name: "http_probe"
-description: "HTTP probe via httpx"
-example:
-  base_url: "http://127.0.0.1:8080"
-  paths: ["/", "/robots.txt", "/api"]

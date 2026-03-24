@@ -1,40 +1,46 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "autopentest"
-version = "0.1.0"
-description = "Multi-agent automated security assessment research platform"
+name = "nyuctf_multiagent"
+version = "0.1"
+authors = [
+  { name="NYU CTF", email="nyuctf@gmail.com" },
+  { name="Meet Udeshi", email="m.udeshi@nyu.edu" },
+]
+description = "NYU CTF Multi-agent: Autonomous LLM agents for solving CTFs"
 readme = "README.md"
-requires-python = ">=3.11"
-license = { text = "MIT" }
-authors = [{ name = "AutoPentest Contributors" }]
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
 dependencies = [
-  "langgraph",
-  "pydantic>=2.0",
-  "typer>=0.9.0",
-  "structlog",
+  "pathlib",
+  "pydantic>=2",
+  "openai",
+  "anthropic",
   "rich",
-  "httpx",
-  "tenacity",
   "pyyaml",
+#  "bs4",
+#  "jinja2",
+  "docker",
+  "tabulate",
+  "backoff",
+  "pyte",
+  "tiktoken",
+  "nyuctf",
+  "google-generativeai",
+  "together"
 ]
 
-[project.optional-dependencies]
-dev = [
-  "ruff",
-  "mypy",
-  "pytest",
-  "pre-commit",
-  "types-PyYAML",
-]
+[project.urls]
+Homepage = "https://nyu-llm-ctf.github.io"
 
 [project.scripts]
-autopentest = "autopentest.cli.main:app"
+autopentest = "nyuctf_mutil_killchain.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-autopentest = ["py.typed"]
+[tool.hatch.build.targets.wheel]
+packages = ["nyuctf_multiagent", "nyuctf_mutil_killchain"]

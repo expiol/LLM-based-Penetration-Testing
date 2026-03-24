@@ -1,4 +1,0 @@
-name: "sample-benchmark"
-tasks:
-  - name: "local-scan"
-    target: "data/targets/sample_target.yaml"

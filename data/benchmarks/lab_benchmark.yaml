@@ -1,8 +1,0 @@
-name: "lab-benchmark"
-tasks:
-  - name: "dvwa"
-    target: "data/targets/dvwa_local.yaml"
-    success_strategy: "dvwa_sqlmap"
-  - name: "juice-shop"
-    target: "data/targets/juice_shop_local.yaml"
-    success_strategy: "juice_shop"

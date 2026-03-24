@@ -1,140 +1,103 @@
-# AutoPentest
+# NYU CTF Automation
 
-AutoPentest is a research platform for multi-agent, automated security assessment in authorized environments. It emphasizes orchestration, evidence chains, reproducibility, and experiment evaluation without exploit payloads or destructive actions outside lab scope.
+这个仓库包含 3 条主要能力线：
 
-## Architecture
+- `D-CIPHER`
+- `NYU CTF Baseline`
+- `NYU Multi-Killchain`
 
-```mermaid
-flowchart LR
-  START([START]) --> Recon[Recon Agent]
-  Recon --> Analysis[Analysis Agent]
-  Analysis --> Planning[Planning Agent]
-  Planning --> Validation[Validation Agent]
-  Validation --> Reporting[Reporting Agent]
-  Reporting --> END([END])
 
-  subgraph Tooling
-    Nmap[nmap]
-    HttpProbe[http_probe]
-    Sqlmap[sqlmap]
-  end
+## 环境准备
 
-  Recon --> Nmap
-  Recon --> HttpProbe
-  Validation --> Sqlmap
-```
-
-## Quickstart (Local)
-
-1. Install dependencies:
+1. 克隆仓库并进入目录。
+2. 准备 Python 3.10+ 环境
+3. 按需执行安装脚本：
 
 ```bash
-pip install -e .[dev]
+./setup_mutil_killchain.sh
+./setup_baseline.sh
+./setup_dcipher.sh
 ```
 
-2. Start the lab:
+4. 如需真实 NYUCTF 题目运行，下载数据集：
 
 ```bash
-./scripts/lab_up.sh
+python -m nyuctf.download
 ```
 
-3. Verify environment:
+
+
+
+### 2. 回归测试
+
+运行当前仓库维护的针对性单测与回归测试。
 
 ```bash
-python -m autopentest doctor
+python -m pytest tests/test_mutil_killchain_optimizations.py
 ```
 
-4. Run an assessment:
+当前覆盖重点：
+
+- web 服务识别逻辑
+- artifact / archive 分类
+- source review 的归档成员读取
+- `max_cycles` 用尽时的状态判定
+
+适用场景：
+
+- 提交前回归
+- 改分类规则、planner、orchestrator 后验证行为
+
+### 3. 真实题目运行
+
+连接 NYUCTF 数据集和 Docker 环境，实际跑单题。
 
 ```bash
-python -m autopentest run \
-  --target data/targets/dvwa_local.yaml \
-  --config configs/dev.yaml \
-  --i-understand-and-am-authorized
+python run_mutil_killchain.py \
+  --split test \
+  --challenge <challenge-name>
 ```
 
-5. Run benchmarks:
+常用附加参数：
 
 ```bash
-python -m autopentest eval \
-  --bench data/benchmarks/lab_benchmark.yaml \
-  --config configs/eval.yaml \
-  --i-understand-and-am-authorized
+--disable-llm
+--disable-llm-planner
+--api-endpoint <base_url>
+--api-key <key>
+--model <model_name>
+--max-cycles 8
+--debug
 ```
 
-6. Stop the lab:
+适用场景：
+
+- 验证真实 challenge 上的端到端行为
+- 检查 Docker 启动、challenge 文件挂载、日志产物是否正常
+
+## Multi-Killchain 主要入口
+
+- `run_mutil_killchain.py`: 单题真实运行入口
+- `run_mutil_killchain_test.py`: 本地自检包装脚本
+- `nyuctf_mutil_killchain/cli.py`: 包级 CLI，支持 `run` / `selftest` / `lab`
+
+## Multi-Killchain 输出
+
+真实单题运行默认会在 `logs_mutil_killchain/<user>/` 下写出：
+
+- 每题一个 `<challenge>.json` 总日志
+- `artifacts/<challenge>/<run-id>/state.json`
+- `artifacts/<challenge>/<run-id>/summary.json`
+- `artifacts/<challenge>/<run-id>/report.md`
+- `artifacts/<challenge>/<run-id>/events.log`
+- `artifacts/<challenge>/<run-id>/evidence.json`
+
+## 其他入口
+
+如果你需要跑仓库里另外两条能力线，入口仍然保留：
 
 ```bash
-./scripts/lab_down.sh
+python run_dcipher.py --split <test|development> --challenge <challenge-name>
+python run_single_executor.py --split <test|development> --challenge <challenge-name>
+python run_baseline.py -c configs/baseline/base_config.yaml --split <test|development> --challenge <challenge-name>
 ```
-
-## Quickstart (Docker)
-
-1. Start the lab on the host:
-
-```bash
-docker compose -f docker/docker-compose.lab.yml up -d
-```
-
-2. Build the AutoPentest image:
-
-```bash
-docker build -f docker/Dockerfile -t autopentest .
-```
-
-3. Run tests and evaluation (Linux host networking):
-
-```bash
-docker run --rm --network host autopentest pytest
-
-docker run --rm --network host autopentest autopentest eval \
-  --bench data/benchmarks/lab_benchmark.yaml \
-  --config configs/eval.yaml \
-  --i-understand-and-am-authorized
-```
-
-On non-Linux hosts, update targets to use `host.docker.internal` instead of `127.0.0.1`.
-
-## Outputs
-
-Each run creates:
-
-- `runs/<run_id>/config_resolved.yaml`
-- `runs/<run_id>/events.jsonl`
-- `runs/<run_id>/evidence/`
-- `runs/<run_id>/artifacts/recon.json`
-- `runs/<run_id>/artifacts/findings.json` (if any)
-- `runs/<run_id>/artifacts/validation_plan.json`
-- `runs/<run_id>/artifacts/session.json`
-- `runs/<run_id>/summary.json`
-- `runs/<run_id>/report.md`
-
-## Add a new agent
-
-1. Create a module in `src/autopentest/agents/`.
-2. Implement `run(state, ctx)` and update `graph/workflow.py`.
-3. Update `schemas/messages.py` if the state changes.
-
-## Add a new tool
-
-1. Implement a command builder or Python handler in `src/autopentest/tools/builtins.py` or a plugin.
-2. Register the tool in `ToolRegistry`.
-3. Add parser logic under `src/autopentest/tools/parsers/`.
-
-## Benchmarks
-
-Benchmarks live in `data/benchmarks/` and reference targets by path with a success strategy.
-
-## Development checks
-
-```bash
-ruff check .
-mypy src
-pytest
-```
-
-## Notes
-
-- Scope declaration is required on every run (`--i-understand-and-am-authorized`).
-- All external commands are allowlisted in `core/safety.py`.
-- sqlmap runs in safe detection mode only (no dump/file/OS shell).
