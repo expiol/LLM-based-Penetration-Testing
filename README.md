@@ -6,6 +6,10 @@
 - `NYU CTF Baseline`
 - `NYU Multi-Killchain`
 
+如果你需要一份适合组会汇报的完整中文项目介绍，见：
+
+- `docs/project_overview_zh.md`
+
 
 ## 环境准备
 
