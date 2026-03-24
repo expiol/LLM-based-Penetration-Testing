@@ -22,6 +22,8 @@ APPROVED_TASK_TYPES = frozenset(
         "artifact.triage",
         "artifact.archive_triage",
         "artifact.binary_triage",
+        "artifact.computation_analysis",
+        "artifact.runtime_probe",
         "artifact.sqlite_review",
         "artifact.pcap_review",
         "artifact.repo_review",
@@ -348,6 +350,12 @@ class LLMPlanner(TaskPlanner):
         if task.task_type == "artifact.binary_triage":
             files = task.input_context.get("binary_files", [])
             return "artifact-binary-triage:" + ",".join(files[:8])
+        if task.task_type == "artifact.computation_analysis":
+            files = task.input_context.get("source_files", [])
+            return "artifact-computation-analysis:" + ",".join(files[:8])
+        if task.task_type == "artifact.runtime_probe":
+            files = task.input_context.get("source_files", [])
+            return "artifact-runtime-probe:" + ",".join(files[:8])
         if task.task_type == "artifact.archive_triage":
             files = task.input_context.get("archive_files", [])
             return "artifact-archive-triage:" + ",".join(files[:8])

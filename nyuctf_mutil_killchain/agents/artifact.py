@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from nyuctf_mutil_killchain.agents.base import (
+    build_computation_analysis_task,
     build_archive_triage_task,
+    build_runtime_probe_task,
     WorkerAgent,
     build_binary_triage_task,
     build_flag_validation_task,
@@ -68,6 +70,7 @@ class ArtifactTriageAgent(WorkerAgent):
         pcap_files = list(output_context.get("pcap_files") or [])
         repo_paths = list(output_context.get("repo_paths") or [])
         source_files = list(output_context.get("web_source_files") or [])
+        script_files = list(output_context.get("script_files") or [])
         flag_candidates = list(output_context.get("flag_candidates") or [])
 
         new_tasks = [
@@ -116,6 +119,20 @@ class ArtifactTriageAgent(WorkerAgent):
                     source_files=source_files[:12],
                 )
             )
+            if script_files and challenge_category in {"rev", "crypto", "misc"}:
+                new_tasks.append(
+                    build_runtime_probe_task(
+                        files_root=files_root,
+                        source_files=script_files[:12],
+                    )
+                )
+            if challenge_category in {"rev", "crypto", "misc"}:
+                new_tasks.append(
+                    build_computation_analysis_task(
+                        files_root=files_root,
+                        source_files=source_files[:12],
+                    )
+                )
 
         return WorkerReport(
             task_id=task.task_id,

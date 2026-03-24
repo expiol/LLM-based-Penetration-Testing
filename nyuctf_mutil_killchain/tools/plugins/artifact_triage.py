@@ -25,6 +25,7 @@ notes_list = []
 interesting_files = []
 flag_candidates = []
 web_sources = []
+script_sources = []
 binaries = []
 archives = []
 database_files = []
@@ -35,6 +36,9 @@ source_suffixes = {
     ".c", ".cc", ".cpp", ".cxx", ".cs", ".go", ".h", ".hpp", ".htm", ".html",
     ".java", ".js", ".jsx", ".kt", ".php", ".py", ".rb", ".rs", ".sh", ".sql",
     ".sv", ".swift", ".tera", ".ts", ".tsx", ".v",
+}
+script_suffixes = {
+    ".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".rb", ".pl", ".php", ".lua",
 }
 text_suffixes = {
     ".cfg", ".csv", ".htm", ".html", ".ini", ".json", ".md", ".txt", ".xml",
@@ -75,6 +79,8 @@ else:
             pcap_files.append(relpath)
         elif suffix in source_suffixes:
             web_sources.append(relpath)
+            if suffix in script_suffixes:
+                script_sources.append(relpath)
         elif "text" in lowered_type or suffix in text_suffixes:
             text_files.append(relpath)
 
@@ -181,6 +187,8 @@ else:
         records.append({"type": "note", "text": f"PCAP files discovered: {pcap_files[:10]}"})
     if repo_paths:
         records.append({"type": "note", "text": f"Repository paths discovered: {sorted(repo_paths)[:10]}"})
+    if script_sources:
+        records.append({"type": "note", "text": f"Script-like source files discovered: {script_sources[:10]}"})
 
     records.append({
         "type": "output_context",
@@ -192,6 +200,7 @@ else:
         "pcap_files": pcap_files[:20],
         "repo_paths": sorted(repo_paths)[:20],
         "web_source_files": web_sources[:20],
+        "script_files": script_sources[:20],
         "text_files": text_files[:20],
         "interesting_files": interesting_files[:20],
         "flag_candidates": flag_candidates[:10],

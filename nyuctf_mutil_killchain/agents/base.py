@@ -239,6 +239,56 @@ def build_source_review_task(
     )
 
 
+def build_computation_analysis_task(
+    *,
+    files_root: str,
+    source_files: list[str],
+    priority: int = 83,
+) -> Task:
+    """Build a deterministic follow-up task for computation-heavy source analysis."""
+
+    return Task(
+        title="Analyze computation-heavy source artifacts",
+        description=(
+            "Execute bundled source files in the container, inspect arithmetic and transform "
+            "pipelines, and recover concrete plaintext or flag candidates when possible."
+        ),
+        task_type="artifact.computation_analysis",
+        priority=priority,
+        input_context={
+            "files_root": files_root,
+            "source_files": source_files,
+        },
+        dedupe_key="artifact-computation-analysis:" + ",".join(source_files[:8]),
+        metadata={"planned_by": "worker-followup"},
+    )
+
+
+def build_runtime_probe_task(
+    *,
+    files_root: str,
+    source_files: list[str],
+    priority: int = 84,
+) -> Task:
+    """Build a deterministic follow-up task for executing bundled script artifacts."""
+
+    return Task(
+        title="Execute script-like source artifacts",
+        description=(
+            "Run bundled scripts with the appropriate interpreter inside the agent container, "
+            "capture runtime output, and extract flag candidates or encoded blobs."
+        ),
+        task_type="artifact.runtime_probe",
+        priority=priority,
+        input_context={
+            "files_root": files_root,
+            "source_files": source_files,
+        },
+        dedupe_key="artifact-runtime-probe:" + ",".join(source_files[:8]),
+        metadata={"planned_by": "worker-followup"},
+    )
+
+
 def build_sqlite_review_task(
     *,
     files_root: str,
