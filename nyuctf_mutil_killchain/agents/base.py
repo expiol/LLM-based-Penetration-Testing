@@ -5,8 +5,12 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
+from typing import Any, TypeVar
+from urllib.parse import urlparse
 
-from nyuctf_mutil_killchain.llm import LLMClient
+from pydantic import BaseModel, ValidationError
+
+from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
 from nyuctf_mutil_killchain.state import GlobalState, Service, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ExecutionPlane
 
@@ -41,6 +45,7 @@ WEB_SERVICE_TOKENS = (
     "web",
 )
 FLAG_PATTERN = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 def infer_web_urls(
@@ -159,7 +164,7 @@ def build_web_review_task(asset_id: str, base_url: str, *, priority: int = 78) -
     )
 
 
-def build_web_content_task(asset_id: str, base_url: str, *, priority: int = 72) -> Task:
+def build_web_content_task(asset_id: str, base_url: str, *, priority: int = 79) -> Task:
     """Build a deterministic follow-up task for content-aware web review."""
 
     return Task(
@@ -169,6 +174,45 @@ def build_web_content_task(asset_id: str, base_url: str, *, priority: int = 72) 
         priority=priority,
         input_context={"asset_id": asset_id, "base_url": base_url},
         dedupe_key=f"web-content:{asset_id}:{base_url}",
+        metadata={"planned_by": "worker-followup"},
+    )
+
+
+def build_web_form_probe_task(
+    *,
+    asset_id: str,
+    page_url: str,
+    forms: list[dict[str, Any]],
+    priority: int = 81,
+) -> Task:
+    """Build a deterministic follow-up task for interacting with discovered web forms."""
+
+    normalized_forms = [form for form in forms if isinstance(form, dict)][:8]
+    signatures: list[str] = []
+    for form in normalized_forms[:4]:
+        action = str(form.get("action") or "").strip()
+        method = str(form.get("method") or "").strip().lower()
+        field_names = [
+            str(field.get("name") or "").strip()
+            for field in list(form.get("inputs") or [])[:8]
+            if isinstance(field, dict)
+        ]
+        signatures.append("|".join([action, method, ",".join(name for name in field_names if name)]))
+
+    return Task(
+        title=f"Interact with discovered forms for {asset_id}",
+        description=(
+            "Submit grounded baseline requests to discovered HTML forms, including file uploads when present, "
+            "and capture reflected content, workflow changes, or flag candidates."
+        ),
+        task_type="web.form_probe",
+        priority=priority,
+        input_context={
+            "asset_id": asset_id,
+            "page_url": page_url,
+            "forms": normalized_forms,
+        },
+        dedupe_key=f"web-form-probe:{asset_id}:{page_url}:{';'.join(signatures[:4])}",
         metadata={"planned_by": "worker-followup"},
     )
 
@@ -221,21 +265,41 @@ def build_source_review_task(
     *,
     files_root: str,
     source_files: list[str],
+    routing_intent: str | None = None,
+    preferred_workers: list[str] | None = None,
+    exclude_workers: list[str] | None = None,
+    routing_notes: list[str] | None = None,
     priority: int = 82,
 ) -> Task:
     """Build a deterministic follow-up task for source/web file review."""
+
+    input_context: dict[str, Any] = {
+        "files_root": files_root,
+        "source_files": source_files,
+    }
+    metadata: dict[str, Any] = {"planned_by": "worker-followup"}
+    dedupe_parts = ["artifact-source-review", *source_files[:8]]
+    if routing_intent:
+        input_context["routing_intent"] = routing_intent
+        metadata["routing_intent"] = routing_intent
+        dedupe_parts.append(routing_intent)
+    if preferred_workers:
+        metadata["preferred_workers"] = preferred_workers[:6]
+        dedupe_parts.extend(preferred_workers[:3])
+    if exclude_workers:
+        metadata["exclude_workers"] = exclude_workers[:8]
+        dedupe_parts.extend(exclude_workers[:4])
+    if routing_notes:
+        metadata["routing_notes"] = routing_notes[:6]
 
     return Task(
         title="Review source artifacts",
         description="Inspect bundled source files for routes, secrets, and flag-like tokens.",
         task_type="artifact.source_review",
         priority=priority,
-        input_context={
-            "files_root": files_root,
-            "source_files": source_files,
-        },
-        dedupe_key="artifact-source-review:" + ",".join(source_files[:8]),
-        metadata={"planned_by": "worker-followup"},
+        input_context=input_context,
+        dedupe_key=":".join(dedupe_parts),
+        metadata=metadata,
     )
 
 
@@ -355,6 +419,205 @@ def build_repo_review_task(
     )
 
 
+def build_artifact_deep_review_task(
+    *,
+    files_root: str,
+    analysis_kind: str,
+    context_field: str,
+    items: list[str],
+    priority: int = 80,
+) -> Task:
+    """Build a routed deep-review task for one artifact bucket."""
+
+    normalized_items = [item for item in items if item][:12]
+    return Task(
+        title=f"Deep review {analysis_kind} artifacts",
+        description=(
+            "Select the most appropriate artifact-review worker for this bundle and extract "
+            "flag candidates, credentials, or pivot hints."
+        ),
+        task_type="artifact.deep_review",
+        priority=priority,
+        input_context={
+            "files_root": files_root,
+            "analysis_kind": analysis_kind,
+            context_field: normalized_items,
+        },
+        dedupe_key=f"artifact-deep-review:{analysis_kind}:{','.join(normalized_items[:8])}",
+        metadata={
+            "planned_by": "worker-followup",
+            "analysis_kind": analysis_kind,
+            "analysis_field": context_field,
+        },
+    )
+
+
+def build_credential_hunt_task(
+    *,
+    files_root: str,
+    seed_terms: list[str] | None = None,
+    priority: int = 90,
+) -> Task:
+    """Build a deterministic follow-up task for CTF credential harvesting."""
+
+    normalized_seed_terms = merge_unique_strings(seed_terms, limit=12)
+    dedupe_parts = ["credential-hunt", files_root]
+    if normalized_seed_terms:
+        dedupe_parts.extend(normalized_seed_terms[:6])
+    return Task(
+        title="Harvest candidate credentials",
+        description=(
+            "Search bundled challenge artifacts for usernames, passwords, bearer tokens, "
+            "cookies, and other credential material that can unlock the next CTF pivot."
+        ),
+        task_type="credential.hunt",
+        priority=priority,
+        input_context={
+            "files_root": files_root,
+            "seed_terms": normalized_seed_terms,
+        },
+        dedupe_key=":".join(dedupe_parts),
+        metadata={"planned_by": "worker-followup"},
+    )
+
+
+def build_flag_hunt_task(
+    *,
+    files_root: str,
+    seed_terms: list[str] | None = None,
+    priority: int = 96,
+) -> Task:
+    """Build a deterministic follow-up task for CTF-wide flag harvesting."""
+
+    normalized_seed_terms = merge_unique_strings(seed_terms, limit=12)
+    dedupe_parts = ["flag-hunt", files_root]
+    if normalized_seed_terms:
+        dedupe_parts.extend(normalized_seed_terms[:6])
+    return Task(
+        title="Hunt for concrete flag candidates",
+        description=(
+            "Search across bundled challenge artifacts for grounded flag candidates, "
+            "decoder breadcrumbs, and flag-bearing paths."
+        ),
+        task_type="flag.hunt",
+        priority=priority,
+        input_context={
+            "files_root": files_root,
+            "seed_terms": normalized_seed_terms,
+        },
+        dedupe_key=":".join(dedupe_parts),
+        metadata={"planned_by": "worker-followup"},
+    )
+
+
+def build_exploit_hypothesis_task(
+    *,
+    files_root: str | None = None,
+    focus_asset_ids: list[str] | None = None,
+    seed_terms: list[str] | None = None,
+    priority: int = 76,
+) -> Task:
+    """Build a deterministic follow-up task for CTF exploit/pivot reasoning."""
+
+    normalized_assets = merge_unique_strings(focus_asset_ids, limit=8)
+    normalized_seed_terms = merge_unique_strings(seed_terms, limit=12)
+    dedupe_parts = ["exploit-hypothesis"]
+    if normalized_assets:
+        dedupe_parts.extend(normalized_assets[:4])
+    if normalized_seed_terms:
+        dedupe_parts.extend(normalized_seed_terms[:4])
+    return Task(
+        title="Synthesize CTF exploit hypotheses",
+        description=(
+            "Use the accumulated evidence to prioritize the shortest path toward credential reuse, "
+            "reachable secrets, and concrete flag recovery."
+        ),
+        task_type="exploit.hypothesis",
+        priority=priority,
+        input_context={
+            "files_root": files_root,
+            "focus_asset_ids": normalized_assets,
+            "seed_terms": normalized_seed_terms,
+        },
+        dedupe_key=":".join(dedupe_parts),
+        metadata={"planned_by": "worker-followup"},
+    )
+
+
+def build_credential_test_task(
+    *,
+    asset_id: str,
+    base_url: str,
+    credential_ids: list[str],
+    seed_paths: list[str] | None = None,
+    priority: int = 85,
+) -> Task:
+    """Build a deterministic follow-up task for credential reuse against a web target."""
+
+    normalized_credential_ids = merge_unique_strings(credential_ids, limit=8)
+    normalized_seed_paths = normalize_probe_paths(seed_paths, limit=16)
+    return Task(
+        title=f"Test recovered credentials against {asset_id}",
+        description=(
+            "Reuse recovered usernames, passwords, tokens, and cookies against the live challenge "
+            "application to unlock privileged routes or direct flag access."
+        ),
+        task_type="exploit.credential_test",
+        priority=priority,
+        input_context={
+            "asset_id": asset_id,
+            "base_url": base_url,
+            "credential_ids": normalized_credential_ids,
+            "seed_paths": normalized_seed_paths,
+        },
+        dedupe_key=f"exploit-credential-test:{asset_id}:{','.join(normalized_credential_ids[:6])}",
+        metadata={"planned_by": "worker-followup"},
+    )
+
+
+def build_cve_probe_task(
+    *,
+    asset_id: str,
+    base_url: str | None = None,
+    hostname: str | None = None,
+    ports: list[int] | None = None,
+    credential_ids: list[str] | None = None,
+    seed_paths: list[str] | None = None,
+    priority: int = 78,
+) -> Task:
+    """Build a deterministic follow-up task for targeted web/pwn exploit probing."""
+
+    normalized_ports = sorted({int(port) for port in (ports or []) if int(port) > 0})[:16]
+    normalized_credentials = merge_unique_strings(credential_ids, limit=8)
+    normalized_seed_paths = normalize_probe_paths(seed_paths, limit=16)
+    dedupe_seed_paths = sorted(normalized_seed_paths)
+    target_label = base_url or hostname or asset_id
+    return Task(
+        title=f"Probe targeted exploit paths for {asset_id}",
+        description=(
+            "Attempt grounded web or TCP interactions against the authorized challenge target "
+            "using recovered routes, prompts, and credentials."
+        ),
+        task_type="exploit.cve_probe",
+        priority=priority,
+        input_context={
+            "asset_id": asset_id,
+            "base_url": base_url,
+            "hostname": hostname,
+            "ports": normalized_ports,
+            "credential_ids": normalized_credentials,
+            "seed_paths": normalized_seed_paths,
+        },
+        dedupe_key=(
+            f"exploit-cve-probe:{asset_id}:{target_label}:"
+            f"{','.join(str(port) for port in normalized_ports[:6])}:"
+            f"{','.join(normalized_credentials[:4])}:"
+            f"{','.join(dedupe_seed_paths[:6])}"
+        ),
+        metadata={"planned_by": "worker-followup"},
+    )
+
+
 def build_flag_validation_task(
     candidate: str,
     *,
@@ -411,7 +674,7 @@ def build_http_path_probe_task(
 ) -> Task:
     """Build a deterministic follow-up task for probing interesting HTTP paths."""
 
-    normalized_paths = list(dict.fromkeys(path for path in paths if path))[:20]
+    normalized_paths = normalize_probe_paths(paths, limit=20)
     return Task(
         title=f"Probe interesting paths for {asset_id}",
         description="Fetch interesting application paths discovered from source, links, or content review.",
@@ -440,11 +703,94 @@ def extract_flag_candidates(*values: str | None) -> list[str]:
     return candidates
 
 
+def merge_unique_strings(*groups: Iterable[str] | None, limit: int | None = None) -> list[str]:
+    """Merge string groups while preserving order and removing empties."""
+
+    merged: list[str] = []
+    for group in groups:
+        if not group:
+            continue
+        for item in group:
+            text = str(item).strip()
+            if not text or text in merged:
+                continue
+            merged.append(text)
+            if limit is not None and len(merged) >= limit:
+                return merged
+    return merged
+
+
+def normalize_probe_paths(paths: Iterable[str] | None, *, limit: int = 20) -> list[str]:
+    """Normalize worker-discovered paths into forms suitable for web.path_probe tasks."""
+
+    normalized: list[str] = []
+    for raw_path in paths or ():
+        text = str(raw_path).strip()
+        if not text:
+            continue
+
+        if text.startswith(("http://", "https://")):
+            parsed = urlparse(text)
+            text = parsed.path or "/"
+            if parsed.query:
+                text = f"{text}?{parsed.query}"
+        else:
+            if any(character.isspace() for character in text):
+                continue
+            if not text.startswith("/"):
+                if "/" in text or any(
+                    token in text.lower()
+                    for token in ("admin", "api", "debug", "flag", "login", "upload", "cgi-bin")
+                ):
+                    text = f"/{text.lstrip('/')}"
+                else:
+                    continue
+
+        if any(character.isspace() for character in text):
+            continue
+
+        if text not in normalized:
+            normalized.append(text)
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+def build_path_probe_tasks_for_assets(
+    state: GlobalState,
+    paths: Iterable[str] | None,
+    *,
+    priority: int = 73,
+) -> list[Task]:
+    """Create deterministic path-probe tasks for every known web asset."""
+
+    normalized_paths = normalize_probe_paths(paths, limit=20)
+    if not normalized_paths:
+        return []
+
+    tasks: list[Task] = []
+    for asset in state.assets.values():
+        if not asset.base_url:
+            continue
+        tasks.append(
+            build_http_path_probe_task(
+                asset_id=asset.asset_id,
+                base_url=asset.base_url,
+                paths=normalized_paths,
+                priority=priority,
+            )
+        )
+    return tasks
+
+
 class WorkerAgent(ABC):
     """Abstract worker that can handle one or more task types."""
 
     name: str
     supported_task_types: tuple[str, ...]
+    routing_summary: str = ""
+    preferred_challenge_categories: tuple[str, ...] = ()
+    required_context_keys: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -457,6 +803,91 @@ class WorkerAgent(ABC):
 
     def supports(self, task: Task) -> bool:
         return any(task.task_type.startswith(prefix) for prefix in self.supported_task_types)
+
+    def can_route_task(self, task: Task, state: GlobalState) -> tuple[bool, str | None]:
+        """Return whether the worker is eligible for a routed dispatch."""
+
+        del state
+        if not self.supports(task):
+            return False, "task type not supported"
+
+        excluded = {
+            str(value)
+            for value in (
+                list(task.metadata.get("exclude_workers") or [])
+                + list(task.input_context.get("exclude_workers") or [])
+            )
+        }
+        if self.name in excluded:
+            return False, "worker explicitly excluded by task metadata"
+
+        for key in self.required_context_keys:
+            value = task.input_context.get(key)
+            if value in (None, "", [], {}, ()):
+                return False, f"missing required context key: {key}"
+        return True, None
+
+    def routing_score(self, task: Task, state: GlobalState) -> int:
+        """Deterministic fallback score when no LLM route is available."""
+
+        score = 40
+        if task.task_type in self.supported_task_types:
+            score += 40
+        challenge_category = str(state.metadata.get("challenge", {}).get("category") or "").lower()
+        if challenge_category and challenge_category in self.preferred_challenge_categories:
+            score += 12
+
+        requested_intent = str(
+            task.input_context.get("routing_intent")
+            or task.metadata.get("routing_intent")
+            or ""
+        ).lower()
+        if requested_intent and requested_intent in self.name.replace("-", "_"):
+            score += 10
+        return score
+
+    def routing_profile(self, task: Task, state: GlobalState) -> dict[str, Any]:
+        """Return structured metadata for LLM-assisted worker routing."""
+
+        default_summary = (self.__doc__ or "").strip().splitlines()
+        return {
+            "worker_name": self.name,
+            "supported_task_types": list(self.supported_task_types),
+            "routing_summary": self.routing_summary or (default_summary[0] if default_summary else self.name),
+            "preferred_challenge_categories": list(self.preferred_challenge_categories),
+            "required_context_keys": list(self.required_context_keys),
+            "heuristic_score": self.routing_score(task, state),
+        }
+
+    def generate_structured_output(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema: type[ModelT],
+        fallback_notes: list[str] | None = None,
+        failure_label: str = "LLM worker guidance",
+        temperature: float = 0.2,
+    ) -> ModelT | None:
+        """Best-effort wrapper around llm_client.generate_json with note-based fallback."""
+
+        if self.llm_client is None:
+            return None
+
+        try:
+            return self.llm_client.generate_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema=schema,
+                temperature=temperature,
+            )
+        except (LLMClientError, ValidationError) as exc:
+            if fallback_notes is not None:
+                fallback_notes.append(
+                    f"{failure_label} unavailable ({type(exc).__name__}: {str(exc)[:200]}); "
+                    "continuing with deterministic worker logic."
+                )
+            return None
 
     @abstractmethod
     def run(self, task: Task, state: GlobalState) -> WorkerReport:

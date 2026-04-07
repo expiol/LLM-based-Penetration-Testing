@@ -13,7 +13,11 @@ from nyuctf_mutil_killchain.agents import (
     ArtifactTriageAgent,
     BinaryTriageAgent,
     ComputationAnalysisAgent,
+    CredentialHuntAgent,
+    CredentialExploitAgent,
+    ExploitReasoningAgent,
     FlagValidationAgent,
+    FlagHuntAgent,
     HostAuditAgent,
     PcapReviewAgent,
     ReconAgent,
@@ -23,12 +27,20 @@ from nyuctf_mutil_killchain.agents import (
     SourceReviewAgent,
     SQLiteReviewAgent,
     VulnScanAgent,
+    WebPwnExploitAgent,
     WebAssessmentAgent,
     WebContentAgent,
+    WebFormProbeAgent,
     WebPathProbeAgent,
 )
 from nyuctf_mutil_killchain.llm import LLMClientError, build_llm_client_from_env
-from nyuctf_mutil_killchain.orchestrator import HeuristicPlanner, LLMPlanner, Orchestrator
+from nyuctf_mutil_killchain.orchestrator import (
+    HeuristicPlanner,
+    HeuristicWorkerRouter,
+    LLMPlanner,
+    LLMWorkerRouter,
+    Orchestrator,
+)
 from nyuctf_mutil_killchain.reporting import render_markdown_report
 from nyuctf_mutil_killchain.state import GlobalState
 from nyuctf_mutil_killchain.tools import ExecutionPlane, build_execution_plane
@@ -47,7 +59,7 @@ class RunConfig(BaseModel):
     objective: str
     authorized_scope: list[str]
     output_root: str = "runs"
-    max_cycles: int = Field(default=6, ge=1)
+    max_cycles: int = Field(default=8, ge=1)
     enable_llm: bool = True
     enable_llm_planner: bool = True
     quiet: bool = False
@@ -104,6 +116,9 @@ def build_runtime(
     planner = HeuristicPlanner()
     if config.enable_llm_planner and llm_client is not None:
         planner = LLMPlanner(llm_client, fallback=planner)
+    router = HeuristicWorkerRouter()
+    if llm_client is not None:
+        router = LLMWorkerRouter(llm_client, fallback=router)
 
     execution_plane = execution_plane or build_execution_plane()
     state = GlobalState(
@@ -114,25 +129,32 @@ def build_runtime(
     orchestrator = Orchestrator(
         state=state,
         workers=[
-            ReconAgent(execution_plane=execution_plane),
-            ArtifactTriageAgent(execution_plane=execution_plane),
-            ArchiveTriageAgent(execution_plane=execution_plane),
-            BinaryTriageAgent(execution_plane=execution_plane),
-            ComputationAnalysisAgent(execution_plane=execution_plane),
-            SQLiteReviewAgent(execution_plane=execution_plane),
-            PcapReviewAgent(execution_plane=execution_plane),
-            RepoReviewAgent(execution_plane=execution_plane),
-            RuntimeProbeAgent(execution_plane=execution_plane),
-            SourceReviewAgent(execution_plane=execution_plane),
-            HostAuditAgent(execution_plane=execution_plane),
-            ServiceBannerAgent(execution_plane=execution_plane),
+            ReconAgent(llm_client=llm_client, execution_plane=execution_plane),
+            ArtifactTriageAgent(llm_client=llm_client, execution_plane=execution_plane),
+            CredentialHuntAgent(llm_client=llm_client, execution_plane=execution_plane),
+            CredentialExploitAgent(llm_client=llm_client, execution_plane=execution_plane),
+            ArchiveTriageAgent(llm_client=llm_client, execution_plane=execution_plane),
+            BinaryTriageAgent(llm_client=llm_client, execution_plane=execution_plane),
+            ComputationAnalysisAgent(llm_client=llm_client, execution_plane=execution_plane),
+            SQLiteReviewAgent(llm_client=llm_client, execution_plane=execution_plane),
+            PcapReviewAgent(llm_client=llm_client, execution_plane=execution_plane),
+            RepoReviewAgent(llm_client=llm_client, execution_plane=execution_plane),
+            RuntimeProbeAgent(llm_client=llm_client, execution_plane=execution_plane),
+            SourceReviewAgent(llm_client=llm_client, execution_plane=execution_plane),
+            HostAuditAgent(llm_client=llm_client, execution_plane=execution_plane),
+            ServiceBannerAgent(llm_client=llm_client, execution_plane=execution_plane),
             WebAssessmentAgent(llm_client=llm_client, execution_plane=execution_plane),
             WebContentAgent(llm_client=llm_client, execution_plane=execution_plane),
-            WebPathProbeAgent(execution_plane=execution_plane),
-            VulnScanAgent(execution_plane=execution_plane),
-            FlagValidationAgent(expected_flag=expected_flag),
+            WebFormProbeAgent(llm_client=llm_client, execution_plane=execution_plane),
+            WebPathProbeAgent(llm_client=llm_client, execution_plane=execution_plane),
+            VulnScanAgent(llm_client=llm_client, execution_plane=execution_plane),
+            WebPwnExploitAgent(llm_client=llm_client, execution_plane=execution_plane),
+            FlagHuntAgent(llm_client=llm_client, execution_plane=execution_plane),
+            ExploitReasoningAgent(llm_client=llm_client, execution_plane=execution_plane),
+            FlagValidationAgent(llm_client=llm_client, expected_flag=expected_flag),
         ],
         planner=planner,
+        router=router,
         emit=(recorder.emit if recorder is not None else print),
     )
     return state, orchestrator
@@ -150,6 +172,7 @@ def build_summary(state: GlobalState) -> dict[str, Any]:
         "authorized_scope": state.authorized_scope,
         "assets": len(state.assets),
         "findings": len(state.findings),
+        "credentials": len(state.credentials),
         "evidence": len(state.evidence),
         "executions": len(state.execution_log),
     }

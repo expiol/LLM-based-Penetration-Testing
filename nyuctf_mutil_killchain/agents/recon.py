@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import socket
 from urllib.parse import urlparse
 
 from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
+    build_credential_hunt_task,
+    build_flag_hunt_task,
+    build_flag_validation_task,
     build_service_banner_task,
     build_web_review_task,
     infer_web_urls,
 )
+from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
 from nyuctf_mutil_killchain.state import Asset, AssetKind, GlobalState, Service, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -42,6 +47,42 @@ class ReconAgent(WorkerAgent):
 
     name = "recon-agent"
     supported_task_types = ("recon.",)
+
+    def _generate_guidance(
+        self,
+        *,
+        task: Task,
+        state: GlobalState,
+        scope_entry: str,
+        asset: Asset,
+        output_context: dict[str, object],
+        findings: list[dict[str, object]],
+        fallback_notes: list[str],
+    ) -> StageAnalysisGuidance | None:
+        return self.generate_structured_output(
+            system_prompt=(
+                "You analyze structured recon evidence from an authorized CTF workflow. "
+                "Return only JSON matching the StageAnalysisGuidance schema. "
+                "Only emit grounded_flag_candidates or interesting_paths that are directly supported by the asset profile, "
+                "scope entry, or findings."
+            ),
+            user_prompt=json.dumps(
+                {
+                    "objective": state.objective,
+                    "task_id": task.task_id,
+                    "challenge": state.metadata.get("challenge", {}),
+                    "scope_entry": scope_entry,
+                    "asset": asset.model_dump(mode="json"),
+                    "output_context": output_context,
+                    "findings": findings,
+                },
+                ensure_ascii=True,
+                indent=2,
+            ),
+            schema=StageAnalysisGuidance,
+            fallback_notes=fallback_notes,
+            failure_label="Recon LLM guidance",
+        )
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
         scope_entry = task.input_context.get("scope") or (
@@ -124,6 +165,21 @@ class ReconAgent(WorkerAgent):
                 # Merge any services/IP discovered by the port scan into our asset
                 for scanned_asset in bundle.parsed.asset_updates:
                     asset.merge(scanned_asset)
+                output_context = {
+                    "asset_id": asset.asset_id,
+                    "scope": scope_entry,
+                    "ip_address": ip_address,
+                    **bundle.parsed.output_context,
+                }
+                guidance = self._generate_guidance(
+                    task=task,
+                    state=state,
+                    scope_entry=scope_entry,
+                    asset=asset,
+                    output_context=output_context,
+                    findings=[finding.model_dump(mode="json") for finding in bundle.parsed.finding_updates],
+                    fallback_notes=notes,
+                )
                 new_tasks = [
                     build_web_review_task(asset.asset_id, base_url)
                     for base_url in infer_web_urls(
@@ -141,6 +197,30 @@ class ReconAgent(WorkerAgent):
                             ports=banner_ports,
                         )
                     )
+                if guidance is not None:
+                    output_context["llm_summary"] = guidance.summary
+                    output_context["manual_checks"] = guidance.manual_checks
+                    new_tasks.extend(
+                        build_flag_validation_task(candidate, source="recon")
+                        for candidate in guidance.grounded_flag_candidates
+                    )
+                    if state.metadata.get("challenge", {}).get("files"):
+                        if guidance.should_schedule_flag_hunt:
+                            new_tasks.append(
+                                build_flag_hunt_task(
+                                    files_root="/home/ctfplayer/ctf_files",
+                                    seed_terms=guidance.interesting_paths or [scope_entry],
+                                    priority=91,
+                                )
+                            )
+                        if guidance.should_schedule_credential_hunt:
+                            new_tasks.append(
+                                build_credential_hunt_task(
+                                    files_root="/home/ctfplayer/ctf_files",
+                                    seed_terms=[scope_entry],
+                                    priority=87,
+                                )
+                            )
                 notes.extend(bundle.parsed.notes)
                 notes.append(
                     f"{self.name} completed initial port scan for {hostname}."
@@ -150,12 +230,7 @@ class ReconAgent(WorkerAgent):
                     worker_name=self.name,
                     success=True,
                     summary=f"Enumerated host asset {asset.asset_id} with port scan.",
-                    output_context={
-                        "asset_id": asset.asset_id,
-                        "scope": scope_entry,
-                        "ip_address": ip_address,
-                        **bundle.parsed.output_context,
-                    },
+                    output_context=output_context,
                     asset_updates=[asset],
                     finding_updates=bundle.parsed.finding_updates,
                     evidence_updates=[bundle.evidence],
@@ -165,16 +240,53 @@ class ReconAgent(WorkerAgent):
             except ToolExecutionError as exc:
                 notes.append(f"Initial port scan failed: {exc}; asset registered without scan data.")
 
+        output_context = {
+            "asset_id": asset.asset_id,
+            "scope": scope_entry,
+            "ip_address": ip_address,
+        }
+        guidance = self._generate_guidance(
+            task=task,
+            state=state,
+            scope_entry=scope_entry,
+            asset=asset,
+            output_context=output_context,
+            findings=[],
+            fallback_notes=notes,
+        )
+        new_tasks = []
+        if guidance is not None:
+            output_context["llm_summary"] = guidance.summary
+            output_context["manual_checks"] = guidance.manual_checks
+            new_tasks.extend(
+                build_flag_validation_task(candidate, source="recon")
+                for candidate in guidance.grounded_flag_candidates
+            )
+            if state.metadata.get("challenge", {}).get("files"):
+                if guidance.should_schedule_flag_hunt:
+                    new_tasks.append(
+                        build_flag_hunt_task(
+                            files_root="/home/ctfplayer/ctf_files",
+                            seed_terms=guidance.interesting_paths or [scope_entry],
+                            priority=91,
+                        )
+                    )
+                if guidance.should_schedule_credential_hunt:
+                    new_tasks.append(
+                        build_credential_hunt_task(
+                            files_root="/home/ctfplayer/ctf_files",
+                            seed_terms=[scope_entry],
+                            priority=87,
+                        )
+                    )
+
         return WorkerReport(
             task_id=task.task_id,
             worker_name=self.name,
             success=True,
             summary=f"Registered asset {asset.asset_id} from scope entry {scope_entry!r}.",
-            output_context={
-                "asset_id": asset.asset_id,
-                "scope": scope_entry,
-                "ip_address": ip_address,
-            },
+            output_context=output_context,
             asset_updates=[asset],
+            new_tasks=new_tasks,
             notes=notes,
         )

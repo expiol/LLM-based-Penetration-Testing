@@ -7,6 +7,11 @@ from collections.abc import Callable, Iterable
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.orchestrator.planner import HeuristicPlanner, TaskPlanner
+from nyuctf_mutil_killchain.orchestrator.router import (
+    HeuristicWorkerRouter,
+    WorkerRouteDecision,
+    WorkerRouter,
+)
 from nyuctf_mutil_killchain.state import GlobalState, RunStatus, Task, TaskStatus, WorkerReport
 from nyuctf_mutil_killchain.state.models import utc_now
 
@@ -30,15 +35,22 @@ class Orchestrator:
         workers: Iterable[WorkerAgent],
         *,
         planner: TaskPlanner | None = None,
+        router: WorkerRouter | None = None,
         emit: Callable[[str], None] = print,
     ) -> None:
         self.state = state
         self.workers = list(workers)
         self.planner = planner or HeuristicPlanner()
+        self.router = router or HeuristicWorkerRouter()
         self.emit = emit
 
-    def select_worker(self, task: Task) -> WorkerAgent | None:
-        return next((worker for worker in self.workers if worker.supports(task)), None)
+    def select_worker(self, task: Task) -> tuple[WorkerAgent | None, WorkerRouteDecision | None]:
+        candidates = [worker for worker in self.workers if worker.supports(task)]
+        if not candidates:
+            return None, None
+        decision = self.router.route(task=task, state=self.state, candidates=candidates)
+        worker = next((candidate for candidate in candidates if candidate.name == decision.worker_name), None)
+        return worker, decision
 
     def refresh_plan(self, cycle: int) -> bool:
         decision = self.planner.plan(self.state)
@@ -76,7 +88,7 @@ class Orchestrator:
                 self.emit(f"[cycle {cycle}] task queue exhausted — no ready tasks remain")
                 break
 
-            worker = self.select_worker(task)
+            worker, route_decision = self.select_worker(task)
             if worker is None:
                 task.mark_blocked(f"No worker registered for task type {task.task_type!r}.")
                 self.emit(
@@ -85,6 +97,12 @@ class Orchestrator:
                 )
                 continue
 
+            if route_decision is not None:
+                task.metadata["route_decision"] = route_decision.model_dump(mode="json")
+                self.emit(
+                    f"[cycle {cycle}] route {task.task_id}: "
+                    f"{route_decision.worker_name} ({route_decision.rationale})"
+                )
             task.mark_running(worker.name)
             self.emit(f"[cycle {cycle}] dispatch {task.task_id} -> {worker.name}")
 

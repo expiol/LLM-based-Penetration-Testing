@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
+import json
+
+from nyuctf_mutil_killchain.agents.base import (
+    WorkerAgent,
+    build_exploit_hypothesis_task,
+    build_flag_hunt_task,
+    build_flag_validation_task,
+    build_path_probe_tasks_for_assets,
+)
+from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -73,8 +82,60 @@ class VulnScanAgent(WorkerAgent):
                 error=str(exc),
             )
 
-        vuln_count = bundle.parsed.output_context.get("vuln_count", len(bundle.parsed.finding_updates))
-        scan_method = bundle.parsed.output_context.get("scan_method", "unknown")
+        output_context = dict(bundle.parsed.output_context)
+        vuln_count = output_context.get("vuln_count", len(bundle.parsed.finding_updates))
+        scan_method = output_context.get("scan_method", "unknown")
+        worker_notes = list(bundle.parsed.notes)
+        llm_guidance = self.generate_structured_output(
+            system_prompt=(
+                "You analyze structured vulnerability-scan evidence from an authorized CTF workflow. "
+                "Return only JSON matching the StageAnalysisGuidance schema. "
+                "Only emit grounded_flag_candidates or interesting_paths that are directly supported by the findings."
+            ),
+            user_prompt=json.dumps(
+                {
+                    "objective": state.objective,
+                    "task_id": task.task_id,
+                    "challenge": state.metadata.get("challenge", {}),
+                    "asset_id": asset_id,
+                    "target": target,
+                    "summary": bundle.parsed.summary,
+                    "output_context": output_context,
+                    "findings": [finding.model_dump(mode="json") for finding in bundle.parsed.finding_updates],
+                },
+                ensure_ascii=True,
+                indent=2,
+            ),
+            schema=StageAnalysisGuidance,
+            fallback_notes=worker_notes,
+            failure_label="Vuln scan LLM guidance",
+        )
+        new_tasks = []
+        if llm_guidance is not None:
+            output_context["llm_summary"] = llm_guidance.summary
+            output_context["manual_checks"] = llm_guidance.manual_checks
+            new_tasks.extend(
+                build_flag_validation_task(candidate, source="vuln_scan")
+                for candidate in llm_guidance.grounded_flag_candidates
+            )
+            new_tasks.extend(build_path_probe_tasks_for_assets(state, llm_guidance.interesting_paths, priority=75))
+            if llm_guidance.should_schedule_exploit_hypothesis:
+                new_tasks.append(
+                    build_exploit_hypothesis_task(
+                        files_root="/home/ctfplayer/ctf_files",
+                        focus_asset_ids=[asset_id],
+                        seed_terms=[target, scan_method],
+                        priority=79,
+                    )
+                )
+            if llm_guidance.should_schedule_flag_hunt and state.metadata.get("challenge", {}).get("files"):
+                new_tasks.append(
+                    build_flag_hunt_task(
+                        files_root="/home/ctfplayer/ctf_files",
+                        seed_terms=[target, scan_method],
+                        priority=92,
+                    )
+                )
 
         return WorkerReport(
             task_id=task.task_id,
@@ -88,14 +149,15 @@ class VulnScanAgent(WorkerAgent):
                 "scanned_asset": asset_id,
                 "scan_method": scan_method,
                 "vuln_count": vuln_count,
-                **bundle.parsed.output_context,
+                **output_context,
             },
             asset_updates=bundle.parsed.asset_updates,
             finding_updates=bundle.parsed.finding_updates,
             credential_updates=bundle.parsed.credential_updates,
             network_updates=bundle.parsed.network_updates,
             evidence_updates=[bundle.evidence],
-            notes=bundle.parsed.notes + [
+            new_tasks=new_tasks,
+            notes=worker_notes + [
                 f"{self.name} completed {scan_method} scan for {target}: {vuln_count} finding(s)."
             ],
         )

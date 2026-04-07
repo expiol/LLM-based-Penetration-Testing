@@ -58,6 +58,7 @@ class PageParser(HTMLParser):
             self.current_form = {
                 "action": attrs.get("action") or "",
                 "method": (attrs.get("method") or "get").lower(),
+                "enctype": (attrs.get("enctype") or "application/x-www-form-urlencoded").lower(),
                 "inputs": [],
             }
         elif tag == "input" and self.current_form is not None:
@@ -121,10 +122,44 @@ if body_text:
         if keyword in lowered_body:
             keywords.add(keyword)
 
+    static_suffixes = (
+        ".css",
+        ".js",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".svg",
+        ".ico",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".map",
+    )
     for href in links:
         absolute = urljoin(base_url, href)
         lowered = absolute.lower()
-        if any(token in lowered for token in ("login", "register", "upload", "admin", "debug", "swagger", "graphql", "api")):
+        parsed_link = urlparse(absolute)
+        path = parsed_link.path.lower()
+        same_origin = (
+            not parsed_link.netloc
+            or (
+                parsed_link.scheme == parsed_url.scheme
+                and parsed_link.netloc == parsed_url.netloc
+            )
+        )
+        script_like_path = path.endswith((".pl", ".cgi", ".php", ".asp", ".aspx", ".jsp"))
+        dynamic_hint = any(
+            token in lowered
+            for token in ("login", "register", "upload", "admin", "debug", "swagger", "graphql", "api", "cgi-bin")
+        )
+        looks_actionable = (
+            same_origin
+            and path not in {"", "/"}
+            and not path.endswith(static_suffixes)
+            and (dynamic_hint or script_like_path or "?" in absolute or path.count("/") >= 2)
+        )
+        if looks_actionable:
             if absolute not in interesting_links:
                 interesting_links.append(absolute)
 

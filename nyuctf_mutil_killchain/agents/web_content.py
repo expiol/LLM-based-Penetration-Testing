@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
     build_flag_validation_task,
+    build_web_form_probe_task,
     build_http_path_probe_task,
 )
 from nyuctf_mutil_killchain.llm import LLMClientError
@@ -100,6 +101,14 @@ class WebContentAgent(WorkerAgent):
             build_flag_validation_task(candidate, source="web_content")
             for candidate in note.potential_flags
         ]
+        if bundle.parsed.output_context.get("forms"):
+            new_tasks.append(
+                build_web_form_probe_task(
+                    asset_id=asset_id,
+                    page_url=base_url,
+                    forms=list(bundle.parsed.output_context.get("forms") or []),
+                )
+            )
         if note.interesting_endpoints:
             new_tasks.append(
                 build_http_path_probe_task(
