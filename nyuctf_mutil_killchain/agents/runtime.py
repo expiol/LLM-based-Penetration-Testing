@@ -72,6 +72,7 @@ class RuntimeProbeAgent(WorkerAgent):
                     "RuntimeProbeAgent.execution_plane is None — "
                     "register the runtime_probe plugin before dispatching artifact.runtime_probe tasks"
                 ),
+                retryable=False,
             )
 
         challenge_meta = state.metadata.get("challenge", {})

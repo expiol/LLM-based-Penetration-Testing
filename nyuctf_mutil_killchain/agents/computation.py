@@ -76,6 +76,7 @@ class ComputationAnalysisAgent(WorkerAgent):
                     "ComputationAnalysisAgent.execution_plane is None — "
                     "register the computation_analysis plugin before dispatching artifact.computation_analysis tasks"
                 ),
+                retryable=False,
             )
 
         challenge_meta = state.metadata.get("challenge", {})

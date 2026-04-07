@@ -56,6 +56,7 @@ class SourceReviewAgent(WorkerAgent):
                     "SourceReviewAgent.execution_plane is None — "
                     "register the source_review plugin before dispatching artifact.source_review tasks"
                 ),
+                retryable=False,
             )
 
         request = ToolExecutionRequest(

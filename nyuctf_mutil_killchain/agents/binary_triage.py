@@ -46,6 +46,7 @@ class BinaryTriageAgent(WorkerAgent):
                     "BinaryTriageAgent.execution_plane is None — "
                     "register the binary_triage plugin before dispatching artifact.binary_triage tasks"
                 ),
+                retryable=False,
             )
 
         request = ToolExecutionRequest(

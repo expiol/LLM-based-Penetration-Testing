@@ -10,6 +10,7 @@ from nyuctf_mutil_killchain.agents.base import (
     build_flag_validation_task,
     build_service_banner_task,
     build_web_review_task,
+    infer_host_context,
     infer_web_urls,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
@@ -27,11 +28,10 @@ class HostAuditAgent(WorkerAgent):
     """
 
     name = "host-audit-agent"
-    supported_task_types = ("host.audit",)
+    supported_task_types = ("host.audit", "host.port_scan")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
-        asset_id = task.input_context.get("asset_id")
-        hostname = task.input_context.get("hostname")
+        asset_id, hostname = infer_host_context(task, state)
         if not asset_id and not hostname:
             return WorkerReport(
                 task_id=task.task_id,
@@ -39,6 +39,7 @@ class HostAuditAgent(WorkerAgent):
                 success=False,
                 summary="Missing host task context.",
                 error="asset_id or hostname is required in task.input_context",
+                retryable=False,
             )
 
         if self.execution_plane is None:
@@ -51,6 +52,7 @@ class HostAuditAgent(WorkerAgent):
                     "HostAuditAgent.execution_plane is None — "
                     "register a local_host_inventory plugin before dispatching host.audit tasks"
                 ),
+                retryable=False,
             )
 
         request = ToolExecutionRequest(

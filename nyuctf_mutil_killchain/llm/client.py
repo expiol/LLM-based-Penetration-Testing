@@ -670,6 +670,7 @@ class OpenAICompatibleLLMClient:
         payload = {
             "model": self.model,
             "temperature": temperature,
+            "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},

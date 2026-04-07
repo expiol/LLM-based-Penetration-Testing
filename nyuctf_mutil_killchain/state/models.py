@@ -363,6 +363,7 @@ class WorkerReport(BaseModel):
     new_tasks: list[Task] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     error: str | None = None
+    retryable: bool = True
     solved: bool = False
     validated_flag: str | None = None
     generated_at: datetime = Field(default_factory=utc_now)
@@ -447,7 +448,7 @@ class GlobalState(BaseModel):
         if report.success:
             task.mark_completed(report.output_context)
         else:
-            task.mark_failed(report.error or report.summary, requeue=True)
+            task.mark_failed(report.error or report.summary, requeue=report.retryable)
 
         for asset in report.asset_updates:
             self.upsert_asset(asset)

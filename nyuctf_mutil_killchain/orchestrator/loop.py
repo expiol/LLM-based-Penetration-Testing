@@ -48,8 +48,11 @@ class Orchestrator:
         candidates = [worker for worker in self.workers if worker.supports(task)]
         if not candidates:
             return None, None
-        decision = self.router.route(task=task, state=self.state, candidates=candidates)
-        worker = next((candidate for candidate in candidates if candidate.name == decision.worker_name), None)
+        routable = [w for w in candidates if w.can_route_task(task, self.state)[0]]
+        if not routable:
+            return None, None
+        decision = self.router.route(task=task, state=self.state, candidates=routable)
+        worker = next((c for c in routable if c.name == decision.worker_name), None)
         return worker, decision
 
     def refresh_plan(self, cycle: int) -> bool:
@@ -70,12 +73,16 @@ class Orchestrator:
 
         return decision.stop_run
 
+    _BATCHABLE_TASK_TYPES = frozenset({"flag.validate"})
+    _MAX_BATCHABLE_PER_CYCLE = 8
+
     def _dequeue_batch(self, *, max_batch: int = 4) -> list[Task]:
         """Dequeue up to *max_batch* independent ready tasks in priority order.
 
         Tasks are independent when they don't share a worker (different
         task_type prefixes) so they won't contend for the same execution
-        context.  This lets the orchestrator retire more work per cycle.
+        context.  Lightweight batchable tasks (e.g. flag validation) bypass
+        the prefix dedup so multiple can retire in a single cycle.
         """
         completed = self.state.task_chain.completed_task_ids()
         ready = [t for t in self.state.task_chain.tasks if t.is_ready(completed)]
@@ -83,13 +90,20 @@ class Orchestrator:
 
         batch: list[Task] = []
         seen_type_prefixes: set[str] = set()
+        batchable_count = 0
         for task in ready:
             prefix = task.task_type.split(".")[0]
-            if prefix in seen_type_prefixes:
-                continue
+            if task.task_type in self._BATCHABLE_TASK_TYPES:
+                if batchable_count >= self._MAX_BATCHABLE_PER_CYCLE:
+                    continue
+                batchable_count += 1
+            else:
+                if prefix in seen_type_prefixes:
+                    continue
+                seen_type_prefixes.add(prefix)
             batch.append(task)
-            seen_type_prefixes.add(prefix)
-            if len(batch) >= max_batch:
+            non_batchable = len(batch) - batchable_count
+            if non_batchable >= max_batch:
                 break
         return batch
 

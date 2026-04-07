@@ -37,6 +37,7 @@ class ArtifactTriageAgent(WorkerAgent):
                     "ArtifactTriageAgent.execution_plane is None — "
                     "register the artifact_triage plugin before dispatching artifact.triage tasks"
                 ),
+                retryable=False,
             )
 
         challenge_meta = state.metadata.get("challenge", {})

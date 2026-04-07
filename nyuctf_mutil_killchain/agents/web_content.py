@@ -11,6 +11,7 @@ from nyuctf_mutil_killchain.agents.base import (
     build_flag_validation_task,
     build_web_form_probe_task,
     build_http_path_probe_task,
+    infer_web_context,
 )
 from nyuctf_mutil_killchain.llm import LLMClientError
 from nyuctf_mutil_killchain.prompts import get_worker_system_prompt
@@ -32,11 +33,10 @@ class WebContentAgent(WorkerAgent):
     """Fetches response bodies and reasons about links, forms, and flag-like content."""
 
     name = "web-content-agent"
-    supported_task_types = ("web.content_review",)
+    supported_task_types = ("web.content_review", "web.crawl")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
-        asset_id = task.input_context.get("asset_id")
-        base_url = task.input_context.get("base_url")
+        asset_id, base_url = infer_web_context(task, state)
         if not asset_id or not base_url:
             return WorkerReport(
                 task_id=task.task_id,
@@ -44,6 +44,7 @@ class WebContentAgent(WorkerAgent):
                 success=False,
                 summary="Missing web content task context.",
                 error="asset_id and base_url are required in task.input_context",
+                retryable=False,
             )
 
         if self.execution_plane is None:
@@ -56,6 +57,7 @@ class WebContentAgent(WorkerAgent):
                     "WebContentAgent.execution_plane is None — "
                     "register the local_http_content plugin before dispatching web.content_review tasks"
                 ),
+                retryable=False,
             )
 
         request = ToolExecutionRequest(

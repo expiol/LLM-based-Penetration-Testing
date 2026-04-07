@@ -233,6 +233,22 @@ else:
             continue
 
         inspected.append(relpath)
+        # Store a source preview so downstream agents (e.g. solver) can see the code
+        preview_key = f"source_preview:{relpath}"
+        if preview_key not in bitstring_constants:
+            records.append({
+                "type": "finding",
+                "finding_id": f"finding-source-preview-{relpath.replace('/', '_').replace('.', '_')}",
+                "title": f"Source preview: {relpath}",
+                "severity": "info",
+                "description": f"Captured source preview of {relpath} ({len(source_text)} chars).",
+                "asset_refs": ["challenge-files"],
+                "evidence_refs": [relpath],
+                "metadata": {
+                    "source": "computation_analysis",
+                    "source_snippet": source_text[:4000],
+                },
+            })
         try:
             module = ast.parse(source_text, filename=relpath)
         except SyntaxError as exc:

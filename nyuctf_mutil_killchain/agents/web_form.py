@@ -129,6 +129,7 @@ class WebFormProbeAgent(WorkerAgent):
                 success=False,
                 summary="Web form probe task is missing required form context.",
                 error="asset_id, page_url, and forms are required in task.input_context",
+                retryable=False,
             )
         if self.execution_plane is None:
             return WorkerReport(
@@ -137,6 +138,7 @@ class WebFormProbeAgent(WorkerAgent):
                 success=False,
                 summary="Web form probing requires an execution plane; none is configured.",
                 error="WebFormProbeAgent.execution_plane is None",
+                retryable=False,
             )
 
         worker_notes: list[str] = []

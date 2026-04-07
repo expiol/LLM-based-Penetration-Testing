@@ -12,6 +12,8 @@ from nyuctf_mutil_killchain.agents.base import (
     build_source_review_task,
     build_web_content_task,
     build_web_review_task,
+    infer_host_context,
+    infer_web_context,
     infer_web_urls_from_banners,
     merge_unique_strings,
 )
@@ -116,6 +118,7 @@ class ArchiveTriageAgent(WorkerAgent):
                 success=False,
                 summary="Archive triage requires an execution plane; none is configured.",
                 error="ArchiveTriageAgent.execution_plane is None",
+                retryable=False,
             )
 
         request = ToolExecutionRequest(
@@ -212,6 +215,7 @@ class SQLiteReviewAgent(WorkerAgent):
                 success=False,
                 summary="SQLite review requires an execution plane; none is configured.",
                 error="SQLiteReviewAgent.execution_plane is None",
+                retryable=False,
             )
 
         request = ToolExecutionRequest(
@@ -296,6 +300,7 @@ class PcapReviewAgent(WorkerAgent):
                 success=False,
                 summary="PCAP review requires an execution plane; none is configured.",
                 error="PcapReviewAgent.execution_plane is None",
+                retryable=False,
             )
 
         request = ToolExecutionRequest(
@@ -380,6 +385,7 @@ class RepoReviewAgent(WorkerAgent):
                 success=False,
                 summary="Repository review requires an execution plane; none is configured.",
                 error="RepoReviewAgent.execution_plane is None",
+                retryable=False,
             )
 
         request = ToolExecutionRequest(
@@ -440,7 +446,7 @@ class ServiceBannerAgent(WorkerAgent):
     """Collects banners from exposed TCP services."""
 
     name = "service-banner-agent"
-    supported_task_types = ("host.banner_grab",)
+    supported_task_types = ("host.banner_grab", "host.service_fingerprint")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
         if self.execution_plane is None:
@@ -450,10 +456,10 @@ class ServiceBannerAgent(WorkerAgent):
                 success=False,
                 summary="Service banner review requires an execution plane; none is configured.",
                 error="ServiceBannerAgent.execution_plane is None",
+                retryable=False,
             )
 
-        asset_id = task.input_context.get("asset_id")
-        hostname = task.input_context.get("hostname")
+        asset_id, hostname = infer_host_context(task, state)
         request = ToolExecutionRequest(
             tool_name="tcp_banner_probe",
             parser_name="jsonl_signals",
@@ -530,10 +536,10 @@ class WebPathProbeAgent(WorkerAgent):
                 success=False,
                 summary="Web path probing requires an execution plane; none is configured.",
                 error="WebPathProbeAgent.execution_plane is None",
+                retryable=False,
             )
 
-        asset_id = task.input_context.get("asset_id")
-        base_url = task.input_context.get("base_url")
+        asset_id, base_url = infer_web_context(task, state)
         request = ToolExecutionRequest(
             tool_name="http_path_probe",
             parser_name="jsonl_signals",

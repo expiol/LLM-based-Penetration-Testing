@@ -27,7 +27,17 @@ solver_language = str(payload.get("solver_language") or "python")
 records = []
 notes_list = []
 flag_candidates = []
-flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
+flag_re = re.compile(r"[A-Za-z0-9_]{2,}\{[ -~]{4,200}\}")
+
+
+def _plausible_flag(m):
+    prefix, _, body = m.partition("{")
+    body = body.rstrip("}")
+    if not prefix or not body:
+        return False
+    if any(ord(c) < 32 or ord(c) == 127 for c in body):
+        return False
+    return True
 
 if not solver_code.strip():
     records.append({"type": "summary", "text": "Solver execution skipped: no solver code provided."})
@@ -85,7 +95,7 @@ try:
 
     for text in (stdout, stderr):
         for match in flag_re.findall(text):
-            if match not in flag_candidates:
+            if match not in flag_candidates and _plausible_flag(match):
                 flag_candidates.append(match)
 
     notes_list.append(f"Solver script executed with {interpreter[0]}, exit code {returncode}.")

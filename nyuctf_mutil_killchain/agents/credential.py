@@ -34,6 +34,7 @@ class CredentialHuntAgent(WorkerAgent):
                 success=False,
                 summary="Credential harvesting requires an execution plane; none is configured.",
                 error="CredentialHuntAgent.execution_plane is None",
+                retryable=False,
             )
 
         request = ToolExecutionRequest(

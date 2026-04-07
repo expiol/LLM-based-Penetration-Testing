@@ -736,11 +736,38 @@ _BASE64_BLOB_PATTERN = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
 _HEX_BLOB_PATTERN = re.compile(r"(?:0x)?([0-9a-fA-F]{20,})")
 
 
+def _looks_like_plausible_flag(candidate: str) -> bool:
+    """Filter out obvious garbage from flag candidate extraction.
+
+    Real flags are printable ASCII with only minimal control chars.
+    Garbage like ``boo{xFpd]=}`` or ``A{h;~chPtf`m}`` can slip through
+    the raw regex but fail basic plausibility checks.
+    """
+    if not candidate or len(candidate) < 4:
+        return False
+    prefix, _, body = candidate.partition("{")
+    if not body or not body.endswith("}"):
+        return False
+    body = body[:-1]
+    if not prefix.isalnum() and not all(c.isalnum() or c == "_" for c in prefix):
+        return False
+    if len(prefix) < 2:
+        return False
+    printable_count = sum(1 for ch in body if 32 <= ord(ch) <= 126)
+    if not body or printable_count / len(body) < 0.90:
+        return False
+    control_count = sum(1 for ch in body if ord(ch) < 32 or ord(ch) == 127)
+    if control_count > 0:
+        return False
+    return True
+
+
 def extract_flag_candidates(*values: str | None) -> list[str]:
     """Extract unique flag-like tokens from the supplied strings.
 
     In addition to direct regex matches, attempts base64, hex, and ROT13
-    decoding on long encoded-looking blobs.
+    decoding on long encoded-looking blobs.  Applies plausibility filtering
+    to reject garbage matches that slip through the raw regex.
     """
 
     candidates: list[str] = []
@@ -748,15 +775,15 @@ def extract_flag_candidates(*values: str | None) -> list[str]:
         if not value:
             continue
         for match in FLAG_PATTERN.findall(value):
-            if match not in candidates:
+            if match not in candidates and _looks_like_plausible_flag(match):
                 candidates.append(match)
         for blob in _BASE64_BLOB_PATTERN.findall(value):
             for decoded in _try_decode_blob(blob):
-                if decoded not in candidates:
+                if decoded not in candidates and _looks_like_plausible_flag(decoded):
                     candidates.append(decoded)
         for blob in _HEX_BLOB_PATTERN.findall(value):
             for decoded in _try_decode_blob(blob):
-                if decoded not in candidates:
+                if decoded not in candidates and _looks_like_plausible_flag(decoded):
                     candidates.append(decoded)
     return candidates
 
@@ -839,6 +866,67 @@ def build_path_probe_tasks_for_assets(
             )
         )
     return tasks
+
+
+def infer_web_context(
+    task: Task,
+    state: GlobalState,
+) -> tuple[str | None, str | None]:
+    """Best-effort inference of (asset_id, base_url) from task context and state.
+
+    Falls back to the first web asset that has a base_url when the task
+    input_context is incomplete — which happens when the LLM planner omits
+    required fields for web.crawl / web.header_analysis / etc.
+    """
+    asset_id = task.input_context.get("asset_id")
+    base_url = task.input_context.get("base_url")
+
+    if asset_id and base_url:
+        return asset_id, base_url
+
+    if asset_id and not base_url:
+        asset = state.assets.get(asset_id)
+        if asset is not None and asset.base_url:
+            return asset_id, asset.base_url
+
+    if base_url and not asset_id:
+        for asset in state.assets.values():
+            if asset.base_url == base_url:
+                return asset.asset_id, base_url
+
+    for asset in state.assets.values():
+        if asset.base_url:
+            return asset.asset_id, asset.base_url
+
+    return asset_id, base_url
+
+
+def infer_host_context(
+    task: Task,
+    state: GlobalState,
+) -> tuple[str | None, str | None]:
+    """Best-effort inference of (asset_id, hostname) from task context and state."""
+    asset_id = task.input_context.get("asset_id")
+    hostname = task.input_context.get("hostname")
+
+    if asset_id and hostname:
+        return asset_id, hostname
+
+    if asset_id and not hostname:
+        asset = state.assets.get(asset_id)
+        if asset is not None and asset.hostname:
+            return asset_id, asset.hostname
+
+    if hostname and not asset_id:
+        for asset in state.assets.values():
+            if asset.hostname == hostname:
+                return asset.asset_id, hostname
+
+    for asset in state.assets.values():
+        if asset.hostname:
+            return asset.asset_id, asset.hostname
+
+    return asset_id, hostname
 
 
 class WorkerAgent(ABC):

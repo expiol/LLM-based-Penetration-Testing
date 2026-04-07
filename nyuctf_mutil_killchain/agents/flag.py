@@ -40,6 +40,7 @@ class FlagValidationAgent(WorkerAgent):
                 success=False,
                 summary="Missing candidate flag.",
                 error="candidate_flag is required in task.input_context",
+                retryable=False,
             )
 
         worker_notes: list[str] = []

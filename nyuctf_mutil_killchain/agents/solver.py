@@ -42,6 +42,10 @@ z3-solver, pyshark, PIL, binascii, struct, etc.)
 evidence (NOT localhost unless explicitly stated)
 - Maximum runtime: {timeout}s
 - Do NOT guess or hallucinate the flag — compute it from the evidence
+- IMPORTANT: If challenge_source_files are provided in the evidence, study them \
+carefully to understand the exact algorithm before writing your solver. Do NOT \
+brute-force when the algorithm can be reversed analytically
+- Read any binary files (ciphertext, data blobs) with open(path, 'rb')
 
 {technique_hints}
 
@@ -125,11 +129,88 @@ def _build_solver_system_prompt(
     )
 
 
+_SOURCE_EXTENSIONS = frozenset({
+    ".py", ".js", ".rb", ".pl", ".sh", ".c", ".cpp", ".h", ".java",
+    ".php", ".go", ".rs", ".sage", ".txt", ".md", ".yml", ".yaml",
+    ".json", ".xml", ".html", ".css", ".sql", ".lua", ".r",
+})
+_MAX_SOURCE_CHARS_PER_FILE = 6000
+_MAX_TOTAL_SOURCE_CHARS = 18000
+
+
+def _collect_challenge_source_files(
+    state: GlobalState,
+    files_root: str,
+) -> list[dict[str, str]]:
+    """Collect actual content of bundled challenge source files from state.
+
+    This gives the solver LLM direct access to the challenge code so it can
+    understand the algorithm instead of guessing blindly.  It searches for
+    source content in three places:
+      1. Findings metadata (source_snippet from computation_analysis/source_review)
+      2. Evidence stdout_preview (from solver retries or runtime_probe)
+      3. Task output_context (source_snippets, file_previews)
+    """
+    challenge_meta = state.metadata.get("challenge", {})
+    filenames = challenge_meta.get("files", [])
+    if not filenames:
+        return []
+
+    collected: list[dict[str, str]] = []
+    total_chars = 0
+    for filename in filenames:
+        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if ext not in _SOURCE_EXTENSIONS:
+            collected.append({"filename": filename, "note": f"binary file (skipped content, available at {files_root}/{filename})"})
+            continue
+
+        found = False
+
+        for finding in state.findings.values():
+            snippet = finding.metadata.get("source_snippet") or ""
+            if snippet and filename in (finding.description or "") and len(snippet) > 100:
+                budget = min(_MAX_SOURCE_CHARS_PER_FILE, _MAX_TOTAL_SOURCE_CHARS - total_chars)
+                if budget > 200:
+                    collected.append({"filename": filename, "content": snippet[:budget]})
+                    total_chars += len(snippet[:budget])
+                    found = True
+                    break
+            refs = finding.evidence_refs or []
+            if filename in refs and snippet and len(snippet) > 100:
+                budget = min(_MAX_SOURCE_CHARS_PER_FILE, _MAX_TOTAL_SOURCE_CHARS - total_chars)
+                if budget > 200:
+                    collected.append({"filename": filename, "content": snippet[:budget]})
+                    total_chars += len(snippet[:budget])
+                    found = True
+                    break
+
+        if not found:
+            for ev in state.evidence.values():
+                result = ev.result or {}
+                stdout_preview = result.get("stdout_preview") or ev.extracted.get("stdout_preview") or ""
+                if filename in stdout_preview and len(stdout_preview) > 200:
+                    budget = min(_MAX_SOURCE_CHARS_PER_FILE, _MAX_TOTAL_SOURCE_CHARS - total_chars)
+                    if budget > 200:
+                        collected.append({"filename": filename, "content": stdout_preview[:budget]})
+                        total_chars += len(stdout_preview[:budget])
+                        found = True
+                        break
+
+        if not found:
+            collected.append({"filename": filename, "note": f"source file at {files_root}/{filename} (read it in your script with open())"})
+
+        if total_chars >= _MAX_TOTAL_SOURCE_CHARS:
+            break
+
+    return collected
+
+
 def _build_solver_user_prompt(
     task: Task,
     state: GlobalState,
 ) -> str:
     challenge_meta = state.metadata.get("challenge", {})
+    files_root = task.input_context.get("files_root", "/home/ctfplayer/ctf_files")
 
     evidence_snapshot: dict[str, Any] = {
         "objective": state.objective,
@@ -142,8 +223,13 @@ def _build_solver_user_prompt(
             "server_name": challenge_meta.get("server_name"),
             "port": challenge_meta.get("port"),
         },
-        "files_root": task.input_context.get("files_root", "/home/ctfplayer/ctf_files"),
+        "files_root": files_root,
     }
+
+    # Inject actual challenge source file content
+    challenge_sources = _collect_challenge_source_files(state, files_root)
+    if challenge_sources:
+        evidence_snapshot["challenge_source_files"] = challenge_sources
 
     # Source code snippets from findings
     source_snippets: list[dict[str, str]] = []
@@ -224,7 +310,7 @@ class SolverAgent(WorkerAgent):
     """
 
     name = "solver-agent"
-    supported_task_types = ("solve.generate_script",)
+    supported_task_types = ("solve.generate_script", "post_exploit.loot", "post_exploit.lateral_move")
     routing_summary = (
         "LLM-driven solver that writes and executes custom scripts to solve the challenge. "
         "The most powerful agent — combines all evidence into an executable solution."
@@ -232,6 +318,14 @@ class SolverAgent(WorkerAgent):
     preferred_challenge_categories = ("crypto", "rev", "web", "forensics", "pwn", "misc")
 
     _MAX_RETRIES = 2
+    _CATEGORY_TIMEOUT: dict[str, int] = {
+        "crypto": 120,
+        "rev": 90,
+        "pwn": 60,
+        "forensics": 60,
+        "web": 45,
+        "misc": 60,
+    }
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
         if self.llm_client is None:
@@ -241,6 +335,7 @@ class SolverAgent(WorkerAgent):
                 success=False,
                 summary="Solver agent requires an LLM client; none is configured.",
                 error="SolverAgent.llm_client is None",
+                retryable=False,
             )
         if self.execution_plane is None:
             return WorkerReport(
@@ -249,12 +344,14 @@ class SolverAgent(WorkerAgent):
                 success=False,
                 summary="Solver agent requires an execution plane; none is configured.",
                 error="SolverAgent.execution_plane is None",
+                retryable=False,
             )
 
         challenge_meta = state.metadata.get("challenge", {})
         category = str(challenge_meta.get("category") or "misc").lower()
         attempt_num = int(task.input_context.get("attempt_number", 1))
-        timeout_s = int(task.input_context.get("solver_timeout_s", 30))
+        default_timeout = self._CATEGORY_TIMEOUT.get(category, 60)
+        timeout_s = int(task.input_context.get("solver_timeout_s", default_timeout))
 
         worker_notes: list[str] = []
 
@@ -308,7 +405,7 @@ class SolverAgent(WorkerAgent):
         flag_candidates = merge_unique_strings(
             output_context.get("flag_candidates") or [],
             guidance.grounded_flag_candidates,
-            limit=12,
+            limit=6,
         )
 
         new_tasks = [

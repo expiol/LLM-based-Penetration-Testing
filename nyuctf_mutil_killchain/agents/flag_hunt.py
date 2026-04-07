@@ -32,6 +32,7 @@ class FlagHuntAgent(WorkerAgent):
                 success=False,
                 summary="Flag hunting requires an execution plane; none is configured.",
                 error="FlagHuntAgent.execution_plane is None",
+                retryable=False,
             )
 
         request = ToolExecutionRequest(

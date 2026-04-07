@@ -57,8 +57,6 @@ APPROVED_TASK_TYPES = frozenset(
         # Post-exploitation (requires explicit scope auth)
         "post_exploit.loot",
         "post_exploit.lateral_move",
-        # Reporting
-        "report.generate",
         # Flag validation
         "flag.validate",
         # LLM solver code generation and execution
@@ -191,7 +189,7 @@ class HeuristicPlanner(TaskPlanner):
             ):
                 candidate_sources.append((candidate, f"finding:{finding.finding_id}"))
 
-        for candidate, source in candidate_sources[:12]:
+        for candidate, source in candidate_sources[:6]:
             dedupe_key = f"flag-validate:{candidate}"
             if state.task_chain.find_by_dedupe_key(dedupe_key) is not None:
                 continue
@@ -342,6 +340,25 @@ class LLMPlanner(TaskPlanner):
             base_url = task.input_context.get("base_url", task.title)
             paths = task.input_context.get("paths", [])
             return f"web-path-probe:{asset_id}:{base_url}:{','.join(paths[:8])}"
+        if task.task_type == "web.crawl":
+            asset_id = task.input_context.get("asset_id", task.title)
+            base_url = task.input_context.get("base_url", task.title)
+            return f"web-crawl:{asset_id}:{base_url}"
+        if task.task_type == "web.header_analysis":
+            asset_id = task.input_context.get("asset_id", task.title)
+            base_url = task.input_context.get("base_url", task.title)
+            return f"web-header-analysis:{asset_id}:{base_url}"
+        if task.task_type == "web.form_probe":
+            asset_id = task.input_context.get("asset_id", task.title)
+            page_url = task.input_context.get("page_url", task.title)
+            return f"web-form-probe:{asset_id}:{page_url}"
+        if task.task_type in {"host.port_scan", "host.service_fingerprint"}:
+            asset_id = task.input_context.get("asset_id", task.title)
+            hostname = task.input_context.get("hostname", "")
+            return f"{task.task_type}:{asset_id}:{hostname}"
+        if task.task_type in {"post_exploit.loot", "post_exploit.lateral_move"}:
+            asset_id = task.input_context.get("asset_id", task.title)
+            return f"{task.task_type}:{asset_id}"
         if task.task_type == "flag.validate":
             candidate = task.input_context.get("candidate_flag", task.title)
             return f"flag-validate:{candidate}"
