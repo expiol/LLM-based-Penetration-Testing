@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
@@ -82,7 +82,6 @@ class WebContentAgent(WorkerAgent):
             asset_id=asset_id,
             base_url=base_url,
             probe_context=bundle.parsed.output_context,
-            fallback_notes=bundle.parsed.notes,
         )
         finding = self._build_finding(
             task=task,
@@ -142,64 +141,35 @@ class WebContentAgent(WorkerAgent):
         asset_id: str,
         base_url: str,
         probe_context: dict[str, Any],
-        fallback_notes: list[str],
     ) -> WebContentNote:
+        if self.llm_client is None:
+            raise LLMClientError("WebContentAgent requires an LLM client but none was provided.")
+
         challenge_category = str(state.metadata.get("challenge", {}).get("category") or "web").lower()
-        if self.llm_client is not None:
-            try:
-                return self.llm_client.generate_json(
-                    system_prompt=get_worker_system_prompt(
-                        challenge_category,
-                        worker_role=(
-                            "You analyze web page content to identify attack surface: "
-                            "forms, links, hidden endpoints, and flag-like content. "
-                            "Identify the most promising injection points and auth bypass vectors."
-                        ),
-                        evidence_type="web content",
-                        output_schema="WebContentNote",
-                    ),
-                    user_prompt=(
-                        f"Objective: {state.objective}\n"
-                        f"Task ID: {task.task_id}\n"
-                        f"Asset ID: {asset_id}\n"
-                        f"Base URL: {base_url}\n"
-                        f"HTML title: {probe_context.get('title', '')}\n"
-                        f"Interesting links: {probe_context.get('interesting_links', [])}\n"
-                        f"Forms: {probe_context.get('forms', [])}\n"
-                        f"Keywords: {probe_context.get('keywords', [])}\n"
-                        f"Potential flags: {probe_context.get('potential_flags', [])}\n"
-                        "Generate a concise content-review note."
-                    ),
-                    schema=WebContentNote,
-                )
-            except (LLMClientError, ValidationError) as exc:
-                fallback_notes.append(
-                    f"LLM content review unavailable ({type(exc).__name__}: {str(exc)[:200]}); using heuristic fallback."
-                )
-
-        return self._derive_note_from_probe(base_url=base_url, probe_context=probe_context)
-
-    def _derive_note_from_probe(
-        self,
-        *,
-        base_url: str,
-        probe_context: dict[str, Any],
-    ) -> WebContentNote:
-        interesting_links: list[str] = probe_context.get("interesting_links", [])
-        forms: list[dict[str, Any]] = probe_context.get("forms", [])
-        potential_flags: list[str] = probe_context.get("potential_flags", [])
-
-        summary = (
-            f"Content review for {base_url}: "
-            f"{len(forms)} form(s), {len(interesting_links)} interesting endpoint(s), "
-            f"{len(potential_flags)} flag candidate(s)."
-        )
-        return WebContentNote(
-            summary=summary,
-            attack_surface=[],
-            interesting_endpoints=interesting_links,
-            manual_checks=[f"Inspect content at {base_url} with LLM for deeper analysis."],
-            potential_flags=potential_flags,
+        return self.llm_client.generate_json(
+            system_prompt=get_worker_system_prompt(
+                challenge_category,
+                worker_role=(
+                    "You analyze web page content to identify attack surface: "
+                    "forms, links, hidden endpoints, and flag-like content. "
+                    "Identify the most promising injection points and auth bypass vectors."
+                ),
+                evidence_type="web content",
+                output_schema="WebContentNote",
+            ),
+            user_prompt=(
+                f"Objective: {state.objective}\n"
+                f"Task ID: {task.task_id}\n"
+                f"Asset ID: {asset_id}\n"
+                f"Base URL: {base_url}\n"
+                f"HTML title: {probe_context.get('title', '')}\n"
+                f"Interesting links: {probe_context.get('interesting_links', [])}\n"
+                f"Forms: {probe_context.get('forms', [])}\n"
+                f"Keywords: {probe_context.get('keywords', [])}\n"
+                f"Potential flags: {probe_context.get('potential_flags', [])}\n"
+                "Generate a concise content-review note."
+            ),
+            schema=WebContentNote,
         )
 
     def _build_finding(
@@ -222,7 +192,7 @@ class WebContentAgent(WorkerAgent):
             evidence_refs=[base_url, *note.potential_flags],
             metadata={
                 "source_task_id": task.task_id,
-                "mode": "llm-assisted" if self.llm_client is not None else "heuristic",
+                "mode": "llm-assisted",
                 "attack_surface": note.attack_surface,
                 "interesting_endpoints": note.interesting_endpoints,
                 "manual_checks": note.manual_checks,

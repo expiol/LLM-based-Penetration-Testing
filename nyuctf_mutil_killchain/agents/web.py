@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent, build_web_content_task
 from nyuctf_mutil_killchain.llm import LLMClientError
@@ -82,7 +82,6 @@ class WebAssessmentAgent(WorkerAgent):
             asset_id=asset_id,
             base_url=base_url,
             probe_context=probe_context,
-            fallback_notes=execution_notes,
         )
         finding = self._build_review_finding(
             task=task,
@@ -118,7 +117,7 @@ class WebAssessmentAgent(WorkerAgent):
     ) -> Finding:
         metadata = {
             "source_task_id": task.task_id,
-            "mode": "llm-assisted" if self.llm_client is not None else "heuristic",
+            "mode": "llm-assisted",
             "risk_hypotheses": note.risk_hypotheses,
             "manual_checks": note.manual_checks,
         }
@@ -149,59 +148,35 @@ class WebAssessmentAgent(WorkerAgent):
         asset_id: str,
         base_url: str,
         probe_context: dict[str, Any],
-        fallback_notes: list[str] | None = None,
     ) -> WebReviewNote:
+        if self.llm_client is None:
+            raise LLMClientError("WebAssessmentAgent requires an LLM client but none was provided.")
+
         challenge_category = str(state.metadata.get("challenge", {}).get("category") or "web").lower()
-
-        if self.llm_client is not None:
-            try:
-                return self.llm_client.generate_json(
-                    system_prompt=get_worker_system_prompt(
-                        challenge_category,
-                        worker_role=(
-                            "You are a web security assessment analyst for a CTF challenge. "
-                            "Generate specific, evidence-based risk hypotheses and actionable "
-                            "manual checks based on the HTTP probe data. Focus on attack vectors "
-                            "most likely to yield the flag: injection points, auth bypass, "
-                            "exposed admin panels, and source code leaks."
-                        ),
-                        evidence_type="HTTP probe",
-                        output_schema="WebReviewNote",
-                    ),
-                    user_prompt=(
-                        f"Objective: {state.objective}\n"
-                        f"Asset ID: {asset_id}\n"
-                        f"Base URL: {base_url}\n"
-                        f"HTTP Status: {probe_context.get('http_status', 'unknown')}\n"
-                        f"Server: {probe_context.get('server', 'unknown')}\n"
-                        f"Powered-By: {probe_context.get('powered_by', 'unknown')}\n"
-                        f"Security Issues Found: {probe_context.get('security_issues', [])}\n"
-                        f"Response Headers: {probe_context.get('headers', {})}\n"
-                        f"Task ID: {task.task_id}\n"
-                        "Generate a concise, evidence-driven web assessment note."
-                    ),
-                    schema=WebReviewNote,
-                )
-            except (LLMClientError, ValidationError) as exc:
-                if fallback_notes is not None:
-                    fallback_notes.append(
-                        f"LLM web assessment unavailable ({type(exc).__name__}: {str(exc)[:200]}); "
-                        "using minimal fallback."
-                    )
-
-        http_status = probe_context.get("http_status")
-        security_issues = probe_context.get("security_issues", [])
-        http_status_str = f" (HTTP {http_status})" if http_status else ""
-        summary = (
-            f"Web assessment for {base_url}{http_status_str}. "
-            f"{len(security_issues)} security header issue(s) detected."
-        ).strip()
-
-        return WebReviewNote(
-            summary=summary or f"Web assessment for {asset_id} at {base_url}.",
-            risk_hypotheses=["Perform deeper analysis with LLM for detailed risk hypotheses."],
-            manual_checks=[
-                f"Inspect all endpoints at {base_url}.",
-                "Test input fields for injection vulnerabilities.",
-            ],
+        return self.llm_client.generate_json(
+            system_prompt=get_worker_system_prompt(
+                challenge_category,
+                worker_role=(
+                    "You are a web security assessment analyst for a CTF challenge. "
+                    "Generate specific, evidence-based risk hypotheses and actionable "
+                    "manual checks based on the HTTP probe data. Focus on attack vectors "
+                    "most likely to yield the flag: injection points, auth bypass, "
+                    "exposed admin panels, and source code leaks."
+                ),
+                evidence_type="HTTP probe",
+                output_schema="WebReviewNote",
+            ),
+            user_prompt=(
+                f"Objective: {state.objective}\n"
+                f"Asset ID: {asset_id}\n"
+                f"Base URL: {base_url}\n"
+                f"HTTP Status: {probe_context.get('http_status', 'unknown')}\n"
+                f"Server: {probe_context.get('server', 'unknown')}\n"
+                f"Powered-By: {probe_context.get('powered_by', 'unknown')}\n"
+                f"Security Issues Found: {probe_context.get('security_issues', [])}\n"
+                f"Response Headers: {probe_context.get('headers', {})}\n"
+                f"Task ID: {task.task_id}\n"
+                "Generate a concise, evidence-driven web assessment note."
+            ),
+            schema=WebReviewNote,
         )

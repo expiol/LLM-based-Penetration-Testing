@@ -58,8 +58,6 @@ class FlagValidationAgent(WorkerAgent):
                 f"Expected flag available: {bool(self.expected_flag)}\n"
             ),
             schema=FlagValidationAssessment,
-            fallback_notes=worker_notes,
-            failure_label="Flag validation LLM guidance",
         )
         candidate_to_check = str(
             (llm_assessment.normalized_candidate if llm_assessment is not None else None) or candidate

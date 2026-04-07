@@ -62,8 +62,6 @@ def _apply_evidence_guidance(
             indent=2,
         ),
         schema=EvidenceReviewGuidance,
-        fallback_notes=worker_notes,
-        failure_label=f"{guidance_label} LLM guidance",
     )
 
     flag_candidates = list(output_context.get("flag_candidates") or [])

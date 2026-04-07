@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from typing import Any, TypeVar
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
 from nyuctf_mutil_killchain.state import GlobalState, Service, Task, WorkerReport
@@ -912,29 +912,24 @@ class WorkerAgent(ABC):
         system_prompt: str,
         user_prompt: str,
         schema: type[ModelT],
-        fallback_notes: list[str] | None = None,
-        failure_label: str = "LLM worker guidance",
         temperature: float = 0.2,
-    ) -> ModelT | None:
-        """Best-effort wrapper around llm_client.generate_json with note-based fallback."""
+    ) -> ModelT:
+        """Call llm_client.generate_json and return the validated result.
+
+        Raises LLMClientError if the LLM client is not configured or the call fails.
+        """
 
         if self.llm_client is None:
-            return None
-
-        try:
-            return self.llm_client.generate_json(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                schema=schema,
-                temperature=temperature,
+            raise LLMClientError(
+                f"{type(self).__name__} requires an LLM client but none was provided."
             )
-        except (LLMClientError, ValidationError) as exc:
-            if fallback_notes is not None:
-                fallback_notes.append(
-                    f"{failure_label} unavailable ({type(exc).__name__}: {str(exc)[:200]}); "
-                    "continuing with deterministic worker logic."
-                )
-            return None
+
+        return self.llm_client.generate_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            schema=schema,
+            temperature=temperature,
+        )
 
     @abstractmethod
     def run(self, task: Task, state: GlobalState) -> WorkerReport:

@@ -262,8 +262,6 @@ class SolverAgent(WorkerAgent):
             system_prompt=_build_solver_system_prompt(category, timeout=timeout_s),
             user_prompt=_build_solver_user_prompt(task, state),
             schema=SolverCodeGuidance,
-            fallback_notes=worker_notes,
-            failure_label="Solver code generation",
             temperature=0.3,
         )
 

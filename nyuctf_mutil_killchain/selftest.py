@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from nyuctf_mutil_killchain.controller import RunConfig, run_assessment
+from nyuctf_mutil_killchain.llm import StaticLLMClient
 from nyuctf_mutil_killchain.score import (
     build_validation_payload,
     summarize_logdir,
@@ -353,13 +354,23 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
     expected_flag = "flag{selftest-ok}"
     simulated_plane = _build_selftest_plane(expected_flag)
     runtime_root = root / "runtime"
+    selftest_llm = StaticLLMClient(
+        lambda system_prompt, user_prompt: {
+            "summary": "Selftest planner decision.",
+            "tasks": [],
+            "notes": [],
+            "stop_run": False,
+            "worker_name": "recon-agent",
+            "rationale": "selftest routing",
+            "confidence": 1.0,
+        }
+    )
+
     config = RunConfig(
         objective="Self-test the NYU multi-killchain orchestrator without docker.",
         authorized_scope=["http://127.0.0.1:8080"],
         output_root=str(runtime_root / "runs"),
         max_cycles=8,
-        enable_llm=False,
-        enable_llm_planner=False,
         quiet=True,
         metadata={
             "challenge": {
@@ -374,6 +385,7 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
         config,
         execution_plane=simulated_plane,
         expected_flag=expected_flag,
+        llm_client=selftest_llm,
     )
 
     summary_path = Path(artifacts.summary_path)

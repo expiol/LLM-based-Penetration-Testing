@@ -23,8 +23,6 @@ def main() -> None:
             authorized_scope=["http://127.0.0.1:8080"],
             output_root="runs",
             max_cycles=4,
-            enable_llm=False,
-            enable_llm_planner=False,
             quiet=False,
         )
     artifacts = run_assessment(config)

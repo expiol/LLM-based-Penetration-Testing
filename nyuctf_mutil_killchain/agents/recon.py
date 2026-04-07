@@ -58,8 +58,7 @@ class ReconAgent(WorkerAgent):
         asset: Asset,
         output_context: dict[str, object],
         findings: list[dict[str, object]],
-        fallback_notes: list[str],
-    ) -> StageAnalysisGuidance | None:
+    ) -> StageAnalysisGuidance:
         challenge_category = str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
         return self.generate_structured_output(
             system_prompt=get_worker_system_prompt(
@@ -86,8 +85,6 @@ class ReconAgent(WorkerAgent):
                 indent=2,
             ),
             schema=StageAnalysisGuidance,
-            fallback_notes=fallback_notes,
-            failure_label="Recon LLM guidance",
         )
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
@@ -184,7 +181,6 @@ class ReconAgent(WorkerAgent):
                     asset=asset,
                     output_context=output_context,
                     findings=[finding.model_dump(mode="json") for finding in bundle.parsed.finding_updates],
-                    fallback_notes=notes,
                 )
                 new_tasks = [
                     build_web_review_task(asset.asset_id, base_url)
@@ -203,30 +199,29 @@ class ReconAgent(WorkerAgent):
                             ports=banner_ports,
                         )
                     )
-                if guidance is not None:
-                    output_context["llm_summary"] = guidance.summary
-                    output_context["manual_checks"] = guidance.manual_checks
-                    new_tasks.extend(
-                        build_flag_validation_task(candidate, source="recon")
-                        for candidate in guidance.grounded_flag_candidates
-                    )
-                    if state.metadata.get("challenge", {}).get("files"):
-                        if guidance.should_schedule_flag_hunt:
-                            new_tasks.append(
-                                build_flag_hunt_task(
-                                    files_root="/home/ctfplayer/ctf_files",
-                                    seed_terms=guidance.interesting_paths or [scope_entry],
-                                    priority=91,
-                                )
+                output_context["llm_summary"] = guidance.summary
+                output_context["manual_checks"] = guidance.manual_checks
+                new_tasks.extend(
+                    build_flag_validation_task(candidate, source="recon")
+                    for candidate in guidance.grounded_flag_candidates
+                )
+                if state.metadata.get("challenge", {}).get("files"):
+                    if guidance.should_schedule_flag_hunt:
+                        new_tasks.append(
+                            build_flag_hunt_task(
+                                files_root="/home/ctfplayer/ctf_files",
+                                seed_terms=guidance.interesting_paths or [scope_entry],
+                                priority=91,
                             )
-                        if guidance.should_schedule_credential_hunt:
-                            new_tasks.append(
-                                build_credential_hunt_task(
-                                    files_root="/home/ctfplayer/ctf_files",
-                                    seed_terms=[scope_entry],
-                                    priority=87,
-                                )
+                        )
+                    if guidance.should_schedule_credential_hunt:
+                        new_tasks.append(
+                            build_credential_hunt_task(
+                                files_root="/home/ctfplayer/ctf_files",
+                                seed_terms=[scope_entry],
+                                priority=87,
                             )
+                        )
                 notes.extend(bundle.parsed.notes)
                 notes.append(
                     f"{self.name} completed initial port scan for {hostname}."
@@ -258,33 +253,30 @@ class ReconAgent(WorkerAgent):
             asset=asset,
             output_context=output_context,
             findings=[],
-            fallback_notes=notes,
         )
-        new_tasks = []
-        if guidance is not None:
-            output_context["llm_summary"] = guidance.summary
-            output_context["manual_checks"] = guidance.manual_checks
-            new_tasks.extend(
-                build_flag_validation_task(candidate, source="recon")
-                for candidate in guidance.grounded_flag_candidates
-            )
-            if state.metadata.get("challenge", {}).get("files"):
-                if guidance.should_schedule_flag_hunt:
-                    new_tasks.append(
-                        build_flag_hunt_task(
-                            files_root="/home/ctfplayer/ctf_files",
-                            seed_terms=guidance.interesting_paths or [scope_entry],
-                            priority=91,
-                        )
+        output_context["llm_summary"] = guidance.summary
+        output_context["manual_checks"] = guidance.manual_checks
+        new_tasks = [
+            build_flag_validation_task(candidate, source="recon")
+            for candidate in guidance.grounded_flag_candidates
+        ]
+        if state.metadata.get("challenge", {}).get("files"):
+            if guidance.should_schedule_flag_hunt:
+                new_tasks.append(
+                    build_flag_hunt_task(
+                        files_root="/home/ctfplayer/ctf_files",
+                        seed_terms=guidance.interesting_paths or [scope_entry],
+                        priority=91,
                     )
-                if guidance.should_schedule_credential_hunt:
-                    new_tasks.append(
-                        build_credential_hunt_task(
-                            files_root="/home/ctfplayer/ctf_files",
-                            seed_terms=[scope_entry],
-                            priority=87,
-                        )
+                )
+            if guidance.should_schedule_credential_hunt:
+                new_tasks.append(
+                    build_credential_hunt_task(
+                        files_root="/home/ctfplayer/ctf_files",
+                        seed_terms=[scope_entry],
+                        priority=87,
                     )
+                )
 
         return WorkerReport(
             task_id=task.task_id,

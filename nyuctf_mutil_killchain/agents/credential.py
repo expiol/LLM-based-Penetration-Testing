@@ -110,8 +110,6 @@ class CredentialHuntAgent(WorkerAgent):
                 indent=2,
             ),
             schema=CredentialHarvestGuidance,
-            fallback_notes=worker_notes,
-            failure_label="Credential harvesting LLM guidance",
         )
 
         if llm_guidance is not None:

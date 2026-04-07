@@ -96,8 +96,6 @@ class FlagHuntAgent(WorkerAgent):
                 indent=2,
             ),
             schema=StageAnalysisGuidance,
-            fallback_notes=worker_notes,
-            failure_label="Flag hunting LLM guidance",
         )
 
         if llm_guidance is not None:

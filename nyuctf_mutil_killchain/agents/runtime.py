@@ -132,8 +132,6 @@ class RuntimeProbeAgent(WorkerAgent):
                 indent=2,
             ),
             schema=EvidenceReviewGuidance,
-            fallback_notes=worker_notes,
-            failure_label="Runtime probe LLM guidance",
         )
         if llm_guidance is not None:
             flag_candidates = merge_unique_strings(

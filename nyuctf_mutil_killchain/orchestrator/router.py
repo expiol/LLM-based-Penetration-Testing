@@ -6,7 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
@@ -164,15 +164,12 @@ class LLMWorkerRouter(WorkerRouter):
 
         category = str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
 
-        try:
-            decision = self.llm_client.generate_json(
-                system_prompt=get_router_system_prompt(category),
-                user_prompt=json.dumps(routing_snapshot, ensure_ascii=True, indent=2),
-                schema=WorkerRouteDecision,
-                temperature=0.1,
-            )
-        except (LLMClientError, ValidationError):
-            return fallback_decision
+        decision = self.llm_client.generate_json(
+            system_prompt=get_router_system_prompt(category),
+            user_prompt=json.dumps(routing_snapshot, ensure_ascii=True, indent=2),
+            schema=WorkerRouteDecision,
+            temperature=0.1,
+        )
 
         selected = candidate_map.get(decision.worker_name)
         if selected is None:

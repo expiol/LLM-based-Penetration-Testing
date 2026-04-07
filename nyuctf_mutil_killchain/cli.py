@@ -25,12 +25,6 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--config", help="Path to a JSON config file")
     run_parser.add_argument("--output-root", help="Directory where run artifacts are stored")
     run_parser.add_argument("--max-cycles", type=int, help="Maximum orchestrator cycles")
-    run_parser.add_argument("--no-llm", action="store_true", help="Disable LLM client usage")
-    run_parser.add_argument(
-        "--heuristic-planner",
-        action="store_true",
-        help="Force the heuristic planner even if an LLM client is configured",
-    )
     run_parser.add_argument("--quiet", action="store_true", help="Suppress orchestrator event streaming")
 
     demo_parser = subcommands.add_parser("demo", help="Run a built-in local demo")
@@ -88,8 +82,6 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
                 authorized_scope=base.authorized_scope,
                 output_root=args.output_root,
                 max_cycles=base.max_cycles,
-                enable_llm=base.enable_llm,
-                enable_llm_planner=base.enable_llm_planner,
                 quiet=args.quiet,
             )
         return RunConfig(
@@ -97,8 +89,6 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
             authorized_scope=["http://127.0.0.1:8080"],
             output_root=args.output_root,
             max_cycles=4,
-            enable_llm=False,
-            enable_llm_planner=False,
             quiet=args.quiet,
         )
 
@@ -115,10 +105,6 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         authorized_scope=scope,
         output_root=args.output_root if args.output_root is not None else (base.output_root if base is not None else "runs"),
         max_cycles=args.max_cycles if args.max_cycles is not None else (base.max_cycles if base is not None else 6),
-        enable_llm=False if args.no_llm else (base.enable_llm if base is not None else True),
-        enable_llm_planner=False
-        if args.heuristic_planner
-        else (base.enable_llm_planner if base is not None else True),
         quiet=args.quiet or (base.quiet if base is not None else False),
     )
 

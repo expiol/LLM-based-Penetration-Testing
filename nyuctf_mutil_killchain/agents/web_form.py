@@ -165,8 +165,6 @@ class WebFormProbeAgent(WorkerAgent):
                 indent=2,
             ),
             schema=FormProbeGuidance,
-            fallback_notes=worker_notes,
-            failure_label="Web form probe LLM planning",
         )
 
         text_payloads = merge_unique_strings(

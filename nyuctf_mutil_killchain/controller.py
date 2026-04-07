@@ -34,7 +34,7 @@ from nyuctf_mutil_killchain.agents import (
     WebFormProbeAgent,
     WebPathProbeAgent,
 )
-from nyuctf_mutil_killchain.llm import LLMClientError, build_llm_client_from_env
+from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError, build_llm_client_from_env
 from nyuctf_mutil_killchain.orchestrator import (
     HeuristicPlanner,
     HeuristicWorkerRouter,
@@ -61,8 +61,6 @@ class RunConfig(BaseModel):
     authorized_scope: list[str]
     output_root: str = "runs"
     max_cycles: int = Field(default=8, ge=1)
-    enable_llm: bool = True
-    enable_llm_planner: bool = True
     quiet: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -107,19 +105,15 @@ def build_runtime(
     recorder: EventRecorder | None = None,
     execution_plane: ExecutionPlane | None = None,
     expected_flag: str | None = None,
+    llm_client: LLMClient | None = None,
 ) -> tuple[GlobalState, Orchestrator]:
     """Assemble state, planner, workers, and execution plane for one run."""
 
-    llm_client = None
-    if config.enable_llm:
+    if llm_client is None:
         llm_client = build_llm_client_from_env()
 
-    planner = HeuristicPlanner()
-    if config.enable_llm_planner and llm_client is not None:
-        planner = LLMPlanner(llm_client, fallback=planner)
-    router = HeuristicWorkerRouter()
-    if llm_client is not None:
-        router = LLMWorkerRouter(llm_client, fallback=router)
+    planner = LLMPlanner(llm_client, fallback=HeuristicPlanner())
+    router = LLMWorkerRouter(llm_client, fallback=HeuristicWorkerRouter())
 
     execution_plane = execution_plane or build_execution_plane()
     state = GlobalState(
@@ -185,6 +179,7 @@ def run_assessment(
     *,
     execution_plane: ExecutionPlane | None = None,
     expected_flag: str | None = None,
+    llm_client: LLMClient | None = None,
 ) -> RunArtifacts:
     """Run the full local workflow and persist artifacts."""
 
@@ -194,6 +189,7 @@ def run_assessment(
         recorder=recorder,
         execution_plane=execution_plane,
         expected_flag=expected_flag,
+        llm_client=llm_client,
     )
 
     try:

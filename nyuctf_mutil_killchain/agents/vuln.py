@@ -107,8 +107,6 @@ class VulnScanAgent(WorkerAgent):
                 indent=2,
             ),
             schema=StageAnalysisGuidance,
-            fallback_notes=worker_notes,
-            failure_label="Vuln scan LLM guidance",
         )
         new_tasks = []
         if llm_guidance is not None:

@@ -112,8 +112,6 @@ class HostAuditAgent(WorkerAgent):
                 indent=2,
             ),
             schema=StageAnalysisGuidance,
-            fallback_notes=worker_notes,
-            failure_label="Host audit LLM guidance",
         )
         new_tasks = []
         if primary_asset is not None:

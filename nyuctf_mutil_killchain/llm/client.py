@@ -649,12 +649,19 @@ class OpenAICompatibleLLMClient:
         return schema.model_validate(_massage_payload_for_schema(structured, schema))
 
 
-def build_llm_client_from_env() -> LLMClient | None:
-    """Construct an LLM client from environment variables."""
+def build_llm_client_from_env() -> LLMClient:
+    """Construct an LLM client from environment variables.
+
+    Raises LLMClientError if the environment is not properly configured.
+    """
 
     settings = LLMSettings.from_env()
     if settings.mode in {"", "disabled", "off", "none"}:
-        return None
+        raise LLMClientError(
+            "LLM is required but AUTOPENTEST_LLM_MODE is not set or is 'disabled'. "
+            "Set AUTOPENTEST_LLM_MODE=openai_compatible and configure "
+            "AUTOPENTEST_LLM_BASE_URL, AUTOPENTEST_LLM_MODEL, and AUTOPENTEST_LLM_API_KEY."
+        )
     if settings.mode != "openai_compatible":
         raise LLMClientError(f"Unsupported AUTOPENTEST_LLM_MODE: {settings.mode}")
     if not settings.base_url or not settings.model or not settings.api_key:

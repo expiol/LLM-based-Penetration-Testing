@@ -6,7 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from nyuctf_mutil_killchain.agents.base import extract_flag_candidates, normalize_probe_paths
 from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
@@ -223,22 +223,19 @@ class LLMPlanner(TaskPlanner):
         self.fallback = fallback or HeuristicPlanner()
 
     def plan(self, state: GlobalState) -> PlannerDecision:
-        fallback_decision = self.fallback.plan(state)
-        try:
-            raw_decision = self.llm_client.generate_json(
-                system_prompt=self._system_prompt(state),
-                user_prompt=self._user_prompt(state),
-                schema=PlannerDecision,
-            )
-        except (LLMClientError, ValidationError):
-            return fallback_decision
+        bootstrap_decision = self.fallback.plan(state)
+
+        raw_decision = self.llm_client.generate_json(
+            system_prompt=self._system_prompt(state),
+            user_prompt=self._user_prompt(state),
+            schema=PlannerDecision,
+        )
 
         sanitized_tasks = [
             task for task in raw_decision.tasks if task.task_type in APPROVED_TASK_TYPES
         ]
 
-        # Merge LLM tasks with bootstrap tasks (bootstrap handles initial seeding)
-        merged_tasks = list(fallback_decision.tasks)
+        merged_tasks = list(bootstrap_decision.tasks)
         existing_dedupe_keys = {t.dedupe_key for t in merged_tasks if t.dedupe_key}
         for task in sanitized_tasks:
             if not task.dedupe_key:
@@ -249,9 +246,9 @@ class LLMPlanner(TaskPlanner):
                 existing_dedupe_keys.add(task.dedupe_key)
 
         return PlannerDecision(
-            summary=raw_decision.summary or fallback_decision.summary,
+            summary=raw_decision.summary or bootstrap_decision.summary,
             tasks=merged_tasks,
-            notes=raw_decision.notes + fallback_decision.notes,
+            notes=raw_decision.notes + bootstrap_decision.notes,
             stop_run=raw_decision.stop_run,
         )
 

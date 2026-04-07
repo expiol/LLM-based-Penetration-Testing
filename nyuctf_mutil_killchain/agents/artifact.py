@@ -190,8 +190,6 @@ class ArtifactTriageAgent(WorkerAgent):
                 indent=2,
             ),
             schema=ArtifactTriageGuidance,
-            fallback_notes=worker_notes,
-            failure_label="Artifact triage LLM guidance",
         )
 
         if llm_guidance is not None:
