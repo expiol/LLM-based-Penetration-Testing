@@ -164,12 +164,15 @@ class LLMWorkerRouter(WorkerRouter):
 
         category = str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
 
-        decision = self.llm_client.generate_json(
-            system_prompt=get_router_system_prompt(category),
-            user_prompt=json.dumps(routing_snapshot, ensure_ascii=True, indent=2),
-            schema=WorkerRouteDecision,
-            temperature=0.1,
-        )
+        try:
+            decision = self.llm_client.generate_json(
+                system_prompt=get_router_system_prompt(category),
+                user_prompt=json.dumps(routing_snapshot, ensure_ascii=True, indent=2),
+                schema=WorkerRouteDecision,
+                temperature=0.1,
+            )
+        except Exception:
+            return fallback_decision
 
         selected = candidate_map.get(decision.worker_name)
         if selected is None:

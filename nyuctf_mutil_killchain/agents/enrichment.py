@@ -168,21 +168,6 @@ class ArchiveTriageAgent(WorkerAgent):
         if guidance is not None:
             new_tasks.extend(build_path_probe_tasks_for_assets(state, guidance.interesting_paths))
 
-        new_tasks = [
-            build_flag_validation_task(candidate, source="http_path_probe")
-            for candidate in flag_candidates
-        ]
-        for probe_url in list(output_context.get("interesting_paths") or [])[:8]:
-            if not isinstance(probe_url, str) or not probe_url.strip():
-                continue
-            new_tasks.append(
-                build_web_content_task(
-                    asset_id=str(asset_id or ""),
-                    base_url=probe_url,
-                    priority=75,
-                )
-            )
-
         return WorkerReport(
             task_id=task.task_id,
             worker_name=self.name,

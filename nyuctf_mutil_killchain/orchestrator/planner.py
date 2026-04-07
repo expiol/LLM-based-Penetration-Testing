@@ -225,11 +225,17 @@ class LLMPlanner(TaskPlanner):
     def plan(self, state: GlobalState) -> PlannerDecision:
         bootstrap_decision = self.fallback.plan(state)
 
-        raw_decision = self.llm_client.generate_json(
-            system_prompt=self._system_prompt(state),
-            user_prompt=self._user_prompt(state),
-            schema=PlannerDecision,
-        )
+        try:
+            raw_decision = self.llm_client.generate_json(
+                system_prompt=self._system_prompt(state),
+                user_prompt=self._user_prompt(state),
+                schema=PlannerDecision,
+            )
+        except (LLMClientError, Exception) as exc:
+            bootstrap_decision.notes.append(
+                f"LLM planner failed ({type(exc).__name__}), using bootstrap fallback."
+            )
+            return bootstrap_decision
 
         sanitized_tasks = [
             task for task in raw_decision.tasks if task.task_type in APPROVED_TASK_TYPES

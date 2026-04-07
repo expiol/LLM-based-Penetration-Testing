@@ -6,7 +6,7 @@ import json
 import os
 import re
 from collections.abc import Callable, Sequence
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar, get_args, get_origin
 from urllib import error, request
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -125,6 +125,8 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "promoteExploitReasoning",
         "should_promote_exploit_reasoning",
     ),
+    "task_type": ("task_type", "taskType", "type"),
+    "title": ("title", "name", "label", "heading"),
 }
 
 
@@ -341,6 +343,23 @@ def _extract_form_probe_lists(payload: dict[str, Any]) -> dict[str, list[str]]:
     return extracted
 
 
+def _list_inner_model(schema: type[BaseModel], field_name: str) -> type[BaseModel] | None:
+    """Return the inner BaseModel type when *field_name* is ``list[SomeModel]``."""
+    field_info = schema.model_fields.get(field_name)
+    if field_info is None:
+        return None
+    annotation = field_info.annotation
+    if get_origin(annotation) is not list:
+        return None
+    args = get_args(annotation)
+    if not args:
+        return None
+    inner = args[0]
+    if isinstance(inner, type) and issubclass(inner, BaseModel):
+        return inner
+    return None
+
+
 def _massage_payload_for_schema(payload: Any, schema: type[ModelT]) -> Any:
     if not isinstance(payload, dict):
         return payload
@@ -402,6 +421,32 @@ def _massage_payload_for_schema(payload: Any, schema: type[ModelT]) -> Any:
 
     if "summary" in field_names and not normalized.get("summary"):
         normalized["summary"] = _synthesized_summary(selected)
+
+    # Recursively massage items inside list[BaseModel] fields
+    for field_name in list(normalized.keys()):
+        value = normalized[field_name]
+        if not isinstance(value, list):
+            continue
+        inner_model = _list_inner_model(schema, field_name)
+        if inner_model is None:
+            continue
+        normalized[field_name] = [
+            _massage_payload_for_schema(item, inner_model)
+            if isinstance(item, dict) else item
+            for item in value
+        ]
+
+    # Synthesize missing required fields when enough context exists
+    if "task_type" in field_names and "title" in field_names:
+        task_type = normalized.get("task_type")
+        if isinstance(task_type, str) and task_type.strip():
+            if not normalized.get("title"):
+                normalized["title"] = task_type.replace(".", " ").replace("_", " ").title()
+            if "description" in field_names and not normalized.get("description"):
+                normalized["description"] = (
+                    f"Execute {task_type} as planned by the LLM planner."
+                )
+
     return normalized or selected
 
 

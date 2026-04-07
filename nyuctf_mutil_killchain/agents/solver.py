@@ -194,10 +194,10 @@ def _build_solver_user_prompt(
         for f in list(state.findings.values())[-12:]
     ]
 
-    # Include file content hints from execution log
+    # Include file content hints from completed tasks
     file_contents: list[dict[str, str]] = []
-    for record in state.execution_log[-10:]:
-        ctx = record.output_context or {}
+    for task_entry in state.task_chain.tasks[-10:]:
+        ctx = task_entry.output_context or {}
         for key in ("source_snippets", "file_previews", "interesting_strings", "blob_candidates"):
             if ctx.get(key):
                 file_contents.append({key: str(ctx[key])[:800]})

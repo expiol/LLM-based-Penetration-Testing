@@ -34,7 +34,7 @@ from nyuctf_mutil_killchain.agents import (
     WebFormProbeAgent,
     WebPathProbeAgent,
 )
-from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError, build_llm_client_from_env
+from nyuctf_mutil_killchain.llm import LLMClient, build_llm_client_from_env
 from nyuctf_mutil_killchain.orchestrator import (
     HeuristicPlanner,
     HeuristicWorkerRouter,
@@ -192,10 +192,7 @@ def run_assessment(
         llm_client=llm_client,
     )
 
-    try:
-        final_state = orchestrator.run(max_cycles=config.max_cycles)
-    except LLMClientError:
-        raise
+    final_state = orchestrator.run(max_cycles=config.max_cycles)
 
     run_dir = Path(config.output_root) / final_state.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
