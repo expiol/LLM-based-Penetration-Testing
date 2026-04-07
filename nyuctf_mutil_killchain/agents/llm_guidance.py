@@ -109,6 +109,23 @@ class FormProbeGuidance(BaseModel):
     should_schedule_exploit_hypothesis: bool = False
 
 
+class SolverCodeGuidance(BaseModel):
+    """LLM-generated solver script for a CTF challenge.
+
+    The LLM writes executable code that, when run in the challenge
+    container, should produce the flag on stdout.
+    """
+
+    summary: str
+    solver_code: str
+    solver_language: str = "python"
+    reasoning: str = ""
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    dependencies: list[str] = Field(default_factory=list)
+    grounded_flag_candidates: list[str] = Field(default_factory=list)
+    should_retry_on_failure: bool = True
+
+
 def boost_prioritized_tasks(
     tasks: Iterable[Task],
     prioritized_task_types: list[str] | None,

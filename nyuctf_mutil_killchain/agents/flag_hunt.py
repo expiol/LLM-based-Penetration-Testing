@@ -11,6 +11,7 @@ from nyuctf_mutil_killchain.agents.base import (
     merge_unique_strings,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
+from nyuctf_mutil_killchain.prompts import get_worker_system_prompt, get_flag_hints
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -60,12 +61,19 @@ class FlagHuntAgent(WorkerAgent):
         interesting_paths = list(output_context.get("interesting_paths") or [])
         manual_checks = list(output_context.get("manual_checks") or [])
 
+        challenge_category = str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
+        flag_hints = get_flag_hints(challenge_category)
         llm_guidance = self.generate_structured_output(
-            system_prompt=(
-                "You analyze structured flag-harvesting evidence from an authorized CTF workflow. "
-                "Return only JSON matching the StageAnalysisGuidance schema. "
-                "Only emit grounded_flag_candidates or interesting_paths that are directly supported by the evidence. "
-                "Do not invent flags."
+            system_prompt=get_worker_system_prompt(
+                challenge_category,
+                worker_role=(
+                    "You analyze flag-harvesting evidence to identify the real flag. "
+                    "Category-specific hints:\n" +
+                    "\n".join(f"- {hint}" for hint in flag_hints) + "\n"
+                    "Do not invent flags. Only emit candidates grounded in the evidence."
+                ),
+                evidence_type="flag-harvesting",
+                output_schema="StageAnalysisGuidance",
             ),
             user_prompt=json.dumps(
                 {

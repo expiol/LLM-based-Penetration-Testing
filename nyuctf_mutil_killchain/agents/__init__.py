@@ -20,6 +20,7 @@ from nyuctf_mutil_killchain.agents.flag_hunt import FlagHuntAgent
 from nyuctf_mutil_killchain.agents.host import HostAuditAgent
 from nyuctf_mutil_killchain.agents.recon import ReconAgent
 from nyuctf_mutil_killchain.agents.runtime import RuntimeProbeAgent
+from nyuctf_mutil_killchain.agents.solver import SolverAgent
 from nyuctf_mutil_killchain.agents.source_review import SourceReviewAgent
 from nyuctf_mutil_killchain.agents.vuln import VulnScanAgent
 from nyuctf_mutil_killchain.agents.web_content import WebContentAgent
@@ -42,6 +43,7 @@ __all__ = [
     "RepoReviewAgent",
     "RuntimeProbeAgent",
     "ServiceBannerAgent",
+    "SolverAgent",
     "SourceReviewAgent",
     "SQLiteReviewAgent",
     "VulnScanAgent",

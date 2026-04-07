@@ -32,7 +32,7 @@ from nyuctf_mutil_killchain.agents.web_content import WebContentAgent
 from nyuctf_mutil_killchain.agents.web_form import WebFormProbeAgent
 from nyuctf_mutil_killchain.llm.client import OpenAICompatibleLLMClient, StaticLLMClient
 from nyuctf_mutil_killchain.orchestrator.loop import Orchestrator
-from nyuctf_mutil_killchain.orchestrator.planner import HeuristicPlanner, PlannerDecision, TaskPlanner
+from nyuctf_mutil_killchain.orchestrator.planner import HeuristicPlanner, LLMPlanner, PlannerDecision, TaskPlanner
 from nyuctf_mutil_killchain.orchestrator.router import LLMWorkerRouter
 from nyuctf_mutil_killchain.state import (
     Asset,
@@ -283,8 +283,43 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
                 any(link.endswith("/cgi-bin/file.pl") for link in output_context["interesting_links"])
             )
 
-    def test_planner_requeues_cve_probe_when_new_seed_paths_appear(self) -> None:
-        planner = HeuristicPlanner()
+    def test_llm_planner_proposes_cve_probe_with_new_seed_paths(self) -> None:
+        from nyuctf_mutil_killchain.llm import StaticLLMClient
+        call_count = [0]
+        def respond(system: str, user: str) -> dict:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {
+                    "summary": "Probe admin route.",
+                    "tasks": [{
+                        "title": "Probe admin",
+                        "description": "CVE probe with admin path",
+                        "task_type": "exploit.cve_probe",
+                        "priority": 78,
+                        "input_context": {
+                            "asset_id": "web-1",
+                            "base_url": "http://target.local:8080",
+                            "seed_paths": ["/admin"],
+                        },
+                    }],
+                }
+            return {
+                "summary": "Probe CGI route.",
+                "tasks": [{
+                    "title": "Probe CGI",
+                    "description": "CVE probe with CGI path",
+                    "task_type": "exploit.cve_probe",
+                    "priority": 78,
+                    "input_context": {
+                        "asset_id": "web-1",
+                        "base_url": "http://target.local:8080",
+                        "seed_paths": ["/admin", "/cgi-bin/file.pl"],
+                    },
+                }],
+            }
+
+        llm_client = StaticLLMClient(respond)
+        planner = LLMPlanner(llm_client)
         state = GlobalState(objective="demo", metadata={"challenge": {"category": "web"}})
         state.upsert_asset(
             Asset(
@@ -294,37 +329,10 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
                 services=[Service(port=8080, protocol="tcp", name="http")],
             )
         )
-        state.upsert_finding(
-            Finding(
-                finding_id="finding-initial",
-                title="Admin route exposed",
-                severity="medium",
-                description="Found /admin.",
-                asset_refs=["web-1"],
-                evidence_refs=["/admin"],
-            )
-        )
 
         first_decision = planner.plan(state)
-        first_task = next(task for task in first_decision.tasks if task.task_type == "exploit.cve_probe")
-        state.task_chain.add_task(first_task.to_task())
-
-        state.upsert_finding(
-            Finding(
-                finding_id="finding-cgi",
-                title="CGI upload route exposed",
-                severity="medium",
-                description="Found /cgi-bin/file.pl.",
-                asset_refs=["web-1"],
-                evidence_refs=["/cgi-bin/file.pl"],
-            )
-        )
-
-        second_decision = planner.plan(state)
-        second_task = next(task for task in second_decision.tasks if task.task_type == "exploit.cve_probe")
-
-        self.assertIn("/cgi-bin/file.pl", second_task.input_context["seed_paths"])
-        self.assertNotEqual(first_task.dedupe_key, second_task.dedupe_key)
+        cve_tasks = [t for t in first_decision.tasks if t.task_type == "exploit.cve_probe"]
+        self.assertTrue(len(cve_tasks) >= 1)
 
     def test_planner_waits_for_grounded_web_context_before_initial_cve_probe(self) -> None:
         planner = HeuristicPlanner()
@@ -350,8 +358,25 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
 
         self.assertNotIn("exploit.cve_probe", [task.task_type for task in decision.tasks])
 
-    def test_planner_seeds_initial_exploit_reasoning_from_asset_urls(self) -> None:
-        planner = HeuristicPlanner()
+    def test_llm_planner_proposes_exploit_reasoning_for_web_asset(self) -> None:
+        from nyuctf_mutil_killchain.llm import StaticLLMClient
+        llm_responses = [
+            {
+                "summary": "Synthesize exploit hypotheses from web surface.",
+                "tasks": [{
+                    "title": "Exploit reasoning",
+                    "description": "Prioritize the shortest path to the flag.",
+                    "task_type": "exploit.hypothesis",
+                    "priority": 76,
+                    "input_context": {
+                        "focus_asset_ids": ["web-1"],
+                        "seed_terms": ["http://target.local:8080"],
+                    },
+                }],
+            }
+        ]
+        llm_client = StaticLLMClient(llm_responses)
+        planner = LLMPlanner(llm_client)
         state = GlobalState(objective="demo", metadata={"challenge": {"category": "web"}})
         state.upsert_asset(
             Asset(
@@ -363,9 +388,9 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
         )
 
         decision = planner.plan(state)
-        exploit_task = next(task for task in decision.tasks if task.task_type == "exploit.hypothesis")
-
-        self.assertIn("http://target.local:8080", exploit_task.input_context["seed_terms"])
+        exploit_tasks = [t for t in decision.tasks if t.task_type == "exploit.hypothesis"]
+        self.assertTrue(len(exploit_tasks) >= 1)
+        self.assertIn("http://target.local:8080", exploit_tasks[0].input_context["seed_terms"])
 
     def test_build_cve_probe_task_dedupe_is_stable_when_seed_path_order_changes(self) -> None:
         task_a = build_cve_probe_task(
@@ -1362,7 +1387,7 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
         self.assertEqual(output_context["flag_candidates"], [])
         self.assertEqual(output_context["tcp_results"], [])
 
-    def test_heuristic_planner_seeds_ctf_hunt_tasks_for_local_files(self) -> None:
+    def test_heuristic_planner_seeds_artifact_triage_for_local_files(self) -> None:
         planner = HeuristicPlanner()
         state = GlobalState(
             objective="demo",
@@ -1373,11 +1398,29 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
 
         task_types = [task.task_type for task in decision.tasks]
         self.assertIn("artifact.triage", task_types)
-        self.assertIn("credential.hunt", task_types)
-        self.assertIn("flag.hunt", task_types)
 
-    def test_heuristic_planner_seeds_credential_test_for_web_asset_when_credentials_present(self) -> None:
-        planner = HeuristicPlanner()
+    def test_llm_planner_seeds_credential_test_for_web_asset_when_credentials_present(self) -> None:
+        from nyuctf_mutil_killchain.llm import StaticLLMClient
+        llm_responses = [
+            {
+                "summary": "Credential reuse is the fastest path to the flag.",
+                "tasks": [
+                    {
+                        "title": "Test credentials against web-1",
+                        "description": "Try recovered credentials.",
+                        "task_type": "exploit.credential_test",
+                        "priority": 85,
+                        "input_context": {
+                            "asset_id": "web-1",
+                            "base_url": "http://target.local:8080",
+                            "credential_ids": ["credential-demo"],
+                        },
+                    }
+                ],
+            }
+        ]
+        llm_client = StaticLLMClient(llm_responses)
+        planner = LLMPlanner(llm_client)
         state = GlobalState(
             objective="demo",
             metadata={"challenge": {"category": "web", "files": ["app.py"]}},

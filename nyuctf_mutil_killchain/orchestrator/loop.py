@@ -70,6 +70,29 @@ class Orchestrator:
 
         return decision.stop_run
 
+    def _dequeue_batch(self, *, max_batch: int = 4) -> list[Task]:
+        """Dequeue up to *max_batch* independent ready tasks in priority order.
+
+        Tasks are independent when they don't share a worker (different
+        task_type prefixes) so they won't contend for the same execution
+        context.  This lets the orchestrator retire more work per cycle.
+        """
+        completed = self.state.task_chain.completed_task_ids()
+        ready = [t for t in self.state.task_chain.tasks if t.is_ready(completed)]
+        ready.sort(key=lambda t: (-t.priority, t.created_at))
+
+        batch: list[Task] = []
+        seen_type_prefixes: set[str] = set()
+        for task in ready:
+            prefix = task.task_type.split(".")[0]
+            if prefix in seen_type_prefixes:
+                continue
+            batch.append(task)
+            seen_type_prefixes.add(prefix)
+            if len(batch) >= max_batch:
+                break
+        return batch
+
     def run(self, max_cycles: int = 10) -> GlobalState:
         self.state.status = RunStatus.RUNNING
 
@@ -83,53 +106,65 @@ class Orchestrator:
                 self.state.status = RunStatus.STOPPED
                 break
 
-            task = self.state.task_chain.next_ready_task()
-            if task is None:
+            batch = self._dequeue_batch()
+            if not batch:
                 self.emit(f"[cycle {cycle}] task queue exhausted — no ready tasks remain")
                 break
 
-            worker, route_decision = self.select_worker(task)
-            if worker is None:
-                task.mark_blocked(f"No worker registered for task type {task.task_type!r}.")
+            dispatched = 0
+            for task in batch:
+                if self.state.solved:
+                    break
+
+                worker, route_decision = self.select_worker(task)
+                if worker is None:
+                    task.mark_blocked(f"No worker registered for task type {task.task_type!r}.")
+                    self.emit(
+                        f"[cycle {cycle}] blocked {task.task_id}: "
+                        f"no worker handles {task.task_type!r}"
+                    )
+                    continue
+
+                if route_decision is not None:
+                    task.metadata["route_decision"] = route_decision.model_dump(mode="json")
+                    self.emit(
+                        f"[cycle {cycle}] route {task.task_id}: "
+                        f"{route_decision.worker_name} ({route_decision.rationale})"
+                    )
+                task.mark_running(worker.name)
+                self.emit(f"[cycle {cycle}] dispatch {task.task_id} -> {worker.name}")
+
+                try:
+                    report = worker.run(task, self.state)
+                except Exception as exc:
+                    tb_text = traceback.format_exc(limit=20)
+                    self.emit(
+                        f"[cycle {cycle}] UNHANDLED EXCEPTION in {worker.name} "
+                        f"while executing {task.task_id}: {type(exc).__name__}: {exc}"
+                    )
+                    report = WorkerReport(
+                        task_id=task.task_id,
+                        worker_name=worker.name,
+                        success=False,
+                        summary=f"Worker {worker.name} raised {type(exc).__name__}: {exc}",
+                        error=tb_text,
+                    )
+
+                self.state.apply_worker_report(report)
+                dispatched += 1
+
+                status_tag = "ok" if report.success else "FAILED"
                 self.emit(
-                    f"[cycle {cycle}] blocked {task.task_id}: "
-                    f"no worker handles {task.task_type!r}"
+                    f"[cycle {cycle}] {status_tag} {task.task_id}: {report.summary}"
                 )
-                continue
+                if self.state.solved:
+                    self.emit(f"[cycle {cycle}] solved: {self.state.validated_flag}")
+                    break
 
-            if route_decision is not None:
-                task.metadata["route_decision"] = route_decision.model_dump(mode="json")
-                self.emit(
-                    f"[cycle {cycle}] route {task.task_id}: "
-                    f"{route_decision.worker_name} ({route_decision.rationale})"
-                )
-            task.mark_running(worker.name)
-            self.emit(f"[cycle {cycle}] dispatch {task.task_id} -> {worker.name}")
+            if dispatched > 1:
+                self.emit(f"[cycle {cycle}] batch: dispatched {dispatched} task(s)")
 
-            try:
-                report = worker.run(task, self.state)
-            except Exception as exc:
-                tb_text = traceback.format_exc(limit=20)
-                self.emit(
-                    f"[cycle {cycle}] UNHANDLED EXCEPTION in {worker.name} "
-                    f"while executing {task.task_id}: {type(exc).__name__}: {exc}"
-                )
-                report = WorkerReport(
-                    task_id=task.task_id,
-                    worker_name=worker.name,
-                    success=False,
-                    summary=f"Worker {worker.name} raised {type(exc).__name__}: {exc}",
-                    error=tb_text,
-                )
-
-            self.state.apply_worker_report(report)
-
-            status_tag = "ok" if report.success else "FAILED"
-            self.emit(
-                f"[cycle {cycle}] {status_tag} {task.task_id}: {report.summary}"
-            )
             if self.state.solved:
-                self.emit(f"[cycle {cycle}] solved: {self.state.validated_flag}")
                 break
         else:
             remaining_open_tasks = [

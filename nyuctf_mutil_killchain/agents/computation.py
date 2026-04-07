@@ -11,6 +11,7 @@ from nyuctf_mutil_killchain.agents.base import (
     merge_unique_strings,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import EvidenceReviewGuidance
+from nyuctf_mutil_killchain.prompts import get_worker_system_prompt, get_exploit_strategy
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -104,12 +105,19 @@ class ComputationAnalysisAgent(WorkerAgent):
         worker_notes = list(bundle.parsed.notes)
         flag_candidates = list(bundle.parsed.output_context.get("flag_candidates") or [])
         manual_checks = list(bundle.parsed.output_context.get("manual_checks") or [])
+        challenge_category = str(challenge_meta.get("category") or "misc").lower()
         llm_guidance = self.generate_structured_output(
-            system_prompt=(
-                "You analyze structured computation-analysis evidence from an authorized CTF workflow. "
-                "Return only JSON matching the EvidenceReviewGuidance schema. "
-                "Only emit grounded_flag_candidates or interesting_paths that are directly supported by the "
-                "recovered plaintexts, function inventory, or bitstring constants."
+            system_prompt=get_worker_system_prompt(
+                challenge_category,
+                worker_role=(
+                    "You analyze computation-heavy source artifacts: transform pipelines, "
+                    "cipher implementations, encoding chains, and checker functions. "
+                    + get_exploit_strategy(challenge_category) + " "
+                    "Focus on recovering concrete plaintext or flag candidates from "
+                    "the recovered functions, constants, and bitstring data."
+                ),
+                evidence_type="computation-analysis",
+                output_schema="EvidenceReviewGuidance",
             ),
             user_prompt=json.dumps(
                 {

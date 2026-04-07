@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from nyuctf_mutil_killchain.agents.base import extract_flag_candidates, normalize_probe_paths
 from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
+from nyuctf_mutil_killchain.prompts import get_planner_system_prompt, get_prompts
 from nyuctf_mutil_killchain.state import Asset, AssetKind, GlobalState, Task, TaskStatus
 
 APPROVED_TASK_TYPES = frozenset(
@@ -60,6 +61,8 @@ APPROVED_TASK_TYPES = frozenset(
         "report.generate",
         # Flag validation
         "flag.validate",
+        # LLM solver code generation and execution
+        "solve.generate_script",
     }
 )
 
@@ -110,27 +113,40 @@ class TaskPlanner(ABC):
 
 
 class HeuristicPlanner(TaskPlanner):
-    """Deterministic planner that drives the standard recon → audit → vuln-scan pipeline."""
+    """Minimal bootstrap planner that seeds the initial task queue.
+
+    Only handles two concerns:
+    1. Bootstrapping recon tasks for authorized scope entries.
+    2. Bootstrapping artifact triage when challenge files exist.
+    3. Validating flag candidates discovered in findings.
+
+    All deeper planning (escalation, credential hunts, exploit reasoning,
+    category-specific pivots) is delegated to the LLM planner.
+    """
 
     def plan(self, state: GlobalState) -> PlannerDecision:
         tasks: list[PlannedTask] = []
         notes: list[str] = []
-        challenge_files = state.metadata.get("challenge", {}).get("files", [])
+        challenge_meta = state.metadata.get("challenge", {})
+        challenge_files = challenge_meta.get("files", [])
 
-        artifact_task = self._plan_artifact_triage(state)
-        if artifact_task is not None:
-            tasks.append(artifact_task)
-        credential_task = self._plan_credential_hunt(state)
-        if credential_task is not None:
-            tasks.append(credential_task)
-        flag_hunt_task = self._plan_flag_hunt(state)
-        if flag_hunt_task is not None:
-            tasks.append(flag_hunt_task)
-        exploit_reasoning_task = self._plan_exploit_reasoning(state)
-        if exploit_reasoning_task is not None:
-            tasks.append(exploit_reasoning_task)
-        tasks.extend(self._plan_flag_validation(state))
+        # Bootstrap: artifact triage for bundled challenge files
+        if challenge_files:
+            dedupe_key = "artifact-triage:challenge-files"
+            if state.task_chain.find_by_dedupe_key(dedupe_key) is None:
+                tasks.append(
+                    PlannedTask(
+                        title="Inventory challenge files",
+                        description="Enumerate bundled files in /home/ctfplayer/ctf_files and classify interesting artifacts.",
+                        task_type="artifact.triage",
+                        priority=95,
+                        input_context={"files_root": "/home/ctfplayer/ctf_files", "max_files": 80},
+                        dedupe_key=dedupe_key,
+                        metadata={"planned_by": "bootstrap", "challenge_files": challenge_files},
+                    )
+                )
 
+        # Bootstrap: recon for each authorized scope entry
         if not state.authorized_scope and not challenge_files:
             notes.append("No authorized scope configured; planner cannot seed recon tasks.")
 
@@ -150,190 +166,15 @@ class HeuristicPlanner(TaskPlanner):
                         priority=100,
                         input_context={"scope": scope, "asset_id": asset_id},
                         dedupe_key=dedupe_key,
-                        metadata={"planned_by": "heuristic-planner"},
+                        metadata={"planned_by": "bootstrap"},
                     )
                 )
 
-        for asset in state.assets.values():
-            if asset.kind == AssetKind.HOST and not asset.base_url:
-                host_task = self._plan_host_audit(asset, state)
-                if host_task is not None:
-                    tasks.append(host_task)
-                exploit_task = self._plan_cve_probe(asset, state)
-                if exploit_task is not None:
-                    tasks.append(exploit_task)
-                vuln_task = self._plan_vuln_scan(asset, state)
-                if vuln_task is not None:
-                    tasks.append(vuln_task)
-            else:
-                web_task = self._plan_web_review(asset, state)
-                if web_task is not None:
-                    tasks.append(web_task)
-                credential_test_task = self._plan_credential_test(asset, state)
-                if credential_test_task is not None:
-                    tasks.append(credential_test_task)
-                exploit_task = self._plan_cve_probe(asset, state)
-                if exploit_task is not None:
-                    tasks.append(exploit_task)
-                vuln_task = self._plan_vuln_scan(asset, state)
-                if vuln_task is not None:
-                    tasks.append(vuln_task)
+        # Always: validate any discovered flag candidates in findings
+        tasks.extend(self._plan_flag_validation(state))
 
-        summary = f"Planner proposed {len(tasks)} task(s)."
+        summary = f"Bootstrap planner proposed {len(tasks)} task(s)."
         return PlannerDecision(summary=summary, tasks=tasks, notes=notes)
-
-    def _plan_web_review(self, asset: Asset, state: GlobalState) -> PlannedTask | None:
-        if not asset.base_url:
-            return None
-        dedupe_key = f"web-review:{asset.asset_id}:{asset.base_url}"
-        if state.task_chain.find_by_dedupe_key(dedupe_key) is not None:
-            return None
-        return PlannedTask(
-            title=f"Review web surface for {asset.asset_id}",
-            description="Collect HTTP metadata and create an evidence-based assessment note.",
-            task_type="web.review_surface",
-            priority=80,
-            input_context={"asset_id": asset.asset_id, "base_url": asset.base_url},
-            dedupe_key=dedupe_key,
-            metadata={"planned_by": "heuristic-planner"},
-        )
-
-    def _plan_artifact_triage(self, state: GlobalState) -> PlannedTask | None:
-        challenge_meta = state.metadata.get("challenge", {})
-        challenge_files = challenge_meta.get("files", [])
-        if not challenge_files:
-            return None
-
-        dedupe_key = "artifact-triage:challenge-files"
-        if state.task_chain.find_by_dedupe_key(dedupe_key) is not None:
-            return None
-
-        return PlannedTask(
-            title="Inventory challenge files",
-            description="Enumerate bundled files in /home/ctfplayer/ctf_files and classify interesting artifacts.",
-            task_type="artifact.triage",
-            priority=95,
-            input_context={
-                "files_root": "/home/ctfplayer/ctf_files",
-                "max_files": 80,
-            },
-            dedupe_key=dedupe_key,
-            metadata={
-                "planned_by": "heuristic-planner",
-                "challenge_files": challenge_files,
-            },
-        )
-
-    def _plan_credential_hunt(self, state: GlobalState) -> PlannedTask | None:
-        challenge_meta = state.metadata.get("challenge", {})
-        challenge_files = challenge_meta.get("files", [])
-        if not challenge_files:
-            return None
-
-        dedupe_key = "credential-hunt:/home/ctfplayer/ctf_files"
-        if state.task_chain.find_by_dedupe_key(dedupe_key) is not None:
-            return None
-
-        return PlannedTask(
-            title="Harvest candidate credentials",
-            description=(
-                "Search bundled challenge files for usernames, passwords, bearer tokens, "
-                "cookies, and other credential artifacts that can unlock the next pivot."
-            ),
-            task_type="credential.hunt",
-            priority=90,
-            input_context={
-                "files_root": "/home/ctfplayer/ctf_files",
-                "seed_terms": [
-                    challenge_meta.get("name"),
-                    challenge_meta.get("category"),
-                    challenge_meta.get("server_name"),
-                    "login",
-                    "admin",
-                    "token",
-                ],
-            },
-            dedupe_key=dedupe_key,
-            metadata={"planned_by": "heuristic-planner"},
-        )
-
-    def _plan_flag_hunt(self, state: GlobalState) -> PlannedTask | None:
-        challenge_meta = state.metadata.get("challenge", {})
-        challenge_files = challenge_meta.get("files", [])
-        if not challenge_files or state.solved:
-            return None
-
-        dedupe_key = "flag-hunt:/home/ctfplayer/ctf_files"
-        if state.task_chain.find_by_dedupe_key(dedupe_key) is not None:
-            return None
-
-        seed_terms = [
-            challenge_meta.get("name"),
-            challenge_meta.get("category"),
-            challenge_meta.get("flag_format"),
-            "flag",
-            "submit",
-            "secret",
-        ]
-        seed_terms.extend(
-            str(finding.title)
-            for finding in list(state.findings.values())[-4:]
-            if finding.title
-        )
-        return PlannedTask(
-            title="Hunt for concrete flag candidates",
-            description=(
-                "Search across bundled challenge artifacts for grounded flag candidates, "
-                "decoded blobs, and flag-bearing routes."
-            ),
-            task_type="flag.hunt",
-            priority=96,
-            input_context={
-                "files_root": "/home/ctfplayer/ctf_files",
-                "seed_terms": [term for term in seed_terms if term],
-            },
-            dedupe_key=dedupe_key,
-            metadata={"planned_by": "heuristic-planner"},
-        )
-
-    def _plan_exploit_reasoning(self, state: GlobalState) -> PlannedTask | None:
-        if state.solved:
-            return None
-        if not state.assets and not state.findings and not state.credentials:
-            return None
-
-        dedupe_key = "exploit-hypothesis"
-        if state.task_chain.find_by_dedupe_key(dedupe_key) is not None:
-            return None
-
-        focus_asset_ids = [asset.asset_id for asset in list(state.assets.values())[:4]]
-        seed_terms: list[str] = []
-        for finding in list(state.findings.values())[-4:]:
-            if finding.title:
-                seed_terms.append(str(finding.title))
-            seed_terms.extend(str(ref) for ref in finding.evidence_refs[:4] if ref)
-        if not seed_terms:
-            for asset in list(state.assets.values())[:4]:
-                if asset.base_url:
-                    seed_terms.append(asset.base_url)
-                elif asset.hostname:
-                    seed_terms.append(asset.hostname)
-        return PlannedTask(
-            title="Synthesize CTF exploit hypotheses",
-            description=(
-                "Use accumulated findings, credentials, and service metadata to prioritize "
-                "the shortest pivot toward the real flag."
-            ),
-            task_type="exploit.hypothesis",
-            priority=76,
-            input_context={
-                "files_root": "/home/ctfplayer/ctf_files",
-                "focus_asset_ids": focus_asset_ids,
-                "seed_terms": seed_terms,
-            },
-            dedupe_key=dedupe_key,
-            metadata={"planned_by": "heuristic-planner"},
-        )
 
     def _plan_flag_validation(self, state: GlobalState) -> list[PlannedTask]:
         tasks: list[PlannedTask] = []
@@ -360,194 +201,22 @@ class HeuristicPlanner(TaskPlanner):
                     description="Compare a discovered flag candidate against the expected challenge flag.",
                     task_type="flag.validate",
                     priority=99,
-                    input_context={
-                        "candidate_flag": candidate,
-                        "candidate_source": source,
-                    },
+                    input_context={"candidate_flag": candidate, "candidate_source": source},
                     dedupe_key=dedupe_key,
-                    metadata={"planned_by": "heuristic-planner"},
+                    metadata={"planned_by": "bootstrap"},
                 )
             )
         return tasks
 
-    def _available_credential_ids(self, state: GlobalState, *, asset_id: str | None = None) -> list[str]:
-        credential_ids: list[str] = []
-        for credential in state.credentials.values():
-            if not credential.metadata.get("secret_value"):
-                continue
-            if asset_id and credential.asset_ref not in {None, "", asset_id, "challenge-files"}:
-                continue
-            credential_ids.append(credential.credential_id)
-        return credential_ids[:8]
-
-    def _plan_credential_test(self, asset: Asset, state: GlobalState) -> PlannedTask | None:
-        if not asset.base_url:
-            return None
-        credential_ids = self._available_credential_ids(state, asset_id=asset.asset_id)
-        if not credential_ids:
-            return None
-
-        dedupe_key = f"exploit-credential-test:{asset.asset_id}:{','.join(credential_ids[:6])}"
-        if state.task_chain.find_by_dedupe_key(dedupe_key) is not None:
-            return None
-
-        seed_paths: list[str] = []
-        for finding in state.findings.values():
-            if asset.asset_id not in finding.asset_refs:
-                continue
-            seed_paths.extend(str(ref) for ref in finding.evidence_refs if ref)
-
-        return PlannedTask(
-            title=f"Test recovered credentials against {asset.asset_id}",
-            description=(
-                "Reuse recovered usernames, passwords, tokens, and cookies against the live challenge "
-                "application to unlock privileged routes or direct flag access."
-            ),
-            task_type="exploit.credential_test",
-            priority=85,
-            input_context={
-                "asset_id": asset.asset_id,
-                "base_url": asset.base_url,
-                "credential_ids": credential_ids,
-                "seed_paths": seed_paths[:12],
-            },
-            dedupe_key=dedupe_key,
-            metadata={"planned_by": "heuristic-planner"},
-        )
-
-    def _plan_cve_probe(self, asset: Asset, state: GlobalState) -> PlannedTask | None:
-        challenge_category = str(state.metadata.get("challenge", {}).get("category") or "").lower()
-        relevant_finding = any(
-            asset.asset_id in finding.asset_refs
-            and finding.severity in {"medium", "high", "critical"}
-            for finding in state.findings.values()
-        )
-        if challenge_category not in {"web", "pwn", "misc"} and not relevant_finding:
-            return None
-        if not asset.base_url and not asset.hostname:
-            return None
-
-        seed_paths: list[str] = []
-        for finding in state.findings.values():
-            if asset.asset_id not in finding.asset_refs:
-                continue
-            seed_paths.extend(str(ref) for ref in finding.evidence_refs if ref)
-        normalized_seed_paths = normalize_probe_paths(seed_paths, limit=16)
-        dedupe_seed_paths = sorted(normalized_seed_paths)
-
-        dedupe_key = (
-            f"exploit-cve-probe:{asset.asset_id}:{asset.base_url or asset.hostname}:"
-            f"{','.join(str(service.port) for service in asset.services[:6])}:"
-            f"{','.join(self._available_credential_ids(state, asset_id=asset.asset_id)[:4])}:"
-            f"{','.join(dedupe_seed_paths[:6])}"
-        )
-        if state.task_chain.find_by_dedupe_key(dedupe_key) is not None:
-            return None
-
-        grounded_web_task_types = {
-            "web.content_review",
-            "web.form_probe",
-            "web.path_probe",
-            "web.crawl",
-            "web.header_analysis",
-        }
-        prerequisite_done = any(
-            task.status == TaskStatus.COMPLETED
-            and (
-                (task.task_type in grounded_web_task_types and task.input_context.get("asset_id") == asset.asset_id)
-                or (task.task_type.startswith("vuln.") and task.input_context.get("asset_id") == asset.asset_id)
-                or (task.task_type == "host.banner_grab" and task.input_context.get("asset_id") == asset.asset_id)
-                or task.task_type == "exploit.hypothesis"
-            )
-            for task in state.task_chain.tasks
-        )
-        if not prerequisite_done and not relevant_finding and challenge_category != "pwn":
-            return None
-
-        return PlannedTask(
-            title=f"Probe targeted exploit paths for {asset.asset_id}",
-            description=(
-                "Attempt grounded web or TCP interactions against the authorized challenge target "
-                "using recovered routes, prompts, and credentials."
-            ),
-            task_type="exploit.cve_probe",
-            priority=78,
-            input_context={
-                "asset_id": asset.asset_id,
-                "base_url": asset.base_url,
-                "hostname": asset.hostname,
-                "ports": [service.port for service in asset.services if service.port][:12],
-                "credential_ids": self._available_credential_ids(state, asset_id=asset.asset_id),
-                "seed_paths": normalized_seed_paths[:12],
-            },
-            dedupe_key=dedupe_key,
-            metadata={"planned_by": "heuristic-planner"},
-        )
-
-    def _plan_host_audit(self, asset: Asset, state: GlobalState) -> PlannedTask | None:
-        dedupe_key = f"host-audit:{asset.asset_id}"
-        if state.task_chain.find_by_dedupe_key(dedupe_key) is not None:
-            return None
-
-        known_ports = sorted({service.port for service in asset.services})
-        return PlannedTask(
-            title=f"Audit host for {asset.asset_id}",
-            description="Run a port scan and service fingerprint via nmap (or socket fallback).",
-            task_type="host.audit",
-            priority=70,
-            input_context={
-                "asset_id": asset.asset_id,
-                "hostname": asset.hostname,
-                "ports": ",".join(str(port) for port in known_ports) if known_ports else None,
-            },
-            dedupe_key=dedupe_key,
-            metadata={"planned_by": "heuristic-planner"},
-        )
-
-    def _plan_vuln_scan(self, asset: Asset, state: GlobalState) -> PlannedTask | None:
-        dedupe_key = f"vuln-scan:{asset.asset_id}"
-        if state.task_chain.find_by_dedupe_key(dedupe_key) is not None:
-            return None
-
-        # Only propose vuln scan once the prior-layer scan (web review or host audit)
-        # has successfully COMPLETED and produced real evidence. This prevents orphaned
-        # vuln.scan tasks being blocked when no VulnScanAgent worker is registered.
-        web_task_completed = any(
-            task.dedupe_key is not None
-            and task.dedupe_key.startswith(f"web-review:{asset.asset_id}:")
-            and task.status == TaskStatus.COMPLETED
-            for task in state.task_chain.tasks
-        )
-        host_task = state.task_chain.find_by_dedupe_key(f"host-audit:{asset.asset_id}")
-        prerequisite_completed = (
-            web_task_completed
-            or (host_task is not None and host_task.status == TaskStatus.COMPLETED)
-        )
-        if not prerequisite_completed:
-            return None
-
-        target = asset.base_url or asset.hostname or asset.ip_address
-        if not target:
-            return None
-
-        return PlannedTask(
-            title=f"Vulnerability scan for {asset.asset_id}",
-            description="Run nuclei/nikto vulnerability scanner against the target.",
-            task_type="vuln.scan",
-            priority=60,
-            input_context={
-                "asset_id": asset.asset_id,
-                "target": target,
-                "base_url": asset.base_url,
-                "hostname": asset.hostname,
-            },
-            dedupe_key=dedupe_key,
-            metadata={"planned_by": "heuristic-planner"},
-        )
-
 
 class LLMPlanner(TaskPlanner):
-    """Planner that asks an LLM for context-aware next-step task proposals."""
+    """Primary planner that uses LLM with category-specific prompts for task proposals.
+
+    Falls back to the bootstrap planner only when the LLM call fails.
+    The LLM receives the full state snapshot plus category-tuned instructions
+    so it can propose the optimal next steps for web, rev, crypto, forensics,
+    pwn, or misc challenges.
+    """
 
     def __init__(self, llm_client: LLMClient, fallback: TaskPlanner | None = None) -> None:
         self.llm_client = llm_client
@@ -557,7 +226,7 @@ class LLMPlanner(TaskPlanner):
         fallback_decision = self.fallback.plan(state)
         try:
             raw_decision = self.llm_client.generate_json(
-                system_prompt=self._system_prompt(),
+                system_prompt=self._system_prompt(state),
                 user_prompt=self._user_prompt(state),
                 schema=PlannerDecision,
             )
@@ -567,18 +236,22 @@ class LLMPlanner(TaskPlanner):
         sanitized_tasks = [
             task for task in raw_decision.tasks if task.task_type in APPROVED_TASK_TYPES
         ]
-        if not sanitized_tasks and fallback_decision.tasks:
-            return fallback_decision
 
+        # Merge LLM tasks with bootstrap tasks (bootstrap handles initial seeding)
+        merged_tasks = list(fallback_decision.tasks)
+        existing_dedupe_keys = {t.dedupe_key for t in merged_tasks if t.dedupe_key}
         for task in sanitized_tasks:
             if not task.dedupe_key:
                 task.dedupe_key = self._default_dedupe_key(task)
             task.metadata["planned_by"] = "llm-planner"
+            if task.dedupe_key not in existing_dedupe_keys:
+                merged_tasks.append(task)
+                existing_dedupe_keys.add(task.dedupe_key)
 
         return PlannerDecision(
-            summary=raw_decision.summary,
-            tasks=sanitized_tasks,
-            notes=raw_decision.notes,
+            summary=raw_decision.summary or fallback_decision.summary,
+            tasks=merged_tasks,
+            notes=raw_decision.notes + fallback_decision.notes,
             stop_run=raw_decision.stop_run,
         )
 
@@ -671,28 +344,24 @@ class LLMPlanner(TaskPlanner):
             return f"flag-validate:{candidate}"
         return f"{task.task_type}:{task.title}"
 
-    def _system_prompt(self) -> str:
+    def _system_prompt(self, state: GlobalState) -> str:
+        challenge_meta = state.metadata.get("challenge", {})
+        category = str(challenge_meta.get("category") or "misc").lower()
         approved = sorted(APPROVED_TASK_TYPES)
-        return (
-            "You are the planning component of an authorized CTF challenge-solving workflow. "
-            "You operate within the explicitly approved challenge environment and scope only. "
-            "Return only JSON matching the PlannerDecision schema. "
-            f"You may only propose tasks from this approved list: {json.dumps(approved)}. "
-            "Prioritize the shortest grounded path to the real flag rather than generic coverage. "
-            "For rev/crypto/forensics/misc challenges with bundled files, prefer local artifact analysis, "
-            "credential hunting, flag hunting, and computation/runtime pivots before broad network work. "
-            "For web/pwn challenges, combine service discovery with source review, targeted path probing, "
-            "credential reuse, executable exploit probes, and flag-oriented reasoning. "
-            "Exploitation tasks (exploit.*, post_exploit.*) must only be proposed when the asset is in the "
-            "authorized_scope AND prior evidence identifies a concrete pivot. "
-            "Never propose tasks outside the authorized_scope or the provided challenge files. "
-            "Never fabricate vulnerability details, credentials, or flag candidates."
-        )
+        return get_planner_system_prompt(category, approved)
 
     def _user_prompt(self, state: GlobalState) -> str:
+        challenge_meta = state.metadata.get("challenge", {})
+        category = str(challenge_meta.get("category") or "misc").lower()
+        prompts = get_prompts(category)
+
         snapshot = {
             "objective": state.objective,
             "authorized_scope": state.authorized_scope,
+            "challenge_category": category,
+            "analysis_strategy": prompts.analysis_strategy,
+            "exploit_strategy": prompts.exploit_strategy,
+            "flag_recovery_hints": prompts.flag_recovery_hints,
             "summary": state.summary(),
             "assets": [
                 {
@@ -714,10 +383,21 @@ class LLMPlanner(TaskPlanner):
                     "finding_id": finding.finding_id,
                     "title": finding.title,
                     "severity": finding.severity,
+                    "description": finding.description,
                     "asset_refs": finding.asset_refs,
+                    "evidence_refs": finding.evidence_refs,
                     "metadata_keys": list(finding.metadata.keys()),
                 }
                 for finding in state.findings.values()
+            ],
+            "credentials": [
+                {
+                    "credential_id": cred.credential_id,
+                    "username": cred.username,
+                    "credential_type": cred.credential_type,
+                    "asset_ref": cred.asset_ref,
+                }
+                for cred in list(state.credentials.values())[-8:]
             ],
             "open_tasks": [
                 {

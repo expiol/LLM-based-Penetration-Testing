@@ -12,6 +12,7 @@ from nyuctf_mutil_killchain.agents.base import (
     merge_unique_strings,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import EvidenceReviewGuidance
+from nyuctf_mutil_killchain.prompts import get_worker_system_prompt, get_analysis_strategy
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -87,13 +88,18 @@ class SourceReviewAgent(WorkerAgent):
         manual_checks = list(bundle.parsed.output_context.get("manual_checks") or [])
 
         llm_guidance = self.generate_structured_output(
-            system_prompt=(
-                "You analyze structured source-review evidence from an authorized CTF workflow. "
-                "Return only JSON matching the EvidenceReviewGuidance schema. "
-                "Only emit grounded_flag_candidates and interesting_paths that are directly supported by the "
-                "provided source-review evidence. "
-                "Use promote_runtime_probe or promote_computation_analysis only when the source evidence "
-                "suggests script execution or reversible transforms are likely relevant."
+            system_prompt=get_worker_system_prompt(
+                challenge_category,
+                worker_role=(
+                    "You analyze source code from bundled challenge files. "
+                    "Look for routes, secrets, hardcoded credentials, SQL queries, "
+                    "template injection points, and flag-like tokens. "
+                    + get_analysis_strategy(challenge_category) + " "
+                    "Use promote_runtime_probe when scripts should be executed, or "
+                    "promote_computation_analysis when reversible transforms are found."
+                ),
+                evidence_type="source-review",
+                output_schema="EvidenceReviewGuidance",
             ),
             user_prompt=json.dumps(
                 {

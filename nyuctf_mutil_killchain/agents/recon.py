@@ -17,6 +17,7 @@ from nyuctf_mutil_killchain.agents.base import (
     infer_web_urls,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
+from nyuctf_mutil_killchain.prompts import get_worker_system_prompt
 from nyuctf_mutil_killchain.state import Asset, AssetKind, GlobalState, Service, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -59,12 +60,17 @@ class ReconAgent(WorkerAgent):
         findings: list[dict[str, object]],
         fallback_notes: list[str],
     ) -> StageAnalysisGuidance | None:
+        challenge_category = str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
         return self.generate_structured_output(
-            system_prompt=(
-                "You analyze structured recon evidence from an authorized CTF workflow. "
-                "Return only JSON matching the StageAnalysisGuidance schema. "
-                "Only emit grounded_flag_candidates or interesting_paths that are directly supported by the asset profile, "
-                "scope entry, or findings."
+            system_prompt=get_worker_system_prompt(
+                challenge_category,
+                worker_role=(
+                    "You analyze recon evidence from scope enumeration. "
+                    "Determine what follow-up tasks would be most productive: "
+                    "flag hunting, credential harvesting, or service exploitation."
+                ),
+                evidence_type="recon",
+                output_schema="StageAnalysisGuidance",
             ),
             user_prompt=json.dumps(
                 {

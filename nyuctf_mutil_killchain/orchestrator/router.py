@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
+from nyuctf_mutil_killchain.prompts import get_router_system_prompt
 from nyuctf_mutil_killchain.state import GlobalState, Task
 
 
@@ -161,18 +162,11 @@ class LLMWorkerRouter(WorkerRouter):
         if not routing_snapshot["candidates"]:
             return fallback_decision
 
+        category = str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
+
         try:
             decision = self.llm_client.generate_json(
-                system_prompt=(
-                    "You are the worker-router for an authorized CTF challenge-solving workflow. "
-                    "Choose exactly one worker from the provided candidates for the current task. "
-                    "Prefer the worker whose specialization best matches the task input_context, "
-                    "challenge category, the shortest path to the flag, and the current evidence. "
-                    "For rev/crypto/misc, prefer workers that can recover plaintext, decode blobs, "
-                    "or inspect local artifacts. For web/pwn, prefer workers that can turn routes, "
-                    "credentials, and findings into concrete pivots. "
-                    "Do not invent worker names. Return only JSON matching WorkerRouteDecision."
-                ),
+                system_prompt=get_router_system_prompt(category),
                 user_prompt=json.dumps(routing_snapshot, ensure_ascii=True, indent=2),
                 schema=WorkerRouteDecision,
                 temperature=0.1,

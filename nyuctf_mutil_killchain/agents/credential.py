@@ -13,6 +13,7 @@ from nyuctf_mutil_killchain.agents.base import (
     merge_unique_strings,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import CredentialHarvestGuidance
+from nyuctf_mutil_killchain.prompts import get_worker_system_prompt
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -64,13 +65,17 @@ class CredentialHuntAgent(WorkerAgent):
         interesting_paths = list(output_context.get("interesting_paths") or [])
         manual_checks = list(output_context.get("manual_checks") or [])
 
+        challenge_category = str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
         llm_guidance = self.generate_structured_output(
-            system_prompt=(
-                "You analyze structured credential-harvesting evidence from an authorized CTF workflow. "
-                "Return only JSON matching the CredentialHarvestGuidance schema. "
-                "Only prioritize credential IDs that already exist in the provided evidence. "
-                "Only emit grounded_flag_candidates or interesting_paths that are directly supported by the evidence. "
-                "Set should_schedule_exploit_hypothesis when the recovered credentials are strong enough to justify a targeted pivot."
+            system_prompt=get_worker_system_prompt(
+                challenge_category,
+                worker_role=(
+                    "You analyze credential-harvesting results and prioritize which "
+                    "credentials are most likely to unlock the flag. Determine whether "
+                    "to schedule exploit reasoning or credential testing next."
+                ),
+                evidence_type="credential-harvesting",
+                output_schema="CredentialHarvestGuidance",
             ),
             user_prompt=json.dumps(
                 {

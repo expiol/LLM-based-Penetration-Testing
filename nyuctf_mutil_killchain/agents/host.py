@@ -13,6 +13,7 @@ from nyuctf_mutil_killchain.agents.base import (
     infer_web_urls,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
+from nyuctf_mutil_killchain.prompts import get_worker_system_prompt
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -85,11 +86,17 @@ class HostAuditAgent(WorkerAgent):
             primary_asset = discovered_assets[0]
         output_context = dict(bundle.parsed.output_context)
         worker_notes = list(bundle.parsed.notes)
+        challenge_category = str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
         llm_guidance = self.generate_structured_output(
-            system_prompt=(
-                "You analyze structured host-audit evidence from an authorized CTF workflow. "
-                "Return only JSON matching the StageAnalysisGuidance schema. "
-                "Only emit grounded_flag_candidates or interesting_paths that are directly supported by the observed services or findings."
+            system_prompt=get_worker_system_prompt(
+                challenge_category,
+                worker_role=(
+                    "You analyze host-audit evidence (open ports, services, banners). "
+                    "Determine which services are most promising for exploitation and "
+                    "what follow-up tasks would be most productive."
+                ),
+                evidence_type="host-audit",
+                output_schema="StageAnalysisGuidance",
             ),
             user_prompt=json.dumps(
                 {

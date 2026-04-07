@@ -13,6 +13,7 @@ from nyuctf_mutil_killchain.agents.base import (
     build_http_path_probe_task,
 )
 from nyuctf_mutil_killchain.llm import LLMClientError
+from nyuctf_mutil_killchain.prompts import get_worker_system_prompt
 from nyuctf_mutil_killchain.state import Finding, GlobalState, Severity, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -143,14 +144,19 @@ class WebContentAgent(WorkerAgent):
         probe_context: dict[str, Any],
         fallback_notes: list[str],
     ) -> WebContentNote:
+        challenge_category = str(state.metadata.get("challenge", {}).get("category") or "web").lower()
         if self.llm_client is not None:
             try:
                 return self.llm_client.generate_json(
-                    system_prompt=(
-                        "You analyze authorized web application content. "
-                        "Return only JSON matching the WebContentNote schema. "
-                        "Summarize attack surface from links, forms, and content. "
-                        "Do not produce exploit steps or payloads."
+                    system_prompt=get_worker_system_prompt(
+                        challenge_category,
+                        worker_role=(
+                            "You analyze web page content to identify attack surface: "
+                            "forms, links, hidden endpoints, and flag-like content. "
+                            "Identify the most promising injection points and auth bypass vectors."
+                        ),
+                        evidence_type="web content",
+                        output_schema="WebContentNote",
                     ),
                     user_prompt=(
                         f"Objective: {state.objective}\n"
@@ -181,26 +187,7 @@ class WebContentAgent(WorkerAgent):
     ) -> WebContentNote:
         interesting_links: list[str] = probe_context.get("interesting_links", [])
         forms: list[dict[str, Any]] = probe_context.get("forms", [])
-        keywords: list[str] = probe_context.get("keywords", [])
         potential_flags: list[str] = probe_context.get("potential_flags", [])
-
-        attack_surface: list[str] = []
-        if forms:
-            attack_surface.append(f"Detected {len(forms)} HTML form(s)")
-        if any("upload" in keyword for keyword in keywords):
-            attack_surface.append("Upload-related content discovered")
-        if any("admin" in keyword or "debug" in keyword for keyword in keywords):
-            attack_surface.append("Administrative or debug content is exposed")
-        if any("login" in keyword for keyword in keywords):
-            attack_surface.append("Authentication surface discovered")
-
-        manual_checks = [f"Manually inspect the rendered content at {base_url}."]
-        if forms:
-            manual_checks.append("Review form parameters and server-side validation.")
-        if interesting_links:
-            manual_checks.append("Inspect interesting links for hidden functionality and unauthenticated access.")
-        if potential_flags:
-            manual_checks.append("Validate any flag-like tokens recovered from the page body.")
 
         summary = (
             f"Content review for {base_url}: "
@@ -209,9 +196,9 @@ class WebContentAgent(WorkerAgent):
         )
         return WebContentNote(
             summary=summary,
-            attack_surface=attack_surface,
+            attack_surface=[],
             interesting_endpoints=interesting_links,
-            manual_checks=manual_checks,
+            manual_checks=[f"Inspect content at {base_url} with LLM for deeper analysis."],
             potential_flags=potential_flags,
         )
 

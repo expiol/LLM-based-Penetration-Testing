@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import codecs
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
@@ -690,8 +693,55 @@ def build_http_path_probe_task(
     )
 
 
+def _try_decode_blob(blob: str) -> list[str]:
+    """Attempt common CTF encodings on a blob and return any flag-like results."""
+    decoded: list[str] = []
+    stripped = blob.strip()
+    if not stripped or len(stripped) < 8:
+        return decoded
+
+    # Base64
+    if re.fullmatch(r"[A-Za-z0-9+/=]{16,}", stripped):
+        for variant in (stripped, stripped + "=", stripped + "=="):
+            try:
+                raw = base64.b64decode(variant, validate=True)
+                text = raw.decode("utf-8", errors="ignore")
+                if FLAG_PATTERN.search(text):
+                    decoded.extend(FLAG_PATTERN.findall(text))
+            except Exception:
+                pass
+
+    # Hex
+    if re.fullmatch(r"[0-9a-fA-F]{16,}", stripped) and len(stripped) % 2 == 0:
+        try:
+            raw = binascii.unhexlify(stripped)
+            text = raw.decode("utf-8", errors="ignore")
+            if FLAG_PATTERN.search(text):
+                decoded.extend(FLAG_PATTERN.findall(text))
+        except Exception:
+            pass
+
+    # ROT13
+    try:
+        text = codecs.decode(stripped, "rot_13")
+        if FLAG_PATTERN.search(text) and not FLAG_PATTERN.search(stripped):
+            decoded.extend(FLAG_PATTERN.findall(text))
+    except Exception:
+        pass
+
+    return decoded
+
+
+_BASE64_BLOB_PATTERN = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
+_HEX_BLOB_PATTERN = re.compile(r"(?:0x)?([0-9a-fA-F]{20,})")
+
+
 def extract_flag_candidates(*values: str | None) -> list[str]:
-    """Extract unique flag-like tokens from the supplied strings."""
+    """Extract unique flag-like tokens from the supplied strings.
+
+    In addition to direct regex matches, attempts base64, hex, and ROT13
+    decoding on long encoded-looking blobs.
+    """
 
     candidates: list[str] = []
     for value in values:
@@ -700,6 +750,14 @@ def extract_flag_candidates(*values: str | None) -> list[str]:
         for match in FLAG_PATTERN.findall(value):
             if match not in candidates:
                 candidates.append(match)
+        for blob in _BASE64_BLOB_PATTERN.findall(value):
+            for decoded in _try_decode_blob(blob):
+                if decoded not in candidates:
+                    candidates.append(decoded)
+        for blob in _HEX_BLOB_PATTERN.findall(value):
+            for decoded in _try_decode_blob(blob):
+                if decoded not in candidates:
+                    candidates.append(decoded)
     return candidates
 
 
@@ -828,22 +886,11 @@ class WorkerAgent(ABC):
         return True, None
 
     def routing_score(self, task: Task, state: GlobalState) -> int:
-        """Deterministic fallback score when no LLM route is available."""
+        """Minimal deterministic fallback score — LLM routing is preferred."""
 
-        score = 40
+        score = 50
         if task.task_type in self.supported_task_types:
-            score += 40
-        challenge_category = str(state.metadata.get("challenge", {}).get("category") or "").lower()
-        if challenge_category and challenge_category in self.preferred_challenge_categories:
-            score += 12
-
-        requested_intent = str(
-            task.input_context.get("routing_intent")
-            or task.metadata.get("routing_intent")
-            or ""
-        ).lower()
-        if requested_intent and requested_intent in self.name.replace("-", "_"):
-            score += 10
+            score += 30
         return score
 
     def routing_profile(self, task: Task, state: GlobalState) -> dict[str, Any]:

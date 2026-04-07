@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent, build_web_content_task
 from nyuctf_mutil_killchain.llm import LLMClientError
+from nyuctf_mutil_killchain.prompts import get_worker_system_prompt
 from nyuctf_mutil_killchain.state import Finding, GlobalState, Severity, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -150,14 +151,22 @@ class WebAssessmentAgent(WorkerAgent):
         probe_context: dict[str, Any],
         fallback_notes: list[str] | None = None,
     ) -> WebReviewNote:
+        challenge_category = str(state.metadata.get("challenge", {}).get("category") or "web").lower()
+
         if self.llm_client is not None:
             try:
                 return self.llm_client.generate_json(
-                    system_prompt=(
-                        "You are a web security assessment analyst. "
-                        "Return only JSON matching the WebReviewNote schema. "
-                        "Generate specific, evidence-based risk hypotheses and actionable manual checks. "
-                        "Do not generate exploit code, payloads, or attack instructions."
+                    system_prompt=get_worker_system_prompt(
+                        challenge_category,
+                        worker_role=(
+                            "You are a web security assessment analyst for a CTF challenge. "
+                            "Generate specific, evidence-based risk hypotheses and actionable "
+                            "manual checks based on the HTTP probe data. Focus on attack vectors "
+                            "most likely to yield the flag: injection points, auth bypass, "
+                            "exposed admin panels, and source code leaks."
+                        ),
+                        evidence_type="HTTP probe",
+                        output_schema="WebReviewNote",
                     ),
                     user_prompt=(
                         f"Objective: {state.objective}\n"
@@ -167,6 +176,7 @@ class WebAssessmentAgent(WorkerAgent):
                         f"Server: {probe_context.get('server', 'unknown')}\n"
                         f"Powered-By: {probe_context.get('powered_by', 'unknown')}\n"
                         f"Security Issues Found: {probe_context.get('security_issues', [])}\n"
+                        f"Response Headers: {probe_context.get('headers', {})}\n"
                         f"Task ID: {task.task_id}\n"
                         "Generate a concise, evidence-driven web assessment note."
                     ),
@@ -175,93 +185,23 @@ class WebAssessmentAgent(WorkerAgent):
             except (LLMClientError, ValidationError) as exc:
                 if fallback_notes is not None:
                     fallback_notes.append(
-                        f"LLM web assessment unavailable ({type(exc).__name__}: {str(exc)[:200]}); using heuristic fallback."
+                        f"LLM web assessment unavailable ({type(exc).__name__}: {str(exc)[:200]}); "
+                        "using minimal fallback."
                     )
-                return self._derive_note_from_probe(
-                    asset_id=asset_id, base_url=base_url, probe_context=probe_context
-                )
 
-        return self._derive_note_from_probe(asset_id=asset_id, base_url=base_url, probe_context=probe_context)
-
-    def _derive_note_from_probe(
-        self,
-        *,
-        asset_id: str,
-        base_url: str,
-        probe_context: dict[str, Any],
-    ) -> WebReviewNote:
-        """Build a risk-grounded review note from real HTTP probe data."""
-        security_issues: list[str] = probe_context.get("security_issues", [])
         http_status = probe_context.get("http_status")
-        server = probe_context.get("server", "")
-        powered_by = probe_context.get("powered_by", "")
-
-        risk_hypotheses: list[str] = []
-        manual_checks: list[str] = []
-
-        # Derive hypotheses from real header findings
-        for issue in security_issues:
-            if "Content-Security-Policy" in issue:
-                risk_hypotheses.append(
-                    "Missing CSP allows cross-site scripting (XSS) via unsafe inline scripts or eval."
-                )
-            elif "X-Frame-Options" in issue:
-                risk_hypotheses.append(
-                    "Missing X-Frame-Options permits clickjacking attacks against authenticated sessions."
-                )
-            elif "Strict-Transport-Security" in issue:
-                risk_hypotheses.append(
-                    "Missing HSTS allows SSL-stripping attacks on HTTPS endpoints."
-                )
-            elif "CORS" in issue:
-                risk_hypotheses.append(
-                    "Permissive CORS policy may allow cross-origin credential theft."
-                )
-            elif "HttpOnly" in issue:
-                risk_hypotheses.append(
-                    "Session cookie without HttpOnly is accessible via JavaScript — XSS cookie theft risk."
-                )
-            elif "Secure" in issue:
-                risk_hypotheses.append(
-                    "Session cookie without Secure flag may be transmitted over plain HTTP."
-                )
-
-        # Generic hypotheses based on server technology disclosures
-        if server:
-            risk_hypotheses.append(
-                f"Server banner discloses '{server}'; check for known CVEs for this version."
-            )
-        if powered_by:
-            risk_hypotheses.append(
-                f"X-Powered-By reveals '{powered_by}'; version-specific vulnerabilities may exist."
-            )
-
-        if not risk_hypotheses:
-            risk_hypotheses.append(
-                "Input validation weaknesses may exist across form fields and URL parameters."
-            )
-
-        # Derive manual checks from probe data
-        manual_checks.append(f"Confirm all HTTP endpoints at {base_url} are intentionally exposed.")
-        if security_issues:
-            manual_checks.append(f"Remediate {len(security_issues)} security header issue(s): " + "; ".join(security_issues[:3]))
-        manual_checks.append("Inspect authentication and session management flows.")
-        manual_checks.append("Test all input fields for injection vulnerabilities (SQLi, XSS, SSRF).")
-        if http_status and http_status >= 400:
-            manual_checks.append(f"Investigate HTTP {http_status} response — may indicate misconfiguration.")
-
+        security_issues = probe_context.get("security_issues", [])
         http_status_str = f" (HTTP {http_status})" if http_status else ""
         summary = (
             f"Web assessment for {base_url}{http_status_str}. "
-            f"{len(security_issues)} security header issue(s) detected. "
-            + (f"Server: {server}. " if server else "")
-            + (f"Powered-By: {powered_by}. " if powered_by else "")
+            f"{len(security_issues)} security header issue(s) detected."
         ).strip()
-        if not summary:
-            summary = f"Web assessment note for {asset_id} at {base_url}. Manual verification required."
 
         return WebReviewNote(
-            summary=summary,
-            risk_hypotheses=risk_hypotheses,
-            manual_checks=manual_checks,
+            summary=summary or f"Web assessment for {asset_id} at {base_url}.",
+            risk_hypotheses=["Perform deeper analysis with LLM for detailed risk hypotheses."],
+            manual_checks=[
+                f"Inspect all endpoints at {base_url}.",
+                "Test input fields for injection vulnerabilities.",
+            ],
         )

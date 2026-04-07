@@ -15,6 +15,7 @@ from nyuctf_mutil_killchain.agents.llm_guidance import (
     ArtifactTriageGuidance,
     boost_prioritized_tasks,
 )
+from nyuctf_mutil_killchain.prompts import get_worker_system_prompt, get_analysis_strategy
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
@@ -143,13 +144,16 @@ class ArtifactTriageAgent(WorkerAgent):
             )
 
         llm_guidance = self.generate_structured_output(
-            system_prompt=(
-                "You prioritize follow-up work for an authorized CTF artifact-analysis pipeline. "
-                "Return only JSON matching the ArtifactTriageGuidance schema. "
-                "Only rank task types or analysis kinds that are already present in the supplied follow_up_tasks list. "
-                "Use source_routing_intent to steer the initial source-analysis worker choice when source files exist. "
-                "Only emit extra_flag_candidates that are directly grounded in the provided evidence or "
-                "that fit the provided flag_format hint without inventing new content."
+            system_prompt=get_worker_system_prompt(
+                challenge_category,
+                worker_role=(
+                    "You prioritize follow-up work for artifact analysis. "
+                    "Rank task types and analysis kinds based on which are most likely to yield the flag. "
+                    "Use source_routing_intent to steer the initial source-analysis worker choice. "
+                    + get_analysis_strategy(challenge_category)
+                ),
+                evidence_type="artifact triage",
+                output_schema="ArtifactTriageGuidance",
             ),
             user_prompt=json.dumps(
                 {
