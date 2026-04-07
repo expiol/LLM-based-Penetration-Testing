@@ -125,6 +125,24 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "promoteExploitReasoning",
         "should_promote_exploit_reasoning",
     ),
+    "solver_code": (
+        "solver_code",
+        "solverCode",
+        "code",
+        "script",
+        "solution_code",
+        "solutionCode",
+        "solve_script",
+        "solveScript",
+        "exploit_code",
+        "exploitCode",
+    ),
+    "solver_language": (
+        "solver_language",
+        "solverLanguage",
+        "language",
+        "lang",
+    ),
     "task_type": ("task_type", "taskType", "type"),
     "title": ("title", "name", "label", "heading"),
 }
@@ -533,8 +551,12 @@ def _default_transport(
     body: bytes,
     timeout_s: int,
 ) -> dict[str, Any]:
+    import socket
+
     http_request = request.Request(url, data=body, headers=headers, method="POST")
+    old_default = socket.getdefaulttimeout()
     try:
+        socket.setdefaulttimeout(timeout_s)
         with request.urlopen(http_request, timeout=timeout_s) as response:
             raw = response.read().decode("utf-8")
     except error.HTTPError as exc:
@@ -543,6 +565,10 @@ def _default_transport(
         raise LLMClientError(f"LLM request failed with HTTP {exc.code}: {detail}") from exc
     except error.URLError as exc:
         raise LLMClientError(f"LLM request failed: {exc}") from exc
+    except (socket.timeout, TimeoutError) as exc:
+        raise LLMClientError(f"LLM request timed out after {timeout_s}s: {exc}") from exc
+    finally:
+        socket.setdefaulttimeout(old_default)
 
     try:
         return json.loads(raw)

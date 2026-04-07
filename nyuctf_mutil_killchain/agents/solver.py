@@ -9,6 +9,7 @@ it inside the challenge container.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from nyuctf_mutil_killchain.agents.base import (
@@ -294,7 +295,49 @@ def _build_solver_user_prompt(
     if prev_attempts:
         evidence_snapshot["previous_solver_attempts"] = prev_attempts[-3:]
 
+        # Surface near-miss diagnostics prominently so the LLM knows its
+        # previous approach was close but needs refinement.
+        near_miss_diags: list[str] = []
+        for attempt in prev_attempts[-3:]:
+            nm = attempt.get("near_miss_candidates") or []
+            diag = attempt.get("error_diagnosis") or ""
+            if nm:
+                near_miss_diags.append(
+                    f"Attempt {attempt.get('attempt', '?')}: output contained near-miss "
+                    f"flag pattern(s) {nm} — the decryption produced flag-shaped output "
+                    f"but with non-printable/garbage bytes, meaning the key or transform "
+                    f"was partially wrong. You MUST use a different strategy for the "
+                    f"bytes/positions that produced garbage."
+                )
+            elif diag:
+                near_miss_diags.append(diag)
+        if near_miss_diags:
+            evidence_snapshot["CRITICAL_RETRY_GUIDANCE"] = near_miss_diags
+
     return json.dumps(evidence_snapshot, ensure_ascii=True, indent=2)
+
+
+_NEAR_MISS_CLEAN_RE = re.compile(r"[^\x20-\x7e]")
+
+
+def _clean_near_miss_candidates(near_miss: list[str]) -> list[str]:
+    """Strip non-printable characters from near-miss flag strings.
+
+    Returns cleaned candidates that still look like plausible flags
+    (prefix + braces + body of at least 4 printable chars).
+    """
+    cleaned: list[str] = []
+    for raw in near_miss:
+        prefix, _, rest = raw.partition("{")
+        if not rest or not rest.endswith("}"):
+            continue
+        body = rest[:-1]
+        clean_body = _NEAR_MISS_CLEAN_RE.sub("", body)
+        if len(clean_body) >= 4 and prefix.isalnum():
+            candidate = f"{prefix}{{{clean_body}}}"
+            if candidate not in cleaned:
+                cleaned.append(candidate)
+    return cleaned
 
 
 class SolverAgent(WorkerAgent):
@@ -317,7 +360,7 @@ class SolverAgent(WorkerAgent):
     )
     preferred_challenge_categories = ("crypto", "rev", "web", "forensics", "pwn", "misc")
 
-    _MAX_RETRIES = 2
+    _MAX_RETRIES = 4
     _CATEGORY_TIMEOUT: dict[str, int] = {
         "crypto": 120,
         "rev": 90,
@@ -355,12 +398,53 @@ class SolverAgent(WorkerAgent):
 
         worker_notes: list[str] = []
 
-        guidance = self.generate_structured_output(
-            system_prompt=_build_solver_system_prompt(category, timeout=timeout_s),
-            user_prompt=_build_solver_user_prompt(task, state),
-            schema=SolverCodeGuidance,
-            temperature=0.3,
-        )
+        try:
+            guidance = self.generate_structured_output(
+                system_prompt=_build_solver_system_prompt(category, timeout=timeout_s),
+                user_prompt=_build_solver_user_prompt(task, state),
+                schema=SolverCodeGuidance,
+                temperature=0.3,
+            )
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            worker_notes.append(f"LLM code generation failed: {error_msg}")
+
+            retry_task = None
+            if attempt_num < self._MAX_RETRIES:
+                retry_task = Task(
+                    title=f"Solver retry (attempt {attempt_num + 1})",
+                    description="Retry solver generation after LLM failure.",
+                    task_type="solve.generate_script",
+                    priority=97,
+                    input_context={
+                        "files_root": task.input_context.get("files_root", "/home/ctfplayer/ctf_files"),
+                        "attempt_number": attempt_num + 1,
+                        "previous_attempts": (task.input_context.get("previous_attempts") or []) + [
+                            {
+                                "attempt": attempt_num,
+                                "error_summary": error_msg,
+                                "error_diagnosis": (
+                                    f"Attempt {attempt_num}: LLM call failed with {type(exc).__name__}. "
+                                    "The LLM may have timed out or returned malformed JSON. "
+                                    "Generate the solver code again with a fresh approach."
+                                ),
+                            }
+                        ],
+                    },
+                    dedupe_key=f"solver-retry:{task.task_id}:attempt-{attempt_num + 1}",
+                    metadata={"planned_by": "solver-agent", "retry_of": task.task_id},
+                )
+
+            return WorkerReport(
+                task_id=task.task_id,
+                worker_name=self.name,
+                success=False,
+                summary=f"LLM code generation failed: {error_msg}",
+                error=error_msg,
+                notes=worker_notes,
+                new_tasks=[retry_task] if retry_task else [],
+                retryable=False,
+            )
 
         if guidance is None or not guidance.solver_code.strip():
             return WorkerReport(
@@ -413,15 +497,54 @@ class SolverAgent(WorkerAgent):
             for candidate in flag_candidates
         ]
 
-        # Schedule a retry if solver failed and we haven't exhausted attempts
+        # Auto-validate cleaned near-miss candidates as a long-shot attempt
         returncode = output_context.get("returncode", -1)
+        near_miss = output_context.get("near_miss_candidates") or []
+        if not flag_candidates and near_miss:
+            cleaned = _clean_near_miss_candidates(near_miss)
+            for candidate in cleaned[:3]:
+                if candidate not in flag_candidates:
+                    new_tasks.append(
+                        build_flag_validation_task(candidate, source="solver_near_miss_cleaned")
+                    )
+            if cleaned:
+                worker_notes.append(
+                    f"Auto-cleaned {len(cleaned)} near-miss candidate(s) for validation: {cleaned[:3]}"
+                )
         if (
             not flag_candidates
             and guidance.should_retry_on_failure
             and attempt_num < self._MAX_RETRIES
         ):
-            stderr = str(output_context.get("stderr", ""))[:500]
-            stdout = str(output_context.get("stdout", ""))[:500]
+            stderr = str(output_context.get("stderr", ""))[:1500]
+            stdout = str(output_context.get("stdout", ""))[:1500]
+
+            error_diagnosis = f"Attempt {attempt_num} failed: exit code {returncode}"
+            if near_miss:
+                error_diagnosis = (
+                    f"Attempt {attempt_num}: solver output contained flag-like pattern(s) "
+                    f"with non-printable characters ({near_miss[:3]}), suggesting the "
+                    f"decryption/decode approach was partially correct but key recovery "
+                    f"or transform was incomplete. Refine the algorithm — do NOT repeat "
+                    f"the same approach."
+                )
+            elif returncode == 0 and not stdout.strip():
+                error_diagnosis = (
+                    f"Attempt {attempt_num}: script exited 0 but produced no output. "
+                    f"Ensure the script prints the flag to stdout."
+                )
+            elif returncode != 0:
+                error_diagnosis = (
+                    f"Attempt {attempt_num}: script crashed with exit code {returncode}. "
+                    f"Fix the runtime error and try a different approach."
+                )
+            else:
+                error_diagnosis = (
+                    f"Attempt {attempt_num}: script exited 0 but no valid flag found in output. "
+                    f"The output may contain garbled data — review the algorithm."
+                )
+
+            retry_timeout = timeout_s + 30 if near_miss else timeout_s
             retry_task = Task(
                 title=f"Solver retry (attempt {attempt_num + 1})",
                 description="Retry solver generation with previous failure context.",
@@ -430,7 +553,7 @@ class SolverAgent(WorkerAgent):
                 input_context={
                     "files_root": task.input_context.get("files_root", "/home/ctfplayer/ctf_files"),
                     "attempt_number": attempt_num + 1,
-                    "solver_timeout_s": timeout_s,
+                    "solver_timeout_s": retry_timeout,
                     "previous_attempts": (task.input_context.get("previous_attempts") or []) + [
                         {
                             "attempt": attempt_num,
@@ -438,7 +561,9 @@ class SolverAgent(WorkerAgent):
                             "returncode": returncode,
                             "stderr": stderr,
                             "stdout": stdout,
+                            "near_miss_candidates": near_miss[:3],
                             "error_summary": f"Attempt {attempt_num} failed: exit code {returncode}",
+                            "error_diagnosis": error_diagnosis,
                         }
                     ],
                 },
@@ -447,6 +572,8 @@ class SolverAgent(WorkerAgent):
             )
             new_tasks.append(retry_task)
             worker_notes.append(f"Solver attempt {attempt_num} produced no flags; scheduling retry.")
+            if near_miss:
+                worker_notes.append(f"Near-miss flag patterns detected: {near_miss[:3]}")
 
         output_context["flag_candidates"] = flag_candidates
         output_context["solver_code_preview"] = guidance.solver_code[:500]
@@ -455,7 +582,7 @@ class SolverAgent(WorkerAgent):
         if guidance.reasoning:
             output_context["llm_summary"] = guidance.summary
 
-        success = bool(flag_candidates) or returncode == 0
+        success = bool(flag_candidates)
         return WorkerReport(
             task_id=task.task_id,
             worker_name=self.name,

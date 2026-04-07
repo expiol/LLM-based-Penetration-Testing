@@ -27,7 +27,9 @@ solver_language = str(payload.get("solver_language") or "python")
 records = []
 notes_list = []
 flag_candidates = []
+near_miss_candidates = []
 flag_re = re.compile(r"[A-Za-z0-9_]{2,}\{[ -~]{4,200}\}")
+near_miss_re = re.compile(r"[A-Za-z0-9_]{2,}\{[^\n]{4,200}\}")
 
 
 def _plausible_flag(m):
@@ -38,6 +40,21 @@ def _plausible_flag(m):
     if any(ord(c) < 32 or ord(c) == 127 for c in body):
         return False
     return True
+
+
+def _near_miss_flag(m):
+    # Detect flag-shaped strings that have non-printable chars (garbled decryption).
+    prefix, _, body = m.partition("{")
+    body = body.rstrip("}")
+    if not prefix or not body:
+        return False
+    if len(prefix) < 2:
+        return False
+    printable = sum(1 for c in body if 32 <= ord(c) <= 126)
+    if len(body) == 0:
+        return False
+    ratio = printable / len(body)
+    return 0.70 <= ratio < 1.0
 
 if not solver_code.strip():
     records.append({"type": "summary", "text": "Solver execution skipped: no solver code provided."})
@@ -98,9 +115,19 @@ try:
             if match not in flag_candidates and _plausible_flag(match):
                 flag_candidates.append(match)
 
+    if not flag_candidates:
+        for text in (stdout, stderr):
+            for match in near_miss_re.findall(text):
+                if match not in flag_candidates and match not in near_miss_candidates and _near_miss_flag(match):
+                    near_miss_candidates.append(match)
+
     notes_list.append(f"Solver script executed with {interpreter[0]}, exit code {returncode}.")
     if flag_candidates:
         notes_list.append(f"Recovered {len(flag_candidates)} flag candidate(s) from solver output.")
+    if near_miss_candidates:
+        notes_list.append(
+            f"Detected {len(near_miss_candidates)} near-miss flag pattern(s) with non-printable characters."
+        )
 
 except subprocess.TimeoutExpired:
     stdout = ""
@@ -145,6 +172,7 @@ records.append({
         "stdout_preview": stdout[:2000],
         "stderr_preview": stderr[:1000],
         "flag_candidates": flag_candidates[:10],
+        "near_miss_candidates": near_miss_candidates[:5],
     },
 })
 records.append({
@@ -155,6 +183,7 @@ records.append({
     "stdout": stdout[:4000],
     "stderr": stderr[:2000],
     "flag_candidates": flag_candidates[:10],
+    "near_miss_candidates": near_miss_candidates[:5],
     "manual_checks": [
         "Review solver stdout for partial flag fragments or encoded data.",
         "Check stderr for missing dependencies that could be installed.",

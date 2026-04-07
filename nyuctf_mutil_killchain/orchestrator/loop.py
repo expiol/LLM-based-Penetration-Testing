@@ -50,10 +50,62 @@ class Orchestrator:
             return None, None
         routable = [w for w in candidates if w.can_route_task(task, self.state)[0]]
         if not routable:
-            return None, None
+            if self._try_repair_task_context(task, candidates):
+                routable = [w for w in candidates if w.can_route_task(task, self.state)[0]]
+            if not routable:
+                return None, None
         decision = self.router.route(task=task, state=self.state, candidates=routable)
         worker = next((c for c in routable if c.name == decision.worker_name), None)
         return worker, decision
+
+    def _try_repair_task_context(
+        self, task: Task, candidates: list[WorkerAgent],
+    ) -> bool:
+        """Last-resort attempt to fill missing required context from state."""
+        ctx = task.input_context
+        challenge_meta = self.state.metadata.get("challenge", {})
+        challenge_files = challenge_meta.get("files", [])
+        if not challenge_files:
+            return False
+
+        missing: set[str] = set()
+        for worker in candidates:
+            for key in worker.required_context_keys:
+                value = ctx.get(key)
+                if value in (None, "", [], {}, ()):
+                    missing.add(key)
+
+        if not missing:
+            return False
+
+        _SOURCE_EXTS = {
+            ".py", ".js", ".rb", ".pl", ".sh", ".c", ".cpp", ".h", ".java",
+            ".php", ".go", ".rs", ".sage", ".txt", ".md", ".yml", ".yaml",
+            ".json", ".xml", ".html", ".css", ".sql", ".lua", ".r",
+        }
+        repaired = False
+
+        if "files_root" in missing:
+            ctx["files_root"] = "/home/ctfplayer/ctf_files"
+            repaired = True
+
+        if "source_files" in missing:
+            inferred = [
+                f for f in challenge_files
+                if "." in f and ("." + f.rsplit(".", 1)[-1].lower()) in _SOURCE_EXTS
+            ]
+            ctx["source_files"] = inferred or challenge_files
+            repaired = True
+
+        if "binary_files" in missing:
+            ctx["binary_files"] = [
+                f for f in challenge_files
+                if "." not in f
+                or ("." + f.rsplit(".", 1)[-1].lower()) not in _SOURCE_EXTS
+            ]
+            repaired = True
+
+        return repaired
 
     def refresh_plan(self, cycle: int) -> bool:
         decision = self.planner.plan(self.state)
