@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import time
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, TypeVar, get_args, get_origin
 from urllib import error, request
+
+log = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -471,6 +475,10 @@ def _massage_payload_for_schema(payload: Any, schema: type[ModelT]) -> Any:
 class LLMClientError(RuntimeError):
     """Raised when an LLM call or response cannot be used safely."""
 
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
+
 
 class LLMClient(Protocol):
     """Protocol for workers and planners that require structured JSON output."""
@@ -496,6 +504,7 @@ class LLMSettings(BaseModel):
     model: str | None = None
     api_key: str | None = None
     timeout_s: int = Field(default=30, ge=1)
+    max_retries: int = Field(default=3, ge=0)
 
     @classmethod
     def from_env(cls) -> "LLMSettings":
@@ -505,6 +514,7 @@ class LLMSettings(BaseModel):
             model=os.getenv("AUTOPENTEST_LLM_MODEL"),
             api_key=os.getenv("AUTOPENTEST_LLM_API_KEY"),
             timeout_s=int(os.getenv("AUTOPENTEST_LLM_TIMEOUT_S", "30")),
+            max_retries=int(os.getenv("AUTOPENTEST_LLM_MAX_RETRIES", "3")),
         )
 
 
@@ -562,11 +572,19 @@ def _default_transport(
     except error.HTTPError as exc:
         response_body = exc.read().decode("utf-8", errors="replace")
         detail = response_body[:400] if response_body else str(exc)
-        raise LLMClientError(f"LLM request failed with HTTP {exc.code}: {detail}") from exc
+        is_transient = exc.code in (429, 500, 502, 503, 504)
+        raise LLMClientError(
+            f"LLM request failed with HTTP {exc.code}: {detail}",
+            transient=is_transient,
+        ) from exc
     except error.URLError as exc:
-        raise LLMClientError(f"LLM request failed: {exc}") from exc
+        raise LLMClientError(
+            f"LLM request failed: {exc}", transient=True,
+        ) from exc
     except (socket.timeout, TimeoutError) as exc:
-        raise LLMClientError(f"LLM request timed out after {timeout_s}s: {exc}") from exc
+        raise LLMClientError(
+            f"LLM request timed out after {timeout_s}s: {exc}", transient=True,
+        ) from exc
     finally:
         socket.setdefaulttimeout(old_default)
 
@@ -653,6 +671,9 @@ def _coerce_json_text(raw_text: str) -> str:
 class OpenAICompatibleLLMClient:
     """Structured-output client for OpenAI-compatible chat completion endpoints."""
 
+    _RETRY_BASE_DELAY = 2.0
+    _RETRY_MAX_DELAY = 60.0
+
     def __init__(
         self,
         *,
@@ -660,12 +681,14 @@ class OpenAICompatibleLLMClient:
         model: str,
         api_key: str,
         timeout_s: int = 30,
+        max_retries: int = 3,
         transport: Transport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout_s = timeout_s
+        self.max_retries = max_retries
         self.transport = transport or _default_transport
 
     def _extract_text_content(self, payload: dict[str, Any]) -> str:
@@ -684,6 +707,35 @@ class OpenAICompatibleLLMClient:
             if parts:
                 return "".join(parts)
         raise LLMClientError("LLM response content is not a supported text shape.")
+
+    def _call_transport(self, body: bytes, headers: dict[str, str]) -> dict[str, Any]:
+        """Single HTTP call with retry on transient failures."""
+        last_error: LLMClientError | None = None
+        for attempt in range(1 + self.max_retries):
+            try:
+                return self.transport(
+                    f"{self.base_url}/chat/completions",
+                    headers,
+                    body,
+                    self.timeout_s,
+                )
+            except LLMClientError as exc:
+                last_error = exc
+                if not exc.transient or attempt >= self.max_retries:
+                    raise
+                delay = min(
+                    self._RETRY_BASE_DELAY * (2 ** attempt),
+                    self._RETRY_MAX_DELAY,
+                )
+                log.warning(
+                    "LLM transient error (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1,
+                    1 + self.max_retries,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
+        raise last_error  # type: ignore[misc]
 
     def generate_json(
         self,
@@ -707,12 +759,7 @@ class OpenAICompatibleLLMClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        response_payload = self.transport(
-            f"{self.base_url}/chat/completions",
-            headers,
-            body,
-            self.timeout_s,
-        )
+        response_payload = self._call_transport(body, headers)
         raw_text = self._extract_text_content(response_payload)
         try:
             structured = json.loads(_coerce_json_text(raw_text))
@@ -745,4 +792,5 @@ def build_llm_client_from_env() -> LLMClient:
         model=settings.model,
         api_key=settings.api_key,
         timeout_s=settings.timeout_s,
+        max_retries=settings.max_retries,
     )

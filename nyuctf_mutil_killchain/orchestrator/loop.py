@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
 import traceback
 from collections.abc import Callable, Iterable
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
+from nyuctf_mutil_killchain.llm import LLMClientError
 from nyuctf_mutil_killchain.orchestrator.planner import HeuristicPlanner, TaskPlanner
 from nyuctf_mutil_killchain.orchestrator.router import (
     HeuristicWorkerRouter,
@@ -202,6 +204,23 @@ class Orchestrator:
 
                 try:
                     report = worker.run(task, self.state)
+                except LLMClientError as exc:
+                    tb_text = traceback.format_exc(limit=20)
+                    tag = "TRANSIENT LLM ERROR" if exc.transient else "LLM ERROR"
+                    self.emit(
+                        f"[cycle {cycle}] {tag} in {worker.name} "
+                        f"while executing {task.task_id}: {exc}"
+                    )
+                    report = WorkerReport(
+                        task_id=task.task_id,
+                        worker_name=worker.name,
+                        success=False,
+                        summary=f"Worker {worker.name} raised {type(exc).__name__}: {exc}",
+                        error=tb_text,
+                    )
+                    if exc.transient:
+                        self.emit(f"[cycle {cycle}] cooldown 5s before next dispatch")
+                        time.sleep(5)
                 except Exception as exc:
                     tb_text = traceback.format_exc(limit=20)
                     self.emit(
