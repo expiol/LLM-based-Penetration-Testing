@@ -163,7 +163,7 @@ def _iter_strings(value: Any) -> list[str]:
         text = value.strip()
         return [text] if text else []
     if isinstance(value, dict):
-        for key in ("path", "url", "route", "endpoint", "text", "summary", "description", "reason", "title"):
+        for key in ("path", "url", "route", "endpoint", "text", "summary", "description", "reason", "title", "value"):
             nested = value.get(key)
             if isinstance(nested, str) and nested.strip():
                 return [nested.strip()]
@@ -427,6 +427,9 @@ def _massage_payload_for_schema(payload: Any, schema: type[ModelT]) -> Any:
             "focus_asset_ids",
             "login_paths",
             "privileged_paths",
+            "text_payloads",
+            "query_variants",
+            "filename_variants",
         }:
             normalized[field_name] = _iter_strings(value)
             continue

@@ -10,12 +10,11 @@ from nyuctf_mutil_killchain.agents.base import (
     build_flag_validation_task,
     build_service_banner_task,
     build_web_review_task,
-    infer_host_context,
     infer_web_urls,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
 from nyuctf_mutil_killchain.prompts import get_worker_system_prompt
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
+from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
 
@@ -29,9 +28,11 @@ class HostAuditAgent(WorkerAgent):
 
     name = "host-audit-agent"
     supported_task_types = ("host.audit", "host.port_scan")
+    required_context_keys = ("asset_id", "hostname")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
-        asset_id, hostname = infer_host_context(task, state)
+        asset_id = task.input_context.get("asset_id")
+        hostname = task.input_context.get("hostname")
         if not asset_id and not hostname:
             return WorkerReport(
                 task_id=task.task_id,
@@ -40,6 +41,7 @@ class HostAuditAgent(WorkerAgent):
                 summary="Missing host task context.",
                 error="asset_id or hostname is required in task.input_context",
                 retryable=False,
+                error_code=TaskErrorCode.MISSING_REQUIRED_CONTEXT,
             )
 
         if self.execution_plane is None:

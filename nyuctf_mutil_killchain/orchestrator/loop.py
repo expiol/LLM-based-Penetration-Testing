@@ -14,7 +14,7 @@ from nyuctf_mutil_killchain.orchestrator.router import (
     WorkerRouteDecision,
     WorkerRouter,
 )
-from nyuctf_mutil_killchain.state import GlobalState, RunStatus, Task, TaskStatus, WorkerReport
+from nyuctf_mutil_killchain.state import GlobalState, RunStatus, Task, TaskErrorCode, TaskStatus, WorkerReport
 from nyuctf_mutil_killchain.state.models import utc_now
 
 
@@ -46,29 +46,65 @@ class Orchestrator:
         self.router = router or HeuristicWorkerRouter()
         self.emit = emit
 
-    def select_worker(self, task: Task) -> tuple[WorkerAgent | None, WorkerRouteDecision | None]:
+    def select_worker(
+        self, task: Task,
+    ) -> tuple[WorkerAgent | None, WorkerRouteDecision | None, str]:
+        """Select a worker for *task*.
+
+        Returns ``(worker, decision, reject_reason)``.  *reject_reason* is a
+        human-readable string explaining why no worker was selected (empty
+        string on success).
+        """
         candidates = [worker for worker in self.workers if worker.supports(task)]
         if not candidates:
-            return None, None
+            return None, None, f"no worker registered for task type {task.task_type!r}"
+
         routable = [w for w in candidates if w.can_route_task(task, self.state)[0]]
         if not routable:
             if self._try_repair_task_context(task, candidates):
                 routable = [w for w in candidates if w.can_route_task(task, self.state)[0]]
             if not routable:
-                return None, None
+                reasons = [
+                    f"{w.name}: {w.can_route_task(task, self.state)[1]}"
+                    for w in candidates
+                ]
+                return None, None, "; ".join(reasons)
+
         decision = self.router.route(task=task, state=self.state, candidates=routable)
         worker = next((c for c in routable if c.name == decision.worker_name), None)
-        return worker, decision
+        return worker, decision, ""
+
+    def _validate_task_for_dispatch(
+        self, task: Task,
+    ) -> tuple[bool, str | None, TaskErrorCode | None]:
+        """Pre-validate a task before dispatch.
+
+        Returns ``(valid, reason, error_code)``.  Checks that referenced
+        asset IDs actually exist in state (except for recon tasks which
+        create them).
+        """
+        ctx_asset_id = task.input_context.get("asset_id")
+        if ctx_asset_id and ctx_asset_id not in self.state.assets:
+            if not task.task_type.startswith("recon."):
+                return (
+                    False,
+                    f"asset_id {ctx_asset_id!r} not found in state.assets",
+                    TaskErrorCode.UNKNOWN_ASSET_ID,
+                )
+        return True, None, None
 
     def _try_repair_task_context(
         self, task: Task, candidates: list[WorkerAgent],
     ) -> bool:
-        """Last-resort attempt to fill missing required context from state."""
+        """Last-resort repair for missing context fields.
+
+        Fills high-confidence fields derived from challenge metadata
+        (``files_root``, ``source_files``, ``binary_files``) and infers
+        network identity fields (``asset_id``, ``base_url``, ``hostname``,
+        ``ports``) via ``GlobalState.infer_asset_identity`` when the
+        inference is unambiguous.  All repairs are logged via ``self.emit``.
+        """
         ctx = task.input_context
-        challenge_meta = self.state.metadata.get("challenge", {})
-        challenge_files = challenge_meta.get("files", [])
-        if not challenge_files:
-            return False
 
         missing: set[str] = set()
         for worker in candidates:
@@ -80,31 +116,45 @@ class Orchestrator:
         if not missing:
             return False
 
-        _SOURCE_EXTS = {
-            ".py", ".js", ".rb", ".pl", ".sh", ".c", ".cpp", ".h", ".java",
-            ".php", ".go", ".rs", ".sage", ".txt", ".md", ".yml", ".yaml",
-            ".json", ".xml", ".html", ".css", ".sql", ".lua", ".r",
-        }
         repaired = False
 
-        if "files_root" in missing:
-            ctx["files_root"] = "/home/ctfplayer/ctf_files"
-            repaired = True
+        # --- Artifact file fields (require challenge_files) ---
+        challenge_meta = self.state.metadata.get("challenge", {})
+        challenge_files = challenge_meta.get("files", [])
+        if challenge_files:
+            _SOURCE_EXTS = {
+                ".py", ".js", ".rb", ".pl", ".sh", ".c", ".cpp", ".h", ".java",
+                ".php", ".go", ".rs", ".sage", ".txt", ".md", ".yml", ".yaml",
+                ".json", ".xml", ".html", ".css", ".sql", ".lua", ".r",
+            }
 
-        if "source_files" in missing:
-            inferred = [
-                f for f in challenge_files
-                if "." in f and ("." + f.rsplit(".", 1)[-1].lower()) in _SOURCE_EXTS
-            ]
-            ctx["source_files"] = inferred or challenge_files
-            repaired = True
+            if "files_root" in missing:
+                ctx["files_root"] = "/home/ctfplayer/ctf_files"
+                self.emit(f"[repair] {task.task_id}: filled files_root=/home/ctfplayer/ctf_files")
+                repaired = True
 
-        if "binary_files" in missing:
-            ctx["binary_files"] = [
-                f for f in challenge_files
-                if "." not in f
-                or ("." + f.rsplit(".", 1)[-1].lower()) not in _SOURCE_EXTS
-            ]
+            if "source_files" in missing:
+                inferred = [
+                    f for f in challenge_files
+                    if "." in f and ("." + f.rsplit(".", 1)[-1].lower()) in _SOURCE_EXTS
+                ]
+                ctx["source_files"] = inferred or challenge_files
+                self.emit(f"[repair] {task.task_id}: filled source_files ({len(ctx['source_files'])} file(s))")
+                repaired = True
+
+            if "binary_files" in missing:
+                ctx["binary_files"] = [
+                    f for f in challenge_files
+                    if "." not in f
+                    or ("." + f.rsplit(".", 1)[-1].lower()) not in _SOURCE_EXTS
+                ]
+                self.emit(f"[repair] {task.task_id}: filled binary_files ({len(ctx['binary_files'])} file(s))")
+                repaired = True
+
+        # --- Network identity fields (delegated to GlobalState) ---
+        filled = self.state.infer_asset_identity(ctx)
+        for field_name, field_value in filled.items():
+            self.emit(f"[repair] {task.task_id}: filled {field_name}={field_value}")
             repaired = True
 
         return repaired
@@ -184,12 +234,21 @@ class Orchestrator:
                 if self.state.solved:
                     break
 
-                worker, route_decision = self.select_worker(task)
-                if worker is None:
-                    task.mark_blocked(f"No worker registered for task type {task.task_type!r}.")
+                # Pre-dispatch validation
+                valid, reason, error_code = self._validate_task_for_dispatch(task)
+                if not valid:
+                    task.mark_blocked(reason or "dispatch refused", error_code=error_code)
                     self.emit(
-                        f"[cycle {cycle}] blocked {task.task_id}: "
-                        f"no worker handles {task.task_type!r}"
+                        f"[cycle {cycle}] dispatch_refused {task.task_id}: "
+                        f"{reason} (error_code={error_code})"
+                    )
+                    continue
+
+                worker, route_decision, reject_reason = self.select_worker(task)
+                if worker is None:
+                    task.mark_blocked(reject_reason, error_code=TaskErrorCode.DISPATCH_REFUSED)
+                    self.emit(
+                        f"[cycle {cycle}] blocked {task.task_id}: {reject_reason}"
                     )
                     continue
 

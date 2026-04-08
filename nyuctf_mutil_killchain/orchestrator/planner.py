@@ -49,7 +49,7 @@ APPROVED_TASK_TYPES = frozenset(
         # Web assessment
         "web.review_surface",
         "web.content_review",
-        "web.form_probe",
+        # web.form_probe requires form data only available from WebContentAgent follow-ups
         "web.path_probe",
         "web.crawl",
         "web.header_analysis",
@@ -60,8 +60,8 @@ APPROVED_TASK_TYPES = frozenset(
         # Targeted exploitation (requires explicit scope auth)
         "exploit.hypothesis",
         "exploit.cve_probe",
-        "exploit.sqli",
         "exploit.credential_test",
+        "exploit.sqli",
         # Post-exploitation (requires explicit scope auth)
         "post_exploit.loot",
         "post_exploit.lateral_move",
@@ -247,6 +247,18 @@ class LLMPlanner(TaskPlanner):
             task for task in raw_decision.tasks if task.task_type in APPROVED_TASK_TYPES
         ]
 
+        # Cap solver attempts: prevent the LLM planner from scheduling unlimited
+        # fresh solve.generate_script tasks when previous attempts have failed.
+        _MAX_SOLVER_TOTAL = 6
+        solver_total = sum(
+            1 for t in state.task_chain.tasks
+            if t.task_type == "solve.generate_script"
+        )
+        sanitized_tasks = [
+            task for task in sanitized_tasks
+            if task.task_type != "solve.generate_script" or solver_total < _MAX_SOLVER_TOTAL
+        ]
+
         merged_tasks = list(bootstrap_decision.tasks)
         existing_dedupe_keys = {t.dedupe_key for t in merged_tasks if t.dedupe_key}
         for task in sanitized_tasks:
@@ -270,14 +282,7 @@ class LLMPlanner(TaskPlanner):
     # ------------------------------------------------------------------
 
     def _normalize_planned_task(self, task: PlannedTask, state: GlobalState) -> None:
-        """Fill in missing required input_context fields from state.
-
-        The LLM planner frequently omits required fields like ``source_files``
-        or ``files_root``, causing downstream workers to reject the task in
-        ``can_route_task``.  This method infers sensible defaults from the
-        challenge metadata and accumulated findings before the task enters the
-        queue.
-        """
+        """Normalize context fields from challenge metadata and discovered assets."""
         ctx = task.input_context
         challenge_meta = state.metadata.get("challenge", {})
         challenge_files = challenge_meta.get("files", [])
@@ -301,6 +306,18 @@ class LLMPlanner(TaskPlanner):
 
         if task.task_type == "artifact.deep_review":
             self._normalize_deep_review_context(ctx, challenge_files)
+
+        # Network tasks: infer identity fields from discovered assets
+        if task.task_type.startswith(("web.", "host.", "vuln.", "exploit.")):
+            state.infer_asset_identity(ctx)
+
+        # vuln.*: derive target from base_url or hostname
+        if task.task_type.startswith("vuln.") and not ctx.get("target"):
+            ctx["target"] = ctx.get("base_url") or ctx.get("hostname") or ""
+
+        # web.form_probe: derive page_url from base_url if already present
+        if task.task_type == "web.form_probe" and not ctx.get("page_url") and ctx.get("base_url"):
+            ctx["page_url"] = ctx["base_url"]
 
     @staticmethod
     def _infer_source_files(
@@ -452,6 +469,10 @@ class LLMPlanner(TaskPlanner):
                 f"{','.join(str(port) for port in ports[:6])}:"
                 f"{','.join(str(item) for item in credential_ids[:4])}"
             )
+        if task.task_type == "exploit.sqli":
+            asset_id = task.input_context.get("asset_id", task.title)
+            target = task.input_context.get("base_url") or task.input_context.get("hostname") or task.title
+            return f"exploit-sqli:{asset_id}:{target}"
         if task.task_type == "web.path_probe":
             asset_id = task.input_context.get("asset_id", task.title)
             base_url = task.input_context.get("base_url", task.title)

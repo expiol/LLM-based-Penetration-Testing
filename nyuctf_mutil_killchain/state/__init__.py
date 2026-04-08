@@ -14,6 +14,7 @@ from nyuctf_mutil_killchain.state.models import (
     Severity,
     Task,
     TaskChain,
+    TaskErrorCode,
     TaskStatus,
     WorkerReport,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "Severity",
     "Task",
     "TaskChain",
+    "TaskErrorCode",
     "TaskStatus",
     "WorkerReport",
 ]

@@ -10,10 +10,9 @@ from nyuctf_mutil_killchain.agents.base import (
     build_flag_hunt_task,
     build_flag_validation_task,
     build_path_probe_tasks_for_assets,
-    infer_web_context,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
+from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
 
@@ -31,16 +30,11 @@ class VulnScanAgent(WorkerAgent):
 
     name = "vuln-scan-agent"
     supported_task_types = ("vuln.",)
+    required_context_keys = ("asset_id", "target")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
-        inferred_asset_id, inferred_base_url = infer_web_context(task, state)
-        asset_id = task.input_context.get("asset_id") or inferred_asset_id
-        target = (
-            task.input_context.get("target")
-            or task.input_context.get("base_url")
-            or inferred_base_url
-            or task.input_context.get("hostname")
-        )
+        asset_id = task.input_context.get("asset_id")
+        target = task.input_context.get("target")
         if not asset_id or not target:
             return WorkerReport(
                 task_id=task.task_id,
@@ -49,6 +43,7 @@ class VulnScanAgent(WorkerAgent):
                 summary="Missing vuln scan context.",
                 error="asset_id and target (or base_url/hostname) are required in task.input_context",
                 retryable=False,
+                error_code=TaskErrorCode.MISSING_REQUIRED_CONTEXT,
             )
 
         if self.execution_plane is None:

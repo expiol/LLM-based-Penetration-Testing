@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.llm import LLMClient
-from nyuctf_mutil_killchain.state import GlobalState, Severity, Task, WorkerReport, Finding
+from nyuctf_mutil_killchain.state import GlobalState, Severity, Task, TaskErrorCode, WorkerReport, Finding
 
 
 class FlagValidationAssessment(BaseModel):
@@ -25,6 +25,7 @@ class FlagValidationAgent(WorkerAgent):
 
     name = "flag-validation-agent"
     supported_task_types = ("flag.validate",)
+    required_context_keys = ("candidate_flag",)
 
     def __init__(self, *, llm_client: LLMClient | None = None, expected_flag: str | None = None):
         super().__init__(llm_client=llm_client, execution_plane=None)
@@ -41,6 +42,7 @@ class FlagValidationAgent(WorkerAgent):
                 summary="Missing candidate flag.",
                 error="candidate_flag is required in task.input_context",
                 retryable=False,
+                error_code=TaskErrorCode.MISSING_REQUIRED_CONTEXT,
             )
 
         worker_notes: list[str] = []

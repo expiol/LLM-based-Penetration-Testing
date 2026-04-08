@@ -6,10 +6,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from nyuctf_mutil_killchain.agents.base import WorkerAgent, build_web_content_task, infer_web_context
+from nyuctf_mutil_killchain.agents.base import WorkerAgent, build_web_content_task
 from nyuctf_mutil_killchain.llm import LLMClientError
 from nyuctf_mutil_killchain.prompts import get_worker_system_prompt
-from nyuctf_mutil_killchain.state import Finding, GlobalState, Severity, Task, WorkerReport
+from nyuctf_mutil_killchain.state import Finding, GlobalState, Severity, Task, TaskErrorCode, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
 
@@ -31,9 +31,11 @@ class WebAssessmentAgent(WorkerAgent):
 
     name = "web-assessment-agent"
     supported_task_types = ("web.review_surface", "web.header_analysis")
+    required_context_keys = ("asset_id", "base_url")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
-        asset_id, base_url = infer_web_context(task, state)
+        asset_id = task.input_context.get("asset_id")
+        base_url = task.input_context.get("base_url")
         if not asset_id or not base_url:
             return WorkerReport(
                 task_id=task.task_id,
@@ -42,6 +44,7 @@ class WebAssessmentAgent(WorkerAgent):
                 summary="Missing web task context.",
                 error="asset_id and base_url are required in task.input_context",
                 retryable=False,
+                error_code=TaskErrorCode.MISSING_REQUIRED_CONTEXT,
             )
 
         evidence_updates = []

@@ -12,13 +12,11 @@ from nyuctf_mutil_killchain.agents.base import (
     build_source_review_task,
     build_web_content_task,
     build_web_review_task,
-    infer_host_context,
-    infer_web_context,
     infer_web_urls_from_banners,
     merge_unique_strings,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import EvidenceReviewGuidance
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
+from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
 
@@ -447,6 +445,7 @@ class ServiceBannerAgent(WorkerAgent):
 
     name = "service-banner-agent"
     supported_task_types = ("host.banner_grab", "host.service_fingerprint")
+    required_context_keys = ("asset_id", "hostname", "ports")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
         if self.execution_plane is None:
@@ -459,7 +458,19 @@ class ServiceBannerAgent(WorkerAgent):
                 retryable=False,
             )
 
-        asset_id, hostname = infer_host_context(task, state)
+        asset_id = task.input_context.get("asset_id")
+        hostname = task.input_context.get("hostname")
+        if not asset_id or not hostname:
+            return WorkerReport(
+                task_id=task.task_id,
+                worker_name=self.name,
+                success=False,
+                summary="Missing host context for banner collection.",
+                error="asset_id and hostname are required in task.input_context",
+                error_code=TaskErrorCode.MISSING_REQUIRED_CONTEXT,
+                retryable=False,
+            )
+
         request = ToolExecutionRequest(
             tool_name="tcp_banner_probe",
             parser_name="jsonl_signals",
@@ -527,6 +538,7 @@ class WebPathProbeAgent(WorkerAgent):
 
     name = "web-path-probe-agent"
     supported_task_types = ("web.path_probe",)
+    required_context_keys = ("asset_id", "base_url", "paths")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
         if self.execution_plane is None:
@@ -539,7 +551,8 @@ class WebPathProbeAgent(WorkerAgent):
                 retryable=False,
             )
 
-        asset_id, base_url = infer_web_context(task, state)
+        asset_id = task.input_context.get("asset_id")
+        base_url = task.input_context.get("base_url")
         request = ToolExecutionRequest(
             tool_name="http_path_probe",
             parser_name="jsonl_signals",

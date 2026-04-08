@@ -48,6 +48,7 @@ class ReconAgent(WorkerAgent):
 
     name = "recon-agent"
     supported_task_types = ("recon.",)
+    required_context_keys = ("scope",)
 
     def _generate_guidance(
         self,
@@ -152,6 +153,16 @@ class ReconAgent(WorkerAgent):
             metadata={"source_task_id": task.task_id, "source": "recon_agent"},
         )
 
+        # For plain-host scope entries, infer a base_url from known services
+        # so that downstream web agents can find a usable web context.
+        if not is_url and services:
+            inferred_urls = infer_web_urls(
+                hostname=hostname, ip_address=ip_address, services=services,
+            )
+            if inferred_urls:
+                asset.base_url = inferred_urls[0]
+                asset.kind = AssetKind.WEB_APPLICATION
+
         # For plain-host scope entries with an execution plane, run an initial port scan
         if not is_url and self.execution_plane is not None:
             scan_request = ToolExecutionRequest(
@@ -168,6 +179,16 @@ class ReconAgent(WorkerAgent):
                 # Merge any services/IP discovered by the port scan into our asset
                 for scanned_asset in bundle.parsed.asset_updates:
                     asset.merge(scanned_asset)
+                # Update base_url from newly discovered services
+                if not asset.base_url:
+                    post_scan_urls = infer_web_urls(
+                        hostname=asset.hostname,
+                        ip_address=asset.ip_address,
+                        services=asset.services,
+                    )
+                    if post_scan_urls:
+                        asset.base_url = post_scan_urls[0]
+                        asset.kind = AssetKind.WEB_APPLICATION
                 output_context = {
                     "asset_id": asset.asset_id,
                     "scope": scope_entry,

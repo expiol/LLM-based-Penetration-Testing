@@ -872,11 +872,13 @@ def infer_web_context(
     task: Task,
     state: GlobalState,
 ) -> tuple[str | None, str | None]:
-    """Best-effort inference of (asset_id, base_url) from task context and state.
+    """Resolve (asset_id, base_url) from task context and state.
 
-    Falls back to the first web asset that has a base_url when the task
-    input_context is incomplete — which happens when the LLM planner omits
-    required fields for web.crawl / web.header_analysis / etc.
+    Only performs deterministic lookups:
+    - Both present: return as-is.
+    - asset_id given: look up base_url from that specific asset.
+    - base_url given: find the exact-matching asset.
+    - Neither present: return (None, None). Does NOT guess.
     """
     asset_id = task.input_context.get("asset_id")
     base_url = task.input_context.get("base_url")
@@ -894,10 +896,6 @@ def infer_web_context(
             if asset.base_url == base_url:
                 return asset.asset_id, base_url
 
-    for asset in state.assets.values():
-        if asset.base_url:
-            return asset.asset_id, asset.base_url
-
     return asset_id, base_url
 
 
@@ -905,7 +903,11 @@ def infer_host_context(
     task: Task,
     state: GlobalState,
 ) -> tuple[str | None, str | None]:
-    """Best-effort inference of (asset_id, hostname) from task context and state."""
+    """Resolve (asset_id, hostname) from task context and state.
+
+    Only performs deterministic lookups. Does NOT iterate all assets
+    as a wildcard fallback when both fields are missing.
+    """
     asset_id = task.input_context.get("asset_id")
     hostname = task.input_context.get("hostname")
 
@@ -921,10 +923,6 @@ def infer_host_context(
         for asset in state.assets.values():
             if asset.hostname == hostname:
                 return asset.asset_id, hostname
-
-    for asset in state.assets.values():
-        if asset.hostname:
-            return asset.asset_id, asset.hostname
 
     return asset_id, hostname
 

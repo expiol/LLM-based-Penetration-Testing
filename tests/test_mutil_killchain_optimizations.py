@@ -451,7 +451,10 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
             def execute(self, _task_id, _request):
                 return bundle
 
-        agent = WebPathProbeAgent(execution_plane=FakeExecutionPlane())
+        agent = WebPathProbeAgent(
+            execution_plane=FakeExecutionPlane(),
+            llm_client=StaticLLMClient([{"summary": "test guidance"}]),
+        )
         report = agent.run(
             Task(
                 title="Probe interesting paths for web-1",
@@ -510,7 +513,10 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
             def execute(self, _task_id, _request):
                 return bundle
 
-        agent = WebContentAgent(execution_plane=FakeExecutionPlane())
+        agent = WebContentAgent(
+            execution_plane=FakeExecutionPlane(),
+            llm_client=StaticLLMClient([{"summary": "test note"}]),
+        )
         report = agent.run(
             Task(
                 title="Review upload page",
@@ -579,7 +585,10 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
                 return bundle
 
         plane = FakeExecutionPlane()
-        agent = WebFormProbeAgent(execution_plane=plane)
+        agent = WebFormProbeAgent(
+            execution_plane=plane,
+            llm_client=StaticLLMClient([{"summary": "test guidance"}]),
+        )
         report = agent.run(
             Task(
                 title="Interact with discovered forms for web-1",
@@ -808,7 +817,10 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
             def execute(self, _task_id, _request):
                 return bundle
 
-        agent = WebFormProbeAgent(execution_plane=FakeExecutionPlane())
+        agent = WebFormProbeAgent(
+            execution_plane=FakeExecutionPlane(),
+            llm_client=StaticLLMClient([{"summary": "test guidance"}]),
+        )
         report = agent.run(
             Task(
                 title="Interact with discovered forms for web-1",
@@ -936,7 +948,10 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
             objective="demo",
             metadata={"challenge": {"category": "rev", "files": ["checker.py"]}},
         )
-        agent = ArtifactTriageAgent(execution_plane=FakeExecutionPlane())
+        agent = ArtifactTriageAgent(
+            execution_plane=FakeExecutionPlane(),
+            llm_client=StaticLLMClient([{"summary": "test guidance"}]),
+        )
         report = agent.run(
             Task(
                 title="Inventory challenge files",
@@ -1584,7 +1599,10 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
                 metadata={"secret_value": "swordfish"},
             )
         )
-        agent = CredentialExploitAgent(execution_plane=FakeExecutionPlane())
+        agent = CredentialExploitAgent(
+            execution_plane=FakeExecutionPlane(),
+            llm_client=StaticLLMClient([{"summary": "test guidance"}]),
+        )
 
         report = agent.run(
             Task(

@@ -64,6 +64,20 @@ class Severity(StrEnum):
     CRITICAL = "critical"
 
 
+class TaskErrorCode(StrEnum):
+    """Machine-readable error classification for task failures."""
+
+    MISSING_REQUIRED_CONTEXT = "missing_required_context"
+    INVALID_TASK_TYPE = "invalid_task_type"
+    TASK_CONTEXT_CONFLICT = "task_context_conflict"
+    UNKNOWN_ASSET_ID = "unknown_asset_id"
+    AMBIGUOUS_ASSET_MATCH = "ambiguous_asset_match"
+    RETRY_LIMIT_REACHED = "retry_limit_reached"
+    REPAIR_FAILED = "repair_failed"
+    DISPATCH_REFUSED = "dispatch_refused"
+    WORKER_PRECONDITION_FAILED = "worker_precondition_failed"
+
+
 class AssetKind(StrEnum):
     UNKNOWN = "unknown"
     HOST = "host"
@@ -214,6 +228,7 @@ class Task(BaseModel):
     attempts: int = 0
     max_attempts: int = Field(default=3, ge=1)
     last_error: str | None = None
+    error_code: TaskErrorCode | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -225,6 +240,7 @@ class Task(BaseModel):
         self.assigned_worker = worker_name
         self.attempts += 1
         self.last_error = None
+        self.error_code = None
         self.updated_at = utc_now()
 
     def mark_completed(self, output_context: dict[str, Any] | None = None) -> None:
@@ -233,17 +249,23 @@ class Task(BaseModel):
             self.output_context.update(output_context)
         self.updated_at = utc_now()
 
-    def mark_failed(self, error: str, *, requeue: bool = False) -> None:
+    def mark_failed(
+        self, error: str, *, requeue: bool = False, error_code: TaskErrorCode | None = None,
+    ) -> None:
         self.last_error = error
+        self.error_code = error_code
         if requeue and self.attempts < self.max_attempts:
             self.status = TaskStatus.PENDING
         else:
             self.status = TaskStatus.FAILED
         self.updated_at = utc_now()
 
-    def mark_blocked(self, reason: str) -> None:
+    def mark_blocked(
+        self, reason: str, *, error_code: TaskErrorCode | None = None,
+    ) -> None:
         self.status = TaskStatus.BLOCKED
         self.last_error = reason
+        self.error_code = error_code
         self.updated_at = utc_now()
 
 
@@ -276,7 +298,7 @@ class TaskChain(BaseModel):
                     item
                     for item in self.tasks
                     if item.dedupe_key == task.dedupe_key
-                    and item.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}
+                    and item.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}
                 ),
                 None,
             )
@@ -363,6 +385,7 @@ class WorkerReport(BaseModel):
     new_tasks: list[Task] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     error: str | None = None
+    error_code: TaskErrorCode | None = None
     retryable: bool = True
     solved: bool = False
     validated_flag: str | None = None
@@ -477,6 +500,50 @@ class GlobalState(BaseModel):
         )
         self.notes.extend(report.notes)
         self.touch()
+
+    def infer_asset_identity(self, ctx: dict[str, Any]) -> dict[str, str]:
+        """Fill missing asset_id / base_url / hostname / ports from discovered assets.
+
+        When exactly one asset exists, inference is unambiguous.  When multiple
+        assets exist, only infer if ``ctx["asset_id"]`` already matches a known
+        asset.  Returns a dict of ``{field_name: filled_value}`` for logging.
+        """
+        assets = self.assets
+        if not assets:
+            return {}
+
+        filled: dict[str, str] = {}
+        asset_id = ctx.get("asset_id")
+
+        if asset_id and asset_id in assets:
+            asset = assets[asset_id]
+            if not ctx.get("base_url") and asset.base_url:
+                ctx["base_url"] = asset.base_url
+                filled["base_url"] = asset.base_url
+            if not ctx.get("hostname") and asset.hostname:
+                ctx["hostname"] = asset.hostname
+                filled["hostname"] = asset.hostname
+            if not ctx.get("ports") and asset.services:
+                ctx["ports"] = [s.port for s in asset.services]
+                filled["ports"] = str(ctx["ports"])
+            return filled
+
+        if len(assets) == 1:
+            only_asset = next(iter(assets.values()))
+            if not ctx.get("asset_id"):
+                ctx.setdefault("asset_id", only_asset.asset_id)
+                filled["asset_id"] = only_asset.asset_id
+            if not ctx.get("base_url") and only_asset.base_url:
+                ctx["base_url"] = only_asset.base_url
+                filled["base_url"] = only_asset.base_url
+            if not ctx.get("hostname") and only_asset.hostname:
+                ctx["hostname"] = only_asset.hostname
+                filled["hostname"] = only_asset.hostname
+            if not ctx.get("ports") and only_asset.services:
+                ctx["ports"] = [s.port for s in only_asset.services]
+                filled["ports"] = str(ctx["ports"])
+
+        return filled
 
     def summary(self) -> dict[str, Any]:
         return {
