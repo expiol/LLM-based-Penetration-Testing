@@ -57,9 +57,19 @@ _TECHNIQUE_HINTS = {
     "web": """\
 WEB TECHNIQUE REFERENCE (from real CTF solutions):
 - LFI: curl 'http://host/path?param=../../../flag.txt'
-- SQLi: ' OR 1=1 -- , ' UNION SELECT flag FROM flags --
+- SQLi (string context): ' OR 1=1 -- , ' UNION SELECT flag FROM flags --
+- SQLi (identifier / quoting context): if errors show delimited names (e.g. \
+backticks, brackets), the app may splice parameters inside identifiers — test \
+breakout using that DB's identifier rules and valid comment tokens (#, --) \
+where SQL comments apply; classic quote payloads may be escaped while other \
+characters are not
+- Escaping vs context: map whether each parameter is used inside string literals, \
+identifiers, or ORDER BY — the same sanitizer (e.g. addslashes-style) often \
+misses delimiter-breaking characters
 - SSTI: {{{{7*7}}}}, {{{{config}}}}, {{{{self.__class__.__mro__}}}}
 - Multi-step: register → login → access protected endpoint → get flag
+- Client-side submit handlers: fetch HTML-linked *.js (login, auth, bundle) and \
+mirror any hash/base64/HMAC transforms so POST bodies match what the browser sends
 - Cookie manipulation: decode JWT/base64 cookies, forge admin role
 - Path traversal: ../, %2e%2e/, double encoding
 Use the `requests` library for HTTP interaction.""",
