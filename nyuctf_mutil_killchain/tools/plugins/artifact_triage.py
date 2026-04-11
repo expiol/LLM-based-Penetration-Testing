@@ -46,6 +46,37 @@ text_suffixes = {
 }
 
 flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
+_FP_PREFIXES = frozenset({
+    "html", "body", "div", "span", "input", "button", "textarea",
+    "select", "label", "form", "table", "thead", "tbody", "tr", "td", "th",
+    "ul", "ol", "li", "nav", "header", "footer", "section", "article",
+    "aside", "main", "summary", "details", "dialog", "fieldset", "legend",
+    "img", "video", "audio", "canvas", "svg", "path", "circle", "rect",
+    "code", "pre", "blockquote", "cite", "abbr", "address", "figure",
+    "var", "function", "return", "if", "else", "for", "while", "switch",
+    "case", "class", "interface", "struct", "enum", "type", "export",
+    "import", "from", "const", "let", "new", "delete", "typeof", "void",
+    "null", "undefined", "true", "false", "try", "catch", "throw",
+    "this", "self", "super", "def", "lambda", "yield", "async", "await",
+    "create", "drop", "alter", "insert", "update",
+})
+_CSS_BODY = re.compile(
+    r"^[\s]*([a-z\-]+\s*:\s*[a-z0-9#%.\"', \-()]+\s*;?[\s]*)+$",
+    re.IGNORECASE,
+)
+
+def _plausible_flag(m):
+    prefix, _, body = m.partition("{")
+    body = body.rstrip("}")
+    if not prefix or not body:
+        return False
+    if any(ord(c) < 32 or ord(c) == 127 for c in body):
+        return False
+    if prefix.lower() in _FP_PREFIXES:
+        return False
+    if _CSS_BODY.match(body):
+        return False
+    return True
 
 if not files_root.exists():
     records.append({"type": "summary", "text": f"Artifact triage skipped: {files_root} does not exist."})
@@ -111,6 +142,8 @@ else:
         if sample:
             found_flags = flag_re.findall(sample)
             for flag in found_flags:
+                if not _plausible_flag(flag):
+                    continue
                 if flag not in flag_candidates:
                     flag_candidates.append(flag)
 

@@ -3,18 +3,58 @@
 from __future__ import annotations
 
 import json
+import re
 
 from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
     build_flag_validation_task,
     build_path_probe_tasks_for_assets,
     build_source_review_task,
+    extract_flag_candidates,
     merge_unique_strings,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import EvidenceReviewGuidance
 from nyuctf_mutil_killchain.prompts import get_worker_system_prompt, get_analysis_strategy
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
+
+_MAX_FLAG_VALIDATIONS_FROM_SOURCE_REVIEW = 6
+_ASCII_PRINTABLE_RE = re.compile(r"^[\x20-\x7e]+$")
+
+
+def _extract_flag_prefix(flag_format: str | None) -> str | None:
+    if not flag_format:
+        return None
+    normalized = str(flag_format).strip()
+    if not normalized or "{" not in normalized:
+        return None
+    prefix = normalized.split("{", 1)[0].strip()
+    return prefix if prefix else None
+
+
+def _select_validation_candidates(
+    candidates: list[str],
+    flag_format: str | None,
+) -> list[str]:
+    """Filter noisy source-review candidates before validation fan-out."""
+    refined: list[str] = []
+    for candidate in candidates:
+        cleaned = str(candidate).strip()
+        if not cleaned or not _ASCII_PRINTABLE_RE.match(cleaned):
+            continue
+        extracted = extract_flag_candidates(cleaned)
+        if not extracted:
+            continue
+        for item in extracted:
+            if item not in refined:
+                refined.append(item)
+
+    prefix = _extract_flag_prefix(flag_format)
+    if prefix:
+        preferred = [item for item in refined if item.startswith(f"{prefix}{{")]
+        if preferred:
+            return preferred[:_MAX_FLAG_VALIDATIONS_FROM_SOURCE_REVIEW]
+    return refined[:_MAX_FLAG_VALIDATIONS_FROM_SOURCE_REVIEW]
 
 
 class SourceReviewAgent(WorkerAgent):
@@ -140,6 +180,10 @@ class SourceReviewAgent(WorkerAgent):
                 limit=8,
             )
 
+        flag_candidates = _select_validation_candidates(
+            flag_candidates,
+            challenge_meta.get("flag_format"),
+        )
         new_tasks = [
             build_flag_validation_task(candidate, source="source_review")
             for candidate in flag_candidates

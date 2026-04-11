@@ -26,6 +26,38 @@ flag_candidates = []
 responsive_ports = []
 
 flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
+_FP_PREFIXES = frozenset({
+    "html", "body", "div", "span", "input", "button", "textarea",
+    "select", "label", "form", "table", "thead", "tbody", "tr", "td", "th",
+    "ul", "ol", "li", "nav", "header", "footer", "section", "article",
+    "aside", "main", "summary", "details", "dialog", "fieldset", "legend",
+    "img", "video", "audio", "canvas", "svg", "path", "circle", "rect",
+    "code", "pre", "blockquote", "cite", "abbr", "address", "figure",
+    "var", "function", "return", "if", "else", "for", "while", "switch",
+    "case", "class", "interface", "struct", "enum", "type", "export",
+    "import", "from", "const", "let", "new", "delete", "typeof", "void",
+    "null", "undefined", "true", "false", "try", "catch", "throw",
+    "this", "self", "super", "def", "lambda", "yield", "async", "await",
+    "create", "drop", "alter", "insert", "update",
+})
+_CSS_BODY = re.compile(
+    r"^[\s]*([a-z\-]+\s*:\s*[a-z0-9#%.\"', \-()]+\s*;?[\s]*)+$",
+    re.IGNORECASE,
+)
+
+def _plausible_flag(m):
+    prefix, _, body = m.partition("{")
+    body = body.rstrip("}")
+    if not prefix or not body:
+        return False
+    if any(ord(c) < 32 or ord(c) == 127 for c in body):
+        return False
+    if prefix.lower() in _FP_PREFIXES:
+        return False
+    if _CSS_BODY.match(body):
+        return False
+    return True
+
 http_ports = {80, 443, 8000, 8080, 8443, 8888, 3000, 5000}
 
 for raw_port in ports[:16]:
@@ -62,6 +94,8 @@ for raw_port in ports[:16]:
                 responsive_ports.append(port)
                 banner_hits[str(port)] = banner[:240]
                 for flag in flag_re.findall(banner):
+                    if not _plausible_flag(flag):
+                        continue
                     if flag not in flag_candidates:
                         flag_candidates.append(flag)
     except Exception:

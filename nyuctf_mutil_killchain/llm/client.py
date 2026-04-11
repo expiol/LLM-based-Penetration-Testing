@@ -13,7 +13,7 @@ from urllib import error, request
 
 log = logging.getLogger(__name__)
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 Transport = Callable[[str, dict[str, str], bytes, int], dict[str, Any]]
@@ -382,7 +382,51 @@ def _list_inner_model(schema: type[BaseModel], field_name: str) -> type[BaseMode
     return None
 
 
+def _coerce_json_object_for_schema(payload: Any, schema: type[ModelT]) -> Any:
+    """When the API returns a JSON array (e.g. ``[null, ...]`` or ``[{...}, ...]``), pick a dict or fail closed."""
+
+    if not isinstance(payload, list):
+        return payload
+    dict_items = [x for x in payload if isinstance(x, dict)]
+    if dict_items:
+        field_names = set(schema.model_fields)
+
+        def score(candidate: dict[str, Any]) -> int:
+            s = 0
+            for field_name in field_names:
+                if _lookup_value(candidate, field_name) is not None:
+                    s += 2
+            return s
+
+        return max(dict_items, key=score)
+    return {}
+
+
+def _collect_code_like_strings(obj: Any, *, max_depth: int = 14) -> list[str]:
+    """Walk nested JSON and find strings that look like Python solver code."""
+
+    found: list[str] = []
+
+    def walk(node: Any, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if isinstance(node, str):
+            text = node.strip()
+            if len(text) > 40 and ("import " in text or "\ndef " in text or "\nclass " in text):
+                found.append(text)
+        elif isinstance(node, dict):
+            for value in node.values():
+                walk(value, depth + 1)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item, depth + 1)
+
+    walk(obj, 0)
+    return found
+
+
 def _massage_payload_for_schema(payload: Any, schema: type[ModelT]) -> Any:
+    payload = _coerce_json_object_for_schema(payload, schema)
     if not isinstance(payload, dict):
         return payload
 
@@ -472,6 +516,21 @@ def _massage_payload_for_schema(payload: Any, schema: type[ModelT]) -> Any:
                     f"Execute {task_type} as planned by the LLM planner."
                 )
 
+    # Synthesize solver_code when the LLM omits it but provides code-like content
+    # elsewhere in the response (e.g. in summary or reasoning fields).
+    if "solver_code" in field_names and not normalized.get("solver_code"):
+        for key in ("reasoning", "summary", "explanation", "analysis"):
+            candidate = normalized.get(key) or selected.get(key) or ""
+            if isinstance(candidate, str) and ("import " in candidate or "def " in candidate or "print(" in candidate):
+                # Looks like the LLM put code in a non-code field; extract it
+                normalized["solver_code"] = candidate
+                break
+
+    if "solver_code" in field_names and not normalized.get("solver_code"):
+        for text in _collect_code_like_strings(selected):
+            normalized["solver_code"] = text
+            break
+
     return normalized or selected
 
 
@@ -555,7 +614,23 @@ class StaticLLMClient:
                 payload = json.loads(payload)
             except json.JSONDecodeError as exc:
                 raise LLMClientError(f"StaticLLMClient returned invalid JSON: {exc}") from exc
-        return schema.model_validate(_massage_payload_for_schema(payload, schema))
+        massaged = _massage_payload_for_schema(payload, schema)
+        if isinstance(massaged, dict) and "solver_code" in schema.model_fields:
+            raw_code = massaged.get("solver_code")
+            if not isinstance(raw_code, str) or not raw_code.strip():
+                raise LLMClientError(
+                    "LLM JSON missing non-empty solver_code field.",
+                    transient=True,
+                )
+        try:
+            return schema.model_validate(massaged)
+        except ValidationError as exc:
+            if "solver_code" in schema.model_fields:
+                raise LLMClientError(
+                    f"LLM response failed SolverCodeGuidance validation: {exc}",
+                    transient=True,
+                ) from exc
+            raise
 
 
 def _default_transport(
@@ -768,7 +843,23 @@ class OpenAICompatibleLLMClient:
             structured = json.loads(_coerce_json_text(raw_text))
         except json.JSONDecodeError as exc:
             raise LLMClientError(f"LLM content is not valid JSON: {exc}") from exc
-        return schema.model_validate(_massage_payload_for_schema(structured, schema))
+        massaged = _massage_payload_for_schema(structured, schema)
+        if isinstance(massaged, dict) and "solver_code" in schema.model_fields:
+            raw_code = massaged.get("solver_code")
+            if not isinstance(raw_code, str) or not raw_code.strip():
+                raise LLMClientError(
+                    "LLM JSON missing non-empty solver_code field.",
+                    transient=True,
+                )
+        try:
+            return schema.model_validate(massaged)
+        except ValidationError as exc:
+            if "solver_code" in schema.model_fields:
+                raise LLMClientError(
+                    f"LLM response failed SolverCodeGuidance validation: {exc}",
+                    transient=True,
+                ) from exc
+            raise
 
 
 def build_llm_client_from_env() -> LLMClient:

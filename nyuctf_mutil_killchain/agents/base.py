@@ -736,12 +736,43 @@ _BASE64_BLOB_PATTERN = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
 _HEX_BLOB_PATTERN = re.compile(r"(?:0x)?([0-9a-fA-F]{20,})")
 
 
+_CSS_LIKE_BODY = re.compile(
+    r"^[\s]*"
+    r"("
+    r"[a-z\-]+\s*:\s*[a-z0-9#%.\"', \-()]+\s*;?"
+    r"[\s]*"
+    r")+$",
+    re.IGNORECASE,
+)
+
+_CODE_FALSE_POSITIVE_PREFIXES = frozenset({
+    "html", "body", "div", "span", "input", "button", "textarea",
+    "select", "label", "form", "table", "thead", "tbody", "tr", "td", "th",
+    "ul", "ol", "li", "nav", "header", "footer", "section", "article",
+    "aside", "main", "summary", "details", "dialog", "fieldset", "legend",
+    "img", "video", "audio", "canvas", "svg", "path", "circle", "rect",
+    "code", "pre", "blockquote", "cite", "abbr", "address", "figure",
+    "figcaption", "picture", "source", "track", "embed", "object", "param",
+    "var", "function", "return", "if", "else", "for", "while", "switch",
+    "case", "class", "interface", "struct", "enum", "type", "export",
+    "import", "from", "const", "let", "new", "delete", "typeof", "void",
+    "null", "undefined", "true", "false", "try", "catch", "throw",
+    "this", "self", "super", "extends", "implements", "abstract",
+    "static", "final", "public", "private", "protected", "virtual",
+    "override", "default", "break", "continue", "goto", "do", "elsif",
+    "elif", "def", "lambda", "yield", "async", "await", "with",
+    "create", "drop", "alter", "insert", "update", "select",
+})
+
+
 def _looks_like_plausible_flag(candidate: str) -> bool:
     """Filter out obvious garbage from flag candidate extraction.
 
     Real flags are printable ASCII with only minimal control chars.
     Garbage like ``boo{xFpd]=}`` or ``A{h;~chPtf`m}`` can slip through
     the raw regex but fail basic plausibility checks.
+    Also rejects CSS selectors (``summary{display:block}``),
+    code constructs (``function{...}``), and SQL patterns.
     """
     if not candidate or len(candidate) < 4:
         return False
@@ -759,6 +790,14 @@ def _looks_like_plausible_flag(candidate: str) -> bool:
     control_count = sum(1 for ch in body if ord(ch) < 32 or ord(ch) == 127)
     if control_count > 0:
         return False
+
+    if prefix.lower() in _CODE_FALSE_POSITIVE_PREFIXES:
+        return False
+    if _CSS_LIKE_BODY.match(body):
+        return False
+    if re.match(r"^[\s;,]+$", body):
+        return False
+
     return True
 
 

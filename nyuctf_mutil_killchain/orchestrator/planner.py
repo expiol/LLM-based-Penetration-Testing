@@ -49,7 +49,7 @@ APPROVED_TASK_TYPES = frozenset(
         # Web assessment
         "web.review_surface",
         "web.content_review",
-        # web.form_probe requires form data only available from WebContentAgent follow-ups
+        "web.form_probe",
         "web.path_probe",
         "web.crawl",
         "web.header_analysis",
@@ -227,6 +227,7 @@ class LLMPlanner(TaskPlanner):
     def __init__(self, llm_client: LLMClient, fallback: TaskPlanner | None = None) -> None:
         self.llm_client = llm_client
         self.fallback = fallback or HeuristicPlanner()
+        self._solver_backoff_after_failures = 2
 
     def plan(self, state: GlobalState) -> PlannerDecision:
         bootstrap_decision = self.fallback.plan(state)
@@ -258,6 +259,7 @@ class LLMPlanner(TaskPlanner):
             task for task in sanitized_tasks
             if task.task_type != "solve.generate_script" or solver_total < _MAX_SOLVER_TOTAL
         ]
+        sanitized_tasks = self._apply_solver_backoff_policy(state, sanitized_tasks)
 
         merged_tasks = list(bootstrap_decision.tasks)
         existing_dedupe_keys = {t.dedupe_key for t in merged_tasks if t.dedupe_key}
@@ -276,6 +278,74 @@ class LLMPlanner(TaskPlanner):
             notes=raw_decision.notes + bootstrap_decision.notes,
             stop_run=raw_decision.stop_run,
         )
+
+    def _recent_consecutive_solver_failures(self, state: GlobalState) -> int:
+        """Return trailing consecutive failures for solve.generate_script tasks."""
+        streak = 0
+        for task in reversed(state.task_chain.tasks):
+            if task.task_type != "solve.generate_script":
+                continue
+            if task.status == TaskStatus.FAILED:
+                streak += 1
+                continue
+            break
+        return streak
+
+    def _apply_solver_backoff_policy(
+        self,
+        state: GlobalState,
+        tasks: list[PlannedTask],
+    ) -> list[PlannedTask]:
+        """Pause solver retries after repeated failures and force evidence refresh."""
+        if self._recent_consecutive_solver_failures(state) < self._solver_backoff_after_failures:
+            return tasks
+
+        challenge_meta = state.metadata.get("challenge", {})
+        challenge_files = challenge_meta.get("files", [])
+        source_files = self._infer_source_files(state, challenge_files)
+        binary_files = self._infer_non_source_files(challenge_files)
+
+        filtered = [task for task in tasks if task.task_type != "solve.generate_script"]
+        if len(filtered) != len(tasks):
+            # Use a deterministic dedupe key so repeated planner cycles don't flood tasks.
+            if source_files:
+                filtered.append(
+                    PlannedTask(
+                        title="Refresh source evidence after solver failures",
+                        description=(
+                            "Solver failed repeatedly. Re-run focused source review to collect "
+                            "higher-quality execution clues before another solver attempt."
+                        ),
+                        task_type="artifact.source_review",
+                        priority=94,
+                        input_context={
+                            "files_root": _DEFAULT_FILES_ROOT,
+                            "source_files": source_files[:12],
+                            "max_files": 12,
+                        },
+                        dedupe_key="planner:solver-backoff:source-refresh",
+                        metadata={"planned_by": "llm-planner", "policy": "solver_backoff"},
+                    )
+                )
+            elif binary_files:
+                filtered.append(
+                    PlannedTask(
+                        title="Refresh binary evidence after solver failures",
+                        description=(
+                            "Solver failed repeatedly. Re-run binary triage to obtain concrete "
+                            "strings/structures before next solver generation."
+                        ),
+                        task_type="artifact.binary_triage",
+                        priority=94,
+                        input_context={
+                            "files_root": _DEFAULT_FILES_ROOT,
+                            "binary_files": binary_files[:12],
+                        },
+                        dedupe_key="planner:solver-backoff:binary-refresh",
+                        metadata={"planned_by": "llm-planner", "policy": "solver_backoff"},
+                    )
+                )
+        return filtered
 
     # ------------------------------------------------------------------
     # Task context normalization
@@ -303,6 +373,31 @@ class LLMPlanner(TaskPlanner):
             inferred = self._infer_non_source_files(challenge_files)
             if inferred:
                 ctx["binary_files"] = inferred
+
+        if task.task_type == "artifact.pcap_review" and not ctx.get("pcap_files"):
+            pcap = [
+                f for f in challenge_files
+                if "." in f and f.rsplit(".", 1)[-1].lower() in ("pcap", "pcapng", "cap")
+            ]
+            if pcap:
+                ctx["pcap_files"] = pcap
+
+        if task.task_type == "artifact.sqlite_review" and not ctx.get("database_files"):
+            dbs = [
+                f for f in challenge_files
+                if "." in f and f.rsplit(".", 1)[-1].lower() in ("db", "sqlite", "sqlite3")
+            ]
+            if dbs:
+                ctx["database_files"] = dbs
+
+        if task.task_type == "artifact.archive_triage" and not ctx.get("archive_files"):
+            archives = [
+                f for f in challenge_files
+                if "." in f
+                and f.rsplit(".", 1)[-1].lower() in ("zip", "tar", "gz", "tgz", "bz2", "7z", "rar")
+            ]
+            if archives:
+                ctx["archive_files"] = archives
 
         if task.task_type == "artifact.deep_review":
             self._normalize_deep_review_context(ctx, challenge_files)
@@ -528,16 +623,34 @@ class LLMPlanner(TaskPlanner):
             bucket[task.task_type] = bucket.get(task.task_type, 0) + 1
 
         has_triage = "artifact.triage" in completed_types
-        has_analysis = any(
-            t in completed_types
-            for t in (
-                "artifact.source_review",
-                "artifact.computation_analysis",
-                "artifact.runtime_probe",
-                "artifact.binary_triage",
-                "artifact.deep_review",
-            )
+        _ANALYSIS_TYPES = (
+            "artifact.source_review",
+            "artifact.computation_analysis",
+            "artifact.runtime_probe",
+            "artifact.binary_triage",
+            "artifact.deep_review",
+            "artifact.pcap_review",
+            "artifact.sqlite_review",
+            "artifact.archive_triage",
         )
+        has_analysis = any(t in completed_types for t in _ANALYSIS_TYPES)
+        # When no analysis task has completed, allow progression only if
+        # analysis types are both blocked AND also failed — meaning the
+        # system genuinely tried and exhausted options.  Merely blocked
+        # tasks (e.g. missing context) should not trigger premature solver
+        # scheduling; the planner should attempt to unblock them first.
+        if not has_analysis:
+            blocked_analysis = set()
+            failed_analysis = set()
+            for task in state.task_chain.tasks:
+                if task.task_type in _ANALYSIS_TYPES:
+                    if task.status == TaskStatus.BLOCKED:
+                        blocked_analysis.add(task.task_type)
+                    elif task.status == TaskStatus.FAILED:
+                        failed_analysis.add(task.task_type)
+            exhausted = blocked_analysis & failed_analysis
+            if exhausted or (blocked_analysis and len(blocked_analysis) >= 2):
+                has_analysis = True
         solver_ever_tried = (
             "solve.generate_script" in completed_types
             or "solve.generate_script" in pending_types

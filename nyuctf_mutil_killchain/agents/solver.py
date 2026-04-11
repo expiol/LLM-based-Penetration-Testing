@@ -31,22 +31,45 @@ Challenge category: {category}
 
 {category_strategy}
 
+SOLVING APPROACH:
+1. ALWAYS start your script by reading the actual challenge files from disk. \
+Do NOT rely solely on the evidence snippets — they may be truncated or incomplete. \
+Use open(path, 'rb') or open(path, 'r') to get the full file content.
+2. If the challenge has source code (.py, .c, .rb, etc.), read it first, understand \
+the exact algorithm, then write the inverse/exploit.
+3. For binary files without source, use subprocess to run analysis tools: \
+strings, xxd, file, objdump, readelf, binwalk, etc.
+4. For network captures (.pcap), use scapy or tshark to parse packets.
+5. For remote services, connect with pwntools (from pwn import remote) or requests.
+
 CRITICAL RULES:
 - The script runs inside a Docker container at /home/ctfplayer/ctf_files
 - Challenge files are already present in that directory
-- Print ONLY the flag to stdout (format: flag{{...}} or similar)
+- Print ONLY the flag to stdout (format: flag{{...}} or as specified by flag_format)
 - The script must be self-contained — do not import from custom challenge modules \
 unless they are bundled files you've analyzed
 - Use standard library + common packages (requests, pwntools, pycryptodome, gmpy2, \
-z3-solver, pyshark, PIL, binascii, struct, etc.)
+z3-solver, pyshark, scapy, PIL, binascii, struct, etc.)
 - If the challenge has a remote service, connect to the hostname and port from the \
 evidence (NOT localhost unless explicitly stated)
 - Maximum runtime: {timeout}s
 - Do NOT guess or hallucinate the flag — compute it from the evidence
-- IMPORTANT: If challenge_source_files are provided in the evidence, study them \
-carefully to understand the exact algorithm before writing your solver. Do NOT \
-brute-force when the algorithm can be reversed analytically
+- If challenge_source_files are provided in the evidence, study them carefully to \
+understand the exact algorithm before writing your solver. Do NOT brute-force when \
+the algorithm can be reversed analytically
 - Read any binary files (ciphertext, data blobs) with open(path, 'rb')
+- For challenges with NO remote service (server_name and port are empty/null), the flag \
+is hidden in the bundled files. Read them directly with open() or use subprocess to run \
+analysis tools (strings, xxd, tshark, file, binwalk, etc.)
+- For PCAP files: use scapy (from scapy.all import rdpcap) or pyshark to parse packets, \
+or subprocess.run(['strings', file]) to search for flag patterns. Also try: \
+subprocess.run(['tshark', '-r', file, '-T', 'fields', '-e', 'data'])
+- For binary crypto: read the encrypted file with open(path, 'rb'), reverse the \
+encryption algorithm based on source code analysis
+- NEVER output placeholder flags like flag{{not_found}}, flag{{test}}, \
+flag{{manual_review_required}}. If you cannot determine the flag, output nothing.
+- When flag_format specifies a non-standard prefix (e.g. key{{...}}), make sure your \
+script searches for and outputs flags with that exact prefix.
 
 {technique_hints}
 
@@ -56,13 +79,14 @@ in the solver_code field."""
 _TECHNIQUE_HINTS = {
     "web": """\
 WEB TECHNIQUE REFERENCE (from real CTF solutions):
-- LFI: curl 'http://host/path?param=../../../flag.txt'
+- LFI: requests.get('http://host/path?param=../../../flag.txt')
 - SQLi (string context): ' OR 1=1 -- , ' UNION SELECT flag FROM flags --
 - SQLi (identifier / quoting context): if errors show delimited names (e.g. \
 backticks, brackets), the app may splice parameters inside identifiers — test \
 breakout using that DB's identifier rules and valid comment tokens (#, --) \
 where SQL comments apply; classic quote payloads may be escaped while other \
 characters are not
+- SQLite-specific: ATTACH DATABASE, sqlite_master table queries
 - Escaping vs context: map whether each parameter is used inside string literals, \
 identifiers, or ORDER BY — the same sanitizer (e.g. addslashes-style) often \
 misses delimiter-breaking characters
@@ -70,56 +94,98 @@ misses delimiter-breaking characters
 - Multi-step: register → login → access protected endpoint → get flag
 - Client-side submit handlers: fetch HTML-linked *.js (login, auth, bundle) and \
 mirror any hash/base64/HMAC transforms so POST bodies match what the browser sends
-- Cookie manipulation: decode JWT/base64 cookies, forge admin role
+- Cookie manipulation: requests.get(url, cookies={{'admin': 'true'}})
+  → Try common cookie bypasses: admin=true, role=admin, authenticated=1
+  → Decode JWT/base64 cookies, forge admin role, modify session values
 - Path traversal: ../, %2e%2e/, double encoding
-Use the `requests` library for HTTP interaction.""",
+- PHP type juggling: '0e1234' == 0, strcmp(array, str) returns NULL, loose comparison
+- Encryption in web apps: if source shows DES/AES key, encrypt your payload with that key
+  → from Crypto.Cipher import DES; DES.new(key, DES.MODE_ECB).encrypt(payload)
+- File read/inclusion: if source code shows file operations, try reading /flag or /home/*/flag*
+- String filter bypass: if str_replace removes 'flag', use 'flflagag' (doubled), case variation
+Use the `requests` library for HTTP interaction. Use `requests.Session()` for multi-step flows.""",
 
     "crypto": """\
 CRYPTO TECHNIQUE REFERENCE (from real CTF solutions):
 - RSA weak key: factor n via factordb.com API or yafu, then d = inverse(e, phi)
 - XOR: ciphertext ^ known_plaintext_prefix → key fragment → full key
+  → if flag format known (e.g. 'flag{{'), XOR first bytes of ciphertext with prefix to get key
 - AES-CBC: known key+IV → AES.new(key, AES.MODE_CBC, iv).decrypt(ct)
+- AES-ECB: from Crypto.Cipher import AES; AES.new(key, AES.MODE_ECB).decrypt(ct)
+- DES/3DES: from Crypto.Cipher import DES; DES.new(key, DES.MODE_ECB).decrypt(ct)
 - Hash collision: MD5/SHA brute-force with itertools.product
-- LFSR: reconstruct state from known output bits
+- LFSR: reconstruct state from seed/taps in file header, XOR keystream with ciphertext
+  → parse binary header (magic bytes, seed, tap positions, skip count) with struct.unpack
+  → implement LFSR shift register: bit = XOR of tapped positions, shift, feedback
+  → advance state by skip iterations, then XOR each chunk with LFSR output
+- Many-time pad / repeated XOR: XOR pairs of ciphertexts, use crib-dragging with known words
 - Modular arithmetic: use gmpy2.invert, pow(base, exp, mod)
+- Stream ciphers: read ciphertext as bytes, apply inverse transform byte-by-byte
+- Custom cipher in source: read the source code, understand encrypt(), write decrypt() as exact inverse
+- Binary file format: always check for magic bytes/header with struct.unpack before ciphertext data
 Use pycryptodome (from Crypto.Cipher import AES), gmpy2, sympy as needed.""",
 
     "rev": """\
 REVERSE ENGINEERING TECHNIQUE REFERENCE (from real CTF solutions):
 - XOR key extraction: identify pkey[] array, XOR with known flag prefix
-- Transform chains: reverse each step (shift, substitute, permute)
-- Checker bypass: extract expected output, solve for input
-- Binary strings: use subprocess to run 'strings' on ELF files
-- Disassembly: subprocess.run(['objdump', '-d', binary]) to find constants
+- Transform chains: reverse each step (shift, substitute, permute) in reverse order
+- Checker bypass: extract expected output, solve for input with z3 or manual inverse
+- Binary strings: use subprocess to run 'strings -n 6' on ELF files
+- Disassembly: subprocess.run(['objdump', '-d', binary]) to find constants and logic
 - For Python bytecode: dis module, uncompyle6
+- For C/C++ source: read the source carefully, identify the exact transform applied to plaintext,
+  then write the inverse function step-by-step
+- Binary file formats: check file header with 'file' command, identify architecture (x86, ARM, AVR)
+- Intel HEX / firmware: parse .hex format, extract data section, apply byte-level transforms
+- Constraint solving: from z3 import *; set up equations for each output byte, solve for input
 Write an inverse function and apply it to the encoded data.""",
 
     "pwn": """\
 PWN TECHNIQUE REFERENCE (from real CTF solutions):
-- Buffer overflow: from pwn import *; p = remote(host, port); p.sendline(payload)
+- Buffer overflow: from pwn import *; p = remote(host, port, timeout=15); p.sendline(payload)
 - Address calculation: use provided binary to find offsets
+  → from pwn import ELF; e = ELF('./binary'); e.symbols, e.got, e.plt
+  → Use cyclic() pattern to find offset: cyclic_find(crash_value)
 - Format string: send %p.%p.%p to leak stack, %n to write
 - ROP: from pwn import ROP; rop = ROP(elf); rop.call('system', ['/bin/sh'])
 - ret2libc: leak libc base via GOT, compute system() address
+- Shell interaction: after getting shell, use p.sendline('cat /home/*/flag*') or p.sendline('cat flag*')
+- Interactive services with menus: parse menu options, select correct option, send input
+  → Always set timeout on remote() to avoid hanging: remote(host, port, timeout=15)
+  → Use p.recvuntil() to wait for prompts before sending data
 Use pwntools (from pwn import *) for binary exploitation.""",
 
     "forensics": """\
 FORENSICS TECHNIQUE REFERENCE (from real CTF solutions):
-- PCAP: import pyshark; cap = FileCapture('file.pcap'); filter DNS/HTTP
+- PCAP: from scapy.all import rdpcap, TCP, UDP, Raw; pkts = rdpcap('file.pcap')
+  → iterate packets, extract Raw layer data, decode payloads
+  → search for flag patterns in reassembled TCP streams
+  → check DNS queries, HTTP requests/responses, FTP data
+  → use subprocess.run(['strings', 'file.pcap']) as quick flag search
+  → try: subprocess.run(['tshark', '-r', 'file.pcap', '-Y', 'http', '-T', 'fields', '-e', 'http.file_data'])
+- PCAP flag in filenames: look for flag patterns in HTTP URIs, DNS queries, exported objects
 - Steganography: from PIL import Image → check LSB, check EOF appended data
 - Archives: subprocess.run(['binwalk', '-e', file]) to extract embedded files
 - Disk images: subprocess.run(['fdisk', '-l', img]) then mount + search
 - Git history: subprocess.run(['git', 'log', '--all', '-p']) → grep for flag
 - Base64 chains: repeatedly b64decode until readable
-Use pyshark, PIL, subprocess with forensic tools.""",
+Use scapy, pyshark, PIL, subprocess with forensic tools.""",
 
     "misc": """\
 MISC TECHNIQUE REFERENCE (from real CTF solutions):
 - Encoding chains: base64 → hex → ROT13 → morse, try all combinations
 - Python jail escape: __builtins__, __import__('os').system('cat flag*')
-- Programming puzzles: parse input, implement algorithm, compute answer
+- Programming puzzles: parse input via socket, implement algorithm, send answer back
+  → for interactive TCP challenges: use pwntools (from pwn import remote)
+  → parse challenge prompt, compute solution, send response within timeout
+  → repeat for multiple rounds (some challenges have 50-100 rounds)
+- Conway's Game of Life / cellular automata: implement the simulation, parse grid input, compute N generations
 - Esoteric languages: brainfuck, whitespace → use interpreter libraries
 - File inspection: check file headers, look for appended data, alternate streams
+- PCAP analysis: use scapy or strings to extract flag patterns from packet captures
+  → look for flag strings in DNS queries, HTTP payloads, FTP transfers, raw TCP data
+  → try: subprocess.run(['strings', 'file.pcap']) | grep flag
+- Network service challenges: connect via TCP socket, interact with menu/protocol
 Be creative and try multiple approaches.""",
 }
 
@@ -145,8 +211,8 @@ _SOURCE_EXTENSIONS = frozenset({
     ".php", ".go", ".rs", ".sage", ".txt", ".md", ".yml", ".yaml",
     ".json", ".xml", ".html", ".css", ".sql", ".lua", ".r",
 })
-_MAX_SOURCE_CHARS_PER_FILE = 6000
-_MAX_TOTAL_SOURCE_CHARS = 18000
+_MAX_SOURCE_CHARS_PER_FILE = 12000
+_MAX_TOTAL_SOURCE_CHARS = 36000
 
 
 def _collect_challenge_source_files(
@@ -213,6 +279,37 @@ def _collect_challenge_source_files(
         if total_chars >= _MAX_TOTAL_SOURCE_CHARS:
             break
 
+    # Also collect source-like files extracted from archives (not in top-level metadata).
+    if total_chars < _MAX_TOTAL_SOURCE_CHARS:
+        extracted_members: list[str] = []
+        for finding in state.findings.values():
+            am = finding.metadata.get("archive_members")
+            if isinstance(am, dict):
+                for members in am.values():
+                    extracted_members.extend(members)
+        already_collected = {item["filename"] for item in collected}
+        for member in extracted_members:
+            if member in already_collected:
+                continue
+            ext = "." + member.rsplit(".", 1)[-1].lower() if "." in member else ""
+            if ext not in _SOURCE_EXTENSIONS:
+                continue
+            snippet = ""
+            for finding in state.findings.values():
+                s = finding.metadata.get("source_snippet") or ""
+                if s and member in (finding.description or ""):
+                    snippet = s
+                    break
+            if snippet:
+                budget = min(_MAX_SOURCE_CHARS_PER_FILE, _MAX_TOTAL_SOURCE_CHARS - total_chars)
+                if budget > 200:
+                    collected.append({"filename": member, "content": snippet[:budget]})
+                    total_chars += len(snippet[:budget])
+            else:
+                collected.append({"filename": member, "note": f"extracted archive member at {files_root}/{member} (read it with open())"})
+            if total_chars >= _MAX_TOTAL_SOURCE_CHARS:
+                break
+
     return collected
 
 
@@ -242,6 +339,26 @@ def _build_solver_user_prompt(
     if challenge_sources:
         evidence_snapshot["challenge_source_files"] = challenge_sources
 
+    # Inject archive member listings so the solver knows about files inside
+    # bundled .tgz/.zip archives that have been extracted to disk.
+    archive_members: dict[str, list[str]] = {}
+    for finding in state.findings.values():
+        members = finding.metadata.get("archive_members")
+        if isinstance(members, dict):
+            archive_members.update(members)
+    if archive_members:
+        evidence_snapshot["archive_contents"] = archive_members
+        flat_members = [
+            member
+            for members_list in archive_members.values()
+            for member in members_list
+        ]
+        evidence_snapshot.setdefault("solver_hints", []).append(
+            f"Archives have been extracted to {files_root}. "
+            f"Inner files: {', '.join(flat_members[:20])}. "
+            f"Read them directly with open() from that directory."
+        )
+
     # Source code snippets from findings
     source_snippets: list[dict[str, str]] = []
     for finding in state.findings.values():
@@ -249,14 +366,34 @@ def _build_solver_user_prompt(
         if meta.get("source") in {"source_review", "computation_analysis", "runtime_probe"}:
             for key in ("stdout_preview", "source_snippet", "function_inventory", "interesting_routes"):
                 if meta.get(key):
-                    source_snippets.append({"source": str(finding.title), key: str(meta[key])[:600]})
+                    source_snippets.append({"source": str(finding.title), key: str(meta[key])[:1500]})
         if meta.get("runtime_outputs"):
             for output in meta["runtime_outputs"][:3]:
                 source_snippets.append({"runtime_output": output})
         if meta.get("recovered_plaintexts"):
             source_snippets.append({"recovered_plaintexts": meta["recovered_plaintexts"][:3]})
 
-    evidence_snapshot["source_evidence"] = source_snippets[:10]
+    evidence_snapshot["source_evidence"] = source_snippets[:16]
+
+    # Inject TCP banner data so the solver knows service protocols.
+    banner_data: dict[str, str] = {}
+    for finding in state.findings.values():
+        meta = finding.metadata
+        if meta.get("source") == "tcp_banner_probe":
+            for port_str, banner_text in (meta.get("banner_hits") or {}).items():
+                banner_data[port_str] = str(banner_text)[:300]
+    if banner_data:
+        evidence_snapshot["tcp_banners"] = banner_data
+        non_http_ports = [
+            p for p, b in banner_data.items()
+            if not b.upper().startswith(("HTTP/", "<!DOCTYPE", "<HTML"))
+        ]
+        if non_http_ports:
+            evidence_snapshot.setdefault("solver_hints", []).append(
+                f"Ports {', '.join(non_http_ports)} appear to run non-HTTP services. "
+                f"Use pwntools (from pwn import remote) or raw sockets for interaction. "
+                f"Set timeouts and handle multi-round interactive protocols."
+            )
 
     evidence_snapshot["assets"] = [
         {
@@ -285,20 +422,20 @@ def _build_solver_user_prompt(
         {
             "title": f.title,
             "severity": f.severity,
-            "description": (f.description or "")[:300],
+            "description": (f.description or "")[:500],
             "evidence_refs": f.evidence_refs[:5],
         }
-        for f in list(state.findings.values())[-12:]
+        for f in list(state.findings.values())[-20:]
     ]
 
     # Include file content hints from completed tasks
     file_contents: list[dict[str, str]] = []
-    for task_entry in state.task_chain.tasks[-10:]:
+    for task_entry in state.task_chain.tasks[-16:]:
         ctx = task_entry.output_context or {}
         for key in ("source_snippets", "file_previews", "interesting_strings", "blob_candidates"):
             if ctx.get(key):
-                file_contents.append({key: str(ctx[key])[:800]})
-    evidence_snapshot["file_contents"] = file_contents[:8]
+                file_contents.append({key: str(ctx[key])[:1500]})
+    evidence_snapshot["file_contents"] = file_contents[:12]
 
     # Previous solver attempts (for retry)
     prev_attempts = task.input_context.get("previous_attempts", [])
@@ -325,6 +462,36 @@ def _build_solver_user_prompt(
             evidence_snapshot["CRITICAL_RETRY_GUIDANCE"] = near_miss_diags
 
     return json.dumps(evidence_snapshot, ensure_ascii=True, indent=2)
+
+
+_PLACEHOLDER_FLAGS = frozenset({
+    "flag{not_found}", "flag{test}", "flag{test_placeholder}",
+    "flag{manual_review_required}", "flag{placeholder}", "flag{todo}",
+    "key{not_found}", "key{test}", "key{placeholder}",
+    "flag{unknown}", "flag{example}", "key{unknown}",
+    "flag{notfound}", "flag{not found}", "flag{none}",
+})
+
+_PLACEHOLDER_BODY_PATTERN = re.compile(
+    r"^(not[_\s]?found|test[_\s]?\d*|placeholder|manual[_\s]?review[_\s]?required"
+    r"|todo|unknown|example|none|n/a|null|undefined|insert[_\s]?flag[_\s]?here"
+    r"|your[_\s]?flag[_\s]?here|flag[_\s]?goes[_\s]?here|replace[_\s]?me)$",
+    re.IGNORECASE,
+)
+
+
+def _is_placeholder_flag(candidate: str) -> bool:
+    """Return True if the candidate looks like a fabricated placeholder."""
+    cleaned = candidate.lower().strip()
+    if cleaned in _PLACEHOLDER_FLAGS:
+        return True
+    # Pattern-based check on the body inside braces
+    _, _, rest = cleaned.partition("{")
+    if rest and rest.endswith("}"):
+        body = rest[:-1].strip()
+        if _PLACEHOLDER_BODY_PATTERN.match(body):
+            return True
+    return False
 
 
 _NEAR_MISS_CLEAN_RE = re.compile(r"[^\x20-\x7e]")
@@ -371,14 +538,19 @@ class SolverAgent(WorkerAgent):
     preferred_challenge_categories = ("crypto", "rev", "web", "forensics", "pwn", "misc")
 
     _MAX_RETRIES = 4
+    _MAX_TOTAL_SOLVER_TASKS_PER_RUN = 8
     _CATEGORY_TIMEOUT: dict[str, int] = {
-        "crypto": 120,
-        "rev": 90,
-        "pwn": 60,
-        "forensics": 60,
-        "web": 45,
-        "misc": 60,
+        "crypto": 180,
+        "rev": 120,
+        "pwn": 120,
+        "forensics": 120,
+        "web": 60,
+        "misc": 120,
     }
+
+    @staticmethod
+    def _solver_task_count(state: GlobalState) -> int:
+        return sum(1 for item in state.task_chain.tasks if item.task_type == "solve.generate_script")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
         if self.llm_client is None:
@@ -397,6 +569,17 @@ class SolverAgent(WorkerAgent):
                 success=False,
                 summary="Solver agent requires an execution plane; none is configured.",
                 error="SolverAgent.execution_plane is None",
+                retryable=False,
+            )
+
+        solver_total = self._solver_task_count(state)
+        if solver_total > self._MAX_TOTAL_SOLVER_TASKS_PER_RUN:
+            return WorkerReport(
+                task_id=task.task_id,
+                worker_name=self.name,
+                success=False,
+                summary="Solver run-level cap already exceeded; skipping LLM call.",
+                error="Run-level solver task cap exceeded.",
                 retryable=False,
             )
 
@@ -420,7 +603,8 @@ class SolverAgent(WorkerAgent):
             worker_notes.append(f"LLM code generation failed: {error_msg}")
 
             retry_task = None
-            if attempt_num < self._MAX_RETRIES:
+            solver_total = self._solver_task_count(state)
+            if attempt_num < self._MAX_RETRIES and solver_total < self._MAX_TOTAL_SOLVER_TASKS_PER_RUN:
                 retry_task = Task(
                     title=f"Solver retry (attempt {attempt_num + 1})",
                     description="Retry solver generation after LLM failure.",
@@ -444,6 +628,10 @@ class SolverAgent(WorkerAgent):
                     dedupe_key=f"solver-retry:{task.task_id}:attempt-{attempt_num + 1}",
                     metadata={"planned_by": "solver-agent", "retry_of": task.task_id},
                 )
+            elif solver_total >= self._MAX_TOTAL_SOLVER_TASKS_PER_RUN:
+                worker_notes.append(
+                    "Solver retry suppressed: run-level solve.generate_script cap reached."
+                )
 
             return WorkerReport(
                 task_id=task.task_id,
@@ -464,6 +652,7 @@ class SolverAgent(WorkerAgent):
                 summary="LLM failed to generate solver code.",
                 error="No solver code was produced by the LLM.",
                 notes=worker_notes,
+                retryable=False,
             )
 
         worker_notes.append(f"LLM generated {guidance.solver_language} solver (confidence: {guidance.confidence:.1%}).")
@@ -493,14 +682,18 @@ class SolverAgent(WorkerAgent):
                 summary="Solver execution failed.",
                 error=str(exc),
                 notes=worker_notes,
+                retryable=False,
             )
 
         output_context = dict(bundle.parsed.output_context)
-        flag_candidates = merge_unique_strings(
-            output_context.get("flag_candidates") or [],
-            guidance.grounded_flag_candidates,
-            limit=6,
-        )
+        flag_candidates = [
+            c for c in merge_unique_strings(
+                output_context.get("flag_candidates") or [],
+                guidance.grounded_flag_candidates,
+                limit=6,
+            )
+            if not _is_placeholder_flag(c)
+        ]
 
         new_tasks = [
             build_flag_validation_task(candidate, source="solver_execution")
@@ -525,33 +718,54 @@ class SolverAgent(WorkerAgent):
             not flag_candidates
             and guidance.should_retry_on_failure
             and attempt_num < self._MAX_RETRIES
+            and self._solver_task_count(state) < self._MAX_TOTAL_SOLVER_TASKS_PER_RUN
         ):
             stderr = str(output_context.get("stderr", ""))[:1500]
             stdout = str(output_context.get("stdout", ""))[:1500]
 
+            _RETRY_STRATEGIES = [
+                "Try a completely different algorithm or technique.",
+                "Re-read all challenge files from disk with open() and inspect the raw bytes. "
+                "Check file headers, magic bytes, and structure before applying transforms.",
+                "Use subprocess to run system tools (strings, xxd, file, tshark, objdump) "
+                "and parse the output instead of implementing the analysis in Python.",
+                "Try the simplest possible approach first: search for flag patterns directly "
+                "in all files with strings/grep, or try known decryption with obvious keys.",
+            ]
+            strategy_hint = _RETRY_STRATEGIES[min(attempt_num - 1, len(_RETRY_STRATEGIES) - 1)]
+
             error_diagnosis = f"Attempt {attempt_num} failed: exit code {returncode}"
-            if near_miss:
+            if returncode == -1 and "timed out" in stderr.lower():
+                error_diagnosis = (
+                    f"Attempt {attempt_num}: script TIMED OUT after {timeout_s}s. "
+                    f"The script likely hung on a network connection or infinite loop. "
+                    f"If connecting to a remote service, add a timeout parameter to your "
+                    f"connection (e.g. r = remote(host, port, timeout=10)). "
+                    f"If doing computation, optimize the algorithm or reduce iterations. "
+                    f"{strategy_hint}"
+                )
+            elif near_miss:
                 error_diagnosis = (
                     f"Attempt {attempt_num}: solver output contained flag-like pattern(s) "
                     f"with non-printable characters ({near_miss[:3]}), suggesting the "
                     f"decryption/decode approach was partially correct but key recovery "
                     f"or transform was incomplete. Refine the algorithm — do NOT repeat "
-                    f"the same approach."
+                    f"the same approach. {strategy_hint}"
                 )
             elif returncode == 0 and not stdout.strip():
                 error_diagnosis = (
                     f"Attempt {attempt_num}: script exited 0 but produced no output. "
-                    f"Ensure the script prints the flag to stdout."
+                    f"Ensure the script prints the flag to stdout. {strategy_hint}"
                 )
             elif returncode != 0:
                 error_diagnosis = (
                     f"Attempt {attempt_num}: script crashed with exit code {returncode}. "
-                    f"Fix the runtime error and try a different approach."
+                    f"Fix the runtime error. {strategy_hint}"
                 )
             else:
                 error_diagnosis = (
                     f"Attempt {attempt_num}: script exited 0 but no valid flag found in output. "
-                    f"The output may contain garbled data — review the algorithm."
+                    f"The output may contain garbled data — review the algorithm. {strategy_hint}"
                 )
 
             retry_timeout = timeout_s + 30 if near_miss else timeout_s
@@ -567,11 +781,11 @@ class SolverAgent(WorkerAgent):
                     "previous_attempts": (task.input_context.get("previous_attempts") or []) + [
                         {
                             "attempt": attempt_num,
-                            "solver_code_preview": guidance.solver_code[:500],
+                            "solver_code_preview": guidance.solver_code[:2000],
                             "returncode": returncode,
                             "stderr": stderr,
                             "stdout": stdout,
-                            "near_miss_candidates": near_miss[:3],
+                            "near_miss_candidates": near_miss[:5],
                             "error_summary": f"Attempt {attempt_num} failed: exit code {returncode}",
                             "error_diagnosis": error_diagnosis,
                         }
@@ -584,15 +798,26 @@ class SolverAgent(WorkerAgent):
             worker_notes.append(f"Solver attempt {attempt_num} produced no flags; scheduling retry.")
             if near_miss:
                 worker_notes.append(f"Near-miss flag patterns detected: {near_miss[:3]}")
+        elif (
+            not flag_candidates
+            and guidance.should_retry_on_failure
+            and self._solver_task_count(state) >= self._MAX_TOTAL_SOLVER_TASKS_PER_RUN
+        ):
+            worker_notes.append(
+                "Solver retry suppressed: run-level solve.generate_script cap reached."
+            )
 
         output_context["flag_candidates"] = flag_candidates
-        output_context["solver_code_preview"] = guidance.solver_code[:500]
+        output_context["solver_code_preview"] = guidance.solver_code[:2000]
         output_context["solver_reasoning"] = guidance.reasoning
         output_context["solver_confidence"] = guidance.confidence
         if guidance.reasoning:
             output_context["llm_summary"] = guidance.summary
 
         success = bool(flag_candidates)
+        has_explicit_retry = any(
+            t.task_type == "solve.generate_script" for t in new_tasks
+        )
         return WorkerReport(
             task_id=task.task_id,
             worker_name=self.name,
@@ -607,4 +832,5 @@ class SolverAgent(WorkerAgent):
             notes=worker_notes + bundle.parsed.notes + [
                 f"{self.name} executed LLM-generated solver (attempt {attempt_num})."
             ],
+            retryable=False if has_explicit_retry else not success,
         )

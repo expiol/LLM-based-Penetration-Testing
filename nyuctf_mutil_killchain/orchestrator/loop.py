@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.llm import LLMClientError
+from nyuctf_mutil_killchain.orchestrator.dispatch_policy import DispatchPolicy
 from nyuctf_mutil_killchain.orchestrator.planner import HeuristicPlanner, TaskPlanner
 from nyuctf_mutil_killchain.orchestrator.router import (
     HeuristicWorkerRouter,
@@ -45,6 +46,7 @@ class Orchestrator:
         self.planner = planner or HeuristicPlanner()
         self.router = router or HeuristicWorkerRouter()
         self.emit = emit
+        self.dispatch_policy = DispatchPolicy(emit=self.emit)
 
     def select_worker(
         self, task: Task,
@@ -61,7 +63,7 @@ class Orchestrator:
 
         routable = [w for w in candidates if w.can_route_task(task, self.state)[0]]
         if not routable:
-            if self._try_repair_task_context(task, candidates):
+            if self.dispatch_policy.try_repair_task_context(task, self.state, candidates):
                 routable = [w for w in candidates if w.can_route_task(task, self.state)[0]]
             if not routable:
                 reasons = [
@@ -73,91 +75,6 @@ class Orchestrator:
         decision = self.router.route(task=task, state=self.state, candidates=routable)
         worker = next((c for c in routable if c.name == decision.worker_name), None)
         return worker, decision, ""
-
-    def _validate_task_for_dispatch(
-        self, task: Task,
-    ) -> tuple[bool, str | None, TaskErrorCode | None]:
-        """Pre-validate a task before dispatch.
-
-        Returns ``(valid, reason, error_code)``.  Checks that referenced
-        asset IDs actually exist in state (except for recon tasks which
-        create them).
-        """
-        ctx_asset_id = task.input_context.get("asset_id")
-        if ctx_asset_id and ctx_asset_id not in self.state.assets:
-            if not task.task_type.startswith("recon."):
-                return (
-                    False,
-                    f"asset_id {ctx_asset_id!r} not found in state.assets",
-                    TaskErrorCode.UNKNOWN_ASSET_ID,
-                )
-        return True, None, None
-
-    def _try_repair_task_context(
-        self, task: Task, candidates: list[WorkerAgent],
-    ) -> bool:
-        """Last-resort repair for missing context fields.
-
-        Fills high-confidence fields derived from challenge metadata
-        (``files_root``, ``source_files``, ``binary_files``) and infers
-        network identity fields (``asset_id``, ``base_url``, ``hostname``,
-        ``ports``) via ``GlobalState.infer_asset_identity`` when the
-        inference is unambiguous.  All repairs are logged via ``self.emit``.
-        """
-        ctx = task.input_context
-
-        missing: set[str] = set()
-        for worker in candidates:
-            for key in worker.required_context_keys:
-                value = ctx.get(key)
-                if value in (None, "", [], {}, ()):
-                    missing.add(key)
-
-        if not missing:
-            return False
-
-        repaired = False
-
-        # --- Artifact file fields (require challenge_files) ---
-        challenge_meta = self.state.metadata.get("challenge", {})
-        challenge_files = challenge_meta.get("files", [])
-        if challenge_files:
-            _SOURCE_EXTS = {
-                ".py", ".js", ".rb", ".pl", ".sh", ".c", ".cpp", ".h", ".java",
-                ".php", ".go", ".rs", ".sage", ".txt", ".md", ".yml", ".yaml",
-                ".json", ".xml", ".html", ".css", ".sql", ".lua", ".r",
-            }
-
-            if "files_root" in missing:
-                ctx["files_root"] = "/home/ctfplayer/ctf_files"
-                self.emit(f"[repair] {task.task_id}: filled files_root=/home/ctfplayer/ctf_files")
-                repaired = True
-
-            if "source_files" in missing:
-                inferred = [
-                    f for f in challenge_files
-                    if "." in f and ("." + f.rsplit(".", 1)[-1].lower()) in _SOURCE_EXTS
-                ]
-                ctx["source_files"] = inferred or challenge_files
-                self.emit(f"[repair] {task.task_id}: filled source_files ({len(ctx['source_files'])} file(s))")
-                repaired = True
-
-            if "binary_files" in missing:
-                ctx["binary_files"] = [
-                    f for f in challenge_files
-                    if "." not in f
-                    or ("." + f.rsplit(".", 1)[-1].lower()) not in _SOURCE_EXTS
-                ]
-                self.emit(f"[repair] {task.task_id}: filled binary_files ({len(ctx['binary_files'])} file(s))")
-                repaired = True
-
-        # --- Network identity fields (delegated to GlobalState) ---
-        filled = self.state.infer_asset_identity(ctx)
-        for field_name, field_value in filled.items():
-            self.emit(f"[repair] {task.task_id}: filled {field_name}={field_value}")
-            repaired = True
-
-        return repaired
 
     def refresh_plan(self, cycle: int) -> bool:
         decision = self.planner.plan(self.state)
@@ -177,40 +94,6 @@ class Orchestrator:
 
         return decision.stop_run
 
-    _BATCHABLE_TASK_TYPES = frozenset({"flag.validate"})
-    _MAX_BATCHABLE_PER_CYCLE = 8
-
-    def _dequeue_batch(self, *, max_batch: int = 4) -> list[Task]:
-        """Dequeue up to *max_batch* independent ready tasks in priority order.
-
-        Tasks are independent when they don't share a worker (different
-        task_type prefixes) so they won't contend for the same execution
-        context.  Lightweight batchable tasks (e.g. flag validation) bypass
-        the prefix dedup so multiple can retire in a single cycle.
-        """
-        completed = self.state.task_chain.completed_task_ids()
-        ready = [t for t in self.state.task_chain.tasks if t.is_ready(completed)]
-        ready.sort(key=lambda t: (-t.priority, t.created_at))
-
-        batch: list[Task] = []
-        seen_type_prefixes: set[str] = set()
-        batchable_count = 0
-        for task in ready:
-            prefix = task.task_type.split(".")[0]
-            if task.task_type in self._BATCHABLE_TASK_TYPES:
-                if batchable_count >= self._MAX_BATCHABLE_PER_CYCLE:
-                    continue
-                batchable_count += 1
-            else:
-                if prefix in seen_type_prefixes:
-                    continue
-                seen_type_prefixes.add(prefix)
-            batch.append(task)
-            non_batchable = len(batch) - batchable_count
-            if non_batchable >= max_batch:
-                break
-        return batch
-
     def run(self, max_cycles: int = 10) -> GlobalState:
         self.state.status = RunStatus.RUNNING
 
@@ -224,7 +107,7 @@ class Orchestrator:
                 self.state.status = RunStatus.STOPPED
                 break
 
-            batch = self._dequeue_batch()
+            batch = self.dispatch_policy.dequeue_batch(self.state)
             if not batch:
                 self.emit(f"[cycle {cycle}] task queue exhausted — no ready tasks remain")
                 break
@@ -235,12 +118,15 @@ class Orchestrator:
                     break
 
                 # Pre-dispatch validation
-                valid, reason, error_code = self._validate_task_for_dispatch(task)
-                if not valid:
-                    task.mark_blocked(reason or "dispatch refused", error_code=error_code)
+                validation = self.dispatch_policy.validate_task_for_dispatch(task, self.state)
+                if not validation.valid:
+                    task.mark_blocked(
+                        validation.reason or "dispatch refused",
+                        error_code=validation.error_code,
+                    )
                     self.emit(
                         f"[cycle {cycle}] dispatch_refused {task.task_id}: "
-                        f"{reason} (error_code={error_code})"
+                        f"{validation.reason} (error_code={validation.error_code})"
                     )
                     continue
 
@@ -335,12 +221,14 @@ class Orchestrator:
         )
         if self.state.solved:
             self.state.status = RunStatus.SOLVED
-        elif any(t.status == TaskStatus.FAILED for t in tasks):
-            self.state.status = RunStatus.FAILED
+        elif has_open_tasks:
+            # Open tasks mean the run halted due budget/planning constraints,
+            # not a terminal failure of the whole challenge.
+            self.state.status = RunStatus.STOPPED
         elif any(t.status == TaskStatus.BLOCKED for t in tasks):
             self.state.status = RunStatus.STOPPED
-        elif has_open_tasks:
-            self.state.status = RunStatus.STOPPED
+        elif any(t.status == TaskStatus.FAILED for t in tasks):
+            self.state.status = RunStatus.FAILED
         else:
             self.state.status = RunStatus.COMPLETED
 

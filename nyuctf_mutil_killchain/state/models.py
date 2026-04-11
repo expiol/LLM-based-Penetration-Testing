@@ -298,7 +298,7 @@ class TaskChain(BaseModel):
                     item
                     for item in self.tasks
                     if item.dedupe_key == task.dedupe_key
-                    and item.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}
+                    and item.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}
                 ),
                 None,
             )

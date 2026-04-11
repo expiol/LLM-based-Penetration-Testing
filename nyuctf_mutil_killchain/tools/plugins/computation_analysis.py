@@ -31,6 +31,38 @@ recovered_plaintexts = []
 flag_candidates = []
 
 flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
+_FP_PREFIXES = frozenset({
+    "html", "body", "div", "span", "input", "button", "textarea",
+    "select", "label", "form", "table", "thead", "tbody", "tr", "td", "th",
+    "ul", "ol", "li", "nav", "header", "footer", "section", "article",
+    "aside", "main", "summary", "details", "dialog", "fieldset", "legend",
+    "img", "video", "audio", "canvas", "svg", "path", "circle", "rect",
+    "code", "pre", "blockquote", "cite", "abbr", "address", "figure",
+    "var", "function", "return", "if", "else", "for", "while", "switch",
+    "case", "class", "interface", "struct", "enum", "type", "export",
+    "import", "from", "const", "let", "new", "delete", "typeof", "void",
+    "null", "undefined", "true", "false", "try", "catch", "throw",
+    "this", "self", "super", "def", "lambda", "yield", "async", "await",
+    "create", "drop", "alter", "insert", "update",
+})
+_CSS_BODY = re.compile(
+    r"^[\s]*([a-z\-]+\s*:\s*[a-z0-9#%.\"', \-()]+\s*;?[\s]*)+$",
+    re.IGNORECASE,
+)
+
+def _plausible_flag(m):
+    prefix, _, body = m.partition("{")
+    body = body.rstrip("}")
+    if not prefix or not body:
+        return False
+    if any(ord(c) < 32 or ord(c) == 127 for c in body):
+        return False
+    if prefix.lower() in _FP_PREFIXES:
+        return False
+    if _CSS_BODY.match(body):
+        return False
+    return True
+
 bitstring_re = re.compile(r"^[01]{24,}$")
 preferred_names = (
     "decode",
@@ -200,7 +232,9 @@ def attempt_linear_bitstring_inverse(func, target_bits):
             except Exception:
                 continue
 
-            if printable_ratio(candidate) < 0.8 and not flag_re.findall(candidate):
+            if printable_ratio(candidate) < 0.8 and not any(
+                _plausible_flag(m) for m in flag_re.findall(candidate)
+            ):
                 continue
 
             return {
@@ -257,6 +291,8 @@ else:
 
         string_constants = collect_string_constants(module)
         for flag in flag_re.findall(source_text):
+            if not _plausible_flag(flag):
+                continue
             if flag not in flag_candidates:
                 flag_candidates.append(flag)
 
@@ -268,8 +304,30 @@ else:
         if bit_candidates:
             bitstring_constants[relpath] = bit_candidates[:8]
 
-        namespace = {"__name__": "_analysis_"}
+        # Many NYUCTF archives ship Python 2 challenge sources (``xrange``,
+        # ``SocketServer``, ``str`` → ``hashlib.update``, …).  Patch the
+        # namespace so simple Python 2 idioms survive ``exec`` under Python 3.
+        py2_compat_source = (
+            "import sys as _sys\n"
+            "if _sys.version_info[0] >= 3:\n"
+            "    import builtins as _bi\n"
+            "    if not hasattr(_bi, 'xrange'): _bi.xrange = range\n"
+            "    if not hasattr(_bi, 'raw_input'): _bi.raw_input = input\n"
+            "    if not hasattr(_bi, 'unicode'): _bi.unicode = str\n"
+            "    if not hasattr(_bi, 'long'): _bi.long = int\n"
+            "    try:\n"
+            "        import socketserver as _ss\n"
+            "        _sys.modules.setdefault('SocketServer', _ss)\n"
+            "    except ImportError: pass\n"
+            "    try:\n"
+            "        import http.server as _hs\n"
+            "        _sys.modules.setdefault('BaseHTTPServer', _hs)\n"
+            "        _sys.modules.setdefault('SimpleHTTPServer', _hs)\n"
+            "    except ImportError: pass\n"
+        )
+        namespace = {"__name__": "_analysis_", "xrange": range}
         try:
+            exec(compile(py2_compat_source, "<py2_compat>", "exec"), namespace, namespace)
             exec(compile(source_text, relpath, "exec"), namespace, namespace)
         except Exception as exc:
             notes_list.append(f"Execution failed for {relpath}: {type(exc).__name__}: {exc}")
@@ -293,6 +351,8 @@ else:
                 }
                 recovered_plaintexts.append(entry)
                 for flag in flag_re.findall(result["candidate_plaintext"]):
+                    if not _plausible_flag(flag):
+                        continue
                     if flag not in flag_candidates:
                         flag_candidates.append(flag)
                 break

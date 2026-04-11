@@ -31,6 +31,34 @@ near_miss_candidates = []
 flag_re = re.compile(r"[A-Za-z0-9_]{2,}\{[ -~]{4,200}\}")
 near_miss_re = re.compile(r"[A-Za-z0-9_]{2,}\{[^\n]{4,200}\}")
 
+# Build a format-specific regex if flag_format specifies a prefix (e.g. "key{...}")
+format_prefix_re = None
+if flag_format and "{" in flag_format:
+    ff_prefix = flag_format.split("{", 1)[0].strip()
+    if ff_prefix and ff_prefix.isalnum():
+        format_prefix_re = re.compile(
+            re.escape(ff_prefix) + r"\{[ -~]{1,200}\}"
+        )
+
+
+_CODE_FALSE_POSITIVE_PREFIXES = frozenset({
+    "html", "body", "div", "span", "input", "button", "textarea",
+    "select", "label", "form", "table", "thead", "tbody", "tr", "td", "th",
+    "ul", "ol", "li", "nav", "header", "footer", "section", "article",
+    "aside", "main", "summary", "details", "dialog", "fieldset", "legend",
+    "img", "video", "audio", "canvas", "svg", "path", "circle", "rect",
+    "code", "pre", "blockquote", "cite", "abbr", "address", "figure",
+    "var", "function", "return", "if", "else", "for", "while", "switch",
+    "case", "class", "interface", "struct", "enum", "type", "export",
+    "import", "from", "const", "let", "new", "delete", "typeof", "void",
+    "null", "undefined", "true", "false", "try", "catch", "throw",
+    "this", "self", "super", "def", "lambda", "yield", "async", "await",
+    "create", "drop", "alter", "insert", "update", "select",
+})
+_CSS_BODY_RE = re.compile(
+    r"^[\s]*([a-z\-]+\s*:\s*[a-z0-9#%.\"', \-()]+\s*;?[\s]*)+$",
+    re.IGNORECASE,
+)
 
 def _plausible_flag(m):
     prefix, _, body = m.partition("{")
@@ -38,6 +66,10 @@ def _plausible_flag(m):
     if not prefix or not body:
         return False
     if any(ord(c) < 32 or ord(c) == 127 for c in body):
+        return False
+    if prefix.lower() in _CODE_FALSE_POSITIVE_PREFIXES:
+        return False
+    if _CSS_BODY_RE.match(body):
         return False
     return True
 
@@ -111,6 +143,12 @@ try:
     returncode = completed.returncode
 
     for text in (stdout, stderr):
+        # First try format-specific prefix if available (e.g. key{...})
+        if format_prefix_re:
+            for match in format_prefix_re.findall(text):
+                if match not in flag_candidates and _plausible_flag(match):
+                    flag_candidates.append(match)
+        # Then try generic flag pattern
         for match in flag_re.findall(text):
             if match not in flag_candidates and _plausible_flag(match):
                 flag_candidates.append(match)
@@ -180,8 +218,8 @@ records.append({
     "files_root": str(files_root),
     "solver_language": solver_language,
     "returncode": returncode,
-    "stdout": stdout[:4000],
-    "stderr": stderr[:2000],
+    "stdout": stdout[:8000],
+    "stderr": stderr[:4000],
     "flag_candidates": flag_candidates[:10],
     "near_miss_candidates": near_miss_candidates[:5],
     "manual_checks": [

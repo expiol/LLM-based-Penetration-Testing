@@ -124,12 +124,59 @@ for relpath in archive_files[:max_files]:
     except Exception as exc:
         records.append({"type": "note", "text": f"Archive parse failed for {relpath}: {type(exc).__name__}: {exc}"})
 
+extracted_files = []
+for relpath in inspected:
+    path = files_root / relpath
+    if not path.is_file():
+        continue
+    try:
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as zf:
+                for info in zf.infolist()[:60]:
+                    if info.is_dir() or info.file_size > 50_000_000:
+                        continue
+                    dest = files_root / info.filename
+                    if dest.exists():
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as src, open(dest, "wb") as dst:
+                        dst.write(src.read())
+                    extracted_files.append(info.filename)
+        elif tarfile.is_tarfile(path):
+            with tarfile.open(path, "r:*") as tf:
+                safe_members = []
+                for member in tf.getmembers()[:60]:
+                    if not member.isfile() or member.size > 50_000_000:
+                        continue
+                    normalized = str(PurePosixPath(member.name)).lstrip("./")
+                    if ".." in normalized or normalized.startswith("/"):
+                        continue
+                    dest = files_root / normalized
+                    if dest.exists():
+                        continue
+                    safe_members.append(member)
+                for member in safe_members:
+                    normalized = str(PurePosixPath(member.name)).lstrip("./")
+                    dest = files_root / normalized
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    src = tf.extractfile(member)
+                    if src is not None:
+                        with open(dest, "wb") as dst:
+                            dst.write(src.read())
+                        extracted_files.append(normalized)
+    except Exception as exc:
+        records.append({"type": "note", "text": f"Archive extraction failed for {relpath}: {type(exc).__name__}: {exc}"})
+
+if extracted_files:
+    records.append({"type": "note", "text": f"Extracted {len(extracted_files)} file(s) from archives to {files_root}: {extracted_files[:15]}"})
+
 member_total = sum(len(values) for values in archive_members.values())
 records.append({
     "type": "summary",
     "text": (
         f"Archive triage completed for {len(inspected)} archive(s): "
-        f"{member_total} embedded member(s), {len(flag_candidates)} flag candidate(s)."
+        f"{member_total} embedded member(s), {len(extracted_files)} extracted to disk, "
+        f"{len(flag_candidates)} flag candidate(s)."
     ),
 })
 
@@ -208,6 +255,7 @@ records.append({
     "qualified_database_like_members": qualified_database_like_members[:20],
     "qualified_pcap_like_members": qualified_pcap_like_members[:20],
     "flag_candidates": flag_candidates[:10],
+    "extracted_files": extracted_files[:30],
     "manual_checks": [
         "Review embedded archive members for hidden source, database, or capture files.",
         "Inspect archive member names for alternate challenge stages or backup files.",

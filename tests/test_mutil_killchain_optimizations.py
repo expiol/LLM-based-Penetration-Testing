@@ -26,11 +26,11 @@ from nyuctf_mutil_killchain.agents.exploit import CredentialExploitAgent, WebPwn
 from nyuctf_mutil_killchain.agents.exploit_reasoning import ExploitReasoningAgent
 from nyuctf_mutil_killchain.agents.enrichment import WebPathProbeAgent
 from nyuctf_mutil_killchain.agents.flag import FlagValidationAgent
-from nyuctf_mutil_killchain.agents.llm_guidance import FormProbeGuidance, StageAnalysisGuidance
+from nyuctf_mutil_killchain.agents.llm_guidance import FormProbeGuidance, SolverCodeGuidance, StageAnalysisGuidance
 from nyuctf_mutil_killchain.agents.source_review import SourceReviewAgent
 from nyuctf_mutil_killchain.agents.web_content import WebContentAgent
 from nyuctf_mutil_killchain.agents.web_form import WebFormProbeAgent
-from nyuctf_mutil_killchain.llm.client import OpenAICompatibleLLMClient, StaticLLMClient
+from nyuctf_mutil_killchain.llm.client import LLMClientError, OpenAICompatibleLLMClient, StaticLLMClient
 from nyuctf_mutil_killchain.orchestrator.loop import Orchestrator
 from nyuctf_mutil_killchain.orchestrator.planner import HeuristicPlanner, LLMPlanner, PlannerDecision, TaskPlanner
 from nyuctf_mutil_killchain.orchestrator.router import LLMWorkerRouter
@@ -230,6 +230,60 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
         self.assertIn("flag{wrapped-json}", result.grounded_flag_candidates)
         self.assertIn("Inspect the CGI upload flow.", result.manual_checks)
         self.assertTrue(result.summary)
+
+    def test_llm_client_solver_guidance_rejects_array_of_nulls(self) -> None:
+        client = OpenAICompatibleLLMClient(
+            base_url="https://example.invalid/v1",
+            model="fake-model",
+            api_key="fake-key",
+            transport=lambda *_args: {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps([None, None, None]),
+                        }
+                    }
+                ]
+            },
+        )
+
+        with self.assertRaises(LLMClientError):
+            client.generate_json(
+                system_prompt="Return JSON",
+                user_prompt="Return JSON",
+                schema=SolverCodeGuidance,
+            )
+
+    def test_llm_client_solver_guidance_picks_best_dict_from_array(self) -> None:
+        client = OpenAICompatibleLLMClient(
+            base_url="https://example.invalid/v1",
+            model="fake-model",
+            api_key="fake-key",
+            transport=lambda *_args: {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                [
+                                    {"summary": "noise"},
+                                    {
+                                        "summary": "ok",
+                                        "solver_code": "import sys\nprint('flag{arr}')\n",
+                                    },
+                                ]
+                            ),
+                        }
+                    }
+                ]
+            },
+        )
+
+        result = client.generate_json(
+            system_prompt="Return JSON",
+            user_prompt="Return JSON",
+            schema=SolverCodeGuidance,
+        )
+        self.assertIn("flag{arr}", result.solver_code)
 
     def test_normalize_probe_paths_ignores_freeform_findings(self) -> None:
         paths = normalize_probe_paths(
@@ -1327,6 +1381,85 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
 
             self.assertGreaterEqual(len(output_context["credential_candidates"]), 2)
             self.assertIn("admin", [item["username"] for item in output_context["credential_candidates"]])
+
+    def test_extract_flag_candidates_rejects_css_selectors(self) -> None:
+        from nyuctf_mutil_killchain.agents.base import extract_flag_candidates
+
+        css_text = (
+            "html{font-family:sans-serif} body{margin:0} "
+            "summary{display:block} textarea{margin:0} "
+            "button{overflow:visible} select{text-transform:none} "
+            "insert{values} update{set}"
+        )
+        result = extract_flag_candidates(css_text)
+        self.assertEqual(result, [])
+
+    def test_extract_flag_candidates_keeps_real_flags(self) -> None:
+        from nyuctf_mutil_killchain.agents.base import extract_flag_candidates
+
+        text = "The flag is flag{real_flag_here} and key{whatDidtheF0xSay?} ok"
+        result = extract_flag_candidates(text)
+        self.assertIn("flag{real_flag_here}", result)
+        self.assertIn("key{whatDidtheF0xSay?}", result)
+
+    def test_solver_agent_sets_retryable_false_when_retry_task_scheduled(self) -> None:
+        from nyuctf_mutil_killchain.agents.solver import SolverAgent
+
+        state = GlobalState(
+            objective="test",
+            metadata={"challenge": {"category": "misc", "flag_format": "flag{...}", "files": []}},
+        )
+        state.queue_task(Task(
+            title="Initial solver",
+            description="Solve it.",
+            task_type="solve.generate_script",
+            input_context={"files_root": "/tmp/ctf"},
+        ))
+
+        fake_parsed = SimpleNamespace(
+            summary="No flags",
+            notes=[],
+            output_context={
+                "flag_candidates": [],
+                "returncode": 0,
+                "stdout": "no flag",
+                "stderr": "",
+                "near_miss_candidates": [],
+            },
+            asset_updates=[],
+            finding_updates=[],
+            credential_updates=[],
+        )
+        fake_evidence = EvidenceRecord(
+            task_id="task-demo", tool_name="solver_execution",
+            mode="local_command", summary="Solver ran.",
+        )
+        fake_bundle = SimpleNamespace(parsed=fake_parsed, evidence=fake_evidence)
+
+        class FakeExecPlane:
+            def execute(self, _task_id, _request):
+                return fake_bundle
+
+        agent = SolverAgent(
+            execution_plane=FakeExecPlane(),
+            llm_client=StaticLLMClient([{
+                "summary": "solver",
+                "solver_code": "print('hello')",
+                "solver_language": "python",
+                "confidence": 0.5,
+            }]),
+        )
+        task = Task(
+            title="Solver",
+            description="Solve.",
+            task_type="solve.generate_script",
+            input_context={"files_root": "/tmp/ctf", "attempt_number": 1},
+        )
+        report = agent.run(task, state)
+        self.assertFalse(report.success)
+        self.assertFalse(report.retryable)
+        retry_tasks = [t for t in report.new_tasks if t.task_type == "solve.generate_script"]
+        self.assertEqual(len(retry_tasks), 1)
 
     def test_flag_harvest_decodes_base64_flag_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
