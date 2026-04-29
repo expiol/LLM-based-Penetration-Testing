@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 
 from nyuctf_mutil_killchain.tools.core import ToolExecutionRequest
+from nyuctf_mutil_killchain.tools.plugins._shared import SHARED_FLAG_DETECTION_SNIPPET
+
 
 TOOL_NAME = "flag_harvest"
 
-SCRIPT = r"""
+_SCRIPT_HEADER = r"""
 import base64
 import binascii
 import json
@@ -34,37 +36,9 @@ flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
 blob_re = re.compile(r"\b(?:[A-Fa-f0-9]{16,}|[A-Za-z0-9+/]{20,}={0,2})\b")
 path_re = re.compile(r"(/(?:[A-Za-z0-9_.-]+/?){1,6})")
 
-_FP_PREFIXES = frozenset({
-    "html", "body", "div", "span", "input", "button", "textarea",
-    "select", "label", "form", "table", "thead", "tbody", "tr", "td", "th",
-    "ul", "ol", "li", "nav", "header", "footer", "section", "article",
-    "aside", "main", "summary", "details", "dialog", "fieldset", "legend",
-    "img", "video", "audio", "canvas", "svg", "path", "circle", "rect",
-    "code", "pre", "blockquote", "cite", "abbr", "address", "figure",
-    "var", "function", "return", "if", "else", "for", "while", "switch",
-    "case", "class", "interface", "struct", "enum", "type", "export",
-    "import", "from", "const", "let", "new", "delete", "typeof", "void",
-    "null", "undefined", "true", "false", "try", "catch", "throw",
-    "this", "self", "super", "def", "lambda", "yield", "async", "await",
-    "create", "drop", "alter", "insert", "update",
-})
-_CSS_BODY = re.compile(
-    r"^[\s]*([a-z\-]+\s*:\s*[a-z0-9#%.\"', \-()]+\s*;?[\s]*)+$",
-    re.IGNORECASE,
-)
+"""
 
-def _plausible_flag(m):
-    prefix, _, body = m.partition("{")
-    body = body.rstrip("}")
-    if not prefix or not body:
-        return False
-    if any(ord(c) < 32 or ord(c) == 127 for c in body):
-        return False
-    if prefix.lower() in _FP_PREFIXES:
-        return False
-    if _CSS_BODY.match(body):
-        return False
-    return True
+_SCRIPT_BODY = r"""
 
 text_suffixes = {
     ".cfg", ".conf", ".csv", ".env", ".go", ".htm", ".html", ".ini", ".java", ".js", ".json",
@@ -202,6 +176,8 @@ else:
 for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
+
+SCRIPT = _SCRIPT_HEADER + SHARED_FLAG_DETECTION_SNIPPET + _SCRIPT_BODY
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

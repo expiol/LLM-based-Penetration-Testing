@@ -253,10 +253,6 @@ class ExecutionPlane:
                 raise ToolExecutionError(
                     f"{request.tool_name} failed after {attempt} attempt(s): {exc}"
                 ) from exc
-        else:
-            raise ToolExecutionError(
-                f"{request.tool_name} exhausted {request.max_retries + 1} attempt(s): {last_exc}"
-            )
 
         parsed = parser(request, result)
         evidence = self._build_evidence(task_id, request, result, parsed)

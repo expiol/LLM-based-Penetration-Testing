@@ -65,8 +65,6 @@ python run_mutil_killchain.py \
 常用附加参数：
 
 ```bash
---disable-llm
---disable-llm-planner
 --api-endpoint <base_url>
 --api-key <key>
 --model <model_name>

@@ -534,6 +534,38 @@ def _massage_payload_for_schema(payload: Any, schema: type[ModelT]) -> Any:
     return normalized or selected
 
 
+class TokenLedger:
+    """Accumulates token usage across all LLM calls in one session."""
+
+    def __init__(self) -> None:
+        self.prompt_tokens: int = 0
+        self.completion_tokens: int = 0
+        self.total_tokens: int = 0
+        self.llm_calls: int = 0
+
+    def record(self, prompt: int, completion: int) -> None:
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.total_tokens += prompt + completion
+        self.llm_calls += 1
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "llm_calls": self.llm_calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"TokenLedger(calls={self.llm_calls}, "
+            f"prompt={self.prompt_tokens}, "
+            f"completion={self.completion_tokens}, "
+            f"total={self.total_tokens})"
+        )
+
+
 class LLMClientError(RuntimeError):
     """Raised when an LLM call or response cannot be used safely."""
 
@@ -554,6 +586,13 @@ class LLMClient(Protocol):
         temperature: float = 0.2,
     ) -> ModelT:
         """Return a response validated against the requested Pydantic schema."""
+
+
+class _LLMPreflightResult(BaseModel):
+    """Minimal structured response used to verify live LLM connectivity."""
+
+    summary: str
+    ok: bool = True
 
 
 class LLMSettings(BaseModel):
@@ -589,6 +628,7 @@ class StaticLLMClient:
     ) -> None:
         self._responses = responses
         self._cursor = 0
+        self.token_ledger = TokenLedger()
 
     def _next_payload(self, system_prompt: str, user_prompt: str) -> dict[str, Any] | str:
         if callable(self._responses):
@@ -630,7 +670,9 @@ class StaticLLMClient:
                     f"LLM response failed SolverCodeGuidance validation: {exc}",
                     transient=True,
                 ) from exc
-            raise
+            raise LLMClientError(
+                f"LLM response failed {schema.__name__} validation: {exc}"
+            ) from exc
 
 
 def _default_transport(
@@ -768,6 +810,7 @@ class OpenAICompatibleLLMClient:
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.transport = transport or _default_transport
+        self.token_ledger = TokenLedger()
 
     def _extract_text_content(self, payload: dict[str, Any]) -> str:
         try:
@@ -838,6 +881,18 @@ class OpenAICompatibleLLMClient:
             "Content-Type": "application/json",
         }
         response_payload = self._call_transport(body, headers)
+        usage = response_payload.get("usage") or {}
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        self.token_ledger.record(prompt_tokens, completion_tokens)
+        log.info(
+            "LLM call #%d: prompt=%d completion=%d total=%d (session total=%d)",
+            self.token_ledger.llm_calls,
+            prompt_tokens,
+            completion_tokens,
+            prompt_tokens + completion_tokens,
+            self.token_ledger.total_tokens,
+        )
         raw_text = self._extract_text_content(response_payload)
         try:
             structured = json.loads(_coerce_json_text(raw_text))
@@ -859,10 +914,31 @@ class OpenAICompatibleLLMClient:
                     f"LLM response failed SolverCodeGuidance validation: {exc}",
                     transient=True,
                 ) from exc
+            raise LLMClientError(
+                f"LLM response failed {schema.__name__} validation: {exc}"
+            ) from exc
+
+
+    def preflight(self) -> None:
+        """Perform a small real request so runs fail before doing any work."""
+
+        try:
+            self.generate_json(
+                system_prompt=(
+                    "Return only a JSON object matching this schema: "
+                    '{"summary": string, "ok": boolean}.'
+                ),
+                user_prompt='{"check": "connectivity", "expected": "json"}',
+                schema=_LLMPreflightResult,
+                temperature=0.0,
+            )
+        except LLMClientError:
             raise
+        except Exception as exc:
+            raise LLMClientError(f"LLM preflight failed: {type(exc).__name__}: {exc}") from exc
 
 
-def build_llm_client_from_env() -> LLMClient:
+def build_llm_client_from_env(*, preflight: bool = True) -> LLMClient:
     """Construct an LLM client from environment variables.
 
     Raises LLMClientError if the environment is not properly configured.
@@ -881,10 +957,13 @@ def build_llm_client_from_env() -> LLMClient:
         raise LLMClientError(
             "AUTOPENTEST_LLM_BASE_URL, AUTOPENTEST_LLM_MODEL, and AUTOPENTEST_LLM_API_KEY are required."
         )
-    return OpenAICompatibleLLMClient(
+    client = OpenAICompatibleLLMClient(
         base_url=settings.base_url,
         model=settings.model,
         api_key=settings.api_key,
         timeout_s=settings.timeout_s,
         max_retries=settings.max_retries,
     )
+    if preflight:
+        client.preflight()
+    return client

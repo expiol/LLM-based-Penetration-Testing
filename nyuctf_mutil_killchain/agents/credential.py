@@ -113,50 +113,48 @@ class CredentialHuntAgent(WorkerAgent):
             schema=CredentialHarvestGuidance,
         )
 
-        if llm_guidance is not None:
-            ranking = {
-                credential_id: index
-                for index, credential_id in enumerate(llm_guidance.prioritized_credential_ids)
-                if credential_id
-            }
-            credential_candidates.sort(key=lambda item: ranking.get(str(item.get("credential_id")), 999))
-            flag_candidates = merge_unique_strings(
-                flag_candidates,
-                llm_guidance.grounded_flag_candidates,
-                limit=12,
-            )
-            interesting_paths = merge_unique_strings(
-                interesting_paths,
-                llm_guidance.interesting_paths,
-                limit=20,
-            )
-            manual_checks = merge_unique_strings(
-                manual_checks,
-                llm_guidance.manual_checks,
-                limit=8,
-            )
+        ranking = {
+            credential_id: index
+            for index, credential_id in enumerate(llm_guidance.prioritized_credential_ids)
+            if credential_id
+        }
+        credential_candidates.sort(key=lambda item: ranking.get(str(item.get("credential_id")), 999))
+        flag_candidates = merge_unique_strings(
+            flag_candidates,
+            llm_guidance.grounded_flag_candidates,
+            limit=12,
+        )
+        interesting_paths = merge_unique_strings(
+            interesting_paths,
+            llm_guidance.interesting_paths,
+            limit=20,
+        )
+        manual_checks = merge_unique_strings(
+            manual_checks,
+            llm_guidance.manual_checks,
+            limit=8,
+        )
 
         new_tasks = [
             build_flag_validation_task(candidate, source="credential_harvest")
             for candidate in flag_candidates
         ]
         new_tasks.extend(build_path_probe_tasks_for_assets(state, interesting_paths, priority=75))
-        for asset in list(state.assets.values())[:4]:
-            if not asset.base_url:
-                continue
-            new_tasks.append(
-                build_credential_test_task(
-                    asset_id=asset.asset_id,
-                    base_url=asset.base_url,
-                    credential_ids=credential_ids[:6],
-                    seed_paths=interesting_paths,
-                    priority=84,
+        if credential_ids:
+            for asset in list(state.assets.values())[:4]:
+                if not asset.base_url:
+                    continue
+                new_tasks.append(
+                    build_credential_test_task(
+                        asset_id=asset.asset_id,
+                        base_url=asset.base_url,
+                        credential_ids=credential_ids[:6],
+                        seed_paths=interesting_paths,
+                        priority=84,
+                    )
                 )
-            )
 
-        if credential_candidates and (
-            llm_guidance is None or llm_guidance.should_schedule_exploit_hypothesis
-        ):
+        if credential_candidates and llm_guidance.should_schedule_exploit_hypothesis:
             new_tasks.append(
                 build_exploit_hypothesis_task(
                     files_root=str(output_context.get("files_root") or "/home/ctfplayer/ctf_files"),
@@ -177,8 +175,7 @@ class CredentialHuntAgent(WorkerAgent):
             "interesting_paths": interesting_paths,
             "manual_checks": manual_checks,
         }
-        if llm_guidance is not None:
-            output_context["llm_summary"] = llm_guidance.summary
+        output_context["llm_summary"] = llm_guidance.summary
 
         return WorkerReport(
             task_id=task.task_id,

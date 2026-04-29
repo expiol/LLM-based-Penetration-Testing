@@ -109,31 +109,30 @@ class VulnScanAgent(WorkerAgent):
             schema=StageAnalysisGuidance,
         )
         new_tasks = []
-        if llm_guidance is not None:
-            output_context["llm_summary"] = llm_guidance.summary
-            output_context["manual_checks"] = llm_guidance.manual_checks
-            new_tasks.extend(
-                build_flag_validation_task(candidate, source="vuln_scan")
-                for candidate in llm_guidance.grounded_flag_candidates
+        output_context["llm_summary"] = llm_guidance.summary
+        output_context["manual_checks"] = llm_guidance.manual_checks
+        new_tasks.extend(
+            build_flag_validation_task(candidate, source="vuln_scan")
+            for candidate in llm_guidance.grounded_flag_candidates
+        )
+        new_tasks.extend(build_path_probe_tasks_for_assets(state, llm_guidance.interesting_paths, priority=75))
+        if llm_guidance.should_schedule_exploit_hypothesis:
+            new_tasks.append(
+                build_exploit_hypothesis_task(
+                    files_root="/home/ctfplayer/ctf_files",
+                    focus_asset_ids=[asset_id],
+                    seed_terms=[target, scan_method],
+                    priority=79,
+                )
             )
-            new_tasks.extend(build_path_probe_tasks_for_assets(state, llm_guidance.interesting_paths, priority=75))
-            if llm_guidance.should_schedule_exploit_hypothesis:
-                new_tasks.append(
-                    build_exploit_hypothesis_task(
-                        files_root="/home/ctfplayer/ctf_files",
-                        focus_asset_ids=[asset_id],
-                        seed_terms=[target, scan_method],
-                        priority=79,
-                    )
+        if llm_guidance.should_schedule_flag_hunt and state.metadata.get("challenge", {}).get("files"):
+            new_tasks.append(
+                build_flag_hunt_task(
+                    files_root="/home/ctfplayer/ctf_files",
+                    seed_terms=[target, scan_method],
+                    priority=92,
                 )
-            if llm_guidance.should_schedule_flag_hunt and state.metadata.get("challenge", {}).get("files"):
-                new_tasks.append(
-                    build_flag_hunt_task(
-                        files_root="/home/ctfplayer/ctf_files",
-                        seed_terms=[target, scan_method],
-                        priority=92,
-                    )
-                )
+            )
 
         return WorkerReport(
             task_id=task.task_id,

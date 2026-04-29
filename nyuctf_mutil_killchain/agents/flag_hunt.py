@@ -99,22 +99,21 @@ class FlagHuntAgent(WorkerAgent):
             schema=StageAnalysisGuidance,
         )
 
-        if llm_guidance is not None:
-            flag_candidates = merge_unique_strings(
-                flag_candidates,
-                llm_guidance.grounded_flag_candidates,
-                limit=16,
-            )
-            interesting_paths = merge_unique_strings(
-                interesting_paths,
-                llm_guidance.interesting_paths,
-                limit=20,
-            )
-            manual_checks = merge_unique_strings(
-                manual_checks,
-                llm_guidance.manual_checks,
-                limit=8,
-            )
+        flag_candidates = merge_unique_strings(
+            flag_candidates,
+            llm_guidance.grounded_flag_candidates,
+            limit=16,
+        )
+        interesting_paths = merge_unique_strings(
+            interesting_paths,
+            llm_guidance.interesting_paths,
+            limit=20,
+        )
+        manual_checks = merge_unique_strings(
+            manual_checks,
+            llm_guidance.manual_checks,
+            limit=8,
+        )
 
         output_context = {
             **output_context,
@@ -122,8 +121,7 @@ class FlagHuntAgent(WorkerAgent):
             "interesting_paths": interesting_paths,
             "manual_checks": manual_checks,
         }
-        if llm_guidance is not None:
-            output_context["llm_summary"] = llm_guidance.summary
+        output_context["llm_summary"] = llm_guidance.summary
 
         new_tasks = [
             build_flag_validation_task(candidate, source="flag_harvest")

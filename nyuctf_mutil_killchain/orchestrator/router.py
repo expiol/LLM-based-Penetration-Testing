@@ -36,67 +36,13 @@ class WorkerRouter(ABC):
         """Return a routed worker choice."""
 
 
-class HeuristicWorkerRouter(WorkerRouter):
-    """Deterministic routing fallback used when no LLM route is available."""
-
-    def route(
-        self,
-        *,
-        task: Task,
-        state: GlobalState,
-        candidates: Sequence[WorkerAgent],
-    ) -> WorkerRouteDecision:
-        if not candidates:
-            raise ValueError("Worker router received no candidates.")
-
-        preferred_workers = [
-            str(value)
-            for value in (
-                list(task.metadata.get("preferred_workers") or [])
-                + list(task.input_context.get("preferred_workers") or [])
-            )
-            if value
-        ]
-
-        ranked: list[tuple[int, int, WorkerAgent]] = []
-        rejection_notes: list[str] = []
-        for index, worker in enumerate(candidates):
-            allowed, reason = worker.can_route_task(task, state)
-            if not allowed:
-                rejection_notes.append(f"{worker.name}: {reason}")
-                continue
-
-            score = worker.routing_score(task, state)
-            if worker.name in preferred_workers:
-                score += max(6, 18 - 3 * preferred_workers.index(worker.name))
-            ranked.append((score, -index, worker))
-
-        if ranked:
-            score, _, worker = max(ranked, key=lambda item: (item[0], item[1]))
-            rationale = (
-                f"Heuristic router selected {worker.name} with score {score} "
-                f"for task type {task.task_type}."
-            )
-            if rejection_notes:
-                rationale += " Rejected candidates: " + "; ".join(rejection_notes[:3])
-            return WorkerRouteDecision(worker_name=worker.name, rationale=rationale, confidence=0.35)
-
-        worker = candidates[0]
-        rationale = (
-            f"Heuristic router fell back to the first compatible worker {worker.name} "
-            f"because all candidates were filtered out."
-        )
-        if rejection_notes:
-            rationale += " Filter reasons: " + "; ".join(rejection_notes[:3])
-        return WorkerRouteDecision(worker_name=worker.name, rationale=rationale, confidence=0.1)
-
-
 class LLMWorkerRouter(WorkerRouter):
-    """LLM-assisted worker router with deterministic fallback."""
+    """LLM-assisted worker router with fail-fast behavior."""
 
-    def __init__(self, llm_client: LLMClient, fallback: WorkerRouter | None = None) -> None:
+    def __init__(self, llm_client: LLMClient) -> None:
+        if llm_client is None:
+            raise LLMClientError("LLMWorkerRouter requires an LLM client.")
         self.llm_client = llm_client
-        self.fallback = fallback or HeuristicWorkerRouter()
 
     def route(
         self,
@@ -115,7 +61,6 @@ class LLMWorkerRouter(WorkerRouter):
                 confidence=1.0,
             )
 
-        fallback_decision = self.fallback.route(task=task, state=state, candidates=candidates)
         candidate_map = {worker.name: worker for worker in candidates}
 
         routing_snapshot = {
@@ -157,27 +102,31 @@ class LLMWorkerRouter(WorkerRouter):
                 for worker in candidates
                 if worker.can_route_task(task, state)[0]
             ],
-            "fallback_choice": fallback_decision.model_dump(mode="json"),
         }
         if not routing_snapshot["candidates"]:
-            return fallback_decision
+            raise LLMClientError(
+                f"No routable worker candidates remained for task {task.task_id} ({task.task_type})."
+            )
 
         category = str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
 
-        try:
-            decision = self.llm_client.generate_json(
-                system_prompt=get_router_system_prompt(category),
-                user_prompt=json.dumps(routing_snapshot, ensure_ascii=True, indent=2),
-                schema=WorkerRouteDecision,
-                temperature=0.1,
-            )
-        except Exception:
-            return fallback_decision
+        decision = self.llm_client.generate_json(
+            system_prompt=get_router_system_prompt(category),
+            user_prompt=json.dumps(routing_snapshot, ensure_ascii=True, indent=2),
+            schema=WorkerRouteDecision,
+            temperature=0.1,
+        )
 
         selected = candidate_map.get(decision.worker_name)
         if selected is None:
-            return fallback_decision
+            raise LLMClientError(
+                f"LLM router selected unknown worker {decision.worker_name!r} "
+                f"for task {task.task_id}; candidates were {sorted(candidate_map)}."
+            )
         allowed, _ = selected.can_route_task(task, state)
         if not allowed:
-            return fallback_decision
+            raise LLMClientError(
+                f"LLM router selected non-routable worker {decision.worker_name!r} "
+                f"for task {task.task_id}."
+            )
         return decision

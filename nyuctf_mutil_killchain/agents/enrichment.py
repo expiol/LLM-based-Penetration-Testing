@@ -1,23 +1,37 @@
-"""Additional enrichment workers for artifact, service, and path analysis."""
+"""Service-banner and web-path-probe enrichment workers.
+
+The four artifact-review agents that lived here historically (Archive, SQLite,
+Pcap, Repo) have been consolidated into :class:`ArtifactWorker` in
+:mod:`agents.artifact_worker`.  They remain importable from this module via
+backwards-compat aliases.
+"""
 
 from __future__ import annotations
 
 import json
 
-from nyuctf_mutil_killchain.agents.base import (
-    WorkerAgent,
-    build_artifact_deep_review_task,
-    build_flag_validation_task,
-    build_path_probe_tasks_for_assets,
-    build_source_review_task,
-    build_web_content_task,
-    build_web_review_task,
-    infer_web_urls_from_banners,
-    merge_unique_strings,
-)
+from nyuctf_mutil_killchain.agents._helpers.network import infer_web_urls_from_banners
+from nyuctf_mutil_killchain.agents._helpers.strings import merge_unique_strings
+from nyuctf_mutil_killchain.agents.artifact_worker import ArtifactWorker
+from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.agents.llm_guidance import EvidenceReviewGuidance
 from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, WorkerReport
+from nyuctf_mutil_killchain.state.task_factory import (
+    build_flag_validation_task,
+    build_web_content_task,
+    build_web_review_task,
+)
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compat aliases for the consolidated artifact worker
+# ---------------------------------------------------------------------------
+
+ArchiveTriageAgent = ArtifactWorker
+SQLiteReviewAgent = ArtifactWorker
+PcapReviewAgent = ArtifactWorker
+RepoReviewAgent = ArtifactWorker
 
 
 def _apply_evidence_guidance(
@@ -27,10 +41,9 @@ def _apply_evidence_guidance(
     task: Task,
     summary: str,
     output_context: dict[str, object],
-    worker_notes: list[str],
     guidance_label: str,
-) -> tuple[EvidenceReviewGuidance | None, list[str], dict[str, object]]:
-    """Apply best-effort grounded LLM synthesis to an evidence-review worker."""
+) -> tuple[EvidenceReviewGuidance, list[str], dict[str, object]]:
+    """Apply grounded LLM synthesis to an evidence-review worker."""
 
     challenge_meta = state.metadata.get("challenge", {})
     guidance = worker.generate_structured_output(
@@ -66,378 +79,24 @@ def _apply_evidence_guidance(
 
     flag_candidates = list(output_context.get("flag_candidates") or [])
     manual_checks = list(output_context.get("manual_checks") or [])
-    if guidance is not None:
-        flag_candidates = merge_unique_strings(
-            flag_candidates,
-            guidance.grounded_flag_candidates,
-            limit=12,
-        )
-        manual_checks = merge_unique_strings(
-            manual_checks,
-            guidance.recommended_checks,
-            limit=8,
-        )
+    flag_candidates = merge_unique_strings(
+        flag_candidates,
+        guidance.grounded_flag_candidates,
+        limit=12,
+    )
+    manual_checks = merge_unique_strings(
+        manual_checks,
+        guidance.recommended_checks,
+        limit=8,
+    )
 
     guided_output_context: dict[str, object] = {
         **output_context,
         "flag_candidates": flag_candidates,
         "manual_checks": manual_checks,
     }
-    if guidance is not None:
-        guided_output_context["llm_summary"] = guidance.summary
+    guided_output_context["llm_summary"] = guidance.summary
     return guidance, flag_candidates, guided_output_context
-
-
-class ArchiveTriageAgent(WorkerAgent):
-    """Inspects bundled archive files for embedded paths and flag-like content."""
-
-    name = "archive-triage-agent"
-    supported_task_types = ("artifact.archive_triage", "artifact.deep_review")
-    routing_summary = "Archive inspection for embedded members, nested sources, and hidden challenge stages."
-    preferred_challenge_categories = ("misc", "forensics", "rev", "web")
-    required_context_keys = ("archive_files",)
-
-    def routing_score(self, task: Task, state: GlobalState) -> int:
-        score = super().routing_score(task, state)
-        analysis_kind = str(
-            task.input_context.get("analysis_kind")
-            or task.metadata.get("analysis_kind")
-            or ""
-        ).lower()
-        if analysis_kind == "archive":
-            score += 40
-        return score
-
-    def run(self, task: Task, state: GlobalState) -> WorkerReport:
-        if self.execution_plane is None:
-            return WorkerReport(
-                task_id=task.task_id,
-                worker_name=self.name,
-                success=False,
-                summary="Archive triage requires an execution plane; none is configured.",
-                error="ArchiveTriageAgent.execution_plane is None",
-                retryable=False,
-            )
-
-        request = ToolExecutionRequest(
-            tool_name="archive_triage",
-            parser_name="jsonl_signals",
-            timeout_s=task.input_context.get("timeout_s", 120),
-            metadata={
-                "files_root": task.input_context.get("files_root", "/home/ctfplayer/ctf_files"),
-                "archive_files": task.input_context.get("archive_files", []),
-                "max_files": task.input_context.get("max_files", 8),
-            },
-        )
-        try:
-            bundle = self.execution_plane.execute(task.task_id, request)
-        except ToolExecutionError as exc:
-            return WorkerReport(
-                task_id=task.task_id,
-                worker_name=self.name,
-                success=False,
-                summary="Archive triage execution failed.",
-                error=str(exc),
-            )
-
-        worker_notes = list(bundle.parsed.notes)
-        guidance, flag_candidates, output_context = _apply_evidence_guidance(
-            self,
-            state=state,
-            task=task,
-            summary=bundle.parsed.summary,
-            output_context=bundle.parsed.output_context,
-            worker_notes=worker_notes,
-            guidance_label="archive triage",
-        )
-        source_like_members = list(
-            output_context.get("qualified_source_like_members")
-            or output_context.get("source_like_members")
-            or []
-        )
-        new_tasks = [
-            build_flag_validation_task(candidate, source="archive_triage")
-            for candidate in flag_candidates
-        ]
-        if source_like_members:
-            new_tasks.append(
-                build_source_review_task(
-                    files_root=str(output_context.get("files_root") or "/home/ctfplayer/ctf_files"),
-                    source_files=source_like_members[:12],
-                )
-            )
-        if guidance is not None:
-            new_tasks.extend(build_path_probe_tasks_for_assets(state, guidance.interesting_paths))
-
-        return WorkerReport(
-            task_id=task.task_id,
-            worker_name=self.name,
-            success=True,
-            summary=bundle.parsed.summary,
-            output_context=output_context,
-            asset_updates=bundle.parsed.asset_updates,
-            finding_updates=bundle.parsed.finding_updates,
-            credential_updates=bundle.parsed.credential_updates,
-            network_updates=bundle.parsed.network_updates,
-            evidence_updates=[bundle.evidence],
-            new_tasks=new_tasks,
-            notes=worker_notes + [f"{self.name} reviewed bundled archives."],
-        )
-
-
-class SQLiteReviewAgent(WorkerAgent):
-    """Inspects bundled SQLite databases for sensitive rows and flags."""
-
-    name = "sqlite-review-agent"
-    supported_task_types = ("artifact.sqlite_review", "artifact.deep_review")
-    routing_summary = "SQLite review for schemas, credential rows, challenge state, and embedded flags."
-    preferred_challenge_categories = ("web", "misc", "forensics")
-    required_context_keys = ("database_files",)
-
-    def routing_score(self, task: Task, state: GlobalState) -> int:
-        score = super().routing_score(task, state)
-        analysis_kind = str(
-            task.input_context.get("analysis_kind")
-            or task.metadata.get("analysis_kind")
-            or ""
-        ).lower()
-        if analysis_kind == "sqlite":
-            score += 40
-        return score
-
-    def run(self, task: Task, state: GlobalState) -> WorkerReport:
-        if self.execution_plane is None:
-            return WorkerReport(
-                task_id=task.task_id,
-                worker_name=self.name,
-                success=False,
-                summary="SQLite review requires an execution plane; none is configured.",
-                error="SQLiteReviewAgent.execution_plane is None",
-                retryable=False,
-            )
-
-        request = ToolExecutionRequest(
-            tool_name="sqlite_review",
-            parser_name="jsonl_signals",
-            timeout_s=task.input_context.get("timeout_s", 120),
-            metadata={
-                "files_root": task.input_context.get("files_root", "/home/ctfplayer/ctf_files"),
-                "database_files": task.input_context.get("database_files", []),
-                "max_files": task.input_context.get("max_files", 6),
-            },
-        )
-        try:
-            bundle = self.execution_plane.execute(task.task_id, request)
-        except ToolExecutionError as exc:
-            return WorkerReport(
-                task_id=task.task_id,
-                worker_name=self.name,
-                success=False,
-                summary="SQLite review execution failed.",
-                error=str(exc),
-            )
-
-        worker_notes = list(bundle.parsed.notes)
-        guidance, flag_candidates, output_context = _apply_evidence_guidance(
-            self,
-            state=state,
-            task=task,
-            summary=bundle.parsed.summary,
-            output_context=bundle.parsed.output_context,
-            worker_notes=worker_notes,
-            guidance_label="sqlite review",
-        )
-        new_tasks = [
-            build_flag_validation_task(candidate, source="sqlite_review")
-            for candidate in flag_candidates
-        ]
-        if guidance is not None:
-            new_tasks.extend(build_path_probe_tasks_for_assets(state, guidance.interesting_paths))
-
-        return WorkerReport(
-            task_id=task.task_id,
-            worker_name=self.name,
-            success=True,
-            summary=bundle.parsed.summary,
-            output_context=output_context,
-            asset_updates=bundle.parsed.asset_updates,
-            finding_updates=bundle.parsed.finding_updates,
-            credential_updates=bundle.parsed.credential_updates,
-            network_updates=bundle.parsed.network_updates,
-            evidence_updates=[bundle.evidence],
-            new_tasks=new_tasks,
-            notes=worker_notes + [f"{self.name} reviewed bundled SQLite databases."],
-        )
-
-
-class PcapReviewAgent(WorkerAgent):
-    """Inspects bundled packet captures for hosts, URLs, credentials, and flags."""
-
-    name = "pcap-review-agent"
-    supported_task_types = ("artifact.pcap_review", "artifact.deep_review")
-    routing_summary = "Packet-capture review for URLs, hosts, cookies, credentials, and protocol pivots."
-    preferred_challenge_categories = ("forensics", "web", "misc")
-    required_context_keys = ("pcap_files",)
-
-    def routing_score(self, task: Task, state: GlobalState) -> int:
-        score = super().routing_score(task, state)
-        analysis_kind = str(
-            task.input_context.get("analysis_kind")
-            or task.metadata.get("analysis_kind")
-            or ""
-        ).lower()
-        if analysis_kind == "pcap":
-            score += 40
-        return score
-
-    def run(self, task: Task, state: GlobalState) -> WorkerReport:
-        if self.execution_plane is None:
-            return WorkerReport(
-                task_id=task.task_id,
-                worker_name=self.name,
-                success=False,
-                summary="PCAP review requires an execution plane; none is configured.",
-                error="PcapReviewAgent.execution_plane is None",
-                retryable=False,
-            )
-
-        request = ToolExecutionRequest(
-            tool_name="pcap_review",
-            parser_name="jsonl_signals",
-            timeout_s=task.input_context.get("timeout_s", 120),
-            metadata={
-                "files_root": task.input_context.get("files_root", "/home/ctfplayer/ctf_files"),
-                "pcap_files": task.input_context.get("pcap_files", []),
-                "max_files": task.input_context.get("max_files", 6),
-            },
-        )
-        try:
-            bundle = self.execution_plane.execute(task.task_id, request)
-        except ToolExecutionError as exc:
-            return WorkerReport(
-                task_id=task.task_id,
-                worker_name=self.name,
-                success=False,
-                summary="PCAP review execution failed.",
-                error=str(exc),
-            )
-
-        worker_notes = list(bundle.parsed.notes)
-        guidance, flag_candidates, output_context = _apply_evidence_guidance(
-            self,
-            state=state,
-            task=task,
-            summary=bundle.parsed.summary,
-            output_context=bundle.parsed.output_context,
-            worker_notes=worker_notes,
-            guidance_label="pcap review",
-        )
-        new_tasks = [
-            build_flag_validation_task(candidate, source="pcap_review")
-            for candidate in flag_candidates
-        ]
-        if guidance is not None:
-            new_tasks.extend(build_path_probe_tasks_for_assets(state, guidance.interesting_paths))
-
-        return WorkerReport(
-            task_id=task.task_id,
-            worker_name=self.name,
-            success=True,
-            summary=bundle.parsed.summary,
-            output_context=output_context,
-            asset_updates=bundle.parsed.asset_updates,
-            finding_updates=bundle.parsed.finding_updates,
-            credential_updates=bundle.parsed.credential_updates,
-            network_updates=bundle.parsed.network_updates,
-            evidence_updates=[bundle.evidence],
-            new_tasks=new_tasks,
-            notes=worker_notes + [f"{self.name} reviewed packet capture artifacts."],
-        )
-
-
-class RepoReviewAgent(WorkerAgent):
-    """Inspects bundled git repositories for useful history and leaked secrets."""
-
-    name = "repo-review-agent"
-    supported_task_types = ("artifact.repo_review", "artifact.deep_review")
-    routing_summary = "Git repository review for commit history, removed secrets, and reverted challenge artifacts."
-    preferred_challenge_categories = ("web", "misc", "forensics", "rev")
-    required_context_keys = ("repo_paths",)
-
-    def routing_score(self, task: Task, state: GlobalState) -> int:
-        score = super().routing_score(task, state)
-        analysis_kind = str(
-            task.input_context.get("analysis_kind")
-            or task.metadata.get("analysis_kind")
-            or ""
-        ).lower()
-        if analysis_kind == "repo":
-            score += 40
-        return score
-
-    def run(self, task: Task, state: GlobalState) -> WorkerReport:
-        if self.execution_plane is None:
-            return WorkerReport(
-                task_id=task.task_id,
-                worker_name=self.name,
-                success=False,
-                summary="Repository review requires an execution plane; none is configured.",
-                error="RepoReviewAgent.execution_plane is None",
-                retryable=False,
-            )
-
-        request = ToolExecutionRequest(
-            tool_name="repo_review",
-            parser_name="jsonl_signals",
-            timeout_s=task.input_context.get("timeout_s", 120),
-            metadata={
-                "files_root": task.input_context.get("files_root", "/home/ctfplayer/ctf_files"),
-                "repo_paths": task.input_context.get("repo_paths", []),
-                "max_files": task.input_context.get("max_files", 4),
-            },
-        )
-        try:
-            bundle = self.execution_plane.execute(task.task_id, request)
-        except ToolExecutionError as exc:
-            return WorkerReport(
-                task_id=task.task_id,
-                worker_name=self.name,
-                success=False,
-                summary="Repository review execution failed.",
-                error=str(exc),
-            )
-
-        worker_notes = list(bundle.parsed.notes)
-        guidance, flag_candidates, output_context = _apply_evidence_guidance(
-            self,
-            state=state,
-            task=task,
-            summary=bundle.parsed.summary,
-            output_context=bundle.parsed.output_context,
-            worker_notes=worker_notes,
-            guidance_label="repository review",
-        )
-        new_tasks = [
-            build_flag_validation_task(candidate, source="repo_review")
-            for candidate in flag_candidates
-        ]
-        if guidance is not None:
-            new_tasks.extend(build_path_probe_tasks_for_assets(state, guidance.interesting_paths))
-
-        return WorkerReport(
-            task_id=task.task_id,
-            worker_name=self.name,
-            success=True,
-            summary=bundle.parsed.summary,
-            output_context=output_context,
-            asset_updates=bundle.parsed.asset_updates,
-            finding_updates=bundle.parsed.finding_updates,
-            credential_updates=bundle.parsed.credential_updates,
-            network_updates=bundle.parsed.network_updates,
-            evidence_updates=[bundle.evidence],
-            new_tasks=new_tasks,
-            notes=worker_notes + [f"{self.name} reviewed embedded repositories."],
-        )
 
 
 class ServiceBannerAgent(WorkerAgent):
@@ -499,7 +158,6 @@ class ServiceBannerAgent(WorkerAgent):
             task=task,
             summary=bundle.parsed.summary,
             output_context=bundle.parsed.output_context,
-            worker_notes=worker_notes,
             guidance_label="service banner review",
         )
         asset = state.assets.get(asset_id) if asset_id else None
@@ -581,7 +239,6 @@ class WebPathProbeAgent(WorkerAgent):
             task=task,
             summary=bundle.parsed.summary,
             output_context=bundle.parsed.output_context,
-            worker_notes=worker_notes,
             guidance_label="web path probe",
         )
         new_tasks = [
@@ -612,3 +269,13 @@ class WebPathProbeAgent(WorkerAgent):
             new_tasks=new_tasks,
             notes=worker_notes + [f"{self.name} probed interesting HTTP paths."],
         )
+
+
+__all__ = [
+    "ArchiveTriageAgent",
+    "PcapReviewAgent",
+    "RepoReviewAgent",
+    "SQLiteReviewAgent",
+    "ServiceBannerAgent",
+    "WebPathProbeAgent",
+]

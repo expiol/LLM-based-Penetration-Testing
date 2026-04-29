@@ -137,21 +137,20 @@ class HostAuditAgent(WorkerAgent):
                         )
                     )
 
-        if llm_guidance is not None:
-            output_context["llm_summary"] = llm_guidance.summary
-            output_context["manual_checks"] = llm_guidance.manual_checks
-            new_tasks.extend(
-                build_flag_validation_task(candidate, source="host_audit")
-                for candidate in llm_guidance.grounded_flag_candidates
-            )
-            if llm_guidance.should_schedule_flag_hunt and state.metadata.get("challenge", {}).get("files"):
-                new_tasks.append(
-                    build_flag_hunt_task(
-                        files_root="/home/ctfplayer/ctf_files",
-                        seed_terms=llm_guidance.interesting_paths or [label],
-                        priority=92,
-                    )
+        output_context["llm_summary"] = llm_guidance.summary
+        output_context["manual_checks"] = llm_guidance.manual_checks
+        new_tasks.extend(
+            build_flag_validation_task(candidate, source="host_audit")
+            for candidate in llm_guidance.grounded_flag_candidates
+        )
+        if llm_guidance.should_schedule_flag_hunt and state.metadata.get("challenge", {}).get("files"):
+            new_tasks.append(
+                build_flag_hunt_task(
+                    files_root="/home/ctfplayer/ctf_files",
+                    seed_terms=llm_guidance.interesting_paths or [label],
+                    priority=92,
                 )
+            )
 
         return WorkerReport(
             task_id=task.task_id,

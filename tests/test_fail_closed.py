@@ -25,10 +25,10 @@ from nyuctf_mutil_killchain.agents.web_content import WebContentAgent
 from nyuctf_mutil_killchain.orchestrator.loop import Orchestrator
 from nyuctf_mutil_killchain.orchestrator.planner import (
     APPROVED_TASK_TYPES,
-    HeuristicPlanner,
     LLMPlanner,
     PlannedTask,
 )
+from nyuctf_mutil_killchain.llm import StaticLLMClient
 from nyuctf_mutil_killchain.state.models import (
     Asset,
     AssetKind,
@@ -146,7 +146,7 @@ class TestPlannerNormalization:
     def test_web_task_identity_filled_single_asset(self):
         """Planner fills asset_id/base_url for web tasks with single asset."""
         state = _state_with_web_asset()
-        planner = LLMPlanner(llm_client=None, fallback=HeuristicPlanner())
+        planner = LLMPlanner(StaticLLMClient([]))
         task = PlannedTask(
             title="Review web",
             description="test",
@@ -160,7 +160,7 @@ class TestPlannerNormalization:
     def test_exploit_task_identity_filled_single_asset(self):
         """Planner fills asset_id for exploit tasks with single asset."""
         state = _state_with_web_asset()
-        planner = LLMPlanner(llm_client=None, fallback=HeuristicPlanner())
+        planner = LLMPlanner(StaticLLMClient([]))
         task = PlannedTask(
             title="Exploit",
             description="test",
@@ -173,7 +173,7 @@ class TestPlannerNormalization:
     def test_host_task_identity_filled_single_asset(self):
         """Planner fills hostname for host tasks with single asset."""
         state = _state_with_web_asset()
-        planner = LLMPlanner(llm_client=None, fallback=HeuristicPlanner())
+        planner = LLMPlanner(StaticLLMClient([]))
         task = PlannedTask(
             title="Banner grab",
             description="test",
@@ -196,7 +196,7 @@ class TestPlannerNormalization:
                 services=[Service(port=9090, name="http")],
             )
         )
-        planner = LLMPlanner(llm_client=None, fallback=HeuristicPlanner())
+        planner = LLMPlanner(StaticLLMClient([]))
         task = PlannedTask(
             title="Review web",
             description="test",
@@ -210,7 +210,7 @@ class TestPlannerNormalization:
     def test_artifact_files_root_still_filled(self):
         """Planner should still fill files_root for artifact tasks."""
         state = _state_with_web_asset()
-        planner = LLMPlanner(llm_client=None, fallback=HeuristicPlanner())
+        planner = LLMPlanner(StaticLLMClient([]))
         task = PlannedTask(
             title="Triage",
             description="test",
@@ -416,8 +416,8 @@ class TestTaskErrorCodeSerialization:
 # ===========================================================================
 
 class TestApprovedTaskTypes:
-    def test_form_probe_not_approved(self):
-        assert "web.form_probe" not in APPROVED_TASK_TYPES
+    def test_form_probe_is_approved(self):
+        assert "web.form_probe" in APPROVED_TASK_TYPES
 
     def test_core_types_present(self):
         for expected in [

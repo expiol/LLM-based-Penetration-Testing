@@ -9,35 +9,17 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from nyuctf_mutil_killchain.agents import (
-    ArchiveTriageAgent,
-    ArtifactTriageAgent,
-    BinaryTriageAgent,
-    ComputationAnalysisAgent,
-    CredentialHuntAgent,
-    CredentialExploitAgent,
-    ExploitReasoningAgent,
+    ArtifactWorker,
+    CredentialWorker,
+    ExploitWorker,
     FlagValidationAgent,
-    FlagHuntAgent,
-    HostAuditAgent,
-    PcapReviewAgent,
     ReconAgent,
-    RepoReviewAgent,
-    RuntimeProbeAgent,
-    ServiceBannerAgent,
     SolverAgent,
-    SourceReviewAgent,
-    SQLiteReviewAgent,
+    SurfaceWorker,
     VulnScanAgent,
-    WebPwnExploitAgent,
-    WebAssessmentAgent,
-    WebContentAgent,
-    WebFormProbeAgent,
-    WebPathProbeAgent,
 )
-from nyuctf_mutil_killchain.llm import LLMClient, build_llm_client_from_env
+from nyuctf_mutil_killchain.llm import LLMClient, TokenLedger, build_llm_client_from_env
 from nyuctf_mutil_killchain.orchestrator import (
-    HeuristicPlanner,
-    HeuristicWorkerRouter,
     LLMPlanner,
     LLMWorkerRouter,
     Orchestrator,
@@ -106,14 +88,14 @@ def build_runtime(
     execution_plane: ExecutionPlane | None = None,
     expected_flag: str | None = None,
     llm_client: LLMClient | None = None,
-) -> tuple[GlobalState, Orchestrator]:
+) -> tuple[GlobalState, Orchestrator, LLMClient]:
     """Assemble state, planner, workers, and execution plane for one run."""
 
     if llm_client is None:
         llm_client = build_llm_client_from_env()
 
-    planner = LLMPlanner(llm_client, fallback=HeuristicPlanner())
-    router = LLMWorkerRouter(llm_client, fallback=HeuristicWorkerRouter())
+    planner = LLMPlanner(llm_client)
+    router = LLMWorkerRouter(llm_client)
 
     execution_plane = execution_plane or build_execution_plane()
     state = GlobalState(
@@ -125,27 +107,11 @@ def build_runtime(
         state=state,
         workers=[
             ReconAgent(llm_client=llm_client, execution_plane=execution_plane),
-            ArtifactTriageAgent(llm_client=llm_client, execution_plane=execution_plane),
-            CredentialHuntAgent(llm_client=llm_client, execution_plane=execution_plane),
-            CredentialExploitAgent(llm_client=llm_client, execution_plane=execution_plane),
-            ArchiveTriageAgent(llm_client=llm_client, execution_plane=execution_plane),
-            BinaryTriageAgent(llm_client=llm_client, execution_plane=execution_plane),
-            ComputationAnalysisAgent(llm_client=llm_client, execution_plane=execution_plane),
-            SQLiteReviewAgent(llm_client=llm_client, execution_plane=execution_plane),
-            PcapReviewAgent(llm_client=llm_client, execution_plane=execution_plane),
-            RepoReviewAgent(llm_client=llm_client, execution_plane=execution_plane),
-            RuntimeProbeAgent(llm_client=llm_client, execution_plane=execution_plane),
-            SourceReviewAgent(llm_client=llm_client, execution_plane=execution_plane),
-            HostAuditAgent(llm_client=llm_client, execution_plane=execution_plane),
-            ServiceBannerAgent(llm_client=llm_client, execution_plane=execution_plane),
-            WebAssessmentAgent(llm_client=llm_client, execution_plane=execution_plane),
-            WebContentAgent(llm_client=llm_client, execution_plane=execution_plane),
-            WebFormProbeAgent(llm_client=llm_client, execution_plane=execution_plane),
-            WebPathProbeAgent(llm_client=llm_client, execution_plane=execution_plane),
+            ArtifactWorker(llm_client=llm_client, execution_plane=execution_plane),
+            CredentialWorker(llm_client=llm_client, execution_plane=execution_plane),
+            SurfaceWorker(llm_client=llm_client, execution_plane=execution_plane),
             VulnScanAgent(llm_client=llm_client, execution_plane=execution_plane),
-            WebPwnExploitAgent(llm_client=llm_client, execution_plane=execution_plane),
-            FlagHuntAgent(llm_client=llm_client, execution_plane=execution_plane),
-            ExploitReasoningAgent(llm_client=llm_client, execution_plane=execution_plane),
+            ExploitWorker(llm_client=llm_client, execution_plane=execution_plane),
             SolverAgent(llm_client=llm_client, execution_plane=execution_plane),
             FlagValidationAgent(llm_client=llm_client, expected_flag=expected_flag),
         ],
@@ -153,13 +119,13 @@ def build_runtime(
         router=router,
         emit=(recorder.emit if recorder is not None else print),
     )
-    return state, orchestrator
+    return state, orchestrator, llm_client
 
 
-def build_summary(state: GlobalState) -> dict[str, Any]:
+def build_summary(state: GlobalState, token_ledger: TokenLedger | None = None) -> dict[str, Any]:
     """Create a compact JSON summary for one run."""
 
-    return {
+    summary: dict[str, Any] = {
         "run_id": state.run_id,
         "status": state.status,
         "solved": state.solved,
@@ -172,6 +138,9 @@ def build_summary(state: GlobalState) -> dict[str, Any]:
         "evidence": len(state.evidence),
         "executions": len(state.execution_log),
     }
+    if token_ledger is not None:
+        summary["token_usage"] = token_ledger.to_dict()
+    return summary
 
 
 def run_assessment(
@@ -184,7 +153,7 @@ def run_assessment(
     """Run the full local workflow and persist artifacts."""
 
     recorder = EventRecorder(quiet=config.quiet)
-    state, orchestrator = build_runtime(
+    state, orchestrator, active_llm_client = build_runtime(
         config,
         recorder=recorder,
         execution_plane=execution_plane,
@@ -193,6 +162,14 @@ def run_assessment(
     )
 
     final_state = orchestrator.run(max_cycles=config.max_cycles)
+    token_ledger = getattr(active_llm_client, "token_ledger", None)
+    if token_ledger is not None:
+        recorder.emit(
+            f"[token usage] calls={token_ledger.llm_calls} "
+            f"prompt={token_ledger.prompt_tokens} "
+            f"completion={token_ledger.completion_tokens} "
+            f"total={token_ledger.total_tokens}"
+        )
 
     run_dir = Path(config.output_root) / final_state.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -206,7 +183,7 @@ def run_assessment(
 
     _write_json(config_path, config.model_dump(mode="json"))
     _write_json(state_path, final_state.model_dump(mode="json"))
-    _write_json(summary_path, build_summary(final_state))
+    _write_json(summary_path, build_summary(final_state, token_ledger))
     _write_json(
         evidence_path,
         {

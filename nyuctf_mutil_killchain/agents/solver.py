@@ -18,9 +18,11 @@ from nyuctf_mutil_killchain.agents.base import (
     merge_unique_strings,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import SolverCodeGuidance
+from nyuctf_mutil_killchain.llm import LLMClientError
 from nyuctf_mutil_killchain.prompts import get_prompts
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
+from nyuctf_mutil_killchain.state.constants import SOURCE_EXTENSIONS as _SOURCE_EXTENSIONS
 
 
 _SOLVER_SYSTEM_PROMPT_TEMPLATE = """\
@@ -206,11 +208,6 @@ def _build_solver_system_prompt(
     )
 
 
-_SOURCE_EXTENSIONS = frozenset({
-    ".py", ".js", ".rb", ".pl", ".sh", ".c", ".cpp", ".h", ".java",
-    ".php", ".go", ".rs", ".sage", ".txt", ".md", ".yml", ".yaml",
-    ".json", ".xml", ".html", ".css", ".sql", ".lua", ".r",
-})
 _MAX_SOURCE_CHARS_PER_FILE = 12000
 _MAX_TOTAL_SOURCE_CHARS = 36000
 
@@ -530,7 +527,7 @@ class SolverAgent(WorkerAgent):
     """
 
     name = "solver-agent"
-    supported_task_types = ("solve.generate_script", "post_exploit.loot", "post_exploit.lateral_move")
+    supported_task_types = ("solve.generate_script",)
     routing_summary = (
         "LLM-driven solver that writes and executes custom scripts to solve the challenge. "
         "The most powerful agent — combines all evidence into an executable solution."
@@ -591,68 +588,16 @@ class SolverAgent(WorkerAgent):
 
         worker_notes: list[str] = []
 
-        try:
-            guidance = self.generate_structured_output(
-                system_prompt=_build_solver_system_prompt(category, timeout=timeout_s),
-                user_prompt=_build_solver_user_prompt(task, state),
-                schema=SolverCodeGuidance,
-                temperature=0.3,
-            )
-        except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
-            worker_notes.append(f"LLM code generation failed: {error_msg}")
+        guidance = self.generate_structured_output(
+            system_prompt=_build_solver_system_prompt(category, timeout=timeout_s),
+            user_prompt=_build_solver_user_prompt(task, state),
+            schema=SolverCodeGuidance,
+            temperature=0.3,
+        )
 
-            retry_task = None
-            solver_total = self._solver_task_count(state)
-            if attempt_num < self._MAX_RETRIES and solver_total < self._MAX_TOTAL_SOLVER_TASKS_PER_RUN:
-                retry_task = Task(
-                    title=f"Solver retry (attempt {attempt_num + 1})",
-                    description="Retry solver generation after LLM failure.",
-                    task_type="solve.generate_script",
-                    priority=97,
-                    input_context={
-                        "files_root": task.input_context.get("files_root", "/home/ctfplayer/ctf_files"),
-                        "attempt_number": attempt_num + 1,
-                        "previous_attempts": (task.input_context.get("previous_attempts") or []) + [
-                            {
-                                "attempt": attempt_num,
-                                "error_summary": error_msg,
-                                "error_diagnosis": (
-                                    f"Attempt {attempt_num}: LLM call failed with {type(exc).__name__}. "
-                                    "The LLM may have timed out or returned malformed JSON. "
-                                    "Generate the solver code again with a fresh approach."
-                                ),
-                            }
-                        ],
-                    },
-                    dedupe_key=f"solver-retry:{task.task_id}:attempt-{attempt_num + 1}",
-                    metadata={"planned_by": "solver-agent", "retry_of": task.task_id},
-                )
-            elif solver_total >= self._MAX_TOTAL_SOLVER_TASKS_PER_RUN:
-                worker_notes.append(
-                    "Solver retry suppressed: run-level solve.generate_script cap reached."
-                )
-
-            return WorkerReport(
-                task_id=task.task_id,
-                worker_name=self.name,
-                success=False,
-                summary=f"LLM code generation failed: {error_msg}",
-                error=error_msg,
-                notes=worker_notes,
-                new_tasks=[retry_task] if retry_task else [],
-                retryable=False,
-            )
-
-        if guidance is None or not guidance.solver_code.strip():
-            return WorkerReport(
-                task_id=task.task_id,
-                worker_name=self.name,
-                success=False,
-                summary="LLM failed to generate solver code.",
-                error="No solver code was produced by the LLM.",
-                notes=worker_notes,
-                retryable=False,
+        if not guidance.solver_code.strip():
+            raise LLMClientError(
+                "LLM failed to generate non-empty solver_code for solve.generate_script."
             )
 
         worker_notes.append(f"LLM generated {guidance.solver_language} solver (confidence: {guidance.confidence:.1%}).")

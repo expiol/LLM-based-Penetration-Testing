@@ -32,7 +32,7 @@ from nyuctf_mutil_killchain.agents.web_content import WebContentAgent
 from nyuctf_mutil_killchain.agents.web_form import WebFormProbeAgent
 from nyuctf_mutil_killchain.llm.client import LLMClientError, OpenAICompatibleLLMClient, StaticLLMClient
 from nyuctf_mutil_killchain.orchestrator.loop import Orchestrator
-from nyuctf_mutil_killchain.orchestrator.planner import HeuristicPlanner, LLMPlanner, PlannerDecision, TaskPlanner
+from nyuctf_mutil_killchain.orchestrator.planner import BootstrapPlanner, LLMPlanner, PlannerDecision, TaskPlanner
 from nyuctf_mutil_killchain.orchestrator.router import LLMWorkerRouter
 from nyuctf_mutil_killchain.state import (
     Asset,
@@ -285,6 +285,32 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
         )
         self.assertIn("flag{arr}", result.solver_code)
 
+    def test_llm_planner_failure_does_not_fall_back_to_bootstrap(self) -> None:
+        planner = LLMPlanner(StaticLLMClient([]))
+        state = GlobalState(
+            objective="demo",
+            metadata={"challenge": {"category": "misc", "files": ["app.py"]}},
+        )
+
+        with self.assertRaises(LLMClientError):
+            planner.plan(state)
+
+    def test_llm_planner_empty_plan_fails_when_queue_is_exhausted(self) -> None:
+        planner = LLMPlanner(StaticLLMClient([{"summary": "No useful next step.", "tasks": []}]))
+        state = GlobalState(objective="demo", metadata={"challenge": {"category": "misc"}})
+
+        with self.assertRaisesRegex(LLMClientError, "no approved next tasks"):
+            planner.plan(state)
+
+    def test_orchestrator_aborts_on_empty_llm_plan(self) -> None:
+        planner = LLMPlanner(StaticLLMClient([{"summary": "No useful next step.", "tasks": []}]))
+        state = GlobalState(objective="demo", metadata={"challenge": {"category": "misc"}})
+        orchestrator = Orchestrator(state=state, workers=[], planner=planner, emit=lambda _message: None)
+
+        with self.assertRaises(LLMClientError):
+            orchestrator.run(max_cycles=1)
+        self.assertEqual(state.status, RunStatus.FAILED)
+
     def test_normalize_probe_paths_ignores_freeform_findings(self) -> None:
         paths = normalize_probe_paths(
             [
@@ -389,7 +415,7 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
         self.assertTrue(len(cve_tasks) >= 1)
 
     def test_planner_waits_for_grounded_web_context_before_initial_cve_probe(self) -> None:
-        planner = HeuristicPlanner()
+        planner = BootstrapPlanner()
         state = GlobalState(objective="demo", metadata={"challenge": {"category": "web"}})
         state.upsert_asset(
             Asset(
@@ -1021,6 +1047,92 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
         source_task = next(task for task in report.new_tasks if task.task_type == "artifact.source_review")
         self.assertEqual(source_task.input_context["routing_intent"], "computation")
 
+    def test_artifact_worker_llm_guidance_failures_bubble(self) -> None:
+        cases = [
+            (
+                "artifact.triage",
+                {"files_root": "/tmp/ctf"},
+                "artifact_triage",
+                {
+                    "files_root": "/tmp/ctf",
+                    "binary_files": [],
+                    "archive_files": [],
+                    "database_files": [],
+                    "pcap_files": [],
+                    "repo_paths": [],
+                    "web_source_files": [],
+                    "script_files": [],
+                    "flag_candidates": [],
+                    "manual_checks": [],
+                },
+            ),
+            (
+                "artifact.source_review",
+                {"files_root": "/tmp/ctf", "source_files": ["checker.py"]},
+                "source_review",
+                {"flag_candidates": [], "interesting_routes": [], "manual_checks": []},
+            ),
+            (
+                "artifact.computation_analysis",
+                {"files_root": "/tmp/ctf", "source_files": ["checker.py"]},
+                "computation_analysis",
+                {"flag_candidates": [], "manual_checks": []},
+            ),
+            (
+                "artifact.runtime_probe",
+                {"files_root": "/tmp/ctf", "source_files": ["checker.py"]},
+                "runtime_probe",
+                {"flag_candidates": [], "manual_checks": []},
+            ),
+        ]
+
+        for task_type, input_context, expected_tool, output_context in cases:
+            with self.subTest(task_type=task_type):
+                parsed = SimpleNamespace(
+                    summary=f"{expected_tool} completed.",
+                    output_context=output_context,
+                    asset_updates=[],
+                    finding_updates=[],
+                    credential_updates=[],
+                    network_updates=[],
+                    notes=[],
+                )
+                bundle = SimpleNamespace(
+                    parsed=parsed,
+                    evidence=EvidenceRecord(
+                        task_id="task-demo",
+                        tool_name=expected_tool,
+                        mode="local_command",
+                        summary=f"{expected_tool} completed.",
+                    ),
+                )
+                outer = self
+
+                class FakeExecutionPlane:
+                    def execute(self, _task_id, request):
+                        outer.assertEqual(request.tool_name, expected_tool)
+                        return bundle
+
+                state = GlobalState(
+                    objective="demo",
+                    metadata={"challenge": {"category": "rev", "files": ["checker.py"]}},
+                )
+                agent = ArtifactTriageAgent(
+                    execution_plane=FakeExecutionPlane(),
+                    llm_client=StaticLLMClient([]),
+                )
+
+                with self.assertRaises(LLMClientError):
+                    agent.run(
+                        Task(
+                            title="Artifact task",
+                            description="Run artifact worker.",
+                            task_type=task_type,
+                            input_context=input_context,
+                        ),
+                        state,
+                    )
+
     def test_artifact_triage_llm_guidance_boosts_prioritized_follow_ups(self) -> None:
         parsed = SimpleNamespace(
             summary="Artifact triage completed.",
@@ -1217,6 +1329,33 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
 
         self.assertEqual(decision.worker_name, "runtime-probe-agent")
         self.assertIn("executed first", decision.rationale)
+
+    def test_llm_worker_router_rejects_unknown_candidate(self) -> None:
+        task = Task(
+            title="Review source artifacts",
+            description="Inspect bundled source files.",
+            task_type="artifact.source_review",
+            input_context={"files_root": "/tmp/ctf", "source_files": ["checker.py"]},
+        )
+        state = GlobalState(objective="demo", metadata={"challenge": {"category": "rev"}})
+        candidates = [
+            RoutedSourceWorker(name="source-review-agent", score=10),
+            RoutedSourceWorker(name="runtime-probe-agent", score=5),
+        ]
+        router = LLMWorkerRouter(
+            StaticLLMClient(
+                [
+                    {
+                        "worker_name": "missing-worker",
+                        "rationale": "invalid selection",
+                        "confidence": 0.7,
+                    }
+                ]
+            )
+        )
+
+        with self.assertRaisesRegex(LLMClientError, "unknown worker"):
+            router.route(task=task, state=state, candidates=candidates)
 
     def test_computation_analysis_recovers_checker_style_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1536,7 +1675,7 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
         self.assertEqual(output_context["tcp_results"], [])
 
     def test_heuristic_planner_seeds_artifact_triage_for_local_files(self) -> None:
-        planner = HeuristicPlanner()
+        planner = BootstrapPlanner()
         state = GlobalState(
             objective="demo",
             metadata={"challenge": {"files": ["app.py"], "name": "demo", "category": "misc"}},
@@ -1918,6 +2057,68 @@ class MultiKillchainOptimizationTests(unittest.TestCase):
 
         self.assertTrue(report.solved)
         self.assertEqual(report.output_context["normalized_candidate"], "flag{normalized}")
+
+    def test_flag_validation_llm_failure_bubbles(self) -> None:
+        agent = FlagValidationAgent(
+            llm_client=StaticLLMClient([]),
+            expected_flag="flag{raw}",
+        )
+
+        with self.assertRaises(LLMClientError):
+            agent.run(
+                Task(
+                    title="Validate candidate flag",
+                    description="Compare a candidate against the expected flag.",
+                    task_type="flag.validate",
+                    input_context={"candidate_flag": "flag{raw}", "candidate_source": "test"},
+                ),
+                GlobalState(objective="demo", metadata={"challenge": {"flag_format": "flag{...}"}}),
+            )
+
+    def test_flag_validation_prefers_raw_match_over_bad_llm_normalization(self) -> None:
+        agent = FlagValidationAgent(
+            llm_client=StaticLLMClient(
+                [
+                    {
+                        "summary": "Incorrect normalization from model.",
+                        "normalized_candidate": "flag{wrong}",
+                        "likely_valid": False,
+                        "confidence": 0.1,
+                    }
+                ]
+            ),
+            expected_flag="STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME",
+        )
+
+        report = agent.run(
+            Task(
+                title="Validate candidate flag",
+                description="Compare a candidate against the expected flag.",
+                task_type="flag.validate",
+                input_context={
+                    "candidate_flag": "STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME",
+                    "candidate_source": "test",
+                },
+            ),
+            GlobalState(objective="demo", metadata={"challenge": {"flag_format": "not provided"}}),
+        )
+
+        self.assertTrue(report.solved)
+        self.assertEqual(report.validated_flag, "STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME")
+
+    def test_extract_plain_solver_flag_lines(self) -> None:
+        from nyuctf_mutil_killchain.agents.base import extract_plain_solver_flag_lines
+
+        blob = "debug line\nSTFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME\n"
+        self.assertEqual(
+            extract_plain_solver_flag_lines(blob),
+            ["STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME"],
+        )
+        sentence = "preamble\nAnd yes the nsa can read this to\n"
+        self.assertEqual(
+            extract_plain_solver_flag_lines(sentence),
+            ["And yes the nsa can read this to"],
+        )
 
     def test_orchestrator_marks_stopped_when_cycle_budget_exhausted(self) -> None:
         state = GlobalState(objective="demo")

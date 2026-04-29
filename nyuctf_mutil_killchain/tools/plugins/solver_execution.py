@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 
 from nyuctf_mutil_killchain.tools.core import ToolExecutionRequest
+from nyuctf_mutil_killchain.tools.plugins._shared import SHARED_FLAG_DETECTION_SNIPPET
 
 TOOL_NAME = "solver_execution"
 
-SCRIPT = r"""
+_SCRIPT_HEADER = r"""
 import json
 import os
 import re
@@ -39,54 +40,59 @@ if flag_format and "{" in flag_format:
         format_prefix_re = re.compile(
             re.escape(ff_prefix) + r"\{[ -~]{1,200}\}"
         )
+"""
+
+_SCRIPT_BODY = r"""
+def _solver_regex_noise(m):
+    # Reject prefix{...} substrings copied from echoed exploit source, not real flags.
+    low = m.lower()
+    needles = (
+        "re.findall",
+        "matches =",
+        "print(",
+        " in binary",
+        " in response",
+        "\\\\",
+        "rb'",
+        "r\"",
+        "payload",
+        "{thing}",
+        "{tablename}",
+        "{fieldname}",
+    )
+    return any(n in low for n in needles)
 
 
-_CODE_FALSE_POSITIVE_PREFIXES = frozenset({
-    "html", "body", "div", "span", "input", "button", "textarea",
-    "select", "label", "form", "table", "thead", "tbody", "tr", "td", "th",
-    "ul", "ol", "li", "nav", "header", "footer", "section", "article",
-    "aside", "main", "summary", "details", "dialog", "fieldset", "legend",
-    "img", "video", "audio", "canvas", "svg", "path", "circle", "rect",
-    "code", "pre", "blockquote", "cite", "abbr", "address", "figure",
-    "var", "function", "return", "if", "else", "for", "while", "switch",
-    "case", "class", "interface", "struct", "enum", "type", "export",
-    "import", "from", "const", "let", "new", "delete", "typeof", "void",
-    "null", "undefined", "true", "false", "try", "catch", "throw",
-    "this", "self", "super", "def", "lambda", "yield", "async", "await",
-    "create", "drop", "alter", "insert", "update", "select",
-})
-_CSS_BODY_RE = re.compile(
-    r"^[\s]*([a-z\-]+\s*:\s*[a-z0-9#%.\"', \-()]+\s*;?[\s]*)+$",
-    re.IGNORECASE,
-)
-
-def _plausible_flag(m):
-    prefix, _, body = m.partition("{")
-    body = body.rstrip("}")
-    if not prefix or not body:
-        return False
-    if any(ord(c) < 32 or ord(c) == 127 for c in body):
-        return False
-    if prefix.lower() in _CODE_FALSE_POSITIVE_PREFIXES:
-        return False
-    if _CSS_BODY_RE.match(body):
-        return False
-    return True
-
-
-def _near_miss_flag(m):
-    # Detect flag-shaped strings that have non-printable chars (garbled decryption).
-    prefix, _, body = m.partition("{")
-    body = body.rstrip("}")
-    if not prefix or not body:
-        return False
-    if len(prefix) < 2:
-        return False
-    printable = sum(1 for c in body if 32 <= ord(c) <= 126)
-    if len(body) == 0:
-        return False
-    ratio = printable / len(body)
-    return 0.70 <= ratio < 1.0
+def _plain_tail_flag_candidates(text, max_take=4):
+    # Bare-token or short-sentence flags (NYU bench) from trailing stdout lines.
+    if not text or not str(text).strip():
+        return []
+    lines = [ln.strip() for ln in str(text).replace("\r\n", "\n").split("\n") if ln.strip()]
+    tail = lines[-40:] if len(lines) > 40 else lines
+    out = []
+    bad_starts = (
+        "traceback", "during ", "  file", "file \"", "import ", "from ", "def ", "class ",
+        "===", "---", "note:", "debug:", "error:", "warning:", "http://", "https://",
+    )
+    for line in reversed(tail):
+        if len(line) < 12 or len(line) > 220:
+            continue
+        low = line.lower()
+        if any(low.startswith(p) for p in bad_starts):
+            continue
+        if "re.findall" in line or "matches =" in line:
+            continue
+        printable = sum(1 for ch in line if ch.isprintable())
+        if not line or printable / len(line) < 0.85:
+            continue
+        if re.fullmatch(r"[A-Za-z0-9_]{12,}", line) or (
+            "{" not in line and 16 <= len(line) <= 120 and 2 <= line.count(" ") <= 24
+        ):
+            if line not in out:
+                out.append(line)
+        if len(out) >= max_take:
+            break
+    return out
 
 if not solver_code.strip():
     records.append({"type": "summary", "text": "Solver execution skipped: no solver code provided."})
@@ -146,17 +152,39 @@ try:
         # First try format-specific prefix if available (e.g. key{...})
         if format_prefix_re:
             for match in format_prefix_re.findall(text):
-                if match not in flag_candidates and _plausible_flag(match):
+                if (
+                    match not in flag_candidates
+                    and _plausible_flag(match)
+                    and not _solver_regex_noise(match)
+                ):
                     flag_candidates.append(match)
         # Then try generic flag pattern
         for match in flag_re.findall(text):
-            if match not in flag_candidates and _plausible_flag(match):
+            if (
+                match not in flag_candidates
+                and _plausible_flag(match)
+                and not _solver_regex_noise(match)
+            ):
                 flag_candidates.append(match)
+
+    ff_norm = flag_format.strip().lower()
+    if ff_norm in ("", "not provided"):
+        seen_fc = set(flag_candidates)
+        for text in (stdout, stderr):
+            for plain in _plain_tail_flag_candidates(text):
+                if plain not in seen_fc:
+                    flag_candidates.append(plain)
+                    seen_fc.add(plain)
 
     if not flag_candidates:
         for text in (stdout, stderr):
             for match in near_miss_re.findall(text):
-                if match not in flag_candidates and match not in near_miss_candidates and _near_miss_flag(match):
+                if (
+                    match not in flag_candidates
+                    and match not in near_miss_candidates
+                    and _near_miss_flag(match)
+                    and not _solver_regex_noise(match)
+                ):
                     near_miss_candidates.append(match)
 
     notes_list.append(f"Solver script executed with {interpreter[0]}, exit code {returncode}.")
@@ -232,6 +260,8 @@ records.append({
 for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
+
+SCRIPT = _SCRIPT_HEADER + SHARED_FLAG_DETECTION_SNIPPET + _SCRIPT_BODY
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

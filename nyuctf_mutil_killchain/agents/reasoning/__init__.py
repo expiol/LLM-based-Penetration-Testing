@@ -1,12 +1,14 @@
-"""Backwards-compat shim: schemas now live in ``agents.reasoning.schemas``.
+"""Centralized LLM-reasoning glue for worker agents.
 
-This module is kept so existing imports (``from
-nyuctf_mutil_killchain.agents.llm_guidance import ...``) keep working during
-and after the refactor.  New code should import directly from
-:mod:`nyuctf_mutil_killchain.agents.reasoning`.
+Each module here owns the prompt construction, schema selection, and result
+post-processing for one stage.  Workers call these as plain functions,
+keeping LLM concerns out of the worker control flow.
+
+The schemas (Pydantic ``BaseModel`` subclasses) live in :mod:`schemas` so
+they can be imported without pulling in the prompt text or state types.
 """
 
-from nyuctf_mutil_killchain.agents.reasoning.schemas import (  # noqa: F401
+from nyuctf_mutil_killchain.agents.reasoning.schemas import (
     ArtifactTriageGuidance,
     CredentialHarvestGuidance,
     CredentialTestGuidance,

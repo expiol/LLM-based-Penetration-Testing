@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import time
 import traceback
 from collections.abc import Callable, Iterable
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.llm import LLMClientError
 from nyuctf_mutil_killchain.orchestrator.dispatch_policy import DispatchPolicy
-from nyuctf_mutil_killchain.orchestrator.planner import HeuristicPlanner, TaskPlanner
+from nyuctf_mutil_killchain.orchestrator.planner import BootstrapPlanner, TaskPlanner
 from nyuctf_mutil_killchain.orchestrator.router import (
-    HeuristicWorkerRouter,
     WorkerRouteDecision,
     WorkerRouter,
 )
@@ -43,10 +41,26 @@ class Orchestrator:
     ) -> None:
         self.state = state
         self.workers = list(workers)
-        self.planner = planner or HeuristicPlanner()
-        self.router = router or HeuristicWorkerRouter()
+        self.planner = planner or BootstrapPlanner()
+        self.router = router
         self.emit = emit
         self.dispatch_policy = DispatchPolicy(emit=self.emit)
+
+    # -- delegate shims for legacy tests ---------------------------------
+    # Older callers exercised these methods directly on the Orchestrator.
+    # The implementations have moved to :class:`DispatchPolicy`; the shims
+    # below preserve the historical interface.
+
+    def _validate_task_for_dispatch(self, task: Task):
+        """Validate task context; returns ``(valid, reason, error_code)``."""
+
+        validation = self.dispatch_policy.validate_task_for_dispatch(task, self.state)
+        return validation.valid, validation.reason, validation.error_code
+
+    def _try_repair_task_context(self, task: Task, candidates: Iterable[WorkerAgent]) -> bool:
+        """Best-effort fill of missing identity / artifact context."""
+
+        return self.dispatch_policy.try_repair_task_context(task, self.state, list(candidates))
 
     def select_worker(
         self, task: Task,
@@ -71,6 +85,19 @@ class Orchestrator:
                     for w in candidates
                 ]
                 return None, None, "; ".join(reasons)
+
+        if len(routable) == 1:
+            only = routable[0]
+            decision = WorkerRouteDecision(
+                worker_name=only.name,
+                rationale=f"Single compatible worker available: {only.name}.",
+                confidence=1.0,
+            )
+            return only, decision, ""
+        if self.router is None:
+            raise LLMClientError(
+                f"Multiple workers can handle {task.task_type!r}; an LLM worker router is required."
+            )
 
         decision = self.router.route(task=task, state=self.state, candidates=routable)
         worker = next((c for c in routable if c.name == decision.worker_name), None)
@@ -102,10 +129,15 @@ class Orchestrator:
                 self.emit(f"[cycle {cycle}] validated flag found — halting run")
                 break
             self.state.last_cycle_at = utc_now()
-            if self.refresh_plan(cycle):
-                self.emit(f"[cycle {cycle}] planner signalled stop — halting run")
-                self.state.status = RunStatus.STOPPED
-                break
+            try:
+                if self.refresh_plan(cycle):
+                    self.emit(f"[cycle {cycle}] planner signalled stop — halting run")
+                    self.state.status = RunStatus.STOPPED
+                    break
+            except LLMClientError as exc:
+                self.state.status = RunStatus.FAILED
+                self.emit(f"[cycle {cycle}] LLM planner failed — aborting run: {exc}")
+                raise
 
             batch = self.dispatch_policy.dequeue_batch(self.state)
             if not batch:
@@ -130,7 +162,13 @@ class Orchestrator:
                     )
                     continue
 
-                worker, route_decision, reject_reason = self.select_worker(task)
+                try:
+                    worker, route_decision, reject_reason = self.select_worker(task)
+                except LLMClientError as exc:
+                    task.mark_failed(str(exc), requeue=False)
+                    self.state.status = RunStatus.FAILED
+                    self.emit(f"[cycle {cycle}] LLM router failed — aborting run: {exc}")
+                    raise
                 if worker is None:
                     task.mark_blocked(reject_reason, error_code=TaskErrorCode.DISPATCH_REFUSED)
                     self.emit(
@@ -150,22 +188,14 @@ class Orchestrator:
                 try:
                     report = worker.run(task, self.state)
                 except LLMClientError as exc:
-                    tb_text = traceback.format_exc(limit=20)
+                    task.mark_failed(str(exc), requeue=False)
+                    self.state.status = RunStatus.FAILED
                     tag = "TRANSIENT LLM ERROR" if exc.transient else "LLM ERROR"
                     self.emit(
                         f"[cycle {cycle}] {tag} in {worker.name} "
-                        f"while executing {task.task_id}: {exc}"
+                        f"while executing {task.task_id} — aborting run: {exc}"
                     )
-                    report = WorkerReport(
-                        task_id=task.task_id,
-                        worker_name=worker.name,
-                        success=False,
-                        summary=f"Worker {worker.name} raised {type(exc).__name__}: {exc}",
-                        error=tb_text,
-                    )
-                    if exc.transient:
-                        self.emit(f"[cycle {cycle}] cooldown 5s before next dispatch")
-                        time.sleep(5)
+                    raise
                 except Exception as exc:
                     tb_text = traceback.format_exc(limit=20)
                     self.emit(

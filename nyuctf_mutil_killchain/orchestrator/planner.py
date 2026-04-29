@@ -8,18 +8,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from nyuctf_mutil_killchain.agents.base import extract_flag_candidates, normalize_probe_paths
+from nyuctf_mutil_killchain.agents.base import (
+    extract_flag_candidates,
+    extract_plain_solver_flag_lines,
+    normalize_probe_paths,
+)
 from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
 from nyuctf_mutil_killchain.prompts import get_planner_system_prompt, get_prompts
 from nyuctf_mutil_killchain.state import Asset, AssetKind, GlobalState, Task, TaskStatus
+from nyuctf_mutil_killchain.state.constants import SOURCE_EXTENSIONS as _SOURCE_EXTENSIONS
 
 _DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
-
-_SOURCE_EXTENSIONS = frozenset({
-    ".py", ".js", ".rb", ".pl", ".sh", ".c", ".cpp", ".h", ".java",
-    ".php", ".go", ".rs", ".sage", ".txt", ".md", ".yml", ".yaml",
-    ".json", ".xml", ".html", ".css", ".sql", ".lua", ".r",
-})
 
 APPROVED_TASK_TYPES = frozenset(
     {
@@ -72,8 +71,6 @@ APPROVED_TASK_TYPES = frozenset(
     }
 )
 
-# Kept for backward compatibility
-SAFE_TASK_TYPES = APPROVED_TASK_TYPES
 
 
 class PlannedTask(BaseModel):
@@ -118,12 +115,12 @@ class TaskPlanner(ABC):
         """Return task updates to merge into the task chain."""
 
 
-class HeuristicPlanner(TaskPlanner):
+class BootstrapPlanner(TaskPlanner):
     """Minimal bootstrap planner that seeds the initial task queue.
 
-    Only handles two concerns:
-    1. Bootstrapping recon tasks for authorized scope entries.
-    2. Bootstrapping artifact triage when challenge files exist.
+    Handles three concerns:
+    1. Bootstrapping artifact triage when challenge files exist.
+    2. Bootstrapping recon tasks for authorized scope entries.
     3. Validating flag candidates discovered in findings.
 
     All deeper planning (escalation, credential hunts, exploit reasoning,
@@ -187,15 +184,37 @@ class HeuristicPlanner(TaskPlanner):
         if state.solved:
             return tasks
 
-        candidate_sources: list[tuple[str, str]] = []
+        challenge_meta = state.metadata.get("challenge", {})
+        ff = str(challenge_meta.get("flag_format") or "").strip().lower()
+        plain_format = not ff or ff == "not provided"
+
+        prioritized: list[tuple[str, str]] = []
+        rest: list[tuple[str, str]] = []
         for finding in state.findings.values():
             if finding.metadata.get("validated") is True:
                 continue
+            if plain_format:
+                for blob in (
+                    finding.metadata.get("stdout_preview"),
+                    finding.metadata.get("stdout"),
+                ):
+                    if not blob:
+                        continue
+                    for line in extract_plain_solver_flag_lines(str(blob)):
+                        prioritized.append((line, f"finding:{finding.finding_id}:stdout"))
             for candidate in extract_flag_candidates(
                 finding.description or "",
                 *[str(ref) for ref in finding.evidence_refs],
             ):
-                candidate_sources.append((candidate, f"finding:{finding.finding_id}"))
+                rest.append((candidate, f"finding:{finding.finding_id}"))
+
+        seen: set[str] = set()
+        candidate_sources: list[tuple[str, str]] = []
+        for pair in prioritized + rest:
+            if pair[0] in seen:
+                continue
+            seen.add(pair[0])
+            candidate_sources.append(pair)
 
         for candidate, source in candidate_sources[:6]:
             dedupe_key = f"flag-validate:{candidate}"
@@ -218,34 +237,36 @@ class HeuristicPlanner(TaskPlanner):
 class LLMPlanner(TaskPlanner):
     """Primary planner that uses LLM with category-specific prompts for task proposals.
 
-    Falls back to the bootstrap planner only when the LLM call fails.
-    The LLM receives the full state snapshot plus category-tuned instructions
-    so it can propose the optimal next steps for web, rev, crypto, forensics,
-    pwn, or misc challenges.
+    The bootstrap planner only seeds mandatory initial tasks; it is not a
+    fallback. Any unusable LLM response fails the run instead of silently
+    continuing with deterministic behavior.
     """
 
-    def __init__(self, llm_client: LLMClient, fallback: TaskPlanner | None = None) -> None:
+    def __init__(self, llm_client: LLMClient) -> None:
+        if llm_client is None:
+            raise LLMClientError("LLMPlanner requires an LLM client.")
         self.llm_client = llm_client
-        self.fallback = fallback or HeuristicPlanner()
+        self.bootstrap = BootstrapPlanner()
         self._solver_backoff_after_failures = 2
 
     def plan(self, state: GlobalState) -> PlannerDecision:
-        bootstrap_decision = self.fallback.plan(state)
+        bootstrap_decision = self.bootstrap.plan(state)
+        had_ready_task = state.task_chain.next_ready_task() is not None
 
-        try:
-            raw_decision = self.llm_client.generate_json(
-                system_prompt=self._system_prompt(state),
-                user_prompt=self._user_prompt(state),
-                schema=PlannerDecision,
-            )
-        except (LLMClientError, Exception) as exc:
-            bootstrap_decision.notes.append(
-                f"LLM planner failed ({type(exc).__name__}), using bootstrap fallback."
-            )
-            return bootstrap_decision
+        raw_decision = self.llm_client.generate_json(
+            system_prompt=self._system_prompt(state),
+            user_prompt=self._user_prompt(state),
+            schema=PlannerDecision,
+        )
 
         sanitized_tasks = [
-            task for task in raw_decision.tasks if task.task_type in APPROVED_TASK_TYPES
+            task
+            for task in raw_decision.tasks
+            if task.task_type in APPROVED_TASK_TYPES
+            and not (
+                task.task_type == "flag.validate"
+                and not str(task.input_context.get("candidate_flag") or "").strip()
+            )
         ]
 
         # Cap solver attempts: prevent the LLM planner from scheduling unlimited
@@ -260,6 +281,18 @@ class LLMPlanner(TaskPlanner):
             if task.task_type != "solve.generate_script" or solver_total < _MAX_SOLVER_TOTAL
         ]
         sanitized_tasks = self._apply_solver_backoff_policy(state, sanitized_tasks)
+
+        if (
+            not state.solved
+            and not raw_decision.stop_run
+            and not bootstrap_decision.tasks
+            and not sanitized_tasks
+            and not had_ready_task
+        ):
+            raise LLMClientError(
+                "LLM planner returned no approved next tasks while the run is unsolved "
+                "and the task queue has no ready work."
+            )
 
         merged_tasks = list(bootstrap_decision.tasks)
         existing_dedupe_keys = {t.dedupe_key for t in merged_tasks if t.dedupe_key}
@@ -614,12 +647,16 @@ class LLMPlanner(TaskPlanner):
         completed_types: dict[str, int] = {}
         failed_types: dict[str, int] = {}
         pending_types: dict[str, int] = {}
+        blocked_types: dict[str, int] = {}
         for task in state.task_chain.tasks:
-            bucket = (
-                completed_types if task.status == TaskStatus.COMPLETED
-                else failed_types if task.status == TaskStatus.FAILED
-                else pending_types
-            )
+            if task.status == TaskStatus.COMPLETED:
+                bucket = completed_types
+            elif task.status == TaskStatus.FAILED:
+                bucket = failed_types
+            elif task.status == TaskStatus.BLOCKED:
+                bucket = blocked_types
+            else:
+                bucket = pending_types
             bucket[task.task_type] = bucket.get(task.task_type, 0) + 1
 
         has_triage = "artifact.triage" in completed_types
@@ -634,20 +671,24 @@ class LLMPlanner(TaskPlanner):
             "artifact.archive_triage",
         )
         has_analysis = any(t in completed_types for t in _ANALYSIS_TYPES)
-        # When no analysis task has completed, allow progression only if
-        # analysis types are both blocked AND also failed — meaning the
-        # system genuinely tried and exhausted options.  Merely blocked
-        # tasks (e.g. missing context) should not trigger premature solver
-        # scheduling; the planner should attempt to unblock them first.
+        # When no analysis task has completed, allow progression only if the
+        # system genuinely tried and exhausted analysis options.  A task type
+        # is "exhausted" when it has appeared in BOTH a BLOCKED and a FAILED
+        # state across different task instances (meaning context repair was
+        # attempted but the task still couldn't complete).  Merely blocked
+        # tasks should not trigger premature solver scheduling; the planner
+        # should attempt to unblock them first.
         if not has_analysis:
-            blocked_analysis = set()
-            failed_analysis = set()
+            blocked_analysis: set[str] = set()
+            failed_analysis: set[str] = set()
             for task in state.task_chain.tasks:
                 if task.task_type in _ANALYSIS_TYPES:
                     if task.status == TaskStatus.BLOCKED:
                         blocked_analysis.add(task.task_type)
                     elif task.status == TaskStatus.FAILED:
                         failed_analysis.add(task.task_type)
+            # A type that has been both blocked AND failed (in different
+            # instances) is truly exhausted — context repair didn't help.
             exhausted = blocked_analysis & failed_analysis
             if exhausted or (blocked_analysis and len(blocked_analysis) >= 2):
                 has_analysis = True
@@ -655,6 +696,7 @@ class LLMPlanner(TaskPlanner):
             "solve.generate_script" in completed_types
             or "solve.generate_script" in pending_types
             or "solve.generate_script" in failed_types
+            or "solve.generate_script" in blocked_types
         )
         has_solver = solver_ever_tried
         solver_failed = "solve.generate_script" in failed_types
@@ -701,6 +743,7 @@ class LLMPlanner(TaskPlanner):
             "completed_task_types": completed_types,
             "failed_task_types": failed_types,
             "pending_task_types": pending_types,
+            "blocked_task_types": blocked_types,
             "solver_attempted": has_solver or solver_failed,
             "solver_succeeded": has_validated_flag,
         }
@@ -742,7 +785,16 @@ class LLMPlanner(TaskPlanner):
                     "description": finding.description,
                     "asset_refs": finding.asset_refs,
                     "evidence_refs": finding.evidence_refs,
-                    "metadata_keys": list(finding.metadata.keys()),
+                    "metadata_preview": {
+                        k: str(v)[:400]
+                        for k, v in finding.metadata.items()
+                        if k in {
+                            "stdout_preview", "source_snippet", "key_observations",
+                            "interesting_routes", "interesting_paths", "flag_candidates",
+                            "near_miss_candidates", "function_inventory", "archive_members",
+                        }
+                        and v
+                    },
                 }
                 for finding in state.findings.values()
             ],

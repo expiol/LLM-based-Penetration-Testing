@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 
 from nyuctf_mutil_killchain.tools.core import ToolExecutionError, ToolExecutionRequest
+from nyuctf_mutil_killchain.tools.plugins._shared import SHARED_FLAG_DETECTION_SNIPPET
 
 TOOL_NAME = "local_http_content"
 
-SCRIPT = r"""
+_SCRIPT_HEADER = r"""
 import json
 import re
 import ssl
@@ -35,8 +36,10 @@ body_text = ""
 title = ""
 content_type = ""
 http_status = None
+flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
+"""
 
-
+_SCRIPT_BODY = r"""
 class PageParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -163,7 +166,6 @@ if body_text:
             if absolute not in interesting_links:
                 interesting_links.append(absolute)
 
-    flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
     potential_flags = list(dict.fromkeys(flag_re.findall(body_text)))[:5]
 
 records.append({
@@ -230,6 +232,8 @@ records.append({
 for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
+
+SCRIPT = _SCRIPT_HEADER + SHARED_FLAG_DETECTION_SNIPPET + _SCRIPT_BODY
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

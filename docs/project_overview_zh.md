@@ -153,7 +153,7 @@ python -m nyuctf.download
 - `GlobalState`：保存运行过程中的资产、发现、证据、任务链、执行记录等共享状态。
 - `TaskChain`：维护待执行任务、去重键和状态流转。
 - `Orchestrator`：循环执行“规划 -> 选任务 -> 分发给 worker -> 回写状态”。
-- `HeuristicPlanner / LLMPlanner`：分别负责启发式规划和 LLM 辅助规划。
+- `BootstrapPlanner / LLMPlanner`：前者只负责初始种子任务，后者负责 LLM 驱动的后续规划。
 - `ExecutionPlane`：统一管理本地命令插件和输出解析器。
 - `WorkerAgent`：每种分析能力的统一抽象。
 
@@ -244,8 +244,6 @@ python run_mutil_killchain.py --split test --challenge <challenge-name>
 常用附加参数：
 
 ```bash
---disable-llm
---disable-llm-planner
 --api-endpoint <base_url>
 --api-key <key>
 --model <model_name>
@@ -315,7 +313,6 @@ logs_mutil_killchain/<user>/
 ### 12.3 复杂推理仍依赖模型质量
 
 即使引入 LLM planner，任务排序、优先级与工具选择仍会受到模型和 prompt 的影响。
-
 
 
 

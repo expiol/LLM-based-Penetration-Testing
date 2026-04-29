@@ -1,969 +1,33 @@
-"""Base abstraction for orchestrator-managed workers."""
+"""Base abstraction for orchestrator-managed worker agents.
+
+This module owns the :class:`WorkerAgent` abstract base class and the two
+template subclasses (:class:`ToolBackedWorker`, :class:`ReasoningOnlyWorker`)
+that share the dispatch pattern.  Helpers for flag extraction, network context,
+and string normalization live in :mod:`nyuctf_mutil_killchain.agents._helpers`.
+Task constructors live in :mod:`nyuctf_mutil_killchain.state.task_factory`.
+
+The bottom of this module re-exports those helpers for backwards
+compatibility with existing worker imports.  Once all workers have been
+migrated to the per-stage modules, the shim can be removed.
+"""
 
 from __future__ import annotations
 
-import base64
-import binascii
-import codecs
-import re
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
-from typing import Any, TypeVar
-from urllib.parse import urlparse
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
 from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
-from nyuctf_mutil_killchain.state import GlobalState, Service, Task, WorkerReport
-from nyuctf_mutil_killchain.tools import ExecutionPlane
+from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, WorkerReport
+from nyuctf_mutil_killchain.tools import ExecutionPlane, ToolExecutionError, ToolExecutionRequest
 
-COMMON_WEB_PORTS = frozenset({80, 443, 8000, 8080, 8443, 8888, 3000, 5000, 5601, 9200})
-DEFAULT_WEB_PORTS = frozenset({80, 443})
-TLS_WEB_PORTS = frozenset({443, 8443})
-WEB_SERVICE_NAMES = frozenset(
-    {
-        "http",
-        "https",
-        "http-proxy",
-        "ssl/http",
-        "sun-answerbook",
-    }
-)
-AMBIGUOUS_WEB_SERVICE_NAMES = frozenset({"http-alt"})
-WEB_SERVICE_TOKENS = (
-    "apache",
-    "caddy",
-    "django",
-    "express",
-    "flask",
-    "gunicorn",
-    "http",
-    "https",
-    "iis",
-    "jetty",
-    "nginx",
-    "tomcat",
-    "uvicorn",
-    "werkzeug",
-    "web",
-)
-FLAG_PATTERN = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
-def infer_web_urls(
-    *,
-    hostname: str | None,
-    ip_address: str | None,
-    services: Iterable[Service],
-) -> list[str]:
-    """Infer candidate web URLs from service fingerprints."""
-
-    target_host = hostname or ip_address
-    if not target_host:
-        return []
-
-    urls: list[str] = []
-    for service in services:
-        if not service_looks_like_web(service):
-            continue
-
-        scheme = infer_web_scheme(port=service.port, service_name=service.name)
-        candidate = f"{scheme}://{target_host}:{service.port}"
-        if candidate not in urls:
-            urls.append(candidate)
-    return urls
-
-
-def service_looks_like_web(service: Service) -> bool:
-    """Return True when service metadata is strong enough to justify HTTP probing."""
-
-    service_name = (service.name or "").strip().lower()
-    service_fingerprint = " ".join(
-        part.strip().lower()
-        for part in (service.name, service.product, service.version)
-        if part
-    )
-
-    if service_name in WEB_SERVICE_NAMES:
-        return True
-    if (
-        service_name in AMBIGUOUS_WEB_SERVICE_NAMES
-        and not (service.product or "").strip()
-        and not (service.version or "").strip()
-        and service.port not in DEFAULT_WEB_PORTS
-    ):
-        return False
-    if any(token in service_fingerprint for token in WEB_SERVICE_TOKENS):
-        return True
-    return service.port in DEFAULT_WEB_PORTS
-
-
-def infer_web_scheme(*, port: int, service_name: str | None = None) -> str:
-    """Infer the most likely HTTP scheme for a service."""
-
-    normalized_name = (service_name or "").strip().lower()
-    if normalized_name == "https" or port in TLS_WEB_PORTS:
-        return "https"
-    return "http"
-
-
-def banner_looks_like_http(banner: str) -> bool:
-    """Return True if a captured banner looks like an HTTP response."""
-
-    text = banner.strip()
-    if not text:
-        return False
-
-    lowered = text.lower()
-    if text.startswith(("HTTP/1.", "HTTP/2", "HTTP/3")):
-        return True
-    if lowered.startswith("<!doctype html") or lowered.startswith("<html"):
-        return True
-    if "content-type:" in lowered and "server:" in lowered:
-        return True
-    return False
-
-
-def infer_web_urls_from_banners(
-    *,
-    hostname: str | None,
-    ip_address: str | None,
-    banner_hits: dict[str, str] | None,
-) -> list[str]:
-    """Infer candidate web URLs from TCP banner captures."""
-
-    target_host = hostname or ip_address
-    if not target_host or not banner_hits:
-        return []
-
-    urls: list[str] = []
-    for raw_port, banner in banner_hits.items():
-        try:
-            port = int(raw_port)
-        except (TypeError, ValueError):
-            continue
-        if not banner_looks_like_http(str(banner)):
-            continue
-
-        scheme = infer_web_scheme(port=port)
-        candidate = f"{scheme}://{target_host}:{port}"
-        if candidate not in urls:
-            urls.append(candidate)
-    return urls
-
-
-def build_web_review_task(asset_id: str, base_url: str, *, priority: int = 78) -> Task:
-    """Build a deterministic follow-up task for web surface review."""
-
-    return Task(
-        title=f"Review web surface for {asset_id}",
-        description="Collect HTTP metadata and create an evidence-based assessment note.",
-        task_type="web.review_surface",
-        priority=priority,
-        input_context={"asset_id": asset_id, "base_url": base_url},
-        dedupe_key=f"web-review:{asset_id}:{base_url}",
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_web_content_task(asset_id: str, base_url: str, *, priority: int = 79) -> Task:
-    """Build a deterministic follow-up task for content-aware web review."""
-
-    return Task(
-        title=f"Review web content for {asset_id}",
-        description="Fetch the response body, enumerate links/forms, and inspect content for exposed attack surface.",
-        task_type="web.content_review",
-        priority=priority,
-        input_context={"asset_id": asset_id, "base_url": base_url},
-        dedupe_key=f"web-content:{asset_id}:{base_url}",
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_web_form_probe_task(
-    *,
-    asset_id: str,
-    page_url: str,
-    forms: list[dict[str, Any]],
-    priority: int = 81,
-) -> Task:
-    """Build a deterministic follow-up task for interacting with discovered web forms."""
-
-    normalized_forms = [form for form in forms if isinstance(form, dict)][:8]
-    signatures: list[str] = []
-    for form in normalized_forms[:4]:
-        action = str(form.get("action") or "").strip()
-        method = str(form.get("method") or "").strip().lower()
-        field_names = [
-            str(field.get("name") or "").strip()
-            for field in list(form.get("inputs") or [])[:8]
-            if isinstance(field, dict)
-        ]
-        signatures.append("|".join([action, method, ",".join(name for name in field_names if name)]))
-
-    return Task(
-        title=f"Interact with discovered forms for {asset_id}",
-        description=(
-            "Submit grounded baseline requests to discovered HTML forms, including file uploads when present, "
-            "and capture reflected content, workflow changes, or flag candidates."
-        ),
-        task_type="web.form_probe",
-        priority=priority,
-        input_context={
-            "asset_id": asset_id,
-            "page_url": page_url,
-            "forms": normalized_forms,
-        },
-        dedupe_key=f"web-form-probe:{asset_id}:{page_url}:{';'.join(signatures[:4])}",
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_binary_triage_task(
-    *,
-    files_root: str,
-    binary_files: list[str],
-    priority: int = 84,
-) -> Task:
-    """Build a deterministic follow-up task for binary artifact triage."""
-
-    return Task(
-        title="Inspect binary artifacts",
-        description="Analyze bundled binaries for hardcoded strings, binary metadata, and obvious flag candidates.",
-        task_type="artifact.binary_triage",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "binary_files": binary_files,
-        },
-        dedupe_key="artifact-binary-triage:" + ",".join(binary_files[:8]),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_archive_triage_task(
-    *,
-    files_root: str,
-    archive_files: list[str],
-    priority: int = 83,
-) -> Task:
-    """Build a deterministic follow-up task for archive inspection."""
-
-    return Task(
-        title="Inspect archive artifacts",
-        description="Review bundled archives for hidden files, embedded sources, and flag-like content.",
-        task_type="artifact.archive_triage",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "archive_files": archive_files,
-        },
-        dedupe_key="artifact-archive-triage:" + ",".join(archive_files[:8]),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_source_review_task(
-    *,
-    files_root: str,
-    source_files: list[str],
-    routing_intent: str | None = None,
-    preferred_workers: list[str] | None = None,
-    exclude_workers: list[str] | None = None,
-    routing_notes: list[str] | None = None,
-    priority: int = 82,
-) -> Task:
-    """Build a deterministic follow-up task for source/web file review."""
-
-    input_context: dict[str, Any] = {
-        "files_root": files_root,
-        "source_files": source_files,
-    }
-    metadata: dict[str, Any] = {"planned_by": "worker-followup"}
-    dedupe_parts = ["artifact-source-review", *source_files[:8]]
-    if routing_intent:
-        input_context["routing_intent"] = routing_intent
-        metadata["routing_intent"] = routing_intent
-        dedupe_parts.append(routing_intent)
-    if preferred_workers:
-        metadata["preferred_workers"] = preferred_workers[:6]
-        dedupe_parts.extend(preferred_workers[:3])
-    if exclude_workers:
-        metadata["exclude_workers"] = exclude_workers[:8]
-        dedupe_parts.extend(exclude_workers[:4])
-    if routing_notes:
-        metadata["routing_notes"] = routing_notes[:6]
-
-    return Task(
-        title="Review source artifacts",
-        description="Inspect bundled source files for routes, secrets, and flag-like tokens.",
-        task_type="artifact.source_review",
-        priority=priority,
-        input_context=input_context,
-        dedupe_key=":".join(dedupe_parts),
-        metadata=metadata,
-    )
-
-
-def build_computation_analysis_task(
-    *,
-    files_root: str,
-    source_files: list[str],
-    priority: int = 83,
-) -> Task:
-    """Build a deterministic follow-up task for computation-heavy source analysis."""
-
-    return Task(
-        title="Analyze computation-heavy source artifacts",
-        description=(
-            "Execute bundled source files in the container, inspect arithmetic and transform "
-            "pipelines, and recover concrete plaintext or flag candidates when possible."
-        ),
-        task_type="artifact.computation_analysis",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "source_files": source_files,
-        },
-        dedupe_key="artifact-computation-analysis:" + ",".join(source_files[:8]),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_runtime_probe_task(
-    *,
-    files_root: str,
-    source_files: list[str],
-    priority: int = 84,
-) -> Task:
-    """Build a deterministic follow-up task for executing bundled script artifacts."""
-
-    return Task(
-        title="Execute script-like source artifacts",
-        description=(
-            "Run bundled scripts with the appropriate interpreter inside the agent container, "
-            "capture runtime output, and extract flag candidates or encoded blobs."
-        ),
-        task_type="artifact.runtime_probe",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "source_files": source_files,
-        },
-        dedupe_key="artifact-runtime-probe:" + ",".join(source_files[:8]),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_sqlite_review_task(
-    *,
-    files_root: str,
-    database_files: list[str],
-    priority: int = 81,
-) -> Task:
-    """Build a deterministic follow-up task for SQLite/database inspection."""
-
-    return Task(
-        title="Review SQLite artifacts",
-        description="Inspect bundled SQLite databases for tables, rows, secrets, and flag-like tokens.",
-        task_type="artifact.sqlite_review",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "database_files": database_files,
-        },
-        dedupe_key="artifact-sqlite-review:" + ",".join(database_files[:8]),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_pcap_review_task(
-    *,
-    files_root: str,
-    pcap_files: list[str],
-    priority: int = 80,
-) -> Task:
-    """Build a deterministic follow-up task for packet capture review."""
-
-    return Task(
-        title="Review packet captures",
-        description="Inspect bundled PCAP artifacts for hosts, URLs, credentials, and flag-like content.",
-        task_type="artifact.pcap_review",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "pcap_files": pcap_files,
-        },
-        dedupe_key="artifact-pcap-review:" + ",".join(pcap_files[:8]),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_repo_review_task(
-    *,
-    files_root: str,
-    repo_paths: list[str],
-    priority: int = 79,
-) -> Task:
-    """Build a deterministic follow-up task for embedded git repository review."""
-
-    return Task(
-        title="Review embedded repositories",
-        description="Inspect bundled git repositories for interesting history, secrets, and flag-like tokens.",
-        task_type="artifact.repo_review",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "repo_paths": repo_paths,
-        },
-        dedupe_key="artifact-repo-review:" + ",".join(repo_paths[:8]),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_artifact_deep_review_task(
-    *,
-    files_root: str,
-    analysis_kind: str,
-    context_field: str,
-    items: list[str],
-    priority: int = 80,
-) -> Task:
-    """Build a routed deep-review task for one artifact bucket."""
-
-    normalized_items = [item for item in items if item][:12]
-    return Task(
-        title=f"Deep review {analysis_kind} artifacts",
-        description=(
-            "Select the most appropriate artifact-review worker for this bundle and extract "
-            "flag candidates, credentials, or pivot hints."
-        ),
-        task_type="artifact.deep_review",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "analysis_kind": analysis_kind,
-            context_field: normalized_items,
-        },
-        dedupe_key=f"artifact-deep-review:{analysis_kind}:{','.join(normalized_items[:8])}",
-        metadata={
-            "planned_by": "worker-followup",
-            "analysis_kind": analysis_kind,
-            "analysis_field": context_field,
-        },
-    )
-
-
-def build_credential_hunt_task(
-    *,
-    files_root: str,
-    seed_terms: list[str] | None = None,
-    priority: int = 90,
-) -> Task:
-    """Build a deterministic follow-up task for CTF credential harvesting."""
-
-    normalized_seed_terms = merge_unique_strings(seed_terms, limit=12)
-    dedupe_parts = ["credential-hunt", files_root]
-    if normalized_seed_terms:
-        dedupe_parts.extend(normalized_seed_terms[:6])
-    return Task(
-        title="Harvest candidate credentials",
-        description=(
-            "Search bundled challenge artifacts for usernames, passwords, bearer tokens, "
-            "cookies, and other credential material that can unlock the next CTF pivot."
-        ),
-        task_type="credential.hunt",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "seed_terms": normalized_seed_terms,
-        },
-        dedupe_key=":".join(dedupe_parts),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_flag_hunt_task(
-    *,
-    files_root: str,
-    seed_terms: list[str] | None = None,
-    priority: int = 96,
-) -> Task:
-    """Build a deterministic follow-up task for CTF-wide flag harvesting."""
-
-    normalized_seed_terms = merge_unique_strings(seed_terms, limit=12)
-    dedupe_parts = ["flag-hunt", files_root]
-    if normalized_seed_terms:
-        dedupe_parts.extend(normalized_seed_terms[:6])
-    return Task(
-        title="Hunt for concrete flag candidates",
-        description=(
-            "Search across bundled challenge artifacts for grounded flag candidates, "
-            "decoder breadcrumbs, and flag-bearing paths."
-        ),
-        task_type="flag.hunt",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "seed_terms": normalized_seed_terms,
-        },
-        dedupe_key=":".join(dedupe_parts),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_exploit_hypothesis_task(
-    *,
-    files_root: str | None = None,
-    focus_asset_ids: list[str] | None = None,
-    seed_terms: list[str] | None = None,
-    priority: int = 76,
-) -> Task:
-    """Build a deterministic follow-up task for CTF exploit/pivot reasoning."""
-
-    normalized_assets = merge_unique_strings(focus_asset_ids, limit=8)
-    normalized_seed_terms = merge_unique_strings(seed_terms, limit=12)
-    dedupe_parts = ["exploit-hypothesis"]
-    if normalized_assets:
-        dedupe_parts.extend(normalized_assets[:4])
-    if normalized_seed_terms:
-        dedupe_parts.extend(normalized_seed_terms[:4])
-    return Task(
-        title="Synthesize CTF exploit hypotheses",
-        description=(
-            "Use the accumulated evidence to prioritize the shortest path toward credential reuse, "
-            "reachable secrets, and concrete flag recovery."
-        ),
-        task_type="exploit.hypothesis",
-        priority=priority,
-        input_context={
-            "files_root": files_root,
-            "focus_asset_ids": normalized_assets,
-            "seed_terms": normalized_seed_terms,
-        },
-        dedupe_key=":".join(dedupe_parts),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_credential_test_task(
-    *,
-    asset_id: str,
-    base_url: str,
-    credential_ids: list[str],
-    seed_paths: list[str] | None = None,
-    priority: int = 85,
-) -> Task:
-    """Build a deterministic follow-up task for credential reuse against a web target."""
-
-    normalized_credential_ids = merge_unique_strings(credential_ids, limit=8)
-    normalized_seed_paths = normalize_probe_paths(seed_paths, limit=16)
-    return Task(
-        title=f"Test recovered credentials against {asset_id}",
-        description=(
-            "Reuse recovered usernames, passwords, tokens, and cookies against the live challenge "
-            "application to unlock privileged routes or direct flag access."
-        ),
-        task_type="exploit.credential_test",
-        priority=priority,
-        input_context={
-            "asset_id": asset_id,
-            "base_url": base_url,
-            "credential_ids": normalized_credential_ids,
-            "seed_paths": normalized_seed_paths,
-        },
-        dedupe_key=f"exploit-credential-test:{asset_id}:{','.join(normalized_credential_ids[:6])}",
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_cve_probe_task(
-    *,
-    asset_id: str,
-    base_url: str | None = None,
-    hostname: str | None = None,
-    ports: list[int] | None = None,
-    credential_ids: list[str] | None = None,
-    seed_paths: list[str] | None = None,
-    priority: int = 78,
-) -> Task:
-    """Build a deterministic follow-up task for targeted web/pwn exploit probing."""
-
-    normalized_ports = sorted({int(port) for port in (ports or []) if int(port) > 0})[:16]
-    normalized_credentials = merge_unique_strings(credential_ids, limit=8)
-    normalized_seed_paths = normalize_probe_paths(seed_paths, limit=16)
-    dedupe_seed_paths = sorted(normalized_seed_paths)
-    target_label = base_url or hostname or asset_id
-    return Task(
-        title=f"Probe targeted exploit paths for {asset_id}",
-        description=(
-            "Attempt grounded web or TCP interactions against the authorized challenge target "
-            "using recovered routes, prompts, and credentials."
-        ),
-        task_type="exploit.cve_probe",
-        priority=priority,
-        input_context={
-            "asset_id": asset_id,
-            "base_url": base_url,
-            "hostname": hostname,
-            "ports": normalized_ports,
-            "credential_ids": normalized_credentials,
-            "seed_paths": normalized_seed_paths,
-        },
-        dedupe_key=(
-            f"exploit-cve-probe:{asset_id}:{target_label}:"
-            f"{','.join(str(port) for port in normalized_ports[:6])}:"
-            f"{','.join(normalized_credentials[:4])}:"
-            f"{','.join(dedupe_seed_paths[:6])}"
-        ),
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_flag_validation_task(
-    candidate: str,
-    *,
-    source: str,
-    priority: int = 99,
-) -> Task:
-    """Build a deterministic high-priority task for validating a candidate flag."""
-
-    return Task(
-        title="Validate candidate flag",
-        description="Compare a discovered flag candidate against the expected challenge flag.",
-        task_type="flag.validate",
-        priority=priority,
-        input_context={
-            "candidate_flag": candidate,
-            "candidate_source": source,
-        },
-        dedupe_key=f"flag-validate:{candidate}",
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_service_banner_task(
-    *,
-    asset_id: str,
-    hostname: str,
-    ports: list[int],
-    priority: int = 74,
-) -> Task:
-    """Build a deterministic follow-up task for TCP banner collection."""
-
-    normalized_ports = sorted({int(port) for port in ports if int(port) > 0})[:16]
-    return Task(
-        title=f"Collect service banners for {asset_id}",
-        description="Connect to exposed ports and capture service banners or greeting text.",
-        task_type="host.banner_grab",
-        priority=priority,
-        input_context={
-            "asset_id": asset_id,
-            "hostname": hostname,
-            "ports": normalized_ports,
-        },
-        dedupe_key=f"host-banner:{asset_id}:{','.join(str(port) for port in normalized_ports)}",
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def build_http_path_probe_task(
-    *,
-    asset_id: str,
-    base_url: str,
-    paths: list[str],
-    priority: int = 73,
-) -> Task:
-    """Build a deterministic follow-up task for probing interesting HTTP paths."""
-
-    normalized_paths = normalize_probe_paths(paths, limit=20)
-    return Task(
-        title=f"Probe interesting paths for {asset_id}",
-        description="Fetch interesting application paths discovered from source, links, or content review.",
-        task_type="web.path_probe",
-        priority=priority,
-        input_context={
-            "asset_id": asset_id,
-            "base_url": base_url,
-            "paths": normalized_paths,
-        },
-        dedupe_key=f"web-path-probe:{asset_id}:{base_url}:{','.join(normalized_paths[:8])}",
-        metadata={"planned_by": "worker-followup"},
-    )
-
-
-def _try_decode_blob(blob: str) -> list[str]:
-    """Attempt common CTF encodings on a blob and return any flag-like results."""
-    decoded: list[str] = []
-    stripped = blob.strip()
-    if not stripped or len(stripped) < 8:
-        return decoded
-
-    # Base64
-    if re.fullmatch(r"[A-Za-z0-9+/=]{16,}", stripped):
-        for variant in (stripped, stripped + "=", stripped + "=="):
-            try:
-                raw = base64.b64decode(variant, validate=True)
-                text = raw.decode("utf-8", errors="ignore")
-                if FLAG_PATTERN.search(text):
-                    decoded.extend(FLAG_PATTERN.findall(text))
-            except Exception:
-                pass
-
-    # Hex
-    if re.fullmatch(r"[0-9a-fA-F]{16,}", stripped) and len(stripped) % 2 == 0:
-        try:
-            raw = binascii.unhexlify(stripped)
-            text = raw.decode("utf-8", errors="ignore")
-            if FLAG_PATTERN.search(text):
-                decoded.extend(FLAG_PATTERN.findall(text))
-        except Exception:
-            pass
-
-    # ROT13
-    try:
-        text = codecs.decode(stripped, "rot_13")
-        if FLAG_PATTERN.search(text) and not FLAG_PATTERN.search(stripped):
-            decoded.extend(FLAG_PATTERN.findall(text))
-    except Exception:
-        pass
-
-    return decoded
-
-
-_BASE64_BLOB_PATTERN = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
-_HEX_BLOB_PATTERN = re.compile(r"(?:0x)?([0-9a-fA-F]{20,})")
-
-
-_CSS_LIKE_BODY = re.compile(
-    r"^[\s]*"
-    r"("
-    r"[a-z\-]+\s*:\s*[a-z0-9#%.\"', \-()]+\s*;?"
-    r"[\s]*"
-    r")+$",
-    re.IGNORECASE,
-)
-
-_CODE_FALSE_POSITIVE_PREFIXES = frozenset({
-    "html", "body", "div", "span", "input", "button", "textarea",
-    "select", "label", "form", "table", "thead", "tbody", "tr", "td", "th",
-    "ul", "ol", "li", "nav", "header", "footer", "section", "article",
-    "aside", "main", "summary", "details", "dialog", "fieldset", "legend",
-    "img", "video", "audio", "canvas", "svg", "path", "circle", "rect",
-    "code", "pre", "blockquote", "cite", "abbr", "address", "figure",
-    "figcaption", "picture", "source", "track", "embed", "object", "param",
-    "var", "function", "return", "if", "else", "for", "while", "switch",
-    "case", "class", "interface", "struct", "enum", "type", "export",
-    "import", "from", "const", "let", "new", "delete", "typeof", "void",
-    "null", "undefined", "true", "false", "try", "catch", "throw",
-    "this", "self", "super", "extends", "implements", "abstract",
-    "static", "final", "public", "private", "protected", "virtual",
-    "override", "default", "break", "continue", "goto", "do", "elsif",
-    "elif", "def", "lambda", "yield", "async", "await", "with",
-    "create", "drop", "alter", "insert", "update", "select",
-})
-
-
-def _looks_like_plausible_flag(candidate: str) -> bool:
-    """Filter out obvious garbage from flag candidate extraction.
-
-    Real flags are printable ASCII with only minimal control chars.
-    Garbage like ``boo{xFpd]=}`` or ``A{h;~chPtf`m}`` can slip through
-    the raw regex but fail basic plausibility checks.
-    Also rejects CSS selectors (``summary{display:block}``),
-    code constructs (``function{...}``), and SQL patterns.
-    """
-    if not candidate or len(candidate) < 4:
-        return False
-    prefix, _, body = candidate.partition("{")
-    if not body or not body.endswith("}"):
-        return False
-    body = body[:-1]
-    if not prefix.isalnum() and not all(c.isalnum() or c == "_" for c in prefix):
-        return False
-    if len(prefix) < 2:
-        return False
-    printable_count = sum(1 for ch in body if 32 <= ord(ch) <= 126)
-    if not body or printable_count / len(body) < 0.90:
-        return False
-    control_count = sum(1 for ch in body if ord(ch) < 32 or ord(ch) == 127)
-    if control_count > 0:
-        return False
-
-    if prefix.lower() in _CODE_FALSE_POSITIVE_PREFIXES:
-        return False
-    if _CSS_LIKE_BODY.match(body):
-        return False
-    if re.match(r"^[\s;,]+$", body):
-        return False
-
-    return True
-
-
-def extract_flag_candidates(*values: str | None) -> list[str]:
-    """Extract unique flag-like tokens from the supplied strings.
-
-    In addition to direct regex matches, attempts base64, hex, and ROT13
-    decoding on long encoded-looking blobs.  Applies plausibility filtering
-    to reject garbage matches that slip through the raw regex.
-    """
-
-    candidates: list[str] = []
-    for value in values:
-        if not value:
-            continue
-        for match in FLAG_PATTERN.findall(value):
-            if match not in candidates and _looks_like_plausible_flag(match):
-                candidates.append(match)
-        for blob in _BASE64_BLOB_PATTERN.findall(value):
-            for decoded in _try_decode_blob(blob):
-                if decoded not in candidates and _looks_like_plausible_flag(decoded):
-                    candidates.append(decoded)
-        for blob in _HEX_BLOB_PATTERN.findall(value):
-            for decoded in _try_decode_blob(blob):
-                if decoded not in candidates and _looks_like_plausible_flag(decoded):
-                    candidates.append(decoded)
-    return candidates
-
-
-def merge_unique_strings(*groups: Iterable[str] | None, limit: int | None = None) -> list[str]:
-    """Merge string groups while preserving order and removing empties."""
-
-    merged: list[str] = []
-    for group in groups:
-        if not group:
-            continue
-        for item in group:
-            text = str(item).strip()
-            if not text or text in merged:
-                continue
-            merged.append(text)
-            if limit is not None and len(merged) >= limit:
-                return merged
-    return merged
-
-
-def normalize_probe_paths(paths: Iterable[str] | None, *, limit: int = 20) -> list[str]:
-    """Normalize worker-discovered paths into forms suitable for web.path_probe tasks."""
-
-    normalized: list[str] = []
-    for raw_path in paths or ():
-        text = str(raw_path).strip()
-        if not text:
-            continue
-
-        if text.startswith(("http://", "https://")):
-            parsed = urlparse(text)
-            text = parsed.path or "/"
-            if parsed.query:
-                text = f"{text}?{parsed.query}"
-        else:
-            if any(character.isspace() for character in text):
-                continue
-            if not text.startswith("/"):
-                if "/" in text or any(
-                    token in text.lower()
-                    for token in ("admin", "api", "debug", "flag", "login", "upload", "cgi-bin")
-                ):
-                    text = f"/{text.lstrip('/')}"
-                else:
-                    continue
-
-        if any(character.isspace() for character in text):
-            continue
-
-        if text not in normalized:
-            normalized.append(text)
-        if len(normalized) >= limit:
-            break
-    return normalized
-
-
-def build_path_probe_tasks_for_assets(
-    state: GlobalState,
-    paths: Iterable[str] | None,
-    *,
-    priority: int = 73,
-) -> list[Task]:
-    """Create deterministic path-probe tasks for every known web asset."""
-
-    normalized_paths = normalize_probe_paths(paths, limit=20)
-    if not normalized_paths:
-        return []
-
-    tasks: list[Task] = []
-    for asset in state.assets.values():
-        if not asset.base_url:
-            continue
-        tasks.append(
-            build_http_path_probe_task(
-                asset_id=asset.asset_id,
-                base_url=asset.base_url,
-                paths=normalized_paths,
-                priority=priority,
-            )
-        )
-    return tasks
-
-
-def infer_web_context(
-    task: Task,
-    state: GlobalState,
-) -> tuple[str | None, str | None]:
-    """Resolve (asset_id, base_url) from task context and state.
-
-    Only performs deterministic lookups:
-    - Both present: return as-is.
-    - asset_id given: look up base_url from that specific asset.
-    - base_url given: find the exact-matching asset.
-    - Neither present: return (None, None). Does NOT guess.
-    """
-    asset_id = task.input_context.get("asset_id")
-    base_url = task.input_context.get("base_url")
-
-    if asset_id and base_url:
-        return asset_id, base_url
-
-    if asset_id and not base_url:
-        asset = state.assets.get(asset_id)
-        if asset is not None and asset.base_url:
-            return asset_id, asset.base_url
-
-    if base_url and not asset_id:
-        for asset in state.assets.values():
-            if asset.base_url == base_url:
-                return asset.asset_id, base_url
-
-    return asset_id, base_url
-
-
-def infer_host_context(
-    task: Task,
-    state: GlobalState,
-) -> tuple[str | None, str | None]:
-    """Resolve (asset_id, hostname) from task context and state.
-
-    Only performs deterministic lookups. Does NOT iterate all assets
-    as a wildcard fallback when both fields are missing.
-    """
-    asset_id = task.input_context.get("asset_id")
-    hostname = task.input_context.get("hostname")
-
-    if asset_id and hostname:
-        return asset_id, hostname
-
-    if asset_id and not hostname:
-        asset = state.assets.get(asset_id)
-        if asset is not None and asset.hostname:
-            return asset_id, asset.hostname
-
-    if hostname and not asset_id:
-        for asset in state.assets.values():
-            if asset.hostname == hostname:
-                return asset.asset_id, hostname
-
-    return asset_id, hostname
+# ===========================================================================
+# WorkerAgent — abstract base
+# ===========================================================================
 
 
 class WorkerAgent(ABC):
@@ -1011,8 +75,9 @@ class WorkerAgent(ABC):
         return True, None
 
     def routing_score(self, task: Task, state: GlobalState) -> int:
-        """Minimal deterministic fallback score — LLM routing is preferred."""
+        """Minimal deterministic score exposed as context for LLM routing."""
 
+        del state
         score = 50
         if task.task_type in self.supported_task_types:
             score += 30
@@ -1059,3 +124,262 @@ class WorkerAgent(ABC):
     @abstractmethod
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
         """Execute a task against the current shared state."""
+
+
+# ===========================================================================
+# ToolBackedWorker — generic plugin-dispatch template
+# ===========================================================================
+
+
+class ToolStep(BaseModel):
+    """One :class:`ToolBackedWorker` recipe: how to translate a task into a tool call.
+
+    A subclass declares ``dispatch: dict[task_type, ToolStep]`` and the base
+    ``run()`` implementation handles the full pipeline:
+
+      1. Build ``ToolExecutionRequest`` from ``request_metadata``.
+      2. Execute through ``execution_plane``.
+      3. Optionally call ``synthesize`` to merge LLM guidance into the result.
+      4. Optionally call ``followups`` to construct new tasks.
+
+    The ``synthesize`` and ``followups`` callables are imported lazily by each
+    worker subclass — they live in :mod:`agents.reasoning` (LLM glue) or in
+    the worker module itself (deterministic post-processing).
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    tool_name: str
+    parser_name: str = "jsonl_signals"
+    timeout_s: int = 60
+    label: str = ""
+
+    request_metadata: Any  # Callable[[Task, GlobalState], dict[str, Any]]
+    synthesize: Any = None  # Callable[[WorkerAgent, GlobalState, Task, ToolExecutionBundle], tuple[BaseModel|None, list[str], dict[str, Any]]]
+    followups: Any = None   # Callable[[WorkerAgent, GlobalState, Task, ToolExecutionBundle, dict, list[str]], list[Task]]
+
+
+class ToolBackedWorker(WorkerAgent):
+    """Worker that delegates the task body to a :class:`ToolStep` lookup.
+
+    Subclasses declare:
+
+    - ``name`` and ``supported_task_types`` (as for :class:`WorkerAgent`)
+    - ``dispatch``: ``ClassVar[dict[str, ToolStep]]`` mapping task_type -> recipe
+    - optionally override ``can_route_task``/``routing_score`` for per-step
+      context requirements
+
+    The base class handles validation, plugin dispatch, evidence wrapping,
+    and follow-up task generation.
+    """
+
+    dispatch: ClassVar[dict[str, ToolStep]] = {}
+
+    def supports(self, task: Task) -> bool:
+        if task.task_type in self.dispatch:
+            return True
+        return super().supports(task)
+
+    def run(self, task: Task, state: GlobalState) -> WorkerReport:
+        step = self.dispatch.get(task.task_type)
+        if step is None:
+            return WorkerReport(
+                task_id=task.task_id,
+                worker_name=self.name,
+                success=False,
+                summary=f"{self.name} has no dispatch entry for task type {task.task_type!r}.",
+                error=(
+                    f"{type(self).__name__}.dispatch is missing an entry for {task.task_type!r}; "
+                    "either add a ToolStep or revise the worker's supported_task_types."
+                ),
+                retryable=False,
+            )
+
+        if self.execution_plane is None:
+            return WorkerReport(
+                task_id=task.task_id,
+                worker_name=self.name,
+                success=False,
+                summary=f"{self.name} requires an execution plane; none is configured.",
+                error=(
+                    f"{type(self).__name__}.execution_plane is None — "
+                    f"register the {step.tool_name!r} plugin before dispatching {task.task_type!r}."
+                ),
+                retryable=False,
+            )
+
+        request = ToolExecutionRequest(
+            tool_name=step.tool_name,
+            parser_name=step.parser_name,
+            timeout_s=int(task.input_context.get("timeout_s", step.timeout_s)),
+            metadata=step.request_metadata(task, state),
+        )
+
+        try:
+            bundle = self.execution_plane.execute(task.task_id, request)
+        except ToolExecutionError as exc:
+            return WorkerReport(
+                task_id=task.task_id,
+                worker_name=self.name,
+                success=False,
+                summary=f"{step.label or step.tool_name} execution failed.",
+                error=str(exc),
+            )
+
+        worker_notes = list(bundle.parsed.notes)
+        guidance: BaseModel | None = None
+        flag_candidates: list[str] = list(bundle.parsed.output_context.get("flag_candidates") or [])
+        output_context: dict[str, Any] = dict(bundle.parsed.output_context)
+
+        if step.synthesize is not None:
+            guidance, flag_candidates, output_context = step.synthesize(
+                self, state, task, bundle,
+            )
+
+        if step.followups is not None:
+            new_tasks = step.followups(self, state, task, bundle, output_context, flag_candidates)
+        else:
+            from nyuctf_mutil_killchain.state.task_factory import build_flag_validation_task
+
+            new_tasks = [
+                build_flag_validation_task(candidate, source=step.tool_name)
+                for candidate in flag_candidates
+            ]
+
+        return WorkerReport(
+            task_id=task.task_id,
+            worker_name=self.name,
+            success=True,
+            summary=bundle.parsed.summary,
+            output_context=output_context,
+            asset_updates=list(bundle.parsed.asset_updates),
+            finding_updates=list(bundle.parsed.finding_updates),
+            credential_updates=list(bundle.parsed.credential_updates),
+            network_updates=list(bundle.parsed.network_updates),
+            evidence_updates=[bundle.evidence],
+            new_tasks=new_tasks,
+            notes=worker_notes + [f"{self.name} ran {step.label or step.tool_name}."],
+        )
+
+
+# ===========================================================================
+# ReasoningOnlyWorker — LLM-only stage worker (no plugin dispatch)
+# ===========================================================================
+
+
+class ReasoningOnlyWorker(WorkerAgent):
+    """Worker that produces a :class:`WorkerReport` from LLM reasoning alone.
+
+    For tasks that have no concrete plugin to call (such as
+    ``exploit.hypothesis`` or ``flag.validate``), the subclass implements a
+    single ``_reason(task, state)`` method that returns a guidance object plus
+    the report fields it should drive.
+    """
+
+    @abstractmethod
+    def run(self, task: Task, state: GlobalState) -> WorkerReport:
+        """Subclasses still implement run; this base just documents intent."""
+
+
+# ===========================================================================
+# Backwards-compat re-exports
+# ===========================================================================
+# Existing worker modules and tests import helpers from agents.base.
+# The canonical homes are:
+#   - agents._helpers.network    network/web context inference
+#   - agents._helpers.flag       flag extraction / decoding
+#   - agents._helpers.strings    string/list normalization
+#   - state.task_factory         build_*_task constructors
+
+from nyuctf_mutil_killchain.agents._helpers.flag import (  # noqa: E402, F401
+    extract_flag_candidates,
+    extract_plain_solver_flag_lines,
+)
+from nyuctf_mutil_killchain.agents._helpers.network import (  # noqa: E402, F401
+    AMBIGUOUS_WEB_SERVICE_NAMES,
+    COMMON_WEB_PORTS,
+    DEFAULT_WEB_PORTS,
+    TLS_WEB_PORTS,
+    WEB_SERVICE_NAMES,
+    WEB_SERVICE_TOKENS,
+    banner_looks_like_http,
+    infer_host_context,
+    infer_web_context,
+    infer_web_scheme,
+    infer_web_urls,
+    infer_web_urls_from_banners,
+    service_looks_like_web,
+)
+from nyuctf_mutil_killchain.agents._helpers.strings import (  # noqa: E402, F401
+    merge_unique_strings,
+    normalize_probe_paths,
+)
+from nyuctf_mutil_killchain.state.task_factory import (  # noqa: E402, F401
+    build_archive_triage_task,
+    build_artifact_deep_review_task,
+    build_binary_triage_task,
+    build_computation_analysis_task,
+    build_credential_hunt_task,
+    build_credential_test_task,
+    build_cve_probe_task,
+    build_exploit_hypothesis_task,
+    build_flag_hunt_task,
+    build_flag_validation_task,
+    build_http_path_probe_task,
+    build_path_probe_tasks_for_assets,
+    build_pcap_review_task,
+    build_repo_review_task,
+    build_runtime_probe_task,
+    build_service_banner_task,
+    build_source_review_task,
+    build_sqlite_review_task,
+    build_web_content_task,
+    build_web_form_probe_task,
+    build_web_review_task,
+)
+
+__all__ = [
+    "ReasoningOnlyWorker",
+    "ToolBackedWorker",
+    "ToolStep",
+    "WorkerAgent",
+    # Helpers (re-exported for backwards compatibility)
+    "AMBIGUOUS_WEB_SERVICE_NAMES",
+    "COMMON_WEB_PORTS",
+    "DEFAULT_WEB_PORTS",
+    "TLS_WEB_PORTS",
+    "WEB_SERVICE_NAMES",
+    "WEB_SERVICE_TOKENS",
+    "banner_looks_like_http",
+    "build_archive_triage_task",
+    "build_artifact_deep_review_task",
+    "build_binary_triage_task",
+    "build_computation_analysis_task",
+    "build_credential_hunt_task",
+    "build_credential_test_task",
+    "build_cve_probe_task",
+    "build_exploit_hypothesis_task",
+    "build_flag_hunt_task",
+    "build_flag_validation_task",
+    "build_http_path_probe_task",
+    "build_path_probe_tasks_for_assets",
+    "build_pcap_review_task",
+    "build_repo_review_task",
+    "build_runtime_probe_task",
+    "build_service_banner_task",
+    "build_source_review_task",
+    "build_sqlite_review_task",
+    "build_web_content_task",
+    "build_web_form_probe_task",
+    "build_web_review_task",
+    "extract_flag_candidates",
+    "extract_plain_solver_flag_lines",
+    "infer_host_context",
+    "infer_web_context",
+    "infer_web_scheme",
+    "infer_web_urls",
+    "infer_web_urls_from_banners",
+    "merge_unique_strings",
+    "normalize_probe_paths",
+    "service_looks_like_web",
+]

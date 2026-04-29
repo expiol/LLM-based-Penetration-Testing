@@ -171,16 +171,16 @@ class WebFormProbeAgent(WorkerAgent):
 
         text_payloads = merge_unique_strings(
             ["autopentest-canary"],
-            llm_guidance.text_payloads if llm_guidance is not None else None,
+            llm_guidance.text_payloads,
             limit=4,
         )
         filename_variants = merge_unique_strings(
             ["autopentest.txt"],
-            llm_guidance.filename_variants if llm_guidance is not None else None,
+            llm_guidance.filename_variants,
             limit=4,
         )
         llm_query_variants = merge_unique_strings(
-            llm_guidance.query_variants if llm_guidance is not None else None,
+            llm_guidance.query_variants,
             limit=8,
         )
         query_variants = llm_query_variants or _script_like_upload_query_variants(page_url, forms)
@@ -211,18 +211,17 @@ class WebFormProbeAgent(WorkerAgent):
 
         output_context = dict(bundle.parsed.output_context)
         flag_candidates = list(output_context.get("flag_candidates") or [])
-        if llm_guidance is not None:
-            flag_candidates = merge_unique_strings(
-                flag_candidates,
-                llm_guidance.grounded_flag_candidates,
-                limit=12,
-            )
-            output_context["llm_summary"] = llm_guidance.summary
-            output_context["manual_checks"] = merge_unique_strings(
-                output_context.get("manual_checks") or [],
-                llm_guidance.manual_checks,
-                limit=10,
-            )
+        flag_candidates = merge_unique_strings(
+            flag_candidates,
+            llm_guidance.grounded_flag_candidates,
+            limit=12,
+        )
+        output_context["llm_summary"] = llm_guidance.summary
+        output_context["manual_checks"] = merge_unique_strings(
+            output_context.get("manual_checks") or [],
+            llm_guidance.manual_checks,
+            limit=10,
+        )
 
         new_tasks = [
             build_flag_validation_task(candidate, source="http_form_probe")

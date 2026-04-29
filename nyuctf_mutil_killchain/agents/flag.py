@@ -62,9 +62,11 @@ class FlagValidationAgent(WorkerAgent):
             ),
             schema=FlagValidationAssessment,
         )
-        candidate_to_check = str(
-            (llm_assessment.normalized_candidate if llm_assessment is not None else None) or candidate
-        ).strip()
+        if llm_assessment.normalized_candidate is not None:
+            normalized = str(llm_assessment.normalized_candidate).strip()
+        else:
+            normalized = ""
+        candidate_to_check = (normalized or candidate).strip()
 
         if not self.expected_flag:
             return WorkerReport(
@@ -78,20 +80,17 @@ class FlagValidationAgent(WorkerAgent):
                     "candidate_source": candidate_source,
                     "validated": False,
                     "validation_skipped": True,
-                    **(
-                        {
-                            "llm_summary": llm_assessment.summary,
-                            "llm_likely_valid": llm_assessment.likely_valid,
-                            "llm_confidence": llm_assessment.confidence,
-                        }
-                        if llm_assessment is not None
-                        else {}
-                    ),
+                    "llm_summary": llm_assessment.summary,
+                    "llm_likely_valid": llm_assessment.likely_valid,
+                    "llm_confidence": llm_assessment.confidence,
                 },
                 notes=worker_notes + ["Flag validation skipped because no expected flag is configured."],
             )
 
-        is_correct = candidate_to_check == self.expected_flag
+        raw_stripped = candidate.strip()
+        is_correct = raw_stripped == self.expected_flag or candidate_to_check == self.expected_flag
+        if is_correct:
+            candidate_to_check = self.expected_flag
         candidate_id = hashlib.sha1(candidate_to_check.encode("utf-8")).hexdigest()[:12]
         finding = Finding(
             finding_id=f"finding-flag-validation-{candidate_id}",
@@ -109,15 +108,9 @@ class FlagValidationAgent(WorkerAgent):
                 "candidate_flag": candidate,
                 "normalized_candidate": candidate_to_check,
                 "validated": is_correct,
-                **(
-                    {
-                        "llm_summary": llm_assessment.summary,
-                        "llm_likely_valid": llm_assessment.likely_valid,
-                        "llm_confidence": llm_assessment.confidence,
-                    }
-                    if llm_assessment is not None
-                    else {}
-                ),
+                "llm_summary": llm_assessment.summary,
+                "llm_likely_valid": llm_assessment.likely_valid,
+                "llm_confidence": llm_assessment.confidence,
             },
             status="closed" if is_correct else "open",
         )
@@ -144,14 +137,8 @@ class FlagValidationAgent(WorkerAgent):
                 "normalized_candidate": candidate_to_check,
                 "candidate_source": candidate_source,
                 "validated": is_correct,
-                **(
-                    {
-                        "llm_summary": llm_assessment.summary,
-                        "llm_likely_valid": llm_assessment.likely_valid,
-                        "llm_confidence": llm_assessment.confidence,
-                    }
-                    if llm_assessment is not None
-                    else {}
-                ),
+                "llm_summary": llm_assessment.summary,
+                "llm_likely_valid": llm_assessment.likely_valid,
+                "llm_confidence": llm_assessment.confidence,
             },
         )

@@ -13,13 +13,9 @@ from typing import Callable
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, TaskStatus
+from nyuctf_mutil_killchain.state.constants import SOURCE_EXTENSIONS as _SOURCE_EXTS
 
 _DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
-_SOURCE_EXTS = frozenset({
-    ".py", ".js", ".rb", ".pl", ".sh", ".c", ".cpp", ".h", ".java",
-    ".php", ".go", ".rs", ".sage", ".txt", ".md", ".yml", ".yaml",
-    ".json", ".xml", ".html", ".css", ".sql", ".lua", ".r",
-})
 _PCAP_EXTS = frozenset({".pcap", ".pcapng", ".cap"})
 _DB_EXTS = frozenset({".db", ".sqlite", ".sqlite3"})
 _ARCHIVE_EXTS = frozenset({".zip", ".tar", ".gz", ".tgz", ".bz2", ".7z", ".rar", ".xz"})
