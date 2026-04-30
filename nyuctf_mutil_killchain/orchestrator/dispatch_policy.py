@@ -1,9 +1,11 @@
 """Dispatch policy helpers for orchestrator task execution.
 
-This module isolates pre-dispatch concerns from the orchestrator main loop:
-- task context validation
-- conservative context repair
-- ready-task batch selection policy
+Responsibilities (only these):
+- Validate task context (asset_id reference must exist in state.assets)
+- Conservative context repair (fill missing required keys from challenge_files / assets)
+- Ready-task batch selection (priority order, one task per type prefix per cycle)
+
+No suppression, no capping, no retry decisions.  Those are LLM concerns.
 """
 
 from __future__ import annotations
@@ -12,13 +14,15 @@ from dataclasses import dataclass
 from typing import Callable
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, TaskStatus
-from nyuctf_mutil_killchain.state.constants import SOURCE_EXTENSIONS as _SOURCE_EXTS
+from nyuctf_mutil_killchain.state import (
+    FileKind,
+    GlobalState,
+    Task,
+    TaskErrorCode,
+    files_by_kind,
+)
 
 _DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
-_PCAP_EXTS = frozenset({".pcap", ".pcapng", ".cap"})
-_DB_EXTS = frozenset({".db", ".sqlite", ".sqlite3"})
-_ARCHIVE_EXTS = frozenset({".zip", ".tar", ".gz", ".tgz", ".bz2", ".7z", ".rar", ".xz"})
 
 
 @dataclass(frozen=True)
@@ -37,33 +41,19 @@ class DispatchPolicy:
     def __init__(self, emit: Callable[[str], None]) -> None:
         self.emit = emit
 
-    _MAX_BLOCKED_PER_TASK_TYPE = 3
-
     def validate_task_for_dispatch(self, task: Task, state: GlobalState) -> DispatchValidation:
-        """Validate that context references required for dispatch are consistent."""
+        """Check that asset references in *task* point to known state.assets entries."""
         ctx_asset_id = task.input_context.get("asset_id")
-        if ctx_asset_id and ctx_asset_id not in state.assets and not task.task_type.startswith("recon."):
+        if (
+            ctx_asset_id
+            and ctx_asset_id not in state.assets
+            and not task.task_type.startswith("recon.")
+        ):
             return DispatchValidation(
                 valid=False,
                 reason=f"asset_id {ctx_asset_id!r} not found in state.assets",
                 error_code=TaskErrorCode.UNKNOWN_ASSET_ID,
             )
-
-        # Suppress tasks whose type has been blocked too many times this run.
-        blocked_count = sum(
-            1 for t in state.task_chain.tasks
-            if t.task_type == task.task_type and t.status == TaskStatus.BLOCKED
-        )
-        if blocked_count >= self._MAX_BLOCKED_PER_TASK_TYPE:
-            return DispatchValidation(
-                valid=False,
-                reason=(
-                    f"task type {task.task_type!r} already blocked {blocked_count} time(s); "
-                    f"suppressing further attempts"
-                ),
-                error_code=TaskErrorCode.DISPATCH_REFUSED,
-            )
-
         return DispatchValidation(valid=True)
 
     def try_repair_task_context(
@@ -72,7 +62,7 @@ class DispatchPolicy:
         state: GlobalState,
         candidates: list[WorkerAgent],
     ) -> bool:
-        """Attempt conservative context repair for missing required fields."""
+        """Fill in missing required-context fields when possible."""
         ctx = task.input_context
         missing: set[str] = set()
         for worker in candidates:
@@ -85,72 +75,71 @@ class DispatchPolicy:
             return False
 
         repaired = False
-        challenge_meta = state.metadata.get("challenge", {})
-        challenge_files = challenge_meta.get("files", [])
+        challenge_meta = state.metadata.get("challenge", {}) or {}
+        challenge_files: list[str] = list(challenge_meta.get("files", []) or [])
 
         if challenge_files:
+            kinds = files_by_kind(challenge_files)
+
             if "files_root" in missing:
                 ctx["files_root"] = _DEFAULT_FILES_ROOT
                 self.emit(f"[repair] {task.task_id}: filled files_root={_DEFAULT_FILES_ROOT}")
                 repaired = True
 
             if "source_files" in missing:
-                inferred = [
-                    f for f in challenge_files
-                    if "." in f and ("." + f.rsplit(".", 1)[-1].lower()) in _SOURCE_EXTS
-                ]
+                inferred = list(kinds.get(FileKind.SOURCE, []))
                 ctx["source_files"] = inferred or challenge_files
-                self.emit(f"[repair] {task.task_id}: filled source_files ({len(ctx['source_files'])} file(s))")
+                self.emit(
+                    f"[repair] {task.task_id}: filled source_files "
+                    f"({len(ctx['source_files'])} file(s))"
+                )
                 repaired = True
 
             if "binary_files" in missing:
-                ctx["binary_files"] = [
-                    f for f in challenge_files
-                    if "." not in f
-                    or ("." + f.rsplit(".", 1)[-1].lower()) not in _SOURCE_EXTS
-                ]
-                self.emit(f"[repair] {task.task_id}: filled binary_files ({len(ctx['binary_files'])} file(s))")
-                repaired = True
+                inferred = list(kinds.get(FileKind.BINARY, []))
+                if inferred:
+                    ctx["binary_files"] = inferred
+                    self.emit(
+                        f"[repair] {task.task_id}: filled binary_files "
+                        f"({len(inferred)} file(s))"
+                    )
+                    repaired = True
 
             if "pcap_files" in missing:
-                inferred = [
-                    f for f in challenge_files
-                    if "." in f and ("." + f.rsplit(".", 1)[-1].lower()) in _PCAP_EXTS
-                ]
+                inferred = list(kinds.get(FileKind.PCAP, []))
                 if inferred:
                     ctx["pcap_files"] = inferred
-                    self.emit(f"[repair] {task.task_id}: filled pcap_files ({len(inferred)} file(s))")
+                    self.emit(
+                        f"[repair] {task.task_id}: filled pcap_files ({len(inferred)} file(s))"
+                    )
                     repaired = True
 
             if "database_files" in missing:
-                inferred = [
-                    f for f in challenge_files
-                    if "." in f and ("." + f.rsplit(".", 1)[-1].lower()) in _DB_EXTS
-                ]
+                inferred = list(kinds.get(FileKind.SQLITE, []))
                 if inferred:
                     ctx["database_files"] = inferred
-                    self.emit(f"[repair] {task.task_id}: filled database_files ({len(inferred)} file(s))")
+                    self.emit(
+                        f"[repair] {task.task_id}: filled database_files ({len(inferred)} file(s))"
+                    )
                     repaired = True
 
             if "archive_files" in missing:
-                inferred = [
-                    f for f in challenge_files
-                    if "." in f and ("." + f.rsplit(".", 1)[-1].lower()) in _ARCHIVE_EXTS
-                ]
+                inferred = list(kinds.get(FileKind.ARCHIVE, []))
                 if inferred:
                     ctx["archive_files"] = inferred
-                    self.emit(f"[repair] {task.task_id}: filled archive_files ({len(inferred)} file(s))")
+                    self.emit(
+                        f"[repair] {task.task_id}: filled archive_files ({len(inferred)} file(s))"
+                    )
                     repaired = True
 
         if "paths" in missing and task.task_type == "web.path_probe":
-            # Start with defaults then add paths discovered in findings
             paths = ["/", "/index.php", "/index.html", "/robots.txt", "/flag", "/admin"]
             for finding in state.findings.values():
                 meta = finding.metadata or {}
                 for key in ("interesting_routes", "interesting_paths"):
-                    for path in (meta.get(key) or []):
+                    for path in meta.get(key) or []:
                         path = str(path).strip()
-                        if path and path.startswith("/") and path not in paths:
+                        if path and path.startswith("/") and ":" not in path and path not in paths:
                             paths.append(path)
             ctx["paths"] = paths[:20]
             self.emit(f"[repair] {task.task_id}: filled paths ({len(ctx['paths'])} path(s))")

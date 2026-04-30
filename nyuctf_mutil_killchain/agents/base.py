@@ -77,10 +77,12 @@ class WorkerAgent(ABC):
     def routing_score(self, task: Task, state: GlobalState) -> int:
         """Minimal deterministic score exposed as context for LLM routing."""
 
-        del state
         score = 50
         if task.task_type in self.supported_task_types:
             score += 30
+        category = str(state.metadata.get("challenge", {}).get("category") or "").lower()
+        if category and category in self.preferred_challenge_categories:
+            score += 25
         return score
 
     def routing_profile(self, task: Task, state: GlobalState) -> dict[str, Any]:

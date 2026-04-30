@@ -3,20 +3,38 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from nyuctf_mutil_killchain.agents import (
-    ArtifactWorker,
-    CredentialWorker,
-    ExploitWorker,
+    ArchiveTriageAgent,
+    ArtifactTriageAgent,
+    BinaryTriageAgent,
+    ComputationAnalysisAgent,
+    CredentialExploitAgent,
+    CredentialHuntAgent,
+    DeepReviewAgent,
+    ExploitReasoningAgent,
+    FlagHuntAgent,
     FlagValidationAgent,
+    HostAuditAgent,
+    PcapReviewAgent,
     ReconAgent,
+    RepoReviewAgent,
+    RuntimeProbeAgent,
+    ServiceBannerAgent,
     SolverAgent,
-    SurfaceWorker,
+    SourceReviewAgent,
+    SqliteReviewAgent,
     VulnScanAgent,
+    WebAssessmentAgent,
+    WebContentAgent,
+    WebFormProbeAgent,
+    WebPathProbeAgent,
+    WebPwnExploitAgent,
 )
 from nyuctf_mutil_killchain.llm import LLMClient, TokenLedger, build_llm_client_from_env
 from nyuctf_mutil_killchain.orchestrator import (
@@ -32,6 +50,64 @@ from nyuctf_mutil_killchain.tools import ExecutionPlane, build_execution_plane
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+class RunPersister:
+    """Owns disk paths for one run and writes them lazily.
+
+    ``write_state`` is the cheap checkpoint (state.json + events.log) called
+    after every orchestrator cycle so a crash never wipes mid-run progress.
+    ``write_all`` is the full snapshot called from controller.run_assessment's
+    ``finally`` block to guarantee state/summary/report/evidence/events all
+    land on disk regardless of whether ``orchestrator.run`` raised.
+    """
+
+    def __init__(self, run_dir: Path, recorder: EventRecorder) -> None:
+        self.run_dir = run_dir
+        self.recorder = recorder
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path = run_dir / "config.json"
+        self.state_path = run_dir / "state.json"
+        self.summary_path = run_dir / "summary.json"
+        self.report_path = run_dir / "report.md"
+        self.events_path = run_dir / "events.log"
+        self.evidence_path = run_dir / "evidence.json"
+
+    def write_config(self, config: RunConfig) -> None:
+        _write_json(self.config_path, config.model_dump(mode="json"))
+
+    def _write_events(self) -> None:
+        messages = list(self.recorder.messages)
+        suffix = "\n" if messages else ""
+        self.events_path.write_text("\n".join(messages) + suffix, encoding="utf-8")
+
+    def write_state(self, state: GlobalState) -> None:
+        try:
+            _write_json(self.state_path, state.model_dump(mode="json"))
+            self._write_events()
+        except Exception as exc:
+            self.recorder.emit(
+                f"[persister] checkpoint write failed: {type(exc).__name__}: {exc}"
+            )
+
+    def write_all(
+        self,
+        state: GlobalState,
+        token_ledger: TokenLedger | None,
+    ) -> None:
+        _write_json(self.state_path, state.model_dump(mode="json"))
+        _write_json(self.summary_path, build_summary(state, token_ledger))
+        _write_json(
+            self.evidence_path,
+            {
+                "evidence": {
+                    key: value.model_dump(mode="json")
+                    for key, value in sorted(state.evidence.items(), key=lambda item: item[0])
+                }
+            },
+        )
+        self.report_path.write_text(render_markdown_report(state), encoding="utf-8")
+        self._write_events()
 
 
 class RunConfig(BaseModel):
@@ -88,6 +164,7 @@ def build_runtime(
     execution_plane: ExecutionPlane | None = None,
     expected_flag: str | None = None,
     llm_client: LLMClient | None = None,
+    checkpoint_callback: Callable[[GlobalState], None] | None = None,
 ) -> tuple[GlobalState, Orchestrator, LLMClient]:
     """Assemble state, planner, workers, and execution plane for one run."""
 
@@ -103,21 +180,47 @@ def build_runtime(
         authorized_scope=config.authorized_scope,
         metadata=dict(config.metadata),
     )
+    common = {"llm_client": llm_client, "execution_plane": execution_plane}
     orchestrator = Orchestrator(
         state=state,
         workers=[
-            ReconAgent(llm_client=llm_client, execution_plane=execution_plane),
-            ArtifactWorker(llm_client=llm_client, execution_plane=execution_plane),
-            CredentialWorker(llm_client=llm_client, execution_plane=execution_plane),
-            SurfaceWorker(llm_client=llm_client, execution_plane=execution_plane),
-            VulnScanAgent(llm_client=llm_client, execution_plane=execution_plane),
-            ExploitWorker(llm_client=llm_client, execution_plane=execution_plane),
-            SolverAgent(llm_client=llm_client, execution_plane=execution_plane),
+            # Recon / host
+            ReconAgent(**common),
+            HostAuditAgent(**common),
+            ServiceBannerAgent(**common),
+            # Artifact / static analysis
+            ArtifactTriageAgent(**common),
+            BinaryTriageAgent(**common),
+            ArchiveTriageAgent(**common),
+            SqliteReviewAgent(**common),
+            PcapReviewAgent(**common),
+            RepoReviewAgent(**common),
+            SourceReviewAgent(**common),
+            ComputationAnalysisAgent(**common),
+            RuntimeProbeAgent(**common),
+            DeepReviewAgent(**common),
+            # Web
+            WebAssessmentAgent(**common),
+            WebContentAgent(**common),
+            WebFormProbeAgent(**common),
+            WebPathProbeAgent(**common),
+            # Vuln
+            VulnScanAgent(**common),
+            # Credential / exploit
+            CredentialHuntAgent(**common),
+            CredentialExploitAgent(**common),
+            WebPwnExploitAgent(**common),
+            ExploitReasoningAgent(**common),
+            FlagHuntAgent(**common),
+            # Solver
+            SolverAgent(**common),
+            # Flag validation (no execution_plane needed)
             FlagValidationAgent(llm_client=llm_client, expected_flag=expected_flag),
         ],
         planner=planner,
         router=router,
         emit=(recorder.emit if recorder is not None else print),
+        checkpoint_callback=checkpoint_callback,
     )
     return state, orchestrator, llm_client
 
@@ -150,7 +253,11 @@ def run_assessment(
     expected_flag: str | None = None,
     llm_client: LLMClient | None = None,
 ) -> RunArtifacts:
-    """Run the full local workflow and persist artifacts."""
+    """Run the full local workflow and persist artifacts.
+
+    Persistence is wrapped in ``try/finally`` so that state/summary/report/
+    evidence/events are always written, even if ``orchestrator.run`` raises.
+    """
 
     recorder = EventRecorder(quiet=config.quiet)
     state, orchestrator, active_llm_client = build_runtime(
@@ -160,50 +267,33 @@ def run_assessment(
         expected_flag=expected_flag,
         llm_client=llm_client,
     )
+    run_dir = Path(config.output_root) / state.run_id
+    persister = RunPersister(run_dir, recorder)
+    persister.write_config(config)
+    orchestrator.checkpoint_callback = persister.write_state
 
-    final_state = orchestrator.run(max_cycles=config.max_cycles)
     token_ledger = getattr(active_llm_client, "token_ledger", None)
-    if token_ledger is not None:
-        recorder.emit(
-            f"[token usage] calls={token_ledger.llm_calls} "
-            f"prompt={token_ledger.prompt_tokens} "
-            f"completion={token_ledger.completion_tokens} "
-            f"total={token_ledger.total_tokens}"
-        )
 
-    run_dir = Path(config.output_root) / final_state.run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    config_path = run_dir / "config.json"
-    state_path = run_dir / "state.json"
-    summary_path = run_dir / "summary.json"
-    report_path = run_dir / "report.md"
-    events_path = run_dir / "events.log"
-    evidence_path = run_dir / "evidence.json"
-
-    _write_json(config_path, config.model_dump(mode="json"))
-    _write_json(state_path, final_state.model_dump(mode="json"))
-    _write_json(summary_path, build_summary(final_state, token_ledger))
-    _write_json(
-        evidence_path,
-        {
-            "evidence": {
-                key: value.model_dump(mode="json")
-                for key, value in sorted(final_state.evidence.items(), key=lambda item: item[0])
-            }
-        },
-    )
-    report_path.write_text(render_markdown_report(final_state), encoding="utf-8")
-    events_path.write_text("\n".join(recorder.messages) + ("\n" if recorder.messages else ""), encoding="utf-8")
+    try:
+        orchestrator.run(max_cycles=config.max_cycles)
+    finally:
+        if token_ledger is not None:
+            recorder.emit(
+                f"[token usage] calls={token_ledger.llm_calls} "
+                f"prompt={token_ledger.prompt_tokens} "
+                f"completion={token_ledger.completion_tokens} "
+                f"total={token_ledger.total_tokens}"
+            )
+        persister.write_all(state, token_ledger)
 
     return RunArtifacts(
-        run_id=final_state.run_id,
+        run_id=state.run_id,
         run_dir=str(run_dir),
-        state_path=str(state_path),
-        summary_path=str(summary_path),
-        report_path=str(report_path),
-        events_path=str(events_path),
-        config_path=str(config_path),
-        evidence_path=str(evidence_path),
-        status=final_state.status,
+        state_path=str(persister.state_path),
+        summary_path=str(persister.summary_path),
+        report_path=str(persister.report_path),
+        events_path=str(persister.events_path),
+        config_path=str(persister.config_path),
+        evidence_path=str(persister.evidence_path),
+        status=state.status,
     )

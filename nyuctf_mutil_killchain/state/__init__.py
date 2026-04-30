@@ -1,5 +1,17 @@
 """Shared state models for the orchestrator."""
 
+from nyuctf_mutil_killchain.state.file_classification import (
+    EXT_TO_KIND,
+    FileKind,
+    classify,
+    files_by_kind,
+    filter_by_kind,
+    looks_like_archive,
+    looks_like_pcap,
+    looks_like_source,
+    looks_like_sqlite,
+    split_source_and_binary,
+)
 from nyuctf_mutil_killchain.state.models import (
     Asset,
     AssetKind,
@@ -25,6 +37,8 @@ __all__ = [
     "Credential",
     "EvidenceRecord",
     "ExecutionRecord",
+    "EXT_TO_KIND",
+    "FileKind",
     "Finding",
     "GlobalState",
     "NetworkEdge",
@@ -36,4 +50,12 @@ __all__ = [
     "TaskErrorCode",
     "TaskStatus",
     "WorkerReport",
+    "classify",
+    "files_by_kind",
+    "filter_by_kind",
+    "looks_like_archive",
+    "looks_like_pcap",
+    "looks_like_source",
+    "looks_like_sqlite",
+    "split_source_and_binary",
 ]

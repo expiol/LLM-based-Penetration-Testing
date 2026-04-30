@@ -606,6 +606,7 @@ class LLMSettings(BaseModel):
     api_key: str | None = None
     timeout_s: int = Field(default=30, ge=1)
     max_retries: int = Field(default=3, ge=0)
+    max_completion_tokens: int = Field(default=16384, ge=1)
 
     @classmethod
     def from_env(cls) -> "LLMSettings":
@@ -616,6 +617,9 @@ class LLMSettings(BaseModel):
             api_key=os.getenv("AUTOPENTEST_LLM_API_KEY"),
             timeout_s=int(os.getenv("AUTOPENTEST_LLM_TIMEOUT_S", "30")),
             max_retries=int(os.getenv("AUTOPENTEST_LLM_MAX_RETRIES", "3")),
+            max_completion_tokens=int(
+                os.getenv("AUTOPENTEST_LLM_MAX_COMPLETION_TOKENS", "16384")
+            ),
         )
 
 
@@ -802,6 +806,7 @@ class OpenAICompatibleLLMClient:
         api_key: str,
         timeout_s: int = 30,
         max_retries: int = 3,
+        max_completion_tokens: int = 16384,
         transport: Transport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
@@ -809,6 +814,7 @@ class OpenAICompatibleLLMClient:
         self.api_key = api_key
         self.timeout_s = timeout_s
         self.max_retries = max_retries
+        self.max_completion_tokens = max_completion_tokens
         self.transport = transport or _default_transport
         self.token_ledger = TokenLedger()
 
@@ -870,6 +876,7 @@ class OpenAICompatibleLLMClient:
             "model": self.model,
             "temperature": temperature,
             "response_format": {"type": "json_object"},
+            "max_tokens": self.max_completion_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -963,6 +970,7 @@ def build_llm_client_from_env(*, preflight: bool = True) -> LLMClient:
         api_key=settings.api_key,
         timeout_s=settings.timeout_s,
         max_retries=settings.max_retries,
+        max_completion_tokens=settings.max_completion_tokens,
     )
     if preflight:
         client.preflight()

@@ -1,9 +1,8 @@
 """Service-banner and web-path-probe enrichment workers.
 
-The four artifact-review agents that lived here historically (Archive, SQLite,
-Pcap, Repo) have been consolidated into :class:`ArtifactWorker` in
-:mod:`agents.artifact_worker`.  They remain importable from this module via
-backwards-compat aliases.
+The artifact-stage workers historically aliased here have moved to
+:mod:`nyuctf_mutil_killchain.agents.artifact`.  This module retains the
+runtime workers it actually owns (banner grab, web path probe).
 """
 
 from __future__ import annotations
@@ -12,9 +11,14 @@ import json
 
 from nyuctf_mutil_killchain.agents._helpers.network import infer_web_urls_from_banners
 from nyuctf_mutil_killchain.agents._helpers.strings import merge_unique_strings
-from nyuctf_mutil_killchain.agents.artifact_worker import ArtifactWorker
+from nyuctf_mutil_killchain.agents.artifact import (
+    ArchiveTriageAgent,
+    PcapReviewAgent,
+    RepoReviewAgent,
+    SqliteReviewAgent,
+)
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.agents.llm_guidance import EvidenceReviewGuidance
+from nyuctf_mutil_killchain.agents.reasoning import EvidenceReviewGuidance
 from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, WorkerReport
 from nyuctf_mutil_killchain.state.task_factory import (
     build_flag_validation_task,
@@ -23,15 +27,8 @@ from nyuctf_mutil_killchain.state.task_factory import (
 )
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
 
-
-# ---------------------------------------------------------------------------
-# Backwards-compat aliases for the consolidated artifact worker
-# ---------------------------------------------------------------------------
-
-ArchiveTriageAgent = ArtifactWorker
-SQLiteReviewAgent = ArtifactWorker
-PcapReviewAgent = ArtifactWorker
-RepoReviewAgent = ArtifactWorker
+# Backwards-compat alias kept for callers that import SQLiteReviewAgent.
+SQLiteReviewAgent = SqliteReviewAgent
 
 
 def _apply_evidence_guidance(
@@ -44,7 +41,6 @@ def _apply_evidence_guidance(
     guidance_label: str,
 ) -> tuple[EvidenceReviewGuidance, list[str], dict[str, object]]:
     """Apply grounded LLM synthesis to an evidence-review worker."""
-
     challenge_meta = state.metadata.get("challenge", {})
     guidance = worker.generate_structured_output(
         system_prompt=(
@@ -94,8 +90,8 @@ def _apply_evidence_guidance(
         **output_context,
         "flag_candidates": flag_candidates,
         "manual_checks": manual_checks,
+        "llm_summary": guidance.summary,
     }
-    guided_output_context["llm_summary"] = guidance.summary
     return guidance, flag_candidates, guided_output_context
 
 
@@ -105,6 +101,8 @@ class ServiceBannerAgent(WorkerAgent):
     name = "service-banner-agent"
     supported_task_types = ("host.banner_grab", "host.service_fingerprint")
     required_context_keys = ("asset_id", "hostname", "ports")
+    routing_summary = "Open TCP banner probe; surfaces non-HTTP service fingerprints and inferred web URLs."
+    preferred_challenge_categories = ("pwn", "misc", "forensics", "web")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
         if self.execution_plane is None:
@@ -197,6 +195,8 @@ class WebPathProbeAgent(WorkerAgent):
     name = "web-path-probe-agent"
     supported_task_types = ("web.path_probe",)
     required_context_keys = ("asset_id", "base_url", "paths")
+    routing_summary = "Fetch a list of HTTP paths and surface 200/401/403 responses for follow-up content review."
+    preferred_challenge_categories = ("web", "misc")
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
         if self.execution_plane is None:
@@ -275,7 +275,8 @@ __all__ = [
     "ArchiveTriageAgent",
     "PcapReviewAgent",
     "RepoReviewAgent",
-    "SQLiteReviewAgent",
     "ServiceBannerAgent",
+    "SQLiteReviewAgent",
+    "SqliteReviewAgent",
     "WebPathProbeAgent",
 ]

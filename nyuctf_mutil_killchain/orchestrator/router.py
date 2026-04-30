@@ -15,10 +15,16 @@ from nyuctf_mutil_killchain.state import GlobalState, Task
 
 
 class WorkerRouteDecision(BaseModel):
-    """Structured worker-selection result."""
+    """Structured worker-selection result.
+
+    ``rationale`` and ``confidence`` are advisory metadata for logging; only
+    ``worker_name`` drives dispatch.  Both have defaults so a minimally valid
+    LLM response (``{"worker_name": "..."}``) is accepted instead of crashing
+    the run on a missing log field.
+    """
 
     worker_name: str
-    rationale: str
+    rationale: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
@@ -64,7 +70,6 @@ class LLMWorkerRouter(WorkerRouter):
         candidate_map = {worker.name: worker for worker in candidates}
 
         routing_snapshot = {
-            "objective": state.objective,
             "task": {
                 "task_id": task.task_id,
                 "title": task.title,
@@ -72,31 +77,10 @@ class LLMWorkerRouter(WorkerRouter):
                 "task_type": task.task_type,
                 "priority": task.priority,
                 "input_context": task.input_context,
-                "metadata": task.metadata,
             },
-            "challenge": state.metadata.get("challenge", {}),
-            "assets": [
-                {
-                    "asset_id": asset.asset_id,
-                    "kind": asset.kind,
-                    "hostname": asset.hostname,
-                    "base_url": asset.base_url,
-                    "services": [
-                        {"port": service.port, "name": service.name, "product": service.product}
-                        for service in asset.services
-                    ],
-                }
-                for asset in state.assets.values()
-            ],
-            "recent_findings": [
-                {
-                    "finding_id": finding.finding_id,
-                    "title": finding.title,
-                    "severity": finding.severity,
-                    "metadata": finding.metadata,
-                }
-                for finding in list(state.findings.values())[-8:]
-            ],
+            "challenge_category": str(
+                state.metadata.get("challenge", {}).get("category") or "misc"
+            ).lower(),
             "candidates": [
                 worker.routing_profile(task, state)
                 for worker in candidates
@@ -109,7 +93,6 @@ class LLMWorkerRouter(WorkerRouter):
             )
 
         category = str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
-
         decision = self.llm_client.generate_json(
             system_prompt=get_router_system_prompt(category),
             user_prompt=json.dumps(routing_snapshot, ensure_ascii=True, indent=2),

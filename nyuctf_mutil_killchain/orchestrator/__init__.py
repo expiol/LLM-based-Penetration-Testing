@@ -1,7 +1,16 @@
 """Orchestrator components."""
 
 from nyuctf_mutil_killchain.orchestrator.loop import Orchestrator
-from nyuctf_mutil_killchain.orchestrator.planner import BootstrapPlanner, LLMPlanner, PlannedTask, PlannerDecision, TaskPlanner
+from nyuctf_mutil_killchain.orchestrator.planning import (
+    BootstrapSeeder,
+    LLMPlanner,
+    PlanStrategy,
+    PlannedTask,
+    PlannerDecision,
+    TaskDeduper,
+    TaskNormalizer,
+    TaskPlanner,
+)
 from nyuctf_mutil_killchain.orchestrator.router import (
     LLMWorkerRouter,
     WorkerRouteDecision,
@@ -9,12 +18,15 @@ from nyuctf_mutil_killchain.orchestrator.router import (
 )
 
 __all__ = [
-    "BootstrapPlanner",
+    "BootstrapSeeder",
     "LLMPlanner",
     "LLMWorkerRouter",
     "Orchestrator",
+    "PlanStrategy",
     "PlannedTask",
     "PlannerDecision",
+    "TaskDeduper",
+    "TaskNormalizer",
     "TaskPlanner",
     "WorkerRouteDecision",
     "WorkerRouter",

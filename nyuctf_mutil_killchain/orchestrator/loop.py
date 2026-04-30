@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.llm import LLMClientError
 from nyuctf_mutil_killchain.orchestrator.dispatch_policy import DispatchPolicy
-from nyuctf_mutil_killchain.orchestrator.planner import BootstrapPlanner, TaskPlanner
+from nyuctf_mutil_killchain.orchestrator.planning import BootstrapSeeder, TaskPlanner
 from nyuctf_mutil_killchain.orchestrator.router import (
     WorkerRouteDecision,
     WorkerRouter,
@@ -38,13 +38,23 @@ class Orchestrator:
         planner: TaskPlanner | None = None,
         router: WorkerRouter | None = None,
         emit: Callable[[str], None] = print,
+        checkpoint_callback: Callable[[GlobalState], None] | None = None,
     ) -> None:
         self.state = state
         self.workers = list(workers)
-        self.planner = planner or BootstrapPlanner()
+        self.planner = planner or BootstrapSeeder()
         self.router = router
         self.emit = emit
         self.dispatch_policy = DispatchPolicy(emit=self.emit)
+        self.checkpoint_callback = checkpoint_callback
+
+    def _checkpoint(self) -> None:
+        if self.checkpoint_callback is None:
+            return
+        try:
+            self.checkpoint_callback(self.state)
+        except Exception as exc:
+            self.emit(f"[checkpoint] failed to persist state: {type(exc).__name__}: {exc}")
 
     # -- delegate shims for legacy tests ---------------------------------
     # Older callers exercised these methods directly on the Orchestrator.
@@ -133,18 +143,25 @@ class Orchestrator:
                 if self.refresh_plan(cycle):
                     self.emit(f"[cycle {cycle}] planner signalled stop — halting run")
                     self.state.status = RunStatus.STOPPED
+                    self._checkpoint()
                     break
             except LLMClientError as exc:
-                self.state.status = RunStatus.FAILED
-                self.emit(f"[cycle {cycle}] LLM planner failed — aborting run: {exc}")
-                raise
+                self.emit(f"[cycle {cycle}] LLM planner error, stopping run: {exc}")
+                self.state.notes.append(
+                    f"cycle {cycle}: planner {type(exc).__name__}: {exc}"
+                )
+                self.state.status = RunStatus.STOPPED
+                self._checkpoint()
+                break
 
             batch = self.dispatch_policy.dequeue_batch(self.state)
             if not batch:
                 self.emit(f"[cycle {cycle}] task queue exhausted — no ready tasks remain")
+                self._checkpoint()
                 break
 
             dispatched = 0
+            llm_error_stop = False
             for task in batch:
                 if self.state.solved:
                     break
@@ -166,9 +183,15 @@ class Orchestrator:
                     worker, route_decision, reject_reason = self.select_worker(task)
                 except LLMClientError as exc:
                     task.mark_failed(str(exc), requeue=False)
-                    self.state.status = RunStatus.FAILED
-                    self.emit(f"[cycle {cycle}] LLM router failed — aborting run: {exc}")
-                    raise
+                    self.emit(
+                        f"[cycle {cycle}] LLM router error, stopping run: {exc}"
+                    )
+                    self.state.notes.append(
+                        f"cycle {cycle}: router {type(exc).__name__}: {exc}"
+                    )
+                    self.state.status = RunStatus.STOPPED
+                    llm_error_stop = True
+                    break
                 if worker is None:
                     task.mark_blocked(reject_reason, error_code=TaskErrorCode.DISPATCH_REFUSED)
                     self.emit(
@@ -189,13 +212,17 @@ class Orchestrator:
                     report = worker.run(task, self.state)
                 except LLMClientError as exc:
                     task.mark_failed(str(exc), requeue=False)
-                    self.state.status = RunStatus.FAILED
                     tag = "TRANSIENT LLM ERROR" if exc.transient else "LLM ERROR"
                     self.emit(
                         f"[cycle {cycle}] {tag} in {worker.name} "
-                        f"while executing {task.task_id} — aborting run: {exc}"
+                        f"while executing {task.task_id}, stopping run: {exc}"
                     )
-                    raise
+                    self.state.notes.append(
+                        f"cycle {cycle}: worker {worker.name} {type(exc).__name__}: {exc}"
+                    )
+                    self.state.status = RunStatus.STOPPED
+                    llm_error_stop = True
+                    break
                 except Exception as exc:
                     tb_text = traceback.format_exc(limit=20)
                     self.emit(
@@ -224,6 +251,11 @@ class Orchestrator:
             if dispatched > 1:
                 self.emit(f"[cycle {cycle}] batch: dispatched {dispatched} task(s)")
 
+            self._checkpoint()
+
+            if llm_error_stop:
+                break
+
             if self.state.solved:
                 break
         else:
@@ -251,9 +283,13 @@ class Orchestrator:
         )
         if self.state.solved:
             self.state.status = RunStatus.SOLVED
+        elif self.state.status == RunStatus.STOPPED:
+            # Loop deliberately set STOPPED (planner stop_run, LLM error,
+            # or queue exhausted); preserve that decision over downstream
+            # task-status heuristics so the caller can tell graceful halts
+            # apart from natural completion.
+            pass
         elif has_open_tasks:
-            # Open tasks mean the run halted due budget/planning constraints,
-            # not a terminal failure of the whole challenge.
             self.state.status = RunStatus.STOPPED
         elif any(t.status == TaskStatus.BLOCKED for t in tasks):
             self.state.status = RunStatus.STOPPED

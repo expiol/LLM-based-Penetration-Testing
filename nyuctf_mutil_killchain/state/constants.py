@@ -56,13 +56,10 @@ CSS_BODY_RE = re.compile(
 # ---------------------------------------------------------------------------
 # Source-file extension sets
 # ---------------------------------------------------------------------------
+# Re-exported from file_classification.SOURCE_EXTS so older imports keep working
+# during the refactor.
 
-#: Extensions that indicate human-readable source code worth reviewing.
-SOURCE_EXTENSIONS: frozenset[str] = frozenset({
-    ".py", ".js", ".rb", ".pl", ".sh", ".c", ".cpp", ".h", ".java",
-    ".php", ".go", ".rs", ".sage", ".txt", ".md", ".yml", ".yaml",
-    ".json", ".xml", ".html", ".css", ".sql", ".lua", ".r",
-})
+from nyuctf_mutil_killchain.state.file_classification import SOURCE_EXTS as SOURCE_EXTENSIONS  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------------------
