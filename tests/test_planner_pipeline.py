@@ -99,6 +99,20 @@ class TaskNormalizerTests(unittest.TestCase):
             sorted(["data.bin", "stfu"]),
         )
 
+    def test_overwrites_bad_files_root_value(self):
+        # NYU CTF agent containers expose challenge files at one fixed path; if
+        # the LLM hallucinates ``/challenge`` the worker hits ENOENT.  The
+        # normalizer must force the canonical value.
+        state = _state_with(["challenge.bin"])
+        task = PlannedTask(
+            title="solve",
+            description="run script",
+            task_type="solve.generate_script",
+            input_context={"files_root": "/challenge"},
+        )
+        TaskNormalizer().fill(task, state)
+        self.assertEqual(task.input_context["files_root"], "/home/ctfplayer/ctf_files")
+
 
 class TaskDeduperTests(unittest.TestCase):
     def test_assigns_default_dedupe_keys(self):
@@ -157,6 +171,100 @@ class LLMPlannerPipelineTests(unittest.TestCase):
         planner = LLMPlanner(StaticLLMClient([llm_response]))
         decision = planner.plan(state)
         self.assertTrue(decision.stop_run)
+
+    def test_user_prompt_exposes_blocked_task_reason(self):
+        """Planner snapshot must surface ``last_error``/``error_code`` so the LLM
+        can route around blocked tasks instead of re-issuing them."""
+
+        import json
+        from nyuctf_mutil_killchain.orchestrator.planning import PlanStrategy
+        from nyuctf_mutil_killchain.state import Task, TaskErrorCode
+
+        state = _state_with(["x.bin"])
+        bad_task = Task(
+            title="probe",
+            description="probe asset",
+            task_type="web.review_surface",
+            input_context={"asset_id": "http://example.com:80"},
+        )
+        bad_task.mark_blocked(
+            "asset_id 'http://example.com:80' not found in state.assets",
+            error_code=TaskErrorCode.UNKNOWN_ASSET_ID,
+        )
+        state.queue_task(bad_task)
+
+        strategy = PlanStrategy(StaticLLMClient([
+            {"summary": "noop", "tasks": [], "notes": [], "stop_run": False}
+        ]))
+        snapshot = json.loads(strategy._user_prompt(state))
+        history_for_task = next(
+            entry for entry in snapshot["task_history"]
+            if entry["task_id"] == bad_task.task_id
+        )
+        self.assertIn("not found in state.assets", history_for_task["last_error"])
+        self.assertEqual(history_for_task["error_code"], "unknown_asset_id")
+
+    def test_planner_accepts_string_priority(self):
+        state = _state_with(["solve.py"])
+        llm_response = {
+            "summary": "consider source review",
+            "tasks": [
+                {
+                    "title": "Review source",
+                    "description": "static review",
+                    "task_type": "artifact.source_review",
+                    "priority": "high",
+                    "input_context": {"source_files": ["solve.py"]},
+                }
+            ],
+            "notes": [],
+            "stop_run": False,
+        }
+        decision = LLMPlanner(StaticLLMClient([llm_response])).plan(state)
+        sr = next(t for t in decision.tasks if t.task_type == "artifact.source_review")
+        self.assertEqual(sr.priority, 75)
+
+
+class PlannedTaskPriorityCoercionTests(unittest.TestCase):
+    def test_string_high_is_int_75(self):
+        task = PlannedTask(
+            title="t", description="d",
+            task_type="solve.generate_script",
+            priority="high",
+        )
+        self.assertEqual(task.priority, 75)
+
+    def test_string_numeric_is_parsed(self):
+        task = PlannedTask(
+            title="t", description="d",
+            task_type="solve.generate_script",
+            priority="60",
+        )
+        self.assertEqual(task.priority, 60)
+
+
+class ConfidenceCoercionTests(unittest.TestCase):
+    def test_solver_guidance_accepts_string_confidence(self):
+        from nyuctf_mutil_killchain.agents.reasoning.schemas import SolverCodeGuidance
+
+        guidance = SolverCodeGuidance(
+            summary="x",
+            solver_code="print(1)",
+            confidence="high",
+        )
+        self.assertEqual(guidance.confidence, 0.75)
+
+    def test_router_decision_accepts_string_confidence(self):
+        from nyuctf_mutil_killchain.orchestrator.router import WorkerRouteDecision
+
+        decision = WorkerRouteDecision(worker_name="w", confidence="medium")
+        self.assertEqual(decision.confidence, 0.5)
+
+    def test_flag_validation_accepts_string_confidence(self):
+        from nyuctf_mutil_killchain.agents.flag import FlagValidationAssessment
+
+        assessment = FlagValidationAssessment(summary="ok", confidence="low")
+        self.assertEqual(assessment.confidence, 0.25)
 
 
 if __name__ == "__main__":

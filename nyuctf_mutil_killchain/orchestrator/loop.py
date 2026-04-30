@@ -26,8 +26,10 @@ class Orchestrator:
       3. Dispatch — route to the appropriate worker agent.
       4. Fold — apply the WorkerReport back to GlobalState.
 
-    If a worker raises an unhandled exception the task is marked FAILED (with full
-    traceback stored as the error) and the run continues so remaining tasks are not lost.
+    Worker-level errors (including ``LLMClientError``) mark the offending task
+    FAILED and let the run continue so the planner can replan around the failure.
+    Only planner- or router-level ``LLMClientError`` aborts the run, since those
+    indicate the loop itself can no longer make decisions.
     """
 
     def __init__(
@@ -55,22 +57,6 @@ class Orchestrator:
             self.checkpoint_callback(self.state)
         except Exception as exc:
             self.emit(f"[checkpoint] failed to persist state: {type(exc).__name__}: {exc}")
-
-    # -- delegate shims for legacy tests ---------------------------------
-    # Older callers exercised these methods directly on the Orchestrator.
-    # The implementations have moved to :class:`DispatchPolicy`; the shims
-    # below preserve the historical interface.
-
-    def _validate_task_for_dispatch(self, task: Task):
-        """Validate task context; returns ``(valid, reason, error_code)``."""
-
-        validation = self.dispatch_policy.validate_task_for_dispatch(task, self.state)
-        return validation.valid, validation.reason, validation.error_code
-
-    def _try_repair_task_context(self, task: Task, candidates: Iterable[WorkerAgent]) -> bool:
-        """Best-effort fill of missing identity / artifact context."""
-
-        return self.dispatch_policy.try_repair_task_context(task, self.state, list(candidates))
 
     def select_worker(
         self, task: Task,
@@ -126,8 +112,13 @@ class Orchestrator:
             self.state.notes.extend(decision.notes)
             self.state.touch()
 
-        if created or decision.notes:
-            self.emit(f"[cycle {cycle}] plan: {decision.summary}")
+        proposed = len(decision.tasks)
+        deduped = proposed - created
+        summary = decision.summary or "(no summary)"
+        self.emit(
+            f"[cycle {cycle}] plan: proposed={proposed} new={created} "
+            f"deduped={deduped} stop_run={decision.stop_run} - {summary[:200]}"
+        )
 
         return decision.stop_run
 
@@ -211,18 +202,25 @@ class Orchestrator:
                 try:
                     report = worker.run(task, self.state)
                 except LLMClientError as exc:
-                    task.mark_failed(str(exc), requeue=False)
                     tag = "TRANSIENT LLM ERROR" if exc.transient else "LLM ERROR"
                     self.emit(
                         f"[cycle {cycle}] {tag} in {worker.name} "
-                        f"while executing {task.task_id}, stopping run: {exc}"
+                        f"while executing {task.task_id}: {exc}"
                     )
                     self.state.notes.append(
                         f"cycle {cycle}: worker {worker.name} {type(exc).__name__}: {exc}"
                     )
-                    self.state.status = RunStatus.STOPPED
-                    llm_error_stop = True
-                    break
+                    report = WorkerReport(
+                        task_id=task.task_id,
+                        worker_name=worker.name,
+                        success=False,
+                        summary=(
+                            f"Worker {worker.name} raised LLMClientError; "
+                            f"replan needed."
+                        ),
+                        error=str(exc),
+                        error_code=TaskErrorCode.WORKER_LLM_ERROR,
+                    )
                 except Exception as exc:
                     tb_text = traceback.format_exc(limit=20)
                     self.emit(

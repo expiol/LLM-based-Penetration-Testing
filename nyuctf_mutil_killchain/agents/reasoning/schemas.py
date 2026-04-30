@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from nyuctf_mutil_killchain.agents._helpers.coercion import coerce_confidence
 from nyuctf_mutil_killchain.state import Task
 
 
@@ -125,6 +126,10 @@ class SolverCodeGuidance(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     grounded_flag_candidates: list[str] = Field(default_factory=list)
     should_retry_on_failure: bool = True
+
+    _coerce_confidence = field_validator("confidence", mode="before")(
+        lambda cls, v: coerce_confidence(v)
+    )
 
 
 def boost_prioritized_tasks(

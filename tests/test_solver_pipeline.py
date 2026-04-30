@@ -104,6 +104,22 @@ class SolverParserTests(unittest.TestCase):
         flag_set = SolverResultParser().extract(outcome, guidance)
         self.assertEqual(flag_set.flag_candidates, ["flag{real_value}"])
 
+    def test_has_real_flag_ignores_plaintext_status_lines(self):
+        # Plaintext candidates can still be scheduled for validation, but should
+        # not suppress solver retry decisions as if we had a real prefix{...} flag.
+        flags = SolverFlagSet(
+            flag_candidates=[
+                "Encrypted test length: 44",
+                "Trying cmd: ['/home/ctfplayer/ctf_files/stfu', 'x', 'y']",
+                "no args: Usage: /home/ctfplayer/ctf_files/stfu <FILE>",
+            ]
+        )
+        self.assertFalse(flags.has_real_flag)
+
+    def test_has_real_flag_true_for_structured_token(self):
+        flags = SolverFlagSet(flag_candidates=["flag{test123}"])
+        self.assertTrue(flags.has_real_flag)
+
 
 class SolverRetryTests(unittest.TestCase):
     def test_retry_skipped_when_flag_found(self):
@@ -112,10 +128,10 @@ class SolverRetryTests(unittest.TestCase):
         evidence = SolverEvidenceComposer().compose(task, state)
         outcome = SolverExecutionOutcome(
             success=True, bundle=None, error=None,
-            output_context={"returncode": 0, "stdout": "flag{x}", "stderr": ""},
+            output_context={"returncode": 0, "stdout": "flag{real_value}", "stderr": ""},
             summary="ok",
         )
-        flags = SolverFlagSet(flag_candidates=["flag{x}"])
+        flags = SolverFlagSet(flag_candidates=["flag{real_value}"])
         guidance = SolverCodeGuidance(summary="ok", solver_code="print('x')")
         plan = SolverRetryPolicy().decide(
             task=task, evidence=evidence, outcome=outcome, flags=flags, guidance=guidance,
@@ -187,6 +203,54 @@ class SolverAgentIntegrationTests(unittest.TestCase):
         report = agent.run(_solve_task(), state)
         self.assertFalse(report.success)
         self.assertIn("execution plane", report.summary)
+
+
+class SolverCodeRecoveryTests(unittest.TestCase):
+    """Recovering ``SolverCodeGuidance`` from a non-JSON LLM response."""
+
+    def test_recovery_wraps_raw_python_as_solver_code(self):
+        from nyuctf_mutil_killchain.agents.reasoning.schemas import SolverCodeGuidance
+        from nyuctf_mutil_killchain.llm.client import (
+            _looks_like_solver_code,
+            _recover_solver_code_payload,
+        )
+
+        raw_text = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "def solve():\n"
+            "    print('hi')\n"
+            "if __name__ == '__main__':\n"
+            "    solve()\n"
+        )
+        self.assertTrue(_looks_like_solver_code(raw_text))
+        payload = _recover_solver_code_payload(raw_text, SolverCodeGuidance)
+        self.assertIsNotNone(payload)
+        self.assertIn("solver_code", payload)  # type: ignore[arg-type]
+        self.assertIn("import sys", payload["solver_code"])  # type: ignore[index]
+
+    def test_recovery_skips_non_solver_schemas(self):
+        from nyuctf_mutil_killchain.llm.client import _recover_solver_code_payload
+        from nyuctf_mutil_killchain.orchestrator.router import WorkerRouteDecision
+
+        payload = _recover_solver_code_payload(
+            "import sys\ndef foo(): pass\n",
+            WorkerRouteDecision,
+        )
+        self.assertIsNone(payload)
+
+    def test_recovery_rejects_short_or_jsonish_text(self):
+        from nyuctf_mutil_killchain.agents.reasoning.schemas import SolverCodeGuidance
+        from nyuctf_mutil_killchain.llm.client import _recover_solver_code_payload
+
+        self.assertIsNone(_recover_solver_code_payload("x", SolverCodeGuidance))
+        # Only one marker hit — too weak to be considered a script.
+        self.assertIsNone(
+            _recover_solver_code_payload(
+                '{"summary": "import was here in the prose"}',
+                SolverCodeGuidance,
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from nyuctf_mutil_killchain.agents._helpers.coercion import coerce_confidence
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.llm import LLMClient
 from nyuctf_mutil_killchain.state import GlobalState, Severity, Task, TaskErrorCode, WorkerReport, Finding
@@ -18,6 +19,10 @@ class FlagValidationAssessment(BaseModel):
     normalized_candidate: str | None = None
     likely_valid: bool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    _coerce_confidence = field_validator("confidence", mode="before")(
+        lambda cls, v: coerce_confidence(v)
+    )
 
 
 class FlagValidationAgent(WorkerAgent):

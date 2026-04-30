@@ -65,6 +65,9 @@ def _solver_regex_noise(m):
 
 def _plain_tail_flag_candidates(text, max_take=4):
     # Bare-token or short-sentence flags (NYU bench) from trailing stdout lines.
+    # Only triggered when no prefix{...}-shaped flag was matched, so we must be
+    # conservative: refuse anything that looks like a solver status / debug log
+    # rather than a final answer.
     if not text or not str(text).strip():
         return []
     lines = [ln.strip() for ln in str(text).replace("\r\n", "\n").split("\n") if ln.strip()]
@@ -73,6 +76,16 @@ def _plain_tail_flag_candidates(text, max_take=4):
     bad_starts = (
         "traceback", "during ", "  file", "file \"", "import ", "from ", "def ", "class ",
         "===", "---", "note:", "debug:", "error:", "warning:", "http://", "https://",
+        "[+]", "[-]", "[!]", "[*]", "[?]", "[debug]", "[info]", "[warn]",
+        ">>> ", ">>>", ">> ", "> ", "$ ", "# ",
+    )
+    bad_substrings = (
+        " could not ", " cannot ", " unable to ", " failed to ",
+        " not valid", " not found", " no automatic", " manual analysis",
+        " exit code", " exit:", " returncode", " exited with ",
+        " matches =", " re.findall",
+        " trying cmd:", " stdout:", " stderr:", " usage:",
+        " test length", " encrypted test length",
     )
     for line in reversed(tail):
         if len(line) < 12 or len(line) > 220:
@@ -80,10 +93,17 @@ def _plain_tail_flag_candidates(text, max_take=4):
         low = line.lower()
         if any(low.startswith(p) for p in bad_starts):
             continue
-        if "re.findall" in line or "matches =" in line:
+        if any(s in (" " + low + " ") for s in bad_substrings):
+            continue
+        # Reject "program-name: error message" style logs (e.g. "stfu: Could not open ...").
+        if re.match(r"^[a-z][a-z0-9_.\-/]{0,30}:\s", line):
+            continue
+        # Real flag-line answers usually start with an alphanumeric character; reject
+        # punctuation-led lines (e.g. "(error)", "<script>", "::: notice").
+        if not line[:1].isalnum():
             continue
         printable = sum(1 for ch in line if ch.isprintable())
-        if not line or printable / len(line) < 0.85:
+        if printable / len(line) < 0.85:
             continue
         if re.fullmatch(r"[A-Za-z0-9_]{12,}", line) or (
             "{" not in line and 16 <= len(line) <= 120 and 2 <= line.count(" ") <= 24
@@ -214,10 +234,16 @@ finally:
 records.extend({"type": "note", "text": note} for note in notes_list)
 
 result_severity = "high" if flag_candidates else ("medium" if returncode == 0 else "info")
+if returncode == 0 and flag_candidates:
+    summary_state = "succeeded"
+elif returncode == 0:
+    summary_state = "ran without recovering a flag"
+else:
+    summary_state = f"failed (exit {returncode})"
 records.append({
     "type": "summary",
     "text": (
-        f"Solver execution {'succeeded' if returncode == 0 else 'completed'}: "
+        f"Solver execution {summary_state}: "
         f"exit code {returncode}, {len(flag_candidates)} flag candidate(s)."
     ),
 })

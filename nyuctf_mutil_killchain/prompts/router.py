@@ -14,5 +14,6 @@ def build_router_system_prompt(category: str | None) -> str:
         "Choose exactly one worker from the provided candidates for the current task. "
         "Prefer the worker whose specialization best matches the task input_context, "
         "challenge category, the shortest path to the flag, and the current evidence. "
-        "Do not invent worker names. Return only JSON matching WorkerRouteDecision."
+        "Do not invent worker names. Return only JSON matching WorkerRouteDecision "
+        '(required key: \"worker_name\" — the registered worker id, e.g. \"binary-triage-agent\").'
     )

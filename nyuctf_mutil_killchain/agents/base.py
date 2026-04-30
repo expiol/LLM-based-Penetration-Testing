@@ -295,7 +295,6 @@ class ReasoningOnlyWorker(WorkerAgent):
 
 from nyuctf_mutil_killchain.agents._helpers.flag import (  # noqa: E402, F401
     extract_flag_candidates,
-    extract_plain_solver_flag_lines,
 )
 from nyuctf_mutil_killchain.agents._helpers.network import (  # noqa: E402, F401
     AMBIGUOUS_WEB_SERVICE_NAMES,
@@ -375,7 +374,6 @@ __all__ = [
     "build_web_form_probe_task",
     "build_web_review_task",
     "extract_flag_candidates",
-    "extract_plain_solver_flag_lines",
     "infer_host_context",
     "infer_web_context",
     "infer_web_scheme",

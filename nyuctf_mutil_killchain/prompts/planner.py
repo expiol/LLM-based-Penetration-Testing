@@ -42,11 +42,81 @@ TASK_TYPE_VOCABULARY: list[str] = [
     "exploit.cve_probe",
     "exploit.credential_test",
     "exploit.sqli",
-    "post_exploit.loot",
-    "post_exploit.lateral_move",
     "flag.validate",
     "solve.generate_script",
 ]
+
+
+_TASK_TYPE_REQUIREMENTS = """\
+Task-type input_context requirements (omit a required field and the task will be blocked):
+
+  Static analysis (challenge files):
+    artifact.triage              - {files_root}
+    artifact.binary_triage       - {files_root, binary_files: [...]}
+    artifact.archive_triage      - {files_root, archive_files: [...]}
+    artifact.sqlite_review       - {files_root, database_files: [...]}
+    artifact.pcap_review         - {files_root, pcap_files: [...]}
+    artifact.repo_review         - {files_root, repo_paths: [...]}
+    artifact.source_review       - {files_root, source_files: [...]}
+    artifact.computation_analysis- {files_root, source_files: [...]}  (Python only)
+    artifact.runtime_probe       - {files_root, source_files: [...]}  (.py/.sh/.js/.rb/.pl/.php/.lua only)
+    artifact.deep_review         - {files_root, analysis_kind, plus the matching file list field}
+                                   analysis_kind MUST be one of: binary, archive, sqlite, pcap, repo
+
+  Network (only when authorized_scope is non-empty AND assets exist).
+  IMPORTANT: 'asset_id' MUST be a registered asset_id from state.assets[*].asset_id
+  (typically 'seed-asset' or similar synthetic id), NOT the raw URL/host string.
+    recon.enumerate_scope        - {scope}
+    host.audit / host.port_scan  - {asset_id, hostname}
+    host.banner_grab             - {asset_id, hostname, ports: [...]}
+    web.review_surface           - {asset_id, base_url}
+    web.content_review           - {asset_id, base_url}
+    web.path_probe               - {asset_id, base_url, paths: [/...]}
+    web.form_probe               - {asset_id, page_url, forms: [...]}
+    vuln.scan                    - {asset_id, target}
+    exploit.credential_test      - {asset_id, credential_ids: [...]}
+    exploit.cve_probe            - {asset_id, base_url|hostname, ports?, credential_ids?}
+    exploit.sqli                 - {asset_id, base_url|hostname}
+    exploit.hypothesis           - {focus_asset_ids: [...] or seed_terms: [...]}
+
+  CTF-specific:
+    credential.hunt              - {files_root}
+    flag.hunt                    - {files_root}
+    flag.validate                - {candidate_flag}
+    solve.generate_script        - {files_root}  (universal solver: writes + runs Python)
+"""
+
+_DECISION_GUIDE = """\
+Decision guidance:
+
+* solve.generate_script is the universal solver. PREFER it whenever:
+  - You have inspected the bundled files and other tools yielded zero flag candidates
+    (zero strings, zero source files, zero scripts, zero database/pcap/repo content).
+  - The challenge requires executing a binary, running custom math, hex-dumping data,
+    reversing a custom cipher, or any task not covered by an existing per-file tool.
+  - In short: if you are unsure what to do next AND no flag has been validated, propose
+    solve.generate_script. The solver writes Python that can use subprocess, struct,
+    pwntools, pycryptodome, scapy, etc.
+  Note: 'success=True' on a tool just means it ran; it does NOT mean it found anything.
+  Treat 'inspected N files but produced 0 flag_candidates' as a CLEAR signal to escalate
+  to solve.generate_script.
+
+* host.audit is for network host enumeration ONLY. To run a local binary, use
+  solve.generate_script (the LLM-written script can subprocess.run the binary).
+
+* For challenges with NO authorized_scope (file-only crypto/rev/forensics/misc), do NOT
+  propose recon.*, host.*, web.*, vuln.*, exploit.*: those workers will block immediately.
+
+* Read the recent_execution_log carefully:
+  - If a task was BLOCKED for missing required fields, do NOT re-propose the same shape.
+    Either fix the missing input_context fields or pivot to a different task type.
+  - If a worker returned success=False, do NOT re-propose the same task type with the
+    same input_context.
+
+* Returning an empty tasks list means the run halts. ONLY do that when you have either:
+  (a) validated a flag, or (b) genuinely exhausted every applicable tool including
+  solve.generate_script. If neither, propose at least one task (usually solve.generate_script).
+"""
 
 
 def build_planner_system_prompt(category: str | None) -> str:
@@ -56,11 +126,16 @@ def build_planner_system_prompt(category: str | None) -> str:
         f"{prompts.planner_system} {prompts.planner_focus} "
         "You operate within the explicitly approved challenge environment and scope only. "
         "Return only JSON matching the PlannerDecision schema. "
-        "You may propose tasks freely from the documented task-type vocabulary. "
-        "Use 'solve.generate_script' when you have enough evidence to write an executable solver. "
+        "You may propose tasks freely from the documented task-type vocabulary, but every task "
+        "must include the required input_context fields documented below. "
         "Use 'flag.validate' to confirm any candidate flag against the expected challenge flag. "
+        "Priority must be an integer in [0, 100] (higher = more urgent); do NOT emit string labels. "
         "Set stop_run=true only when you genuinely have nothing further to attempt. "
         "Never propose tasks outside the authorized_scope or the provided challenge files. "
-        "Never fabricate vulnerability details, credentials, or flag candidates. "
-        "Open vocabulary of task types: " + ", ".join(TASK_TYPE_VOCABULARY)
+        "Never fabricate vulnerability details, credentials, or flag candidates.\n\n"
+        + _TASK_TYPE_REQUIREMENTS
+        + "\n"
+        + _DECISION_GUIDE
+        + "\nFull task-type vocabulary: "
+        + ", ".join(TASK_TYPE_VOCABULARY)
     )

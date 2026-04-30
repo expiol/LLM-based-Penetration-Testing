@@ -75,6 +75,19 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(decision.worker_name, "deep-review")
         self.assertGreater(decision.confidence, 0.5)
 
+    def test_selected_worker_alias_accepted(self):
+        candidates = [
+            _StubWorker(name="binary", supported=("artifact.binary_triage",)),
+            _StubWorker(name="deep-review", supported=("artifact.binary_triage",)),
+        ]
+        client = StaticLLMClient([
+            {"selected_worker": "binary", "rationale": "binary triage first", "confidence": 0.85}
+        ])
+        router = LLMWorkerRouter(client)
+        task = Task(title="t", description="d", task_type="artifact.binary_triage")
+        decision = router.route(task=task, state=_state(), candidates=candidates)
+        self.assertEqual(decision.worker_name, "binary")
+
     def test_invalid_choice_raises(self):
         candidates = [
             _StubWorker(name="binary", supported=("artifact.binary_triage",)),

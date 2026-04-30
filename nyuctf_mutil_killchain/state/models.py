@@ -76,6 +76,7 @@ class TaskErrorCode(StrEnum):
     REPAIR_FAILED = "repair_failed"
     DISPATCH_REFUSED = "dispatch_refused"
     WORKER_PRECONDITION_FAILED = "worker_precondition_failed"
+    WORKER_LLM_ERROR = "worker_llm_error"
 
 
 class AssetKind(StrEnum):
@@ -471,7 +472,11 @@ class GlobalState(BaseModel):
         if report.success:
             task.mark_completed(report.output_context)
         else:
-            task.mark_failed(report.error or report.summary, requeue=report.retryable)
+            task.mark_failed(
+                report.error or report.summary,
+                requeue=report.retryable,
+                error_code=report.error_code,
+            )
 
         for asset in report.asset_updates:
             self.upsert_asset(asset)

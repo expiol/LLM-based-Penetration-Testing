@@ -6,8 +6,9 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
+from nyuctf_mutil_killchain.agents._helpers.coercion import coerce_confidence
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
 from nyuctf_mutil_killchain.prompts import get_router_system_prompt
@@ -18,14 +19,20 @@ class WorkerRouteDecision(BaseModel):
     """Structured worker-selection result.
 
     ``rationale`` and ``confidence`` are advisory metadata for logging; only
-    ``worker_name`` drives dispatch.  Both have defaults so a minimally valid
-    LLM response (``{"worker_name": "..."}``) is accepted instead of crashing
-    the run on a missing log field.
+    ``worker_name`` drives dispatch.  Models sometimes emit ``selected_worker``;
+    both keys deserialize via ``validation_alias``.  Optional fields use defaults
+    so a minimal JSON object does not crash the run on missing log metadata.
     """
 
-    worker_name: str
+    worker_name: str = Field(
+        validation_alias=AliasChoices("worker_name", "selected_worker"),
+    )
     rationale: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    _coerce_confidence = field_validator("confidence", mode="before")(
+        lambda cls, v: coerce_confidence(v)
+    )
 
 
 class WorkerRouter(ABC):

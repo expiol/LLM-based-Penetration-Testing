@@ -36,8 +36,12 @@ class TaskNormalizer:
         challenge_meta = state.metadata.get("challenge", {}) or {}
         challenge_files: list[str] = list(challenge_meta.get("files", []) or [])
 
+        # The agent container always exposes challenge files under a single
+        # known path; allowing the LLM to override this just produces ENOENT
+        # in the worker (e.g. ``/challenge`` for a NYU CTF run).  Force the
+        # canonical value so downstream tools always see the right root.
         if task.task_type.startswith(("artifact.", "solve.", "credential.", "flag.")):
-            ctx.setdefault("files_root", _DEFAULT_FILES_ROOT)
+            ctx["files_root"] = _DEFAULT_FILES_ROOT
 
         # Source-derived contexts ------------------------------------------------
         if task.task_type in (
@@ -98,18 +102,6 @@ class TaskNormalizer:
         challenge_files: list[str],
         kinds: dict[FileKind, list[str]],
     ) -> None:
-        known_fields = (
-            "binary_files", "source_files", "archive_files",
-            "database_files", "pcap_files", "repo_paths",
-        )
-        if any(ctx.get(field) for field in known_fields):
-            return
-
-        alt_files = ctx.pop("target_files", None) or ctx.pop("files", None) or []
-        if not alt_files:
-            return
-
-        analysis_kind = str(ctx.get("analysis_kind", "")).lower()
         kind_to_field = {
             "binary": "binary_files",
             "archive": "archive_files",
@@ -119,6 +111,59 @@ class TaskNormalizer:
             "repo": "repo_paths",
             "git": "repo_paths",
         }
+        kind_for: dict[FileKind, str] = {
+            FileKind.BINARY: "binary",
+            FileKind.ARCHIVE: "archive",
+            FileKind.SQLITE: "sqlite",
+            FileKind.PCAP: "pcap",
+            FileKind.REPO: "repo",
+        }
+
+        known_fields = (
+            "binary_files", "source_files", "archive_files",
+            "database_files", "pcap_files", "repo_paths",
+        )
+        has_files = any(ctx.get(field) for field in known_fields)
+        analysis_kind = str(ctx.get("analysis_kind", "")).lower()
+
+        # Path 1: LLM gave file lists -> derive analysis_kind from them if missing.
+        if has_files and not analysis_kind:
+            for field, kind_name in (
+                ("binary_files", "binary"),
+                ("archive_files", "archive"),
+                ("database_files", "sqlite"),
+                ("pcap_files", "pcap"),
+                ("repo_paths", "repo"),
+                ("source_files", "source"),
+            ):
+                if ctx.get(field):
+                    ctx["analysis_kind"] = kind_name
+                    break
+            return
+
+        if has_files:
+            return
+
+        # Path 2: LLM gave neither file list nor analysis_kind -> infer from challenge files.
+        # When the challenge has only one non-empty file kind, fill both analysis_kind and
+        # the matching file list from challenge metadata.
+        if not analysis_kind and not has_files:
+            non_empty_kinds = [
+                kind for kind, files in kinds.items()
+                if files and kind in kind_for
+            ]
+            if len(non_empty_kinds) == 1:
+                only_kind = non_empty_kinds[0]
+                kind_name = kind_for[only_kind]
+                ctx["analysis_kind"] = kind_name
+                ctx[kind_to_field[kind_name]] = list(kinds[only_kind])
+                return
+
+        # Path 3: alternate field names (target_files / files) -> normalize.
+        alt_files = ctx.pop("target_files", None) or ctx.pop("files", None) or []
+        if not alt_files:
+            return
+
         for keyword, field in kind_to_field.items():
             if keyword in analysis_kind:
                 ctx[field] = alt_files

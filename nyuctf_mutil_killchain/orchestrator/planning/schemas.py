@@ -5,9 +5,18 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from nyuctf_mutil_killchain.state import GlobalState, Task
+
+_PRIORITY_WORD_TO_INT: dict[str, int] = {
+    "lowest": 10, "very_low": 15, "very low": 15,
+    "low": 25, "minor": 25,
+    "medium": 50, "med": 50, "normal": 50, "default": 50, "moderate": 50,
+    "high": 75, "important": 75,
+    "very_high": 85, "very high": 85, "urgent": 90,
+    "critical": 95, "highest": 100,
+}
 
 
 class PlannedTask(BaseModel):
@@ -21,6 +30,24 @@ class PlannedTask(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     dedupe_key: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def _coerce_priority(cls, value: Any) -> Any:
+        """Accept LLM-friendly priority labels (`'high'`, `'medium'`, ...) as ints.
+
+        Models occasionally emit the qualitative word; treat it as a synonym for
+        the canonical integer band rather than crashing the whole plan.
+        """
+        if isinstance(value, str):
+            mapped = _PRIORITY_WORD_TO_INT.get(value.strip().lower())
+            if mapped is not None:
+                return mapped
+            try:
+                return int(value.strip())
+            except ValueError:
+                return value
+        return value
 
     def to_task(self) -> Task:
         return Task(

@@ -107,6 +107,8 @@ class PlanStrategy:
                     "status": task.status,
                     "title": task.title,
                     "dedupe_key": task.dedupe_key,
+                    "last_error": (task.last_error or "")[:200] or None,
+                    "error_code": task.error_code,
                 }
                 for task in state.task_chain.tasks
             ],

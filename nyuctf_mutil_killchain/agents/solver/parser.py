@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from nyuctf_mutil_killchain.agents._helpers.flag import extract_flag_candidates
 from nyuctf_mutil_killchain.agents._helpers.strings import merge_unique_strings
 from nyuctf_mutil_killchain.agents.reasoning import SolverCodeGuidance
 from nyuctf_mutil_killchain.agents.solver.executor import SolverExecutionOutcome
@@ -24,14 +25,20 @@ _PLACEHOLDER_FLAGS = frozenset({
     "flag{notfound}", "flag{not found}", "flag{none}",
 })
 
+# Patterns that match obvious placeholder *bodies*.  IMPORTANT: keep this list
+# tight - patterns like ``test\d*`` would falsely flag real flags such as
+# ``flag{test123}`` (which is the literal flag body of the CSAW 'stfu'
+# challenge).  Only literal placeholder words go here, no digit-suffix or
+# token-prefix wildcards.
 _PLACEHOLDER_BODY_PATTERN = re.compile(
-    r"^(not[_\s]?found|test[_\s]?\d*|placeholder|manual[_\s]?review[_\s]?required"
+    r"^(not[_\s]?found|placeholder|manual[_\s]?review[_\s]?required"
     r"|todo|unknown|example|none|n/a|null|undefined|insert[_\s]?flag[_\s]?here"
     r"|your[_\s]?flag[_\s]?here|flag[_\s]?goes[_\s]?here|replace[_\s]?me)$",
     re.IGNORECASE,
 )
 
 _NEAR_MISS_CLEAN_RE = re.compile(r"[^\x20-\x7e]")
+_STRUCTURED_FLAG_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,}\{[ -~]{4,200}\}$")
 
 
 def is_placeholder_flag(candidate: str) -> bool:
@@ -73,11 +80,25 @@ class SolverFlagSet:
 
     @property
     def has_real_flag(self) -> bool:
-        return bool(self.flag_candidates)
+        # Plain-text tail candidates are useful leads but too noisy to treat as
+        # proof of success; only prefix{...}-shaped candidates count as "real"
+        # for retry-control decisions.
+        return any(_STRUCTURED_FLAG_PATTERN.fullmatch(c) for c in self.flag_candidates)
 
 
 class SolverResultParser:
-    """Combine guidance + outcome into a clean flag set."""
+    """Combine guidance + outcome into a clean flag set.
+
+    Extracts flag candidates from THREE sources, with prefix{body}-shaped
+    matches preferred over plaintext-tail fallbacks:
+
+    1. Plugin-emitted flag_candidates from output_context (already filtered).
+    2. LLM-supplied grounded_flag_candidates from SolverCodeGuidance.
+    3. Hex/base64/ROT13 decoded substrings of the solver's stdout/stderr -
+       crucial because LLM-written solvers often print the flag as hex
+       (e.g. ``[*] Encryption: 666c61677b...``) and the plugin's plain regex
+       cannot see through that encoding.
+    """
 
     def extract(
         self,
@@ -86,7 +107,13 @@ class SolverResultParser:
         *,
         limit: int = 6,
     ) -> SolverFlagSet:
+        decoded_from_streams = extract_flag_candidates(
+            outcome.stdout,
+            outcome.stderr,
+        )
+
         merged = merge_unique_strings(
+            decoded_from_streams,
             outcome.output_context.get("flag_candidates") or [],
             list(guidance.grounded_flag_candidates),
             limit=limit,

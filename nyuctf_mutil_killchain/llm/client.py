@@ -147,6 +147,7 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "language",
         "lang",
     ),
+    "worker_name": ("worker_name", "workerName", "selected_worker", "selectedWorker"),
     "task_type": ("task_type", "taskType", "type"),
     "title": ("title", "name", "label", "heading"),
 }
@@ -792,6 +793,53 @@ def _coerce_json_text(raw_text: str) -> str:
     raise LLMClientError(f"LLM content is not valid JSON: {snippet}")
 
 
+_CODE_MARKER_PATTERNS = (
+    "import ", "from ", "def ", "class ", "print(", "subprocess",
+    "if __name__", "with open(", "for ", "while ", "lambda ",
+)
+
+
+def _looks_like_solver_code(raw_text: str) -> bool:
+    """Heuristic: does *raw_text* look like raw script source instead of JSON?
+
+    Used as a recovery hint when the model returns the body of a Python (or
+    other interpreted) solver script directly rather than wrapping it in JSON.
+    Requires multiple line-anchored markers to avoid mistaking JSON-with-code
+    fragments for whole-script payloads.
+    """
+    if not raw_text or len(raw_text) < 40:
+        return False
+    text = raw_text.strip()
+    hit_count = 0
+    for marker in _CODE_MARKER_PATTERNS:
+        if marker in text:
+            hit_count += 1
+    return hit_count >= 2
+
+
+def _recover_solver_code_payload(raw_text: str, schema: type[BaseModel]) -> dict[str, Any] | None:
+    """Wrap *raw_text* as a synthesized payload when it is plainly solver code.
+
+    Some models reply to ``SolverCodeGuidance`` requests with the script body
+    only (no JSON wrapper, or a wrapper with embedded quotes that breaks JSON).
+    Treating that body as the ``solver_code`` field is the only honest reading
+    of the response, so we synthesize a minimal payload here rather than aborting
+    the run.  Returns ``None`` when the schema lacks ``solver_code`` or the text
+    is not code-like.
+    """
+    if "solver_code" not in schema.model_fields:
+        return None
+    if not _looks_like_solver_code(raw_text):
+        return None
+    return {
+        "summary": "Recovered solver code from non-JSON LLM response.",
+        "solver_code": raw_text.strip(),
+        "solver_language": "python",
+        "reasoning": "Model returned raw script text; wrapped as solver_code.",
+        "confidence": 0.4,
+    }
+
+
 class OpenAICompatibleLLMClient:
     """Structured-output client for OpenAI-compatible chat completion endpoints."""
 
@@ -887,24 +935,50 @@ class OpenAICompatibleLLMClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        response_payload = self._call_transport(body, headers)
-        usage = response_payload.get("usage") or {}
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
-        self.token_ledger.record(prompt_tokens, completion_tokens)
-        log.info(
-            "LLM call #%d: prompt=%d completion=%d total=%d (session total=%d)",
-            self.token_ledger.llm_calls,
-            prompt_tokens,
-            completion_tokens,
-            prompt_tokens + completion_tokens,
-            self.token_ledger.total_tokens,
-        )
-        raw_text = self._extract_text_content(response_payload)
+        # One in-content retry handles the rare case where the upstream model
+        # returns a 200 with empty body.  Other parse failures (e.g. malformed
+        # JSON, validation errors) are deterministic for the same prompt; we
+        # do not waste tokens retrying those.
+        max_empty_retries = 1
+        for empty_attempt in range(max_empty_retries + 1):
+            response_payload = self._call_transport(body, headers)
+            usage = response_payload.get("usage") or {}
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            self.token_ledger.record(prompt_tokens, completion_tokens)
+            log.info(
+                "LLM call #%d: prompt=%d completion=%d total=%d (session total=%d)",
+                self.token_ledger.llm_calls,
+                prompt_tokens,
+                completion_tokens,
+                prompt_tokens + completion_tokens,
+                self.token_ledger.total_tokens,
+            )
+            raw_text = self._extract_text_content(response_payload)
+            if raw_text.strip():
+                break
+            if empty_attempt >= max_empty_retries:
+                raise LLMClientError("LLM content is empty.")
+            log.warning(
+                "LLM returned empty content for %s (attempt %d/%d); retrying once.",
+                schema.__name__,
+                empty_attempt + 1,
+                max_empty_retries + 1,
+            )
+
         try:
             structured = json.loads(_coerce_json_text(raw_text))
-        except json.JSONDecodeError as exc:
-            raise LLMClientError(f"LLM content is not valid JSON: {exc}") from exc
+        except (json.JSONDecodeError, LLMClientError) as exc:
+            recovered = _recover_solver_code_payload(raw_text, schema)
+            if recovered is None:
+                if isinstance(exc, LLMClientError):
+                    raise
+                raise LLMClientError(f"LLM content is not valid JSON: {exc}") from exc
+            log.warning(
+                "LLM returned non-JSON solver script for %s; wrapping raw text as solver_code.",
+                schema.__name__,
+            )
+            structured = recovered
         massaged = _massage_payload_for_schema(structured, schema)
         if isinstance(massaged, dict) and "solver_code" in schema.model_fields:
             raw_code = massaged.get("solver_code")
