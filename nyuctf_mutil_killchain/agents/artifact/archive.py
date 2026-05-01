@@ -12,7 +12,7 @@ from nyuctf_mutil_killchain.agents.artifact._helpers import (
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.state.task_factory import (
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
     build_source_review_task,
 )
@@ -70,10 +70,9 @@ class ArchiveTriageAgent(WorkerAgent):
             or merged_ctx.get("source_like_members")
             or []
         )
-        new_tasks: list[Task] = [
-            build_flag_validation_task(candidate, source="archive_triage")
-            for candidate in flag_candidates
-        ]
+        new_tasks: list[Task] = build_flag_validation_tasks(
+            flag_candidates, source="archive_triage"
+        )
         if source_like_members:
             new_tasks.append(
                 build_source_review_task(

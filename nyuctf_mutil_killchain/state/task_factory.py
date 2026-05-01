@@ -13,6 +13,7 @@ them.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -527,13 +528,84 @@ def build_flag_hunt_task(
     )
 
 
+# Two acceptable flag shapes:
+#
+# 1. Canonical ``prefix{body}`` — every "standard" CTF flag (flag{...},
+#    csaw{...}, key{...}).  Body is printable ASCII (32-126, plus we exclude
+#    raw whitespace), 4-200 chars.
+# 2. Bare token — NYU dataset has a handful of non-standard challenges where
+#    the flag is a single underscored/dashed identifier (e.g. CSAW 2013 stfu's
+#    ``STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME``).  We require: starts alnum,
+#    only alnum + ``_-.``, length 12-200, not a Python exception name.
+_FLAG_PREFIX_SHAPE = re.compile(r"^[A-Za-z0-9_]+\{[!-z|~]{4,200}\}$")
+_FLAG_BARE_TOKEN_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.]{11,199}$")
+_FLAG_PYTHON_EXCEPTION_RE = re.compile(
+    r"^(?:[A-Z][A-Za-z0-9]*)+(?:Error|Exception|Warning)$"
+)
+
+# Even when the shape regex matches, these substrings betray echoed source code
+# rather than a real answer (we saw the LLM solver write
+# ``debug("flag{...}")`` style strings that then surfaced in stderr).  Also
+# common LLM placeholders like ``test{test}`` that the placeholder filter in
+# solver/parser.py already catches but other producers miss.
+_FLAG_VALIDATION_SOURCE_NEEDLES: tuple[str, ...] = (
+    "re.findall", "re.search", "re.match",
+    "subprocess.", "os.system", "shell=true",
+    "{thing}", "{tablename}", "{fieldname}",
+    "{0}", "{1}", "{name}", "{flag}",
+)
+
+# Bare-token "give-up" sentinels that LLM solvers like to print when they
+# can't recover the flag.  Matched as a case-insensitive substring (so
+# e.g. ``NO_FLAG_FOUND_HERE`` and ``flag_not_recovered_v2`` both reject).
+_FLAG_BARE_TOKEN_NOISE_NEEDLES: tuple[str, ...] = (
+    "no_flag_found", "noflagfound",
+    "flag_not_found", "flag_not_recovered",
+    "no_flag_recovered",
+    "manual_review_required", "manual_review",
+    "todo_replace_me", "your_flag_here", "insert_flag",
+    "placeholder", "not_implemented",
+)
+
+
+def is_validatable_flag_candidate(candidate: str) -> bool:
+    """Cheap shape check: only call the validator on candidates that *could* be a flag.
+
+    Accepts both canonical ``prefix{body}`` flags and NYU-style bare-token
+    flags.  Anything else is debug log, traceback, or source-code echo, and
+    short-circuiting those avoids burning an LLM-validation cycle on every
+    junk line.
+    """
+    text = (candidate or "").strip()
+    if _FLAG_PREFIX_SHAPE.fullmatch(text):
+        low = text.lower()
+        return not any(needle in low for needle in _FLAG_VALIDATION_SOURCE_NEEDLES)
+    if _FLAG_BARE_TOKEN_SHAPE.fullmatch(text):
+        if _FLAG_PYTHON_EXCEPTION_RE.fullmatch(text):
+            return False
+        low = text.lower()
+        if any(needle in low for needle in _FLAG_BARE_TOKEN_NOISE_NEEDLES):
+            return False
+        return True
+    return False
+
+
 def build_flag_validation_task(
     candidate: str,
     *,
     source: str,
     priority: int = 99,
-) -> Task:
-    """Build a deterministic high-priority task for validating a candidate flag."""
+) -> Task | None:
+    """Build a flag-validate task, or ``None`` if the candidate is clearly junk.
+
+    Workers should treat ``None`` as "skip" — the candidate failed shape checks
+    and isn't worth the round-trip through :class:`FlagValidationAgent`.
+    Prefer :func:`build_flag_validation_tasks` when you have an iterable of
+    candidates; it filters out the ``None`` entries for you.
+    """
+
+    if not is_validatable_flag_candidate(candidate):
+        return None
 
     return Task(
         title="Validate candidate flag",
@@ -547,6 +619,27 @@ def build_flag_validation_task(
         dedupe_key=f"flag-validate:{candidate}",
         metadata={"planned_by": "worker-followup"},
     )
+
+
+def build_flag_validation_tasks(
+    candidates: Iterable[str],
+    *,
+    source: str,
+    priority: int = 99,
+) -> list[Task]:
+    """Build flag-validate tasks for every plausible candidate.
+
+    Convenience wrapper around :func:`build_flag_validation_task` that drops
+    junk candidates instead of yielding ``None`` entries.  Use this whenever
+    the worker has a list of candidates to validate.
+    """
+
+    tasks: list[Task] = []
+    for candidate in candidates:
+        task = build_flag_validation_task(candidate, source=source, priority=priority)
+        if task is not None:
+            tasks.append(task)
+    return tasks
 
 
 # ---------------------------------------------------------------------------

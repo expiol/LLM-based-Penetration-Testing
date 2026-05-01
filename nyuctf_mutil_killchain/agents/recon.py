@@ -11,7 +11,7 @@ from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
     build_credential_hunt_task,
     build_flag_hunt_task,
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_service_banner_task,
     build_web_review_task,
     infer_web_urls,
@@ -223,8 +223,9 @@ class ReconAgent(WorkerAgent):
                 output_context["llm_summary"] = guidance.summary
                 output_context["manual_checks"] = guidance.manual_checks
                 new_tasks.extend(
-                    build_flag_validation_task(candidate, source="recon")
-                    for candidate in guidance.grounded_flag_candidates
+                    build_flag_validation_tasks(
+                        guidance.grounded_flag_candidates, source="recon"
+                    )
                 )
                 if state.metadata.get("challenge", {}).get("files"):
                     if guidance.should_schedule_flag_hunt:
@@ -277,10 +278,9 @@ class ReconAgent(WorkerAgent):
         )
         output_context["llm_summary"] = guidance.summary
         output_context["manual_checks"] = guidance.manual_checks
-        new_tasks = [
-            build_flag_validation_task(candidate, source="recon")
-            for candidate in guidance.grounded_flag_candidates
-        ]
+        new_tasks = build_flag_validation_tasks(
+            guidance.grounded_flag_candidates, source="recon"
+        )
         if state.metadata.get("challenge", {}).get("files"):
             if guidance.should_schedule_flag_hunt:
                 new_tasks.append(

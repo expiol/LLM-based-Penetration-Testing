@@ -3,13 +3,14 @@
 Responsibilities (only these):
 - Validate task context (asset_id reference must exist in state.assets)
 - Conservative context repair (fill missing required keys from challenge_files / assets)
-- Ready-task batch selection (priority order, one task per type prefix per cycle)
+- Ready-task batch selection (priority order, capped per type prefix per cycle)
 
 No suppression, no capping, no retry decisions.  Those are LLM concerns.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Callable
 
@@ -36,7 +37,20 @@ class DispatchPolicy:
     """Encapsulates deterministic dispatch behavior for the orchestrator."""
 
     _BATCHABLE_TASK_TYPES = frozenset({"flag.validate"})
-    _MAX_BATCHABLE_PER_CYCLE = 8
+    # Cap flag.validate fan-out per cycle.  Even after upstream filters (shape
+    # check at task-creation time, top-N cap inside the solver agent), a
+    # creative LLM planner can still propose many validations after a single
+    # solver run.  3 is enough to confirm the most-likely candidate without
+    # spinning the whole cycle on negative confirmations.
+    _MAX_BATCHABLE_PER_CYCLE = 3
+    _MAX_PER_PREFIX_PER_CYCLE = 2
+
+    # Anti-spin: when this many flag.validate tasks have run consecutively
+    # without a single one returning ``solved=True``, stop dispatching new
+    # validations until at least one non-validate task makes progress.
+    # Otherwise the planner happily refills the queue with shape-rejected
+    # noise it harvested from solver findings.
+    _VALIDATION_FAILURE_STREAK_LIMIT = 5
 
     def __init__(self, emit: Callable[[str], None]) -> None:
         self.emit = emit
@@ -157,28 +171,70 @@ class DispatchPolicy:
 
         return repaired
 
-    def dequeue_batch(self, state: GlobalState, *, max_batch: int = 4) -> list[Task]:
-        """Dequeue up to *max_batch* independent ready tasks in priority order."""
+    def dequeue_batch(self, state: GlobalState, *, max_batch: int = 6) -> list[Task]:
+        """Dequeue up to *max_batch* independent ready tasks in priority order.
+
+        At most :attr:`_MAX_PER_PREFIX_PER_CYCLE` non-batchable tasks share the
+        same prefix per cycle (e.g. two ``solve.*`` tasks can run concurrently
+        when the queue is solver-heavy), so accumulated planner proposals don't
+        starve and the cycle budget is actually consumed.
+
+        When the recent execution log shows a long streak of failed
+        ``flag.validate`` tasks (a sign that the planner is filling the queue
+        with shape-rejected noise harvested from solver findings), stop
+        accepting more validations until non-validate work makes progress.
+        """
         completed = state.task_chain.completed_task_ids()
         ready = [t for t in state.task_chain.tasks if t.is_ready(completed)]
         ready.sort(key=lambda t: (-t.priority, t.created_at))
 
+        suppress_validates = self._validation_streak_too_long(state)
+
         batch: list[Task] = []
-        seen_type_prefixes: set[str] = set()
+        prefix_counts: Counter[str] = Counter()
         batchable_count = 0
         for task in ready:
             prefix = task.task_type.split(".")[0]
             if task.task_type in self._BATCHABLE_TASK_TYPES:
+                if suppress_validates:
+                    continue
                 if batchable_count >= self._MAX_BATCHABLE_PER_CYCLE:
                     continue
                 batchable_count += 1
             else:
-                if prefix in seen_type_prefixes:
+                if prefix_counts[prefix] >= self._MAX_PER_PREFIX_PER_CYCLE:
                     continue
-                seen_type_prefixes.add(prefix)
+                prefix_counts[prefix] += 1
             batch.append(task)
             non_batchable = len(batch) - batchable_count
             if non_batchable >= max_batch:
                 break
 
         return batch
+
+    def _validation_streak_too_long(self, state: GlobalState) -> bool:
+        """Return True if the recent execution log is dominated by failed validates.
+
+        Walk backwards through the execution log: every failed-validation
+        record (``flag-validation-agent`` + the run flag is still unset)
+        contributes to the streak; the first non-validation record resets it.
+        Once that streak hits the configured limit we suppress further
+        ``flag.validate`` dispatch this cycle so a noisy planner can't keep
+        refilling the queue with already-rejected candidates.
+        """
+        limit = self._VALIDATION_FAILURE_STREAK_LIMIT
+        if limit <= 0 or state.solved:
+            return False
+        streak = 0
+        for record in reversed(state.execution_log):
+            if record.worker_name != "flag-validation-agent":
+                return False
+            streak += 1
+            if streak >= limit:
+                self.emit(
+                    f"[dispatch] suppressing flag.validate this cycle: "
+                    f"{streak} consecutive validations recorded without "
+                    f"solver/planner progress"
+                )
+                return True
+        return False

@@ -17,7 +17,7 @@ from nyuctf_mutil_killchain.agents.reasoning import EvidenceReviewGuidance
 from nyuctf_mutil_killchain.prompts import get_exploit_strategy, get_worker_system_prompt
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.state.task_factory import (
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
 )
 
@@ -101,10 +101,9 @@ class ComputationAnalysisAgent(WorkerAgent):
             limit=8,
         )
 
-        new_tasks: list[Task] = [
-            build_flag_validation_task(candidate, source="computation_analysis")
-            for candidate in flag_candidates
-        ]
+        new_tasks: list[Task] = build_flag_validation_tasks(
+            flag_candidates, source="computation_analysis"
+        )
         new_tasks.extend(build_path_probe_tasks_for_assets(state, guidance.interesting_paths))
 
         output_context = {

@@ -16,7 +16,7 @@ from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.agents.reasoning import EvidenceReviewGuidance
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.state.task_factory import (
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
     build_source_review_task,
 )
@@ -97,10 +97,9 @@ class RuntimeProbeAgent(WorkerAgent):
             limit=8,
         )
 
-        new_tasks: list[Task] = [
-            build_flag_validation_task(candidate, source="runtime_probe")
-            for candidate in flag_candidates
-        ]
+        new_tasks: list[Task] = build_flag_validation_tasks(
+            flag_candidates, source="runtime_probe"
+        )
         new_tasks.extend(build_path_probe_tasks_for_assets(state, guidance.interesting_paths))
         if guidance.promote_computation_analysis and category in {"rev", "crypto", "misc"}:
             new_tasks.append(

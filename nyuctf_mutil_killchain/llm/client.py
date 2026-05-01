@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
+import random
 import re
+import ssl
 import time
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, TypeVar, get_args, get_origin
@@ -606,7 +609,7 @@ class LLMSettings(BaseModel):
     model: str | None = None
     api_key: str | None = None
     timeout_s: int = Field(default=30, ge=1)
-    max_retries: int = Field(default=3, ge=0)
+    max_retries: int = Field(default=5, ge=0)
     max_completion_tokens: int = Field(default=16384, ge=1)
 
     @classmethod
@@ -617,7 +620,7 @@ class LLMSettings(BaseModel):
             model=os.getenv("AUTOPENTEST_LLM_MODEL"),
             api_key=os.getenv("AUTOPENTEST_LLM_API_KEY"),
             timeout_s=int(os.getenv("AUTOPENTEST_LLM_TIMEOUT_S", "30")),
-            max_retries=int(os.getenv("AUTOPENTEST_LLM_MAX_RETRIES", "3")),
+            max_retries=int(os.getenv("AUTOPENTEST_LLM_MAX_RETRIES", "5")),
             max_completion_tokens=int(
                 os.getenv("AUTOPENTEST_LLM_MAX_COMPLETION_TOKENS", "16384")
             ),
@@ -710,13 +713,39 @@ def _default_transport(
         raise LLMClientError(
             f"LLM request timed out after {timeout_s}s: {exc}", transient=True,
         ) from exc
+    # http.client.HTTPException covers RemoteDisconnected / IncompleteRead /
+    # BadStatusLine / NotConnected — they bypass urllib's URLError wrapper when
+    # the failure happens after getresponse() returns.  ssl.SSLError can also
+    # surface mid-read from recv_into.  Generic OSError catches the residual
+    # ConnectionResetError / BrokenPipeError when the upstream cuts the TCP
+    # session while we're decoding the body.  All of these are non-fatal — let
+    # _call_transport's retry loop have a chance.
+    except http.client.HTTPException as exc:
+        raise LLMClientError(
+            f"LLM request failed: {type(exc).__name__}: {exc}",
+            transient=True,
+        ) from exc
+    except ssl.SSLError as exc:
+        raise LLMClientError(
+            f"LLM request failed: SSLError: {exc}",
+            transient=True,
+        ) from exc
+    except (ConnectionError, OSError) as exc:
+        raise LLMClientError(
+            f"LLM request failed: {type(exc).__name__}: {exc}",
+            transient=True,
+        ) from exc
     finally:
         socket.setdefaulttimeout(old_default)
 
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise LLMClientError(f"LLM server returned invalid JSON: {exc}") from exc
+        # Body truncation between OK status and JSON close is non-deterministic;
+        # giving the retry loop a chance is much cheaper than aborting the run.
+        raise LLMClientError(
+            f"LLM server returned invalid JSON: {exc}", transient=True,
+        ) from exc
 
 
 def _extract_balanced_json(text: str) -> str | None:
@@ -769,7 +798,7 @@ def _coerce_json_text(raw_text: str) -> str:
 
     text = raw_text.strip()
     if not text:
-        raise LLMClientError("LLM content is empty.")
+        raise LLMClientError("LLM content is empty.", transient=True)
 
     candidates: list[str] = [text]
     if text.startswith("```"):
@@ -790,7 +819,9 @@ def _coerce_json_text(raw_text: str) -> str:
         return candidate
 
     snippet = text[:240].replace("\n", "\\n")
-    raise LLMClientError(f"LLM content is not valid JSON: {snippet}")
+    raise LLMClientError(
+        f"LLM content is not valid JSON: {snippet}", transient=True,
+    )
 
 
 _CODE_MARKER_PATTERNS = (
@@ -843,8 +874,9 @@ def _recover_solver_code_payload(raw_text: str, schema: type[BaseModel]) -> dict
 class OpenAICompatibleLLMClient:
     """Structured-output client for OpenAI-compatible chat completion endpoints."""
 
-    _RETRY_BASE_DELAY = 2.0
-    _RETRY_MAX_DELAY = 60.0
+    _RETRY_BASE_DELAY = 3.0
+    _RETRY_MAX_DELAY = 90.0
+    _RETRY_JITTER_FRAC = 0.2
 
     def __init__(
         self,
@@ -898,10 +930,14 @@ class OpenAICompatibleLLMClient:
                 last_error = exc
                 if not exc.transient or attempt >= self.max_retries:
                     raise
-                delay = min(
+                base_delay = min(
                     self._RETRY_BASE_DELAY * (2 ** attempt),
                     self._RETRY_MAX_DELAY,
                 )
+                # Symmetric jitter avoids multiple workers retrying in lockstep
+                # against the same upstream when the provider has a brief outage.
+                jitter = base_delay * self._RETRY_JITTER_FRAC
+                delay = max(0.1, base_delay + random.uniform(-jitter, jitter))
                 log.warning(
                     "LLM transient error (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1,
@@ -958,7 +994,7 @@ class OpenAICompatibleLLMClient:
             if raw_text.strip():
                 break
             if empty_attempt >= max_empty_retries:
-                raise LLMClientError("LLM content is empty.")
+                raise LLMClientError("LLM content is empty.", transient=True)
             log.warning(
                 "LLM returned empty content for %s (attempt %d/%d); retrying once.",
                 schema.__name__,
@@ -973,7 +1009,9 @@ class OpenAICompatibleLLMClient:
             if recovered is None:
                 if isinstance(exc, LLMClientError):
                     raise
-                raise LLMClientError(f"LLM content is not valid JSON: {exc}") from exc
+                raise LLMClientError(
+                    f"LLM content is not valid JSON: {exc}", transient=True,
+                ) from exc
             log.warning(
                 "LLM returned non-JSON solver script for %s; wrapping raw text as solver_code.",
                 schema.__name__,

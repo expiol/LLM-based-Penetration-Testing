@@ -17,7 +17,7 @@ from nyuctf_mutil_killchain.agents.artifact._helpers import (
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.state.task_factory import (
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
 )
 
@@ -73,10 +73,7 @@ def run_simple_review(
         bundle.parsed.output_context, guidance,
     )
 
-    new_tasks = [
-        build_flag_validation_task(candidate, source=tool_name)
-        for candidate in flag_candidates
-    ]
+    new_tasks = build_flag_validation_tasks(flag_candidates, source=tool_name)
     new_tasks.extend(build_path_probe_tasks_for_assets(state, guidance.interesting_paths))
 
     processed_items = list(merged_ctx.get(processed_field) or [])

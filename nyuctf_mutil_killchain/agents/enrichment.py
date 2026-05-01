@@ -21,7 +21,7 @@ from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.agents.reasoning import EvidenceReviewGuidance
 from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, WorkerReport
 from nyuctf_mutil_killchain.state.task_factory import (
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_web_content_task,
     build_web_review_task,
 )
@@ -164,10 +164,9 @@ class ServiceBannerAgent(WorkerAgent):
             ip_address=asset.ip_address if asset is not None else None,
             banner_hits=output_context.get("banner_hits") or {},
         )
-        new_tasks = [
-            build_flag_validation_task(candidate, source="tcp_banner_probe")
-            for candidate in flag_candidates
-        ]
+        new_tasks = build_flag_validation_tasks(
+            flag_candidates, source="tcp_banner_probe"
+        )
         if asset_id:
             new_tasks.extend(
                 build_web_review_task(asset_id, base_url)
@@ -241,10 +240,9 @@ class WebPathProbeAgent(WorkerAgent):
             output_context=bundle.parsed.output_context,
             guidance_label="web path probe",
         )
-        new_tasks = [
-            build_flag_validation_task(candidate, source="http_path_probe")
-            for candidate in flag_candidates
-        ]
+        new_tasks = build_flag_validation_tasks(
+            flag_candidates, source="http_path_probe"
+        )
         for probe_url in list(output_context.get("interesting_paths") or [])[:8]:
             if not isinstance(probe_url, str) or not probe_url.strip():
                 continue

@@ -15,6 +15,7 @@ from nyuctf_mutil_killchain.agents._helpers.flag import extract_flag_candidates
 from nyuctf_mutil_killchain.agents._helpers.strings import merge_unique_strings
 from nyuctf_mutil_killchain.agents.reasoning import SolverCodeGuidance
 from nyuctf_mutil_killchain.agents.solver.executor import SolverExecutionOutcome
+from nyuctf_mutil_killchain.state.task_factory import is_validatable_flag_candidate
 
 
 _PLACEHOLDER_FLAGS = frozenset({
@@ -39,6 +40,30 @@ _PLACEHOLDER_BODY_PATTERN = re.compile(
 
 _NEAR_MISS_CLEAN_RE = re.compile(r"[^\x20-\x7e]")
 _STRUCTURED_FLAG_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,}\{[ -~]{4,200}\}$")
+
+def _harvest_bare_token_candidates(stdout: str, *, max_take: int = 3) -> list[str]:
+    """Pull single-token candidates from the tail of stdout.
+
+    Used only when the prefix-shaped extractor returned nothing.  Each
+    candidate must pass :func:`is_validatable_flag_candidate` as a bare
+    token, which already rejects Python exception names and common
+    "give-up" sentinels.  Stderr is never scanned because solvers print
+    debug logs and source echoes there.
+    """
+    if not stdout:
+        return []
+    out: list[str] = []
+    raw_lines = stdout.replace("\r\n", "\n").split("\n")
+    tail = [ln.strip() for ln in raw_lines if ln.strip()][-20:]
+    for line in reversed(tail):
+        if not is_validatable_flag_candidate(line):
+            continue
+        if line in out:
+            continue
+        out.append(line)
+        if len(out) >= max_take:
+            break
+    return out
 
 
 def is_placeholder_flag(candidate: str) -> bool:
@@ -80,10 +105,11 @@ class SolverFlagSet:
 
     @property
     def has_real_flag(self) -> bool:
-        # Plain-text tail candidates are useful leads but too noisy to treat as
-        # proof of success; only prefix{...}-shaped candidates count as "real"
-        # for retry-control decisions.
-        return any(_STRUCTURED_FLAG_PATTERN.fullmatch(c) for c in self.flag_candidates)
+        # ``Real flag`` for retry-control purposes: anything that survived the
+        # validatable-shape filter (canonical ``prefix{body}`` OR a clean
+        # bare-token).  We accept both since the validation worker will resolve
+        # correctness via equality against ``expected_flag`` in benchmark mode.
+        return any(is_validatable_flag_candidate(c) for c in self.flag_candidates)
 
 
 class SolverResultParser:
@@ -112,13 +138,33 @@ class SolverResultParser:
             outcome.stderr,
         )
 
+        plugin_candidates = list(outcome.output_context.get("flag_candidates") or [])
         merged = merge_unique_strings(
             decoded_from_streams,
-            outcome.output_context.get("flag_candidates") or [],
+            plugin_candidates,
             list(guidance.grounded_flag_candidates),
             limit=limit,
         )
-        flag_candidates = [c for c in merged if not is_placeholder_flag(c)]
+
+        # Bare-token fallback (NYU non-prefix flags like
+        # ``STFU_THIS_CHALLENGE_...``).  Only kicks in when nothing prefix-shaped
+        # made it through, so it never competes with real ``flag{...}`` matches.
+        if not merged:
+            bare_tokens = _harvest_bare_token_candidates(outcome.stdout)
+            merged = merge_unique_strings(bare_tokens, limit=limit)
+
+        # Final gate: drop placeholders AND anything that fails the canonical
+        # flag-shape filter.  Defence in depth — even though earlier producers
+        # apply their own filters, a stale call site (or a non-solver_execution
+        # plugin source carried in via guidance.grounded_flag_candidates) could
+        # still smuggle junk through.  We DO NOT want to forward those: the
+        # downstream flag-validate task factory filters them out anyway, but
+        # forwarding the junk pollutes `flag_candidates` in finding metadata,
+        # which the planner reads back as "candidate flags worth retrying".
+        flag_candidates = [
+            c for c in merged
+            if not is_placeholder_flag(c) and is_validatable_flag_candidate(c)
+        ]
 
         near_miss_raw = outcome.near_miss_candidates
         cleaned_near_miss: list[str] = []

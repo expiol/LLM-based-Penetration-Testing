@@ -6,7 +6,7 @@ import json
 
 from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
     merge_unique_strings,
 )
@@ -123,10 +123,9 @@ class FlagHuntAgent(WorkerAgent):
         }
         output_context["llm_summary"] = llm_guidance.summary
 
-        new_tasks = [
-            build_flag_validation_task(candidate, source="flag_harvest")
-            for candidate in flag_candidates
-        ]
+        new_tasks = build_flag_validation_tasks(
+            flag_candidates, source="flag_harvest"
+        )
         new_tasks.extend(build_path_probe_tasks_for_assets(state, interesting_paths, priority=76))
 
         return WorkerReport(

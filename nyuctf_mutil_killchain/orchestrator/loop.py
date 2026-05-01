@@ -28,9 +28,14 @@ class Orchestrator:
 
     Worker-level errors (including ``LLMClientError``) mark the offending task
     FAILED and let the run continue so the planner can replan around the failure.
-    Only planner- or router-level ``LLMClientError`` aborts the run, since those
-    indicate the loop itself can no longer make decisions.
+    Planner-level ``LLMClientError`` skips that cycle's planning step instead of
+    aborting outright; only ``MAX_CONSECUTIVE_PLANNER_ERRORS`` failures in a row
+    will halt the run.  This keeps a single transient API hiccup from wasting
+    the entire cycle budget.
     """
+
+    MAX_CONSECUTIVE_PLANNER_ERRORS = 3
+    MAX_CONSECUTIVE_EMPTY_QUEUES = 2
 
     def __init__(
         self,
@@ -49,6 +54,8 @@ class Orchestrator:
         self.emit = emit
         self.dispatch_policy = DispatchPolicy(emit=self.emit)
         self.checkpoint_callback = checkpoint_callback
+        self._consecutive_planner_errors = 0
+        self._consecutive_empty_queues = 0
 
     def _checkpoint(self) -> None:
         if self.checkpoint_callback is None:
@@ -136,20 +143,59 @@ class Orchestrator:
                     self.state.status = RunStatus.STOPPED
                     self._checkpoint()
                     break
+                self._consecutive_planner_errors = 0
             except LLMClientError as exc:
-                self.emit(f"[cycle {cycle}] LLM planner error, stopping run: {exc}")
+                self._consecutive_planner_errors += 1
                 self.state.notes.append(
-                    f"cycle {cycle}: planner {type(exc).__name__}: {exc}"
+                    f"cycle {cycle}: planner {type(exc).__name__}"
+                    f" (consecutive={self._consecutive_planner_errors}): {exc}"
                 )
-                self.state.status = RunStatus.STOPPED
-                self._checkpoint()
-                break
+                if (
+                    self._consecutive_planner_errors
+                    >= self.MAX_CONSECUTIVE_PLANNER_ERRORS
+                ):
+                    self.emit(
+                        f"[cycle {cycle}] LLM planner error #{self._consecutive_planner_errors}"
+                        f", giving up on run: {exc}"
+                    )
+                    self.state.status = RunStatus.STOPPED
+                    self._checkpoint()
+                    break
+                self.emit(
+                    f"[cycle {cycle}] LLM planner error #{self._consecutive_planner_errors}"
+                    f"/{self.MAX_CONSECUTIVE_PLANNER_ERRORS}, skipping plan and continuing"
+                    f" with existing queue: {exc}"
+                )
+                # Fall through — we still try to dispatch already-queued tasks
+                # so the cycle isn't wasted.
 
             batch = self.dispatch_policy.dequeue_batch(self.state)
             if not batch:
-                self.emit(f"[cycle {cycle}] task queue exhausted — no ready tasks remain")
+                self._consecutive_empty_queues += 1
+                if (
+                    self._consecutive_empty_queues
+                    >= self.MAX_CONSECUTIVE_EMPTY_QUEUES
+                ):
+                    self.emit(
+                        f"[cycle {cycle}] task queue exhausted ({self._consecutive_empty_queues}"
+                        f" cycle(s) in a row) — halting run"
+                    )
+                    self._checkpoint()
+                    break
+                hint = (
+                    f"cycle {cycle}: task queue empty after planning."
+                    f" Previous proposals were either deduped or unready."
+                    f" Next plan should propose a structurally different task"
+                    f" (different task_type or distinct input_context)."
+                )
+                self.state.notes.append(hint)
+                self.state.touch()
+                self.emit(
+                    f"[cycle {cycle}] task queue empty — recorded hint for next planner call"
+                )
                 self._checkpoint()
-                break
+                continue
+            self._consecutive_empty_queues = 0
 
             dispatched = 0
             llm_error_stop = False

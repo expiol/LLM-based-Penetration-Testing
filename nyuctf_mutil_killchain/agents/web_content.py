@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_web_form_probe_task,
     build_http_path_probe_task,
 )
@@ -101,10 +101,9 @@ class WebContentAgent(WorkerAgent):
             "interesting_endpoints": note.interesting_endpoints,
             "potential_flags": note.potential_flags,
         }
-        new_tasks = [
-            build_flag_validation_task(candidate, source="web_content")
-            for candidate in note.potential_flags
-        ]
+        new_tasks = build_flag_validation_tasks(
+            note.potential_flags, source="web_content"
+        )
         if bundle.parsed.output_context.get("forms"):
             new_tasks.append(
                 build_web_form_probe_task(

@@ -241,12 +241,9 @@ class ToolBackedWorker(WorkerAgent):
         if step.followups is not None:
             new_tasks = step.followups(self, state, task, bundle, output_context, flag_candidates)
         else:
-            from nyuctf_mutil_killchain.state.task_factory import build_flag_validation_task
+            from nyuctf_mutil_killchain.state.task_factory import build_flag_validation_tasks
 
-            new_tasks = [
-                build_flag_validation_task(candidate, source=step.tool_name)
-                for candidate in flag_candidates
-            ]
+            new_tasks = build_flag_validation_tasks(flag_candidates, source=step.tool_name)
 
         return WorkerReport(
             task_id=task.task_id,
@@ -326,6 +323,7 @@ from nyuctf_mutil_killchain.state.task_factory import (  # noqa: E402, F401
     build_exploit_hypothesis_task,
     build_flag_hunt_task,
     build_flag_validation_task,
+    build_flag_validation_tasks,
     build_http_path_probe_task,
     build_path_probe_tasks_for_assets,
     build_pcap_review_task,
@@ -362,6 +360,7 @@ __all__ = [
     "build_exploit_hypothesis_task",
     "build_flag_hunt_task",
     "build_flag_validation_task",
+    "build_flag_validation_tasks",
     "build_http_path_probe_task",
     "build_path_probe_tasks_for_assets",
     "build_pcap_review_task",

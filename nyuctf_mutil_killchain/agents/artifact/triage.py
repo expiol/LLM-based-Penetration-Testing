@@ -24,7 +24,7 @@ from nyuctf_mutil_killchain.prompts import (
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.state.task_factory import (
     build_artifact_deep_review_task,
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_source_review_task,
 )
 
@@ -216,10 +216,9 @@ class ArtifactTriageAgent(WorkerAgent):
             "source_routing_intent": source_routing_intent,
         }
 
-        new_tasks = [
-            build_flag_validation_task(candidate, source="artifact_triage")
-            for candidate in flag_candidates
-        ] + follow_up_tasks
+        new_tasks = build_flag_validation_tasks(
+            flag_candidates, source="artifact_triage"
+        ) + follow_up_tasks
 
         return success_report(
             worker_name=self.name,

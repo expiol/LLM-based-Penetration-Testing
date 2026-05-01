@@ -1,8 +1,23 @@
-"""Candidate flag validation worker."""
+"""Candidate flag validation worker.
+
+This worker is hot path during NYU-CTF batch runs: every flag candidate that
+gets past :func:`build_flag_validation_tasks` ends up here.  We optimize for
+two regimes:
+
+1. ``expected_flag`` is configured (benchmark mode).  We can answer the
+   question with a string compare; the LLM call is purely decorative and we
+   skip it entirely.
+2. ``expected_flag`` is ``None`` (real-world use).  We have no oracle, so the
+   most we can do is light normalization (strip transport noise like quotes
+   and whitespace) and report a non-validation finding.  In this case the LLM
+   is consulted, but only when the candidate has the right shape — gibberish
+   that slipped through earlier filters short-circuits the same way.
+"""
 
 from __future__ import annotations
 
 import hashlib
+import re
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -10,10 +25,20 @@ from nyuctf_mutil_killchain.agents._helpers.coercion import coerce_confidence
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
 from nyuctf_mutil_killchain.llm import LLMClient
 from nyuctf_mutil_killchain.state import GlobalState, Severity, Task, TaskErrorCode, WorkerReport, Finding
+from nyuctf_mutil_killchain.state.task_factory import is_validatable_flag_candidate
+
+
+# Common "transport noise" wrappers that obscure an otherwise correct flag.
+_TRANSPORT_NOISE_RE = re.compile(r"^[\s\"'`<>\[\(]+|[\s\"'`>\]\)]+$")
+
+
+def _normalize_transport(candidate: str) -> str:
+    """Strip wrapping quotes/brackets/whitespace that often surround pasted flags."""
+    return _TRANSPORT_NOISE_RE.sub("", candidate.strip())
 
 
 class FlagValidationAssessment(BaseModel):
-    """LLM-assisted assessment of a candidate flag."""
+    """LLM-assisted assessment of a candidate flag (normalization-only)."""
 
     summary: str
     normalized_candidate: str | None = None
@@ -50,53 +75,49 @@ class FlagValidationAgent(WorkerAgent):
                 error_code=TaskErrorCode.MISSING_REQUIRED_CONTEXT,
             )
 
-        worker_notes: list[str] = []
-        llm_assessment = self.generate_structured_output(
-            system_prompt=(
-                "You assess whether a candidate flag from an authorized CTF workflow looks plausible. "
-                "Return only JSON matching the FlagValidationAssessment schema. "
-                "Do not invent a new flag. Only normalize obvious transport noise such as quotes, whitespace, or wrappers."
-            ),
-            user_prompt=(
-                f"Objective: {state.objective}\n"
-                f"Task ID: {task.task_id}\n"
-                f"Candidate source: {candidate_source}\n"
-                f"Candidate flag: {candidate}\n"
-                f"Expected flag format: {state.metadata.get('challenge', {}).get('flag_format')}\n"
-                f"Expected flag available: {bool(self.expected_flag)}\n"
-            ),
-            schema=FlagValidationAssessment,
-        )
-        if llm_assessment.normalized_candidate is not None:
-            normalized = str(llm_assessment.normalized_candidate).strip()
-        else:
-            normalized = ""
-        candidate_to_check = (normalized or candidate).strip()
+        # Benchmark mode (oracle present): equality is the truth, do it first
+        # and ignore everything else.  This is also the regime where wasting a
+        # cycle on shape-rejection actually matters — we just want a yes/no.
+        if self.expected_flag is not None:
+            return self._validate_against_oracle(task, candidate, candidate_source)
 
-        if not self.expected_flag:
+        # No oracle: shape-check before any LLM round-trip so junk strings
+        # (``FileNotFoundError: ...``, ``with open(...) as f:`` and friends)
+        # don't burn a validation call.
+        normalized_for_shape = _normalize_transport(candidate)
+        if not is_validatable_flag_candidate(normalized_for_shape):
             return WorkerReport(
                 task_id=task.task_id,
                 worker_name=self.name,
                 success=True,
-                summary="Flag validation skipped; expected flag is not configured.",
+                summary=f"Candidate from {candidate_source} rejected: not a flag-shaped token.",
                 output_context={
                     "candidate_flag": candidate,
-                    "normalized_candidate": candidate_to_check,
                     "candidate_source": candidate_source,
                     "validated": False,
                     "validation_skipped": True,
-                    "llm_summary": llm_assessment.summary,
-                    "llm_likely_valid": llm_assessment.likely_valid,
-                    "llm_confidence": llm_assessment.confidence,
+                    "rejection_reason": "shape_mismatch",
                 },
-                notes=worker_notes + ["Flag validation skipped because no expected flag is configured."],
+                notes=[
+                    f"{self.name} skipped LLM validation: candidate is not a plausible flag shape."
+                ],
             )
+        return self._validate_without_oracle(task, candidate, candidate_source, state)
 
-        raw_stripped = candidate.strip()
-        is_correct = raw_stripped == self.expected_flag or candidate_to_check == self.expected_flag
+    def _validate_against_oracle(
+        self,
+        task: Task,
+        candidate: str,
+        candidate_source: str,
+    ) -> WorkerReport:
+        """Fast path used during benchmark runs: equality + cheap normalization."""
+
+        normalized = _normalize_transport(candidate)
+        is_correct = candidate == self.expected_flag or normalized == self.expected_flag
         if is_correct:
-            candidate_to_check = self.expected_flag
-        candidate_id = hashlib.sha1(candidate_to_check.encode("utf-8")).hexdigest()[:12]
+            normalized = self.expected_flag
+
+        candidate_id = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
         finding = Finding(
             finding_id=f"finding-flag-validation-{candidate_id}",
             title="Candidate flag validation result",
@@ -106,23 +127,20 @@ class FlagValidationAgent(WorkerAgent):
                 + ("correct flag." if is_correct else "candidate did not match expected flag.")
             ),
             asset_refs=["challenge"],
-            evidence_refs=[candidate_to_check],
+            evidence_refs=[normalized],
             metadata={
                 "source_task_id": task.task_id,
                 "candidate_source": candidate_source,
                 "candidate_flag": candidate,
-                "normalized_candidate": candidate_to_check,
+                "normalized_candidate": normalized,
                 "validated": is_correct,
-                "llm_summary": llm_assessment.summary,
-                "llm_likely_valid": llm_assessment.likely_valid,
-                "llm_confidence": llm_assessment.confidence,
             },
             status="closed" if is_correct else "open",
         )
 
-        notes = worker_notes + [f"{self.name} validated candidate from {candidate_source}."]
+        notes = [f"{self.name} validated candidate from {candidate_source} via equality check."]
         if is_correct:
-            notes.append(f"Correct flag validated: {candidate_to_check}")
+            notes.append(f"Correct flag validated: {normalized}")
 
         return WorkerReport(
             task_id=task.task_id,
@@ -136,14 +154,59 @@ class FlagValidationAgent(WorkerAgent):
             finding_updates=[finding],
             notes=notes,
             solved=is_correct,
-            validated_flag=candidate_to_check if is_correct else None,
+            validated_flag=normalized if is_correct else None,
             output_context={
                 "candidate_flag": candidate,
-                "normalized_candidate": candidate_to_check,
+                "normalized_candidate": normalized,
                 "candidate_source": candidate_source,
                 "validated": is_correct,
+            },
+        )
+
+    def _validate_without_oracle(
+        self,
+        task: Task,
+        candidate: str,
+        candidate_source: str,
+        state: GlobalState,
+    ) -> WorkerReport:
+        """No oracle: ask the LLM to opine, but only as advisory metadata."""
+
+        llm_assessment = self.generate_structured_output(
+            system_prompt=(
+                "You assess whether a candidate flag from an authorized CTF workflow looks plausible. "
+                "Return only JSON matching the FlagValidationAssessment schema. "
+                "Do not invent a new flag. Only normalize obvious transport noise such as quotes, whitespace, or wrappers."
+            ),
+            user_prompt=(
+                f"Objective: {state.objective}\n"
+                f"Task ID: {task.task_id}\n"
+                f"Candidate source: {candidate_source}\n"
+                f"Candidate flag: {candidate}\n"
+                f"Expected flag format: {state.metadata.get('challenge', {}).get('flag_format')}\n"
+                "Expected flag available: False\n"
+            ),
+            schema=FlagValidationAssessment,
+        )
+        normalized = (
+            (llm_assessment.normalized_candidate or "").strip()
+            or _normalize_transport(candidate)
+        )
+
+        return WorkerReport(
+            task_id=task.task_id,
+            worker_name=self.name,
+            success=True,
+            summary="Flag validation skipped; expected flag is not configured.",
+            output_context={
+                "candidate_flag": candidate,
+                "normalized_candidate": normalized,
+                "candidate_source": candidate_source,
+                "validated": False,
+                "validation_skipped": True,
                 "llm_summary": llm_assessment.summary,
                 "llm_likely_valid": llm_assessment.likely_valid,
                 "llm_confidence": llm_assessment.confidence,
             },
+            notes=["Flag validation skipped because no expected flag is configured."],
         )

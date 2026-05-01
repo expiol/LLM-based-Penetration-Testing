@@ -24,11 +24,20 @@ strings, xxd, file, objdump, readelf, binwalk, etc.
 CRITICAL RULES:
 - The script runs inside a Docker container at /home/ctfplayer/ctf_files
 - Challenge files are already present in that directory
-- Print ONLY the flag to stdout (format: flag{{...}} or as specified by flag_format)
+- Print ONLY the flag to stdout, exactly once.  Flag format depends on \
+``challenge.flag_format`` in the user-prompt JSON:
+  * ``flag{{...}}`` (or any other ``prefix{{...}}`` shape) — emit that exact shape.
+  * Empty string (``""``) — the challenge uses a NON-STANDARD bare-token flag \
+(e.g. an underscored identifier like ``STFU_SOMETHING_HERE`` or a hash-style \
+token).  Do NOT assume ``flag{{...}}`` shape: that will pollute known-plaintext \
+attacks against ciphertext.  Print whatever printable single-token string the \
+challenge yields — alphanumeric + underscores/dashes/dots, no spaces.
 - The script must be self-contained - do not import from custom challenge modules \
 unless they are bundled files you've analyzed
 - Use standard library + common packages (requests, pwntools, pycryptodome, gmpy2, \
 z3-solver, pyshark, scapy, PIL, binascii, struct, etc.)
+- ALWAYS ``import sys`` at the top if you reference ``sys.exit`` / ``sys.stderr`` / \
+``sys.argv`` anywhere — a missing ``import sys`` is a frequent NameError fingerprint.
 - If the challenge has a remote service, connect to the hostname and port from the \
 evidence (NOT localhost unless explicitly stated)
 - Maximum runtime: {timeout}s
@@ -45,10 +54,21 @@ or subprocess.run(['strings', file]) to search for flag patterns. Also try: \
 subprocess.run(['tshark', '-r', file, '-T', 'fields', '-e', 'data'])
 - For binary crypto: read the encrypted file with open(path, 'rb'), reverse the \
 encryption algorithm based on source code analysis
+- BEFORE writing crypto code, scan the binary's ``interesting_strings`` and library \
+imports for cipher giveaways: ``srand``+``time`` → time-seeded glibc rand keystream; \
+``tap`` / ``shift register`` / ``out of range`` → LFSR with configurable taps; \
+``rc4_init`` → RC4; ``AES_set_*`` / ``EVP_*`` → AES; ``rsa`` / ``mpz`` → RSA.  \
+Match the algorithm to the strings BEFORE picking a known-plaintext attack target.
 - NEVER output placeholder flags like flag{{not_found}}, flag{{test}}, \
 flag{{manual_review_required}}. If you cannot determine the flag, output nothing.
 - When flag_format specifies a non-standard prefix (e.g. key{{...}}), make sure your \
 script searches for and outputs flags with that exact prefix.
+- If `CRITICAL_RETRY_GUIDANCE` is present in the user prompt, the previous solver \
+already failed with the listed `last_failure_fingerprint`. Your new script MUST avoid \
+that exact failure. If the failure was a Python exception, fix the offending line. \
+If the failure was logical (wrong header offset, wrong key length, decode produced \
+near-miss garbage), pick a fundamentally different parsing/decoding strategy — do \
+NOT just tweak constants in the previous attempt.
 
 {technique_hints}
 

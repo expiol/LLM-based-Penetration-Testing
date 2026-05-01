@@ -19,7 +19,7 @@ from nyuctf_mutil_killchain.agents.reasoning import EvidenceReviewGuidance
 from nyuctf_mutil_killchain.prompts import get_analysis_strategy, get_worker_system_prompt
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.state.task_factory import (
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
     build_source_review_task,
 )
@@ -137,10 +137,9 @@ class SourceReviewAgent(WorkerAgent):
         manual_checks = merge_unique_strings(manual_checks, guidance.recommended_checks, limit=8)
         flag_candidates = _filter_candidates(flag_candidates, cm.get("flag_format"))
 
-        new_tasks: list[Task] = [
-            build_flag_validation_task(candidate, source="source_review")
-            for candidate in flag_candidates
-        ]
+        new_tasks: list[Task] = build_flag_validation_tasks(
+            flag_candidates, source="source_review"
+        )
         new_tasks.extend(build_path_probe_tasks_for_assets(state, interesting_routes))
 
         source_files = list(task.input_context.get("source_files") or [])

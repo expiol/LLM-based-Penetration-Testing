@@ -55,13 +55,70 @@ for relpath in binary_files[:max_files]:
     except Exception:
         strings_output = ""
 
-    hits = []
+    # Two passes: explicit "interesting" tokens (credentials / endpoints /
+    # crypto-algorithm hints / error messages that betray the algorithm) AND
+    # a generic short-string fallback that ships the binary's distinctive
+    # printable strings to the solver even when none of the keyword tokens
+    # match.  This is critical for non-trivial CTF binaries where the giveaway
+    # is something like ``Supplied tap values out of range`` (a stock LFSR
+    # error message): without the fallback, ``interesting_strings`` would be
+    # ``{}`` and the LLM solver would never see the cipher-identifying string
+    # in the structured evidence.
+    keyword_hits: list[str] = []
+    fallback_hits: list[str] = []
+    interesting_tokens = (
+        # Credentials / secrets:
+        "flag", "password", "secret", "token", "api", "key", "auth", "creds",
+        # Reachable endpoints:
+        "http://", "https://", "/bin/sh", "ftp://",
+        # Crypto algorithm names:
+        "aes", "des", "rsa", "rc4", "rc5", "blowfish", "twofish", "chacha",
+        "salsa", "sha256", "sha512", "md5", "hmac",
+        # Stream-cipher / RNG hints (tap/lfsr is a common giveaway for LFSR
+        # ciphers; rand/srand/prng for time-seeded rand keystreams):
+        "lfsr", "tap", "shift register", "xor", "cipher", "crypt",
+        "rand", "srand", "prng", "seed", "iv ", "nonce", "stream",
+        # Encoding hints:
+        "base64", "base32", "rot13", "hexdump",
+        # File-format magic numbers / tags often serve as keystone clues:
+        "magic", "header", "stfu", "ctf{",
+        # Error messages — frequently betray the algorithm choice:
+        "out of range", "invalid key", "could not encode", "could not decode",
+        "wrong size", "padding", "block size", "supplied",
+    )
     for line in strings_output.splitlines():
-        lowered = line.lower()
-        if any(token in lowered for token in ("flag", "password", "secret", "token", "api", "key", "http://", "https://", "/bin/sh")):
-            hits.append(line[:160])
-    if hits:
-        interesting_strings[relpath] = hits[:12]
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if any(token in lowered for token in interesting_tokens):
+            keyword_hits.append(cleaned[:200])
+            continue
+        # Fallback: capture distinctive printable strings (alphanumeric
+        # presence + at least 6 chars + at most ~80 chars).  Filters out
+        # ELF section headers (``.shstrtab``, ``.dynsym``, ``GLIBC_2.x``)
+        # and trivial padding so the bucket isn't drowned in noise.
+        if 6 <= len(cleaned) <= 80 and any(c.isalpha() for c in cleaned):
+            if cleaned.startswith(".") or cleaned.startswith("__"):
+                continue
+            if cleaned.startswith("GLIBC_") or cleaned in ("libc.so.6", "/lib/ld-linux.so.2"):
+                continue
+            fallback_hits.append(cleaned[:200])
+
+    selected = keyword_hits[:12]
+    # Top up to 18 total with deduplicated fallback hits so the solver always
+    # gets at least a sample of the binary's printable strings, but never
+    # more than ~18 lines per binary (controls prompt size).
+    seen = set(selected)
+    for cand in fallback_hits:
+        if len(selected) >= 18:
+            break
+        if cand in seen:
+            continue
+        selected.append(cand)
+        seen.add(cand)
+    if selected:
+        interesting_strings[relpath] = selected
 
     for flag in flag_re.findall(strings_output):
         if flag not in flag_candidates:

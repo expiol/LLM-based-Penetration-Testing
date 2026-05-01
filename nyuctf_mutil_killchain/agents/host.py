@@ -7,7 +7,7 @@ import json
 from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
     build_flag_hunt_task,
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_service_banner_task,
     build_web_review_task,
     infer_web_urls,
@@ -140,8 +140,9 @@ class HostAuditAgent(WorkerAgent):
         output_context["llm_summary"] = llm_guidance.summary
         output_context["manual_checks"] = llm_guidance.manual_checks
         new_tasks.extend(
-            build_flag_validation_task(candidate, source="host_audit")
-            for candidate in llm_guidance.grounded_flag_candidates
+            build_flag_validation_tasks(
+                llm_guidance.grounded_flag_candidates, source="host_audit"
+            )
         )
         if llm_guidance.should_schedule_flag_hunt and state.metadata.get("challenge", {}).get("files"):
             new_tasks.append(

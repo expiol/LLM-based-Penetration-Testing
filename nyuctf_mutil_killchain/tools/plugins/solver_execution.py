@@ -9,6 +9,9 @@ from nyuctf_mutil_killchain.tools.plugins._shared import SHARED_FLAG_DETECTION_S
 
 TOOL_NAME = "solver_execution"
 
+# The script header parses the JSON payload and sets up the regex objects used
+# by the body. The shared flag-detection snippet (concatenated at build time)
+# defines `_plausible_flag` / `_near_miss_flag`.
 _SCRIPT_HEADER = r"""
 import json
 import os
@@ -29,10 +32,17 @@ records = []
 notes_list = []
 flag_candidates = []
 near_miss_candidates = []
-flag_re = re.compile(r"[A-Za-z0-9_]{2,}\{[ -~]{4,200}\}")
+
+# Generic shape: ``prefix{body}`` with printable ASCII body of 4-200 chars.
+flag_re = re.compile(r"[A-Za-z0-9_]+\{[ -~]{4,200}\}")
+# Same shape but allows non-printable characters in the body, used for "garbled
+# decrypt" near-miss reporting only.
 near_miss_re = re.compile(r"[A-Za-z0-9_]{2,}\{[^\n]{4,200}\}")
 
-# Build a format-specific regex if flag_format specifies a prefix (e.g. "key{...}")
+# When the challenge metadata advertises a specific format prefix (e.g.
+# ``key{...}``), we accept only that prefix as a candidate and ignore generic
+# ``flag{}`` matches that may appear in source code echoed back from solver
+# scripts (e.g. ``re.findall(r'flag\{...}')`` literals).
 format_prefix_re = None
 if flag_format and "{" in flag_format:
     ff_prefix = flag_format.split("{", 1)[0].strip()
@@ -40,79 +50,86 @@ if flag_format and "{" in flag_format:
         format_prefix_re = re.compile(
             re.escape(ff_prefix) + r"\{[ -~]{1,200}\}"
         )
+
+# Bare-token mode: when the actual challenge flag is NOT in ``prefix{body}``
+# shape (NYU dataset has these — e.g. CSAW 2013 stfu uses
+# ``STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME``).  The runner signals this
+# mode by passing ``flag_format == ""``.  In that mode we additionally
+# harvest single-token candidates from the tail of stdout (NEVER stderr,
+# since solvers print debug logs / tracebacks / source echoes there).
+_bare_token_mode = not flag_format.strip()
+_bare_token_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.]{11,199}$")
+_py_exception_re = re.compile(r"^(?:[A-Z][A-Za-z0-9]*)+(?:Error|Exception|Warning)$")
 """
 
+# Body executes the user solver and harvests flag candidates from its output:
+#
+# 1. Always attempt prefix{body}-shaped extraction.  Apply the format-specific
+#    prefix first when one is known, then the generic ``\w+\{...\}`` regex.
+# 2. Bare-token fallback (only when ``flag_format`` is empty AND no prefix
+#    candidate was found): scan the stdout tail for single-token answers
+#    matching ``[A-Za-z0-9][A-Za-z0-9_\-.]{11,199}``.  Stricter than the
+#    pre-refactor "trailing line" heuristic — that one used to flood the
+#    queue with garbage like ``"FileNotFoundError: ..."`` or
+#    ``"with open('x') as f:"``.  Stderr is never scanned because solvers
+#    print debug logs / tracebacks / source echoes there.
 _SCRIPT_BODY = r"""
-def _solver_regex_noise(m):
-    # Reject prefix{...} substrings copied from echoed exploit source, not real flags.
-    low = m.lower()
+def _looks_like_solver_source(text):
+    # Return True for lines that are clearly echoed source code, not flags.
     needles = (
-        "re.findall",
-        "matches =",
-        "print(",
-        " in binary",
-        " in response",
-        "\\\\",
-        "rb'",
-        "r\"",
-        "payload",
-        "{thing}",
-        "{tablename}",
-        "{fieldname}",
+        # Calls into common Python idioms most solvers use:
+        "re.findall", "re.search", "re.match",
+        "subprocess.", "os.system", "shell=True",
+        "open(", "import ", "from ",
+        # Flag pattern source-code references:
+        "{thing}", "{tablename}", "{fieldname}",
+        # Format-string artifacts:
+        "{0}", "{1}", "{name}", "{flag}",
     )
-    return any(n in low for n in needles)
+    low = text.lower()
+    return any(needle in text or needle.lower() in low for needle in needles)
 
 
-def _plain_tail_flag_candidates(text, max_take=4):
-    # Bare-token or short-sentence flags (NYU bench) from trailing stdout lines.
-    # Only triggered when no prefix{...}-shaped flag was matched, so we must be
-    # conservative: refuse anything that looks like a solver status / debug log
-    # rather than a final answer.
-    if not text or not str(text).strip():
+def _record_candidate(match, bucket):
+    if match in bucket:
+        return
+    if not _plausible_flag(match):
+        return
+    if _looks_like_solver_source(match):
+        return
+    bucket.append(match)
+
+
+def _record_near_miss(match):
+    if match in flag_candidates or match in near_miss_candidates:
+        return
+    if not _near_miss_flag(match):
+        return
+    if _looks_like_solver_source(match):
+        return
+    near_miss_candidates.append(match)
+
+
+def _harvest_bare_token_candidates(text, max_take=3):
+    # Tail-of-stdout harvest for non-prefix flag formats. Strict single-token
+    # filter: no whitespace, alnum + ``_-.`` only, 12-200 chars, not a Python
+    # exception name like ``FileNotFoundError``.
+    if not text:
         return []
-    lines = [ln.strip() for ln in str(text).replace("\r\n", "\n").split("\n") if ln.strip()]
-    tail = lines[-40:] if len(lines) > 40 else lines
     out = []
-    bad_starts = (
-        "traceback", "during ", "  file", "file \"", "import ", "from ", "def ", "class ",
-        "===", "---", "note:", "debug:", "error:", "warning:", "http://", "https://",
-        "[+]", "[-]", "[!]", "[*]", "[?]", "[debug]", "[info]", "[warn]",
-        ">>> ", ">>>", ">> ", "> ", "$ ", "# ",
-    )
-    bad_substrings = (
-        " could not ", " cannot ", " unable to ", " failed to ",
-        " not valid", " not found", " no automatic", " manual analysis",
-        " exit code", " exit:", " returncode", " exited with ",
-        " matches =", " re.findall",
-        " trying cmd:", " stdout:", " stderr:", " usage:",
-        " test length", " encrypted test length",
-    )
-    for line in reversed(tail):
-        if len(line) < 12 or len(line) > 220:
+    raw_lines = str(text).replace("\r\n", "\n").split("\n")
+    for raw in reversed([ln.strip() for ln in raw_lines if ln.strip()][-20:]):
+        if not _bare_token_re.fullmatch(raw):
             continue
-        low = line.lower()
-        if any(low.startswith(p) for p in bad_starts):
+        if _py_exception_re.fullmatch(raw):
             continue
-        if any(s in (" " + low + " ") for s in bad_substrings):
+        if raw in out or raw in flag_candidates:
             continue
-        # Reject "program-name: error message" style logs (e.g. "stfu: Could not open ...").
-        if re.match(r"^[a-z][a-z0-9_.\-/]{0,30}:\s", line):
-            continue
-        # Real flag-line answers usually start with an alphanumeric character; reject
-        # punctuation-led lines (e.g. "(error)", "<script>", "::: notice").
-        if not line[:1].isalnum():
-            continue
-        printable = sum(1 for ch in line if ch.isprintable())
-        if printable / len(line) < 0.85:
-            continue
-        if re.fullmatch(r"[A-Za-z0-9_]{12,}", line) or (
-            "{" not in line and 16 <= len(line) <= 120 and 2 <= line.count(" ") <= 24
-        ):
-            if line not in out:
-                out.append(line)
+        out.append(raw)
         if len(out) >= max_take:
             break
     return out
+
 
 if not solver_code.strip():
     records.append({"type": "summary", "text": "Solver execution skipped: no solver code provided."})
@@ -168,44 +185,30 @@ try:
     stderr = completed.stderr or ""
     returncode = completed.returncode
 
+    # Prefer format-specific prefix when metadata gives us one. Otherwise fall
+    # back to the generic prefix{body} pattern.
     for text in (stdout, stderr):
-        # First try format-specific prefix if available (e.g. key{...})
-        if format_prefix_re:
+        if format_prefix_re is not None:
             for match in format_prefix_re.findall(text):
-                if (
-                    match not in flag_candidates
-                    and _plausible_flag(match)
-                    and not _solver_regex_noise(match)
-                ):
-                    flag_candidates.append(match)
-        # Then try generic flag pattern
+                _record_candidate(match, flag_candidates)
         for match in flag_re.findall(text):
-            if (
-                match not in flag_candidates
-                and _plausible_flag(match)
-                and not _solver_regex_noise(match)
-            ):
-                flag_candidates.append(match)
+            _record_candidate(match, flag_candidates)
 
-    ff_norm = flag_format.strip().lower()
-    if ff_norm in ("", "not provided"):
-        seen_fc = set(flag_candidates)
-        for text in (stdout, stderr):
-            for plain in _plain_tail_flag_candidates(text):
-                if plain not in seen_fc:
-                    flag_candidates.append(plain)
-                    seen_fc.add(plain)
+    # Bare-token mode: harvest single-token candidates from stdout tail when
+    # the challenge uses a non-prefix flag (e.g. ``STFU_THIS_CHALLENGE_...``).
+    # Only fired when no prefix-shaped candidate was found, so it stays a
+    # supplement rather than another source of validation spam.
+    if _bare_token_mode and not flag_candidates:
+        for token in _harvest_bare_token_candidates(stdout):
+            if token not in flag_candidates:
+                flag_candidates.append(token)
 
+    # Near-miss capture only when no real candidate was found, so we don't spam
+    # the validator with both shapes.
     if not flag_candidates:
         for text in (stdout, stderr):
             for match in near_miss_re.findall(text):
-                if (
-                    match not in flag_candidates
-                    and match not in near_miss_candidates
-                    and _near_miss_flag(match)
-                    and not _solver_regex_noise(match)
-                ):
-                    near_miss_candidates.append(match)
+                _record_near_miss(match)
 
     notes_list.append(f"Solver script executed with {interpreter[0]}, exit code {returncode}.")
     if flag_candidates:

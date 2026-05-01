@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
     build_exploit_hypothesis_task,
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_web_form_probe_task,
     merge_unique_strings,
 )
@@ -223,10 +223,9 @@ class WebFormProbeAgent(WorkerAgent):
             limit=10,
         )
 
-        new_tasks = [
-            build_flag_validation_task(candidate, source="http_form_probe")
-            for candidate in flag_candidates
-        ]
+        new_tasks = build_flag_validation_tasks(
+            flag_candidates, source="http_form_probe"
+        )
         replay_urls = _candidate_replay_urls(page_url, forms, output_context)
         new_tasks.extend(
             build_web_form_probe_task(

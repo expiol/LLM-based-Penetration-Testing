@@ -8,7 +8,7 @@ from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
     build_exploit_hypothesis_task,
     build_flag_hunt_task,
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
 )
 from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
@@ -112,8 +112,9 @@ class VulnScanAgent(WorkerAgent):
         output_context["llm_summary"] = llm_guidance.summary
         output_context["manual_checks"] = llm_guidance.manual_checks
         new_tasks.extend(
-            build_flag_validation_task(candidate, source="vuln_scan")
-            for candidate in llm_guidance.grounded_flag_candidates
+            build_flag_validation_tasks(
+                llm_guidance.grounded_flag_candidates, source="vuln_scan"
+            )
         )
         new_tasks.extend(build_path_probe_tasks_for_assets(state, llm_guidance.interesting_paths, priority=75))
         if llm_guidance.should_schedule_exploit_hypothesis:

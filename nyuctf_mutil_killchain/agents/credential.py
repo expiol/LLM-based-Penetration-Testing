@@ -8,7 +8,7 @@ from nyuctf_mutil_killchain.agents.base import (
     build_credential_test_task,
     WorkerAgent,
     build_exploit_hypothesis_task,
-    build_flag_validation_task,
+    build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
     merge_unique_strings,
 )
@@ -135,10 +135,9 @@ class CredentialHuntAgent(WorkerAgent):
             limit=8,
         )
 
-        new_tasks = [
-            build_flag_validation_task(candidate, source="credential_harvest")
-            for candidate in flag_candidates
-        ]
+        new_tasks = build_flag_validation_tasks(
+            flag_candidates, source="credential_harvest"
+        )
         new_tasks.extend(build_path_probe_tasks_for_assets(state, interesting_paths, priority=75))
         if credential_ids:
             for asset in list(state.assets.values())[:4]:
