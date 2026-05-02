@@ -663,23 +663,17 @@ class StaticLLMClient:
             except json.JSONDecodeError as exc:
                 raise LLMClientError(f"StaticLLMClient returned invalid JSON: {exc}") from exc
         massaged = _massage_payload_for_schema(payload, schema)
-        if isinstance(massaged, dict) and "solver_code" in schema.model_fields:
-            raw_code = massaged.get("solver_code")
-            if not isinstance(raw_code, str) or not raw_code.strip():
-                raise LLMClientError(
-                    "LLM JSON missing non-empty solver_code field.",
-                    transient=True,
-                )
         try:
             return schema.model_validate(massaged)
         except ValidationError as exc:
-            if "solver_code" in schema.model_fields:
-                raise LLMClientError(
-                    f"LLM response failed SolverCodeGuidance validation: {exc}",
-                    transient=True,
-                ) from exc
+            # ``solver_code`` schemas have their own in-worker lint+retry loop
+            # that handles empty bodies via ``SolverLintResult(error_kind="empty")``.
+            # We surface ValidationError as transient so the worker keeps the
+            # cycle and re-prompts.
+            transient = "solver_code" in schema.model_fields
             raise LLMClientError(
-                f"LLM response failed {schema.__name__} validation: {exc}"
+                f"LLM response failed {schema.__name__} validation: {exc}",
+                transient=transient,
             ) from exc
 
 
@@ -1018,23 +1012,17 @@ class OpenAICompatibleLLMClient:
             )
             structured = recovered
         massaged = _massage_payload_for_schema(structured, schema)
-        if isinstance(massaged, dict) and "solver_code" in schema.model_fields:
-            raw_code = massaged.get("solver_code")
-            if not isinstance(raw_code, str) or not raw_code.strip():
-                raise LLMClientError(
-                    "LLM JSON missing non-empty solver_code field.",
-                    transient=True,
-                )
         try:
             return schema.model_validate(massaged)
         except ValidationError as exc:
-            if "solver_code" in schema.model_fields:
-                raise LLMClientError(
-                    f"LLM response failed SolverCodeGuidance validation: {exc}",
-                    transient=True,
-                ) from exc
+            # ``solver_code`` schemas have their own in-worker lint+retry loop
+            # that handles empty bodies via ``SolverLintResult(error_kind="empty")``.
+            # We surface ValidationError as transient so the worker keeps the
+            # cycle and re-prompts.
+            transient = "solver_code" in schema.model_fields
             raise LLMClientError(
-                f"LLM response failed {schema.__name__} validation: {exc}"
+                f"LLM response failed {schema.__name__} validation: {exc}",
+                transient=transient,
             ) from exc
 
 

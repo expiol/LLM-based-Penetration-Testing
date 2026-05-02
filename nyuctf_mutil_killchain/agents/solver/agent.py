@@ -134,7 +134,11 @@ class SolverAgent(WorkerAgent):
                 ],
             )
 
-        flags = self.parser.extract(outcome, guidance)
+        flag_format = (evidence.flag_format or "").strip()
+        ff_prefix = None
+        if flag_format and "{" in flag_format:
+            ff_prefix = flag_format.split("{", 1)[0].strip() or None
+        flags = self.parser.extract(outcome, guidance, flag_format_prefix=ff_prefix)
         retry_plan = self.retry_policy.decide(
             task=task,
             evidence=evidence,

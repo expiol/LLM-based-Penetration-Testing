@@ -89,10 +89,15 @@ class ReconAgent(WorkerAgent):
         )
 
     def run(self, task: Task, state: GlobalState) -> WorkerReport:
+        # ``Task.normalise_input_context`` already coerces ``scope`` from
+        # list to scalar; this is just a final safety net for hand-built
+        # tasks (tests, BootstrapSeeder).
         scope_entry = task.input_context.get("scope") or (
             state.authorized_scope[0] if state.authorized_scope else None
         )
-        if scope_entry is None:
+        if isinstance(scope_entry, (list, tuple)):
+            scope_entry = next((str(x) for x in scope_entry if x), None)
+        if not scope_entry or not isinstance(scope_entry, str):
             return WorkerReport(
                 task_id=task.task_id,
                 worker_name=self.name,

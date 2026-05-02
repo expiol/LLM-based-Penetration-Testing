@@ -24,6 +24,12 @@ strings, xxd, file, objdump, readelf, binwalk, etc.
 CRITICAL RULES:
 - The script runs inside a Docker container at /home/ctfplayer/ctf_files
 - Challenge files are already present in that directory
+- Treat every challenge file as READ-ONLY.  NEVER invoke a bundled binary on \
+its own ciphertext, source, or any name listed under ``challenge.files`` — \
+e.g. running ``./stfu flag.stfu`` re-encodes ``flag.stfu`` IN PLACE and \
+destroys the original ciphertext.  Always copy the challenge file to a \
+``/tmp/...`` working path or an in-memory buffer before passing it to a \
+binary that *might* write back to its input.
 - Print ONLY the flag to stdout, exactly once.  Flag format depends on \
 ``challenge.flag_format`` in the user-prompt JSON:
   * ``flag{{...}}`` (or any other ``prefix{{...}}`` shape) — emit that exact shape.
@@ -32,6 +38,14 @@ CRITICAL RULES:
 token).  Do NOT assume ``flag{{...}}`` shape: that will pollute known-plaintext \
 attacks against ciphertext.  Print whatever printable single-token string the \
 challenge yields — alphanumeric + underscores/dashes/dots, no spaces.
+- CANONICAL OUTPUT FORMAT: when you derive the flag content, print the \
+``<prefix>{{body}}`` token on its OWN line, separated from any narrative \
+text.  If the recovered plaintext is decorative prose like \
+``MY key for you is {{And yes the nsa can read this to}}``, print BOTH the \
+narrative line AND a separate canonical line with the body wrapped in the \
+expected prefix (e.g. ``key{{And yes the nsa can read this to}}``).  The \
+extraction regex requires the ``prefix`` to touch ``{{`` directly with no \
+intervening whitespace.
 - The script must be self-contained - do not import from custom challenge modules \
 unless they are bundled files you've analyzed
 - Use standard library + common packages (requests, pwntools, pycryptodome, gmpy2, \
@@ -53,12 +67,18 @@ analysis tools (strings, xxd, tshark, file, binwalk, etc.)
 or subprocess.run(['strings', file]) to search for flag patterns. Also try: \
 subprocess.run(['tshark', '-r', file, '-T', 'fields', '-e', 'data'])
 - For binary crypto: read the encrypted file with open(path, 'rb'), reverse the \
-encryption algorithm based on source code analysis
+    encryption algorithm based on source code analysis
 - BEFORE writing crypto code, scan the binary's ``interesting_strings`` and library \
 imports for cipher giveaways: ``srand``+``time`` → time-seeded glibc rand keystream; \
 ``tap`` / ``shift register`` / ``out of range`` → LFSR with configurable taps; \
 ``rc4_init`` → RC4; ``AES_set_*`` / ``EVP_*`` → AES; ``rsa`` / ``mpz`` → RSA.  \
 Match the algorithm to the strings BEFORE picking a known-plaintext attack target.
+- Stripped natives without symbols: skim ``.rodata`` for recognizable error/format \
+messages.  Literal bytes appearing *immediately before* those strings are often compiled-in \
+coefficient tables — length fields, bitmask tap descriptors, XOR constants, truncated keys, IVs — \
+rather than unstructured noise. Dump with ``objdump -rs -j .rodata``, ``readelf -x .rodata``, \
+or a tiny ``mmap`` + ASCII scan, then correlate each integer array with bit ops / loads in \
+``.text`` instead of guessing parameters from disassembly alone.
 - NEVER output placeholder flags like flag{{not_found}}, flag{{test}}, \
 flag{{manual_review_required}}. If you cannot determine the flag, output nothing.
 - When flag_format specifies a non-standard prefix (e.g. key{{...}}), make sure your \

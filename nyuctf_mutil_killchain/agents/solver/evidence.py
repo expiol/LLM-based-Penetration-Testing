@@ -113,9 +113,54 @@ class SolverEvidenceComposer:
         evidence.credentials = self._collect_credentials(state)
         evidence.key_findings = self._collect_key_findings(state)
         evidence.file_contents = self._collect_file_contents(state)
-        evidence.previous_attempts = list(task.input_context.get("previous_attempts") or [])[-3:]
+
+        in_chain_attempts = list(task.input_context.get("previous_attempts") or [])
+        if in_chain_attempts:
+            # Solver-retry path: the in-chain context already carries the
+            # last attempts (with structured fingerprint + diagnosis).
+            evidence.previous_attempts = in_chain_attempts[-3:]
+        else:
+            # Planner-proposed path: this is a *fresh* solver chain.  Pull
+            # the last failed attempts of the same task_type from the
+            # cross-task memory so the LLM doesn't repeat the previous
+            # chain's broad approach verbatim (the historypeats failure
+            # mode: 22 unique solver titles, none of which inherited the
+            # previous chain's stdout/stderr).
+            evidence.previous_attempts = self._memory_to_previous_attempts(
+                state, task.task_type
+            )
         evidence.solver_hints = self._build_solver_hints(evidence)
         return evidence
+
+    @staticmethod
+    def _memory_to_previous_attempts(
+        state: GlobalState, task_type: str
+    ) -> list[dict[str, Any]]:
+        """Convert the last K :class:`TaskAttemptMemory` entries into snapshot dicts.
+
+        Returns at most 3 entries (newest last) shaped like the in-chain
+        ``previous_attempts`` list so the prompt builder doesn't have to
+        special-case the source.
+        """
+        memory = state.task_type_memory.get(task_type) or []
+        attempts: list[dict[str, Any]] = []
+        # Only surface the most recent 3 to keep the prompt tight.
+        for entry in memory[-3:]:
+            attempts.append(
+                {
+                    "attempt": 0,  # cross-chain: no in-chain attempt number
+                    "task_id": entry.task_id,
+                    "title": entry.title,
+                    "summary": entry.summary,
+                    "error": entry.error,
+                    "stdout": entry.stdout_preview,
+                    "stderr": entry.stderr_preview,
+                    "solver_code_preview": entry.solver_code_preview,
+                    "error_fingerprint": entry.error_fingerprint,
+                    "source": "cross_chain_memory",
+                }
+            )
+        return attempts
 
     # -----------------------------------------------------------------
     # Internal collectors

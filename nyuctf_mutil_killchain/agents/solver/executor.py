@@ -74,6 +74,7 @@ class SolverCodeExecutor:
                 "timeout_s": evidence.timeout_s,
                 "flag_format": evidence.flag_format,
                 "solver_language": solver_language,
+                "challenge_files": list(evidence.challenge.get("files") or []),
             },
         )
 

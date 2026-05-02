@@ -3,9 +3,9 @@
 Responsibilities (only these):
 - Validate task context (asset_id reference must exist in state.assets)
 - Conservative context repair (fill missing required keys from challenge_files / assets)
-- Ready-task batch selection (priority order, capped per type prefix per cycle)
-
-No suppression, no capping, no retry decisions.  Those are LLM concerns.
+- Ready-task batch selection (priority order, capped per task-type prefix).
+- Bounded batching / streak-suppression shortcuts that temporarily skip rows
+  in the ready-set so stalled workers do not hog the orchestrator cycles.
 """
 
 from __future__ import annotations
@@ -33,6 +33,20 @@ class DispatchValidation:
     error_code: TaskErrorCode | None = None
 
 
+@dataclass(frozen=True)
+class DequeueBatchResult:
+    """Ready tasks selected for this cycle, plus a starvation guard flag.
+
+    ``withheld_due_to_policy`` distinguishes (a) ``ready`` genuinely empty from
+    (b) tasks were ready but every candidate was skipped by caps / streak
+    suppression — so the orchestrator should not treat (b) as successive
+    idle cycles.
+    """
+
+    tasks: list[Task]
+    withheld_due_to_policy: bool
+
+
 class DispatchPolicy:
     """Encapsulates deterministic dispatch behavior for the orchestrator."""
 
@@ -40,17 +54,38 @@ class DispatchPolicy:
     # Cap flag.validate fan-out per cycle.  Even after upstream filters (shape
     # check at task-creation time, top-N cap inside the solver agent), a
     # creative LLM planner can still propose many validations after a single
-    # solver run.  3 is enough to confirm the most-likely candidate without
-    # spinning the whole cycle on negative confirmations.
-    _MAX_BATCHABLE_PER_CYCLE = 3
-    _MAX_PER_PREFIX_PER_CYCLE = 2
+    # solver run.  Raised to 5 so a flurry of bracket-span candidates from a
+    # single solver run can drain in one cycle.
+    _MAX_BATCHABLE_PER_CYCLE = 5
 
-    # Anti-spin: when this many flag.validate tasks have run consecutively
-    # without a single one returning ``solved=True``, stop dispatching new
-    # validations until at least one non-validate task makes progress.
-    # Otherwise the planner happily refills the queue with shape-rejected
-    # noise it harvested from solver findings.
+    # Per-prefix cap dict: how many tasks of each ``<prefix>.*`` type can
+    # share a cycle.  Default is 2; ``solve`` is pinned to 1 so a single
+    # in-flight solver retry chain progresses one attempt per cycle without
+    # starving validations / web probes / source review.  Add prefixes here
+    # when a class of worker proves "hoggy" in production logs.
+    _PER_PREFIX_LIMITS: dict[str, int] = {"solve": 1}
+    _DEFAULT_PER_PREFIX_LIMIT = 2
+
+    # Anti-spin: when this many tasks of the same task_type / worker have run
+    # consecutively without a single one returning ``solved=True``, stop
+    # dispatching more of them this cycle until other work makes progress.
+    # Generic for any worker; single-purpose ``flag.validate`` suppression
+    # lives in :meth:`_validation_streak_too_long` for backwards readability,
+    # but solver / vuln / web workers can also spin and we suppress those
+    # uniformly via :meth:`_streak_too_long`.
     _VALIDATION_FAILURE_STREAK_LIMIT = 5
+    _SOLVER_FAILURE_STREAK_LIMIT = 4
+
+    # Failure fingerprints surfaced by ``WorkerReport.summary`` that should
+    # count toward the solver streak.  These are the dominant fingerprints in
+    # ``2013f-cry-stfu`` and ``2013f-web-historypeats`` runs — the LLM keeps
+    # producing scripts that exit 0 with empty stdout or exit 0 without any
+    # canonical flag candidate.
+    _SOLVER_NO_PROGRESS_FINGERPRINTS = (
+        "ran without recovering a flag",
+        "exit code 1",
+        "exit code -1",
+    )
 
     def __init__(self, emit: Callable[[str], None]) -> None:
         self.emit = emit
@@ -171,24 +206,42 @@ class DispatchPolicy:
 
         return repaired
 
-    def dequeue_batch(self, state: GlobalState, *, max_batch: int = 6) -> list[Task]:
+    def dequeue_batch(self, state: GlobalState, *, max_batch: int = 6) -> DequeueBatchResult:
         """Dequeue up to *max_batch* independent ready tasks in priority order.
 
-        At most :attr:`_MAX_PER_PREFIX_PER_CYCLE` non-batchable tasks share the
-        same prefix per cycle (e.g. two ``solve.*`` tasks can run concurrently
-        when the queue is solver-heavy), so accumulated planner proposals don't
-        starve and the cycle budget is actually consumed.
+        Each ``<prefix>.*`` task type is capped via :attr:`_PER_PREFIX_LIMITS`
+        (defaulting to :attr:`_DEFAULT_PER_PREFIX_LIMIT`) so accumulated
+        planner proposals don't starve other work and the cycle budget is
+        actually consumed.  ``solve`` is pinned to 1 because solver retry
+        chains keep adding new tasks every cycle, and two of them per cycle
+        starves validations / web probes (`2013f-cry-stfu` ran cycles 4-20
+        with exactly two solver tasks each cycle).
 
-        When the recent execution log shows a long streak of failed
-        ``flag.validate`` tasks (a sign that the planner is filling the queue
-        with shape-rejected noise harvested from solver findings), stop
-        accepting more validations until non-validate work makes progress.
+        When the recent execution log shows a long streak of failed tasks of
+        the same kind (validates with no progress, solvers with empty stdout,
+        etc.), suppress further dispatch of that kind this cycle so the
+        planner is forced to diversify.  The suppression event is also
+        pushed to ``state.notes`` so the next planner call sees the hint.
+
+        Returns a :class:`DequeueBatchResult` so callers can tell when ready
+        tasks exist but were withheld by policy (``withheld_due_to_policy``).
         """
         completed = state.task_chain.completed_task_ids()
         ready = [t for t in state.task_chain.tasks if t.is_ready(completed)]
         ready.sort(key=lambda t: (-t.priority, t.created_at))
 
         suppress_validates = self._validation_streak_too_long(state)
+        suppress_solver = self._solver_streak_too_long(state)
+        if suppress_solver:
+            state.notes.append(
+                "dispatch: solver suppressed this cycle due to a streak of "
+                "no-progress runs; propose a non-solver task type next."
+            )
+        if suppress_validates:
+            state.notes.append(
+                "dispatch: flag.validate suppressed this cycle due to a streak "
+                "of failed validations; propose a different task type."
+            )
 
         batch: list[Task] = []
         prefix_counts: Counter[str] = Counter()
@@ -202,7 +255,12 @@ class DispatchPolicy:
                     continue
                 batchable_count += 1
             else:
-                if prefix_counts[prefix] >= self._MAX_PER_PREFIX_PER_CYCLE:
+                if suppress_solver and prefix == "solve":
+                    continue
+                limit = self._PER_PREFIX_LIMITS.get(
+                    prefix, self._DEFAULT_PER_PREFIX_LIMIT
+                )
+                if prefix_counts[prefix] >= limit:
                     continue
                 prefix_counts[prefix] += 1
             batch.append(task)
@@ -210,31 +268,73 @@ class DispatchPolicy:
             if non_batchable >= max_batch:
                 break
 
-        return batch
+        withheld = bool(ready) and len(batch) == 0
+        return DequeueBatchResult(tasks=batch, withheld_due_to_policy=withheld)
 
     def _validation_streak_too_long(self, state: GlobalState) -> bool:
-        """Return True if the recent execution log is dominated by failed validates.
+        """Return True if the recent execution log is dominated by failed validates."""
+        return self._streak_too_long(
+            state,
+            worker_name="flag-validation-agent",
+            limit=self._VALIDATION_FAILURE_STREAK_LIMIT,
+            kind="flag.validate",
+        )
 
-        Walk backwards through the execution log: every failed-validation
-        record (``flag-validation-agent`` + the run flag is still unset)
-        contributes to the streak; the first non-validation record resets it.
-        Once that streak hits the configured limit we suppress further
-        ``flag.validate`` dispatch this cycle so a noisy planner can't keep
-        refilling the queue with already-rejected candidates.
+    def _solver_streak_too_long(self, state: GlobalState) -> bool:
+        """Return True if the recent execution log shows the solver-agent spinning.
+
+        We treat a solver run as "no progress" when its summary contains one
+        of :attr:`_SOLVER_NO_PROGRESS_FINGERPRINTS`.  Once that streak hits
+        the configured limit we drop new ``solve.*`` dispatches for one
+        cycle so the planner has to propose a different task type (web
+        probe, computation analysis, etc.).
         """
-        limit = self._VALIDATION_FAILURE_STREAK_LIMIT
+        limit = self._SOLVER_FAILURE_STREAK_LIMIT
         if limit <= 0 or state.solved:
             return False
         streak = 0
         for record in reversed(state.execution_log):
-            if record.worker_name != "flag-validation-agent":
+            if record.worker_name != "solver-agent":
+                return False
+            summary = (record.summary or "").lower()
+            if not any(fp in summary for fp in self._SOLVER_NO_PROGRESS_FINGERPRINTS):
                 return False
             streak += 1
             if streak >= limit:
                 self.emit(
-                    f"[dispatch] suppressing flag.validate this cycle: "
-                    f"{streak} consecutive validations recorded without "
-                    f"solver/planner progress"
+                    f"[dispatch] suppressing solve.* this cycle: "
+                    f"{streak} consecutive no-progress solver runs"
+                )
+                return True
+        return False
+
+    def _streak_too_long(
+        self,
+        state: GlobalState,
+        *,
+        worker_name: str,
+        limit: int,
+        kind: str,
+    ) -> bool:
+        """Generic anti-spin: ``limit`` consecutive failures from *worker_name*.
+
+        Walks the execution log backwards: every failed record from the
+        target worker contributes to the streak, the first record from a
+        *different* worker resets it (i.e. resets when other progress is
+        made).  Once the streak hits ``limit`` we emit a debug note and
+        return True so the caller can suppress that work for the cycle.
+        """
+        if limit <= 0 or state.solved:
+            return False
+        streak = 0
+        for record in reversed(state.execution_log):
+            if record.worker_name != worker_name:
+                return False
+            streak += 1
+            if streak >= limit:
+                self.emit(
+                    f"[dispatch] suppressing {kind} this cycle: "
+                    f"{streak} consecutive {worker_name} records without progress"
                 )
                 return True
         return False

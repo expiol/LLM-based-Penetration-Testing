@@ -531,13 +531,18 @@ def build_flag_hunt_task(
 # Two acceptable flag shapes:
 #
 # 1. Canonical ``prefix{body}`` — every "standard" CTF flag (flag{...},
-#    csaw{...}, key{...}).  Body is printable ASCII (32-126, plus we exclude
-#    raw whitespace), 4-200 chars.
+#    csaw{...}, key{...}).  Body is printable ASCII (incl. space) excluding
+#    braces.  Prefix is ≥2 alnum/_ chars.  Single source of truth lives in
+#    :mod:`state.constants`; we re-import the validator regex here.
 # 2. Bare token — NYU dataset has a handful of non-standard challenges where
 #    the flag is a single underscored/dashed identifier (e.g. CSAW 2013 stfu's
 #    ``STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME``).  We require: starts alnum,
 #    only alnum + ``_-.``, length 12-200, not a Python exception name.
-_FLAG_PREFIX_SHAPE = re.compile(r"^[A-Za-z0-9_]+\{[!-z|~]{4,200}\}$")
+from nyuctf_mutil_killchain.state.constants import (  # noqa: E402
+    FLAG_PREFIX_SHAPE as _FLAG_PREFIX_SHAPE,
+    plausible_flag as _plausible_flag,
+)
+
 _FLAG_BARE_TOKEN_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.]{11,199}$")
 _FLAG_PYTHON_EXCEPTION_RE = re.compile(
     r"^(?:[A-Z][A-Za-z0-9]*)+(?:Error|Exception|Warning)$"
@@ -579,7 +584,12 @@ def is_validatable_flag_candidate(candidate: str) -> bool:
     text = (candidate or "").strip()
     if _FLAG_PREFIX_SHAPE.fullmatch(text):
         low = text.lower()
-        return not any(needle in low for needle in _FLAG_VALIDATION_SOURCE_NEEDLES)
+        if any(needle in low for needle in _FLAG_VALIDATION_SOURCE_NEEDLES):
+            return False
+        # Also gate on the full plausibility filter so 1-char prefixes,
+        # template-noise bodies (``flag{pagination}``) and CSS/format-spec
+        # bodies are rejected uniformly.
+        return _plausible_flag(text)
     if _FLAG_BARE_TOKEN_SHAPE.fullmatch(text):
         if _FLAG_PYTHON_EXCEPTION_RE.fullmatch(text):
             return False

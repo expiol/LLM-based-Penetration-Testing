@@ -39,7 +39,6 @@ _PLACEHOLDER_BODY_PATTERN = re.compile(
 )
 
 _NEAR_MISS_CLEAN_RE = re.compile(r"[^\x20-\x7e]")
-_STRUCTURED_FLAG_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,}\{[ -~]{4,200}\}$")
 
 def _harvest_bare_token_candidates(stdout: str, *, max_take: int = 3) -> list[str]:
     """Pull single-token candidates from the tail of stdout.
@@ -132,10 +131,12 @@ class SolverResultParser:
         guidance: SolverCodeGuidance,
         *,
         limit: int = 6,
+        flag_format_prefix: str | None = None,
     ) -> SolverFlagSet:
         decoded_from_streams = extract_flag_candidates(
             outcome.stdout,
             outcome.stderr,
+            flag_format_prefix=flag_format_prefix,
         )
 
         plugin_candidates = list(outcome.output_context.get("flag_candidates") or [])

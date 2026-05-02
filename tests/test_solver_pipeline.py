@@ -205,6 +205,38 @@ class SolverAgentIntegrationTests(unittest.TestCase):
         self.assertIn("execution plane", report.summary)
 
 
+class SolverEmptyCodeRecoveryTests(unittest.TestCase):
+    """Empty ``solver_code`` from the LLM must be recovered by the lint loop,
+    not raised at the LLM-client level (which would kill the cycle)."""
+
+    def test_empty_then_valid_recovers(self):
+        from nyuctf_mutil_killchain.agents.solver.agent import SolverAgent
+
+        # First response is empty; second response is a valid script.  The
+        # lint loop should re-prompt and accept the second.
+        responses = [
+            {
+                "summary": "first attempt",
+                "solver_code": "",
+                "solver_language": "python",
+                "should_retry_on_failure": True,
+            },
+            {
+                "summary": "second attempt",
+                "solver_code": "import sys\nprint('flag{ok}')\n",
+                "solver_language": "python",
+                "should_retry_on_failure": True,
+            },
+        ]
+        client = StaticLLMClient(responses)
+        agent = SolverAgent(llm_client=client)
+        state = _state_with_files(["solve.py"])
+        evidence = SolverEvidenceComposer().compose(_solve_task(), state)
+        guidance, lint_attempts = agent._generate_lint_clean_solver_code(evidence)
+        self.assertEqual(lint_attempts, 1)
+        self.assertIn("flag{ok}", guidance.solver_code)
+
+
 class SolverCodeRecoveryTests(unittest.TestCase):
     """Recovering ``SolverCodeGuidance`` from a non-JSON LLM response."""
 

@@ -169,8 +169,17 @@ class Orchestrator:
                 # Fall through — we still try to dispatch already-queued tasks
                 # so the cycle isn't wasted.
 
-            batch = self.dispatch_policy.dequeue_batch(self.state)
+            dequeued = self.dispatch_policy.dequeue_batch(self.state)
+            batch = dequeued.tasks
             if not batch:
+                if dequeued.withheld_due_to_policy:
+                    self._consecutive_empty_queues = 0
+                    self.emit(
+                        f"[cycle {cycle}] dispatch withheld ready tasks "
+                        "(suppression/caps); not counting toward idle stall"
+                    )
+                    self._checkpoint()
+                    continue
                 self._consecutive_empty_queues += 1
                 if (
                     self._consecutive_empty_queues

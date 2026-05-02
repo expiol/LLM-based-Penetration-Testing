@@ -209,6 +209,45 @@ class NetworkEdge(BaseModel):
     discovered_at: datetime = Field(default_factory=utc_now)
 
 
+# Centralised list of `input_context` keys that the worker layer expects to be
+# scalars (single string/int) vs lists.  When the LLM planner emits a list
+# where a scalar is expected (or vice versa), the worker would normally crash
+# with ``AttributeError`` deep inside (e.g. recon-agent calling ``urlparse``
+# on a list).  We normalise once at task creation so no worker has to defend
+# against type drift.
+_TASK_INPUT_SCALAR_KEYS: frozenset[str] = frozenset({
+    "scope", "candidate_flag", "asset_id", "hostname", "base_url",
+    "target", "analysis_kind", "page_url", "files_root",
+})
+_TASK_INPUT_LIST_KEYS: frozenset[str] = frozenset({
+    "source_files", "binary_files", "archive_files", "database_files",
+    "pcap_files", "repo_paths", "ports", "paths", "forms",
+    "credential_ids", "focus_asset_ids", "seed_terms", "previous_attempts",
+    "challenge_files",
+})
+
+
+def _coerce_scalar(value: Any) -> Any:
+    """Take the first non-empty entry of a list; otherwise return as-is."""
+    if isinstance(value, (list, tuple)):
+        for entry in value:
+            if entry not in (None, "", [], {}, ()):
+                return entry
+        return None
+    return value
+
+
+def _coerce_list(value: Any) -> Any:
+    """Wrap a scalar in a list; split a comma-separated string; otherwise return as-is."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, str) and "," in value:
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return [value]
+
+
 class Task(BaseModel):
     """Single unit of work managed by the orchestrator."""
 
@@ -232,6 +271,24 @@ class Task(BaseModel):
     error_code: TaskErrorCode | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    def model_post_init(self, __context: Any) -> None:
+        """Normalise ``input_context`` field types after construction."""
+        self.normalise_input_context()
+
+    def normalise_input_context(self) -> None:
+        """Coerce known scalar/list keys to their expected shapes in place.
+
+        Defends against LLM-emitted shape drift (e.g. ``scope=["http://x"]``
+        when the worker expects ``scope="http://x"``).  Idempotent.
+        """
+        ctx = self.input_context
+        if not isinstance(ctx, dict):
+            return
+        for key in _TASK_INPUT_SCALAR_KEYS & ctx.keys():
+            ctx[key] = _coerce_scalar(ctx[key])
+        for key in _TASK_INPUT_LIST_KEYS & ctx.keys():
+            ctx[key] = _coerce_list(ctx[key])
 
     def is_ready(self, completed_task_ids: set[str]) -> bool:
         return self.status == TaskStatus.PENDING and set(self.dependencies).issubset(completed_task_ids)
@@ -393,6 +450,35 @@ class WorkerReport(BaseModel):
     generated_at: datetime = Field(default_factory=utc_now)
 
 
+#: Per-task-type memory of the last K failed attempts.  Used by LLM-driven
+#: workers (solver-agent, web-pwn-exploit-agent, …) to seed
+#: ``previous_attempts`` on freshly-planned tasks so a new chain doesn't
+#: forget what the previous chain just tried.  Bounded to keep state.json
+#: from growing unbounded on long runs.
+TASK_TYPE_MEMORY_LIMIT = 8
+
+
+class TaskAttemptMemory(BaseModel):
+    """Snapshot of a single failed task attempt, indexed by task_type.
+
+    Captures only the LLM-relevant slice of the worker report: the summary
+    that surfaces the failure fingerprint, a short stdout/stderr preview
+    that the LLM can read to understand what its previous script
+    discovered, and any solver_code preview when present.
+    """
+
+    task_id: str
+    title: str
+    worker_name: str
+    summary: str
+    error: str | None = None
+    stdout_preview: str = ""
+    stderr_preview: str = ""
+    solver_code_preview: str = ""
+    error_fingerprint: str = ""
+    recorded_at: datetime = Field(default_factory=utc_now)
+
+
 class GlobalState(BaseModel):
     """System-wide shared memory updated after every worker execution."""
 
@@ -409,6 +495,9 @@ class GlobalState(BaseModel):
     network_edges: list[NetworkEdge] = Field(default_factory=list)
     task_chain: TaskChain = Field(default_factory=TaskChain)
     execution_log: list[ExecutionRecord] = Field(default_factory=list)
+    task_type_memory: dict[str, list[TaskAttemptMemory]] = Field(
+        default_factory=dict
+    )
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     solved: bool = False
@@ -477,6 +566,7 @@ class GlobalState(BaseModel):
                 requeue=report.retryable,
                 error_code=report.error_code,
             )
+            self._record_task_attempt(task, report)
 
         for asset in report.asset_updates:
             self.upsert_asset(asset)
@@ -504,6 +594,44 @@ class GlobalState(BaseModel):
             )
         )
         self.notes.extend(report.notes)
+        self.touch()
+
+    def _record_task_attempt(self, task: Task, report: WorkerReport) -> None:
+        """Append a :class:`TaskAttemptMemory` entry for failed *report*.
+
+        Stored under ``self.task_type_memory[task.task_type]``, capped at
+        :data:`TASK_TYPE_MEMORY_LIMIT` entries (FIFO) so freshly-planned
+        tasks of the same type can read what previous chains tried.
+        """
+        ctx = report.output_context or {}
+        stdout_preview = str(ctx.get("stdout", ""))[:1500]
+        stderr_preview = str(ctx.get("stderr", ""))[:1500]
+        solver_code_preview = str(ctx.get("solver_code_preview", ""))[:2000]
+        prev_attempts = task.input_context.get("previous_attempts") or []
+        last_fingerprint = ""
+        if prev_attempts and isinstance(prev_attempts, list):
+            last = prev_attempts[-1]
+            if isinstance(last, dict):
+                last_fingerprint = str(last.get("error_fingerprint", ""))
+
+        snapshot = TaskAttemptMemory(
+            task_id=task.task_id,
+            title=task.title,
+            worker_name=report.worker_name,
+            summary=report.summary,
+            error=report.error,
+            stdout_preview=stdout_preview,
+            stderr_preview=stderr_preview,
+            solver_code_preview=solver_code_preview,
+            error_fingerprint=last_fingerprint,
+        )
+        memory = self.task_type_memory.setdefault(task.task_type, [])
+        memory.append(snapshot)
+        # FIFO trim so state.json stays bounded.
+        if len(memory) > TASK_TYPE_MEMORY_LIMIT:
+            del memory[: len(memory) - TASK_TYPE_MEMORY_LIMIT]
+        # Re-assign so pydantic validate_assignment picks up the change.
+        self.task_type_memory[task.task_type] = memory
         self.touch()
 
     def infer_asset_identity(self, ctx: dict[str, Any]) -> dict[str, str]:

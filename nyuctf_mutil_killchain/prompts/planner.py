@@ -101,6 +101,19 @@ Decision guidance:
   Treat 'inspected N files but produced 0 flag_candidates' as a CLEAR signal to escalate
   to solve.generate_script.
 
+* CRITICAL — solver task titles MUST describe ONE concrete experiment, ≤80 characters,
+  with at most one conjunction. The orchestrator will silently truncate broader titles.
+  - GOOD:  "Decrypt flag.stfu using LFSR keystream from binary"
+  - GOOD:  "Forge FuelPHP admin cookie with extracted encryption_key"
+  - GOOD:  "Many-time-pad crib drag with 'the' across all 8 ciphertexts"
+  - BAD :  "Comprehensive FuelPHP source analysis & live exploitation: extract
+            encryption keys, forge admin session cookie, bypass auth, and exploit ..."
+  - BAD :  "Deep analysis of PHP source code to identify admin bypass, SQLi, or file
+            upload vulnerabilities and exploit live target"
+  When the previous solver attempt failed with "exit 0 with empty stdout" or "exit 0
+  without flag", do NOT respond by widening the next task's scope; respond by proposing
+  a NARROWER, more specific title that targets a different concrete hypothesis.
+
 * host.audit is for network host enumeration ONLY. To run a local binary, use
   solve.generate_script (the LLM-written script can subprocess.run the binary).
 
@@ -112,6 +125,10 @@ Decision guidance:
     Either fix the missing input_context fields or pivot to a different task type.
   - If a worker returned success=False, do NOT re-propose the same task type with the
     same input_context.
+  - When the orchestrator emits "[dispatch] suppressing solve.* this cycle" in the
+    notes, the dispatch policy is forcing diversification.  Propose a non-solver task
+    (e.g. web.path_probe, exploit.cve_probe, artifact.computation_analysis) for the
+    next cycle and wait to re-propose solver work until other workers report progress.
 
 * Returning an empty tasks list means the run halts. ONLY do that when you have either:
   (a) validated a flag, or (b) genuinely exhausted every applicable tool including

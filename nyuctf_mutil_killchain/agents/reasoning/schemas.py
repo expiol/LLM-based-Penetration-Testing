@@ -11,7 +11,7 @@ from collections.abc import Iterable
 
 from pydantic import BaseModel, Field, field_validator
 
-from nyuctf_mutil_killchain.agents._helpers.coercion import coerce_confidence
+from nyuctf_mutil_killchain.agents._helpers.coercion import coerce_confidence, coerce_llm_bool
 from nyuctf_mutil_killchain.state import Task
 
 
@@ -38,6 +38,10 @@ class EvidenceReviewGuidance(BaseModel):
     promote_runtime_probe: bool = False
     promote_computation_analysis: bool = False
 
+    _coerce_llm_bools_evidence = field_validator(
+        "promote_runtime_probe", "promote_computation_analysis", mode="before",
+    )(lambda cls, v: coerce_llm_bool(v))
+
 
 class StageAnalysisGuidance(BaseModel):
     """Grounded LLM synthesis for recon, host, service, vuln, and flag stages."""
@@ -50,6 +54,13 @@ class StageAnalysisGuidance(BaseModel):
     should_schedule_credential_hunt: bool = False
     should_schedule_exploit_hypothesis: bool = False
 
+    _coerce_llm_bools_stage = field_validator(
+        "should_schedule_flag_hunt",
+        "should_schedule_credential_hunt",
+        "should_schedule_exploit_hypothesis",
+        mode="before",
+    )(lambda cls, v: coerce_llm_bool(v))
+
 
 class CredentialHarvestGuidance(BaseModel):
     """Grounded LLM synthesis for credential-centric CTF pivots."""
@@ -60,6 +71,11 @@ class CredentialHarvestGuidance(BaseModel):
     interesting_paths: list[str] = Field(default_factory=list)
     manual_checks: list[str] = Field(default_factory=list)
     should_schedule_exploit_hypothesis: bool = False
+
+    _coerce_llm_bools_cred_harvest = field_validator(
+        "should_schedule_exploit_hypothesis",
+        mode="before",
+    )(lambda cls, v: coerce_llm_bool(v))
 
 
 class ExploitHypothesisGuidance(BaseModel):
@@ -76,6 +92,14 @@ class ExploitHypothesisGuidance(BaseModel):
     should_schedule_credential_test: bool = False
     should_schedule_cve_probe: bool = False
 
+    _coerce_llm_bools_exploit_hypothesis = field_validator(
+        "should_schedule_flag_hunt",
+        "should_schedule_credential_hunt",
+        "should_schedule_credential_test",
+        "should_schedule_cve_probe",
+        mode="before",
+    )(lambda cls, v: coerce_llm_bool(v))
+
 
 class CredentialTestGuidance(BaseModel):
     """LLM plan for credential reuse against web targets."""
@@ -87,6 +111,11 @@ class CredentialTestGuidance(BaseModel):
     grounded_flag_candidates: list[str] = Field(default_factory=list)
     manual_checks: list[str] = Field(default_factory=list)
     should_schedule_cve_probe: bool = False
+
+    _coerce_llm_bools_cred_test = field_validator(
+        "should_schedule_cve_probe",
+        mode="before",
+    )(lambda cls, v: coerce_llm_bool(v))
 
 
 class ExploitProbeGuidance(BaseModel):
@@ -102,6 +131,11 @@ class ExploitProbeGuidance(BaseModel):
     manual_checks: list[str] = Field(default_factory=list)
     should_schedule_flag_hunt: bool = False
 
+    _coerce_llm_bools_exploit_probe = field_validator(
+        "should_schedule_flag_hunt",
+        mode="before",
+    )(lambda cls, v: coerce_llm_bool(v))
+
 
 class FormProbeGuidance(BaseModel):
     """LLM plan for generalized web-form interaction and upload probing."""
@@ -113,6 +147,11 @@ class FormProbeGuidance(BaseModel):
     grounded_flag_candidates: list[str] = Field(default_factory=list)
     manual_checks: list[str] = Field(default_factory=list)
     should_schedule_exploit_hypothesis: bool = False
+
+    _coerce_llm_bools_form_probe = field_validator(
+        "should_schedule_exploit_hypothesis",
+        mode="before",
+    )(lambda cls, v: coerce_llm_bool(v))
 
 
 class SolverCodeGuidance(BaseModel):
@@ -129,6 +168,9 @@ class SolverCodeGuidance(BaseModel):
 
     _coerce_confidence = field_validator("confidence", mode="before")(
         lambda cls, v: coerce_confidence(v)
+    )
+    _coerce_retry_bool = field_validator("should_retry_on_failure", mode="before")(
+        lambda cls, v: coerce_llm_bool(v)
     )
 
 
