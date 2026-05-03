@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from nyuctf_mutil_killchain.prompts.rag import SOLVER_RAG_GUIDE
+
 SOLVER_SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert CTF solver. Your job is to write a complete, executable \
 {language} script that solves the given CTF challenge and prints the flag to stdout.
@@ -9,6 +11,8 @@ You are an expert CTF solver. Your job is to write a complete, executable \
 Challenge category: {category}
 
 {category_strategy}
+
+{rag_guide}
 
 SOLVING APPROACH:
 1. ALWAYS start your script by reading the actual challenge files from disk. \

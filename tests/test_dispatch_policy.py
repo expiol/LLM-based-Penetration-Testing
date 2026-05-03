@@ -83,13 +83,28 @@ class TestPerPrefixCaps(unittest.TestCase):
 
 
 class TestSolverStreakSuppression(unittest.TestCase):
-    def _push_solver_failure(self, state: GlobalState, summary: str) -> None:
+    def _push_solver_failure(
+        self, state: GlobalState, summary: str, *, error: str | None = None,
+    ) -> None:
         state.execution_log.append(
             ExecutionRecord(
                 task_id=f"task-{len(state.execution_log)}",
                 worker_name="solver-agent",
                 success=False,
                 summary=summary,
+                error=error,
+            )
+        )
+
+    def _push_other_worker(
+        self, state: GlobalState, worker: str = "web-content-agent", success: bool = True,
+    ) -> None:
+        state.execution_log.append(
+            ExecutionRecord(
+                task_id=f"task-{len(state.execution_log)}",
+                worker_name=worker,
+                success=success,
+                summary=f"{worker} did something",
                 error=None,
             )
         )
@@ -110,28 +125,180 @@ class TestSolverStreakSuppression(unittest.TestCase):
             "ready solve tasks withheld by suppression should set withheld_due_to_policy",
         )
 
-    def test_progress_resets_streak(self) -> None:
+    def test_unrelated_worker_records_do_not_reset_streak(self) -> None:
+        """Regression for historypeats / onlythisprogram: solver streak is
+        the count of consecutive *solver* failures, regardless of unrelated
+        web/source/computation records sandwiched between them."""
+
         state = _state_with_tasks([_solve_task(0)])
-        # 3 fails, then a non-solver task succeeds — streak resets.
-        for _ in range(3):
+        # Pattern observed in real logs: solver fails, web-path-probe
+        # succeeds, solver fails again, web-content-agent succeeds, ...
+        for _ in range(4):
             self._push_solver_failure(
                 state,
-                "Solver execution ran without recovering a flag: exit code 0.",
+                "Solver execution ran without recovering a flag: exit code 0, 0 flag candidate(s).",
             )
+            self._push_other_worker(state, "web-path-probe-agent", success=True)
+        policy = DispatchPolicy(emit=lambda _: None)
+        dq = policy.dequeue_batch(state)
+        self.assertEqual(
+            [t for t in dq.tasks if t.task_type.startswith("solve.")], [],
+            "interleaved web-probe successes must NOT reset the solver streak",
+        )
+
+    def test_llm_error_summary_counts_toward_streak(self) -> None:
+        """LLMClientError-style failures (empty body, missing field, lint
+        exhausted) must count toward the solver streak — they previously
+        dropped through unnoticed."""
+
+        state = _state_with_tasks([_solve_task(0)])
+        fingerprints = [
+            "Worker solver-agent raised LLMClientError; replan needed.",
+            "Solver execution failed: LLM solver_code failed in-process lint after 5 attempt(s).",
+            "Solver execution failed (exit 1): exit code 1, 0 flag candidate(s).",
+            "Solver execution ran without recovering a flag: exit code 0.",
+        ]
+        for summary in fingerprints:
+            self._push_solver_failure(state, summary)
+        policy = DispatchPolicy(emit=lambda _: None)
+        dq = policy.dequeue_batch(state)
+        self.assertEqual([t for t in dq.tasks if t.task_type.startswith("solve.")], [])
+
+    def test_solver_success_resets_streak(self) -> None:
+        state = _state_with_tasks([_solve_task(0)])
+        for _ in range(3):
+            self._push_solver_failure(
+                state, "Solver execution ran without recovering a flag.",
+            )
+        # A solver SUCCESS resets the streak (validation will pick up the flag).
         state.execution_log.append(
             ExecutionRecord(
-                task_id="task-source-review",
-                worker_name="source-review-agent",
+                task_id="task-solver-ok",
+                worker_name="solver-agent",
                 success=True,
-                summary="reviewed 5 files",
+                summary="Solver execution succeeded: 3 flag candidate(s).",
                 error=None,
             )
         )
+        # Three more failures after the success — streak below limit, no suppression.
+        for _ in range(3):
+            self._push_solver_failure(
+                state, "Solver execution ran without recovering a flag.",
+            )
+        policy = DispatchPolicy(emit=lambda _: None)
+        dq = policy.dequeue_batch(state)
+        self.assertTrue(
+            any(t.task_type.startswith("solve.") for t in dq.tasks),
+            "solver streak should reset on solver success, even with 3 failures after",
+        )
+
+    def test_progress_resets_streak(self) -> None:
+        state = _state_with_tasks([_solve_task(0)])
+        # 3 fails, then a non-solver task succeeds — streak should NOT
+        # reset on non-solver work, but neither should it reach the limit.
+        for _ in range(3):
+            self._push_solver_failure(
+                state, "Solver execution ran without recovering a flag: exit code 0.",
+            )
+        self._push_other_worker(state, "source-review-agent", success=True)
         policy = DispatchPolicy(emit=lambda _: None)
         batch = policy.dequeue_batch(state).tasks
         self.assertTrue(
             any(t.task_type.startswith("solve.") for t in batch),
-            "solver should be allowed after a non-solver task makes progress",
+            "below-limit solver streak should not block dispatch",
+        )
+
+
+class _StubAugmenter:
+    """Minimal augmenter double for streak-suppression tests.
+
+    Exposes only the ``enabled`` / ``top_score`` surface that
+    :class:`DispatchPolicy` consumes — keeps tests free of fastembed
+    dependency.
+    """
+
+    def __init__(self, *, enabled: bool, top_score: float) -> None:
+        self._enabled = enabled
+        self._top_score = top_score
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def top_score(self, _state) -> float:
+        return self._top_score
+
+
+class TestRagAwareSolverStreak(unittest.TestCase):
+    """High-confidence RAG hits relax the solver-streak suppression limit."""
+
+    def _push_failures(self, state: GlobalState, n: int) -> None:
+        for _ in range(n):
+            state.execution_log.append(
+                ExecutionRecord(
+                    task_id=f"task-{len(state.execution_log)}",
+                    worker_name="solver-agent",
+                    success=False,
+                    summary="Solver execution ran without recovering a flag: exit code 0.",
+                    error=None,
+                )
+            )
+
+    def test_high_score_grants_extra_retries(self) -> None:
+        # 4 fails would normally suppress; a top score of 0.8 should
+        # allow at least one more solver task through this cycle.
+        state = _state_with_tasks([_solve_task(0)])
+        self._push_failures(state, 4)
+        policy = DispatchPolicy(
+            emit=lambda _: None,
+            augmenter=_StubAugmenter(enabled=True, top_score=0.8),
+        )
+        batch = policy.dequeue_batch(state).tasks
+        self.assertTrue(
+            any(t.task_type.startswith("solve.") for t in batch),
+            "RAG top-1 ≥ HIGH_CONFIDENCE_SCORE should relax the solver streak",
+        )
+
+    def test_low_score_keeps_default_limit(self) -> None:
+        state = _state_with_tasks([_solve_task(0)])
+        self._push_failures(state, 4)
+        policy = DispatchPolicy(
+            emit=lambda _: None,
+            augmenter=_StubAugmenter(enabled=True, top_score=0.2),
+        )
+        dq = policy.dequeue_batch(state)
+        self.assertFalse(
+            any(t.task_type.startswith("solve.") for t in dq.tasks),
+            "weak RAG signals should NOT lift the suppression limit",
+        )
+        self.assertTrue(dq.withheld_due_to_policy)
+
+    def test_disabled_augmenter_uses_default_limit(self) -> None:
+        state = _state_with_tasks([_solve_task(0)])
+        self._push_failures(state, 4)
+        policy = DispatchPolicy(
+            emit=lambda _: None,
+            augmenter=_StubAugmenter(enabled=False, top_score=0.0),
+        )
+        dq = policy.dequeue_batch(state)
+        self.assertFalse(
+            any(t.task_type.startswith("solve.") for t in dq.tasks),
+            "augmenter.enabled=False must fall back to the default streak limit",
+        )
+
+    def test_high_score_eventually_suppresses_at_extended_limit(self) -> None:
+        # With high RAG score the limit is base+bonus = 4+4 = 8.
+        # Eight failures must still cross the threshold.
+        state = _state_with_tasks([_solve_task(0)])
+        self._push_failures(state, 8)
+        policy = DispatchPolicy(
+            emit=lambda _: None,
+            augmenter=_StubAugmenter(enabled=True, top_score=0.9),
+        )
+        dq = policy.dequeue_batch(state)
+        self.assertFalse(
+            any(t.task_type.startswith("solve.") for t in dq.tasks),
+            "extended limit must still trip when failures pile up",
         )
 
 

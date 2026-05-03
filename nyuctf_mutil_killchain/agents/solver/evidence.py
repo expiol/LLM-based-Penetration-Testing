@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
 from nyuctf_mutil_killchain.state import FileKind, GlobalState, Task, classify
 
 
@@ -36,6 +37,7 @@ class SolverEvidence:
     file_contents: list[dict[str, str]] = field(default_factory=list)
     previous_attempts: list[dict[str, Any]] = field(default_factory=list)
     solver_hints: list[str] = field(default_factory=list)
+    related_writeups: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def category(self) -> str:
@@ -80,11 +82,23 @@ class SolverEvidence:
             snapshot["previous_solver_attempts"] = self.previous_attempts
         if self.solver_hints:
             snapshot["solver_hints"] = self.solver_hints
+        if self.related_writeups:
+            snapshot["related_writeups"] = self.related_writeups
         return snapshot
 
 
 class SolverEvidenceComposer:
-    """Build a :class:`SolverEvidence` snapshot from current state."""
+    """Build a :class:`SolverEvidence` snapshot from current state.
+
+    Optionally accepts a :class:`KnowledgeAugmenter` so the solver prompt
+    receives the same RAG hits the planner sees.  Without an augmenter
+    the composer still works — it just emits an empty
+    ``related_writeups`` list — so existing tests that construct
+    ``SolverEvidenceComposer()`` directly continue to function.
+    """
+
+    def __init__(self, augmenter: KnowledgeAugmenter | None = None) -> None:
+        self.augmenter = augmenter
 
     def compose(self, task: Task, state: GlobalState) -> SolverEvidence:
         challenge_meta = state.metadata.get("challenge", {}) or {}
@@ -113,6 +127,9 @@ class SolverEvidenceComposer:
         evidence.credentials = self._collect_credentials(state)
         evidence.key_findings = self._collect_key_findings(state)
         evidence.file_contents = self._collect_file_contents(state)
+        evidence.related_writeups = (
+            self.augmenter.for_solver(state) if self.augmenter is not None else []
+        )
 
         in_chain_attempts = list(task.input_context.get("previous_attempts") or [])
         if in_chain_attempts:

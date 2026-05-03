@@ -36,6 +36,7 @@ from nyuctf_mutil_killchain.agents import (
     WebPathProbeAgent,
     WebPwnExploitAgent,
 )
+from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
 from nyuctf_mutil_killchain.llm import LLMClient, TokenLedger, build_llm_client_from_env
 from nyuctf_mutil_killchain.orchestrator import (
     LLMPlanner,
@@ -171,7 +172,13 @@ def build_runtime(
     if llm_client is None:
         llm_client = build_llm_client_from_env()
 
-    planner = LLMPlanner(llm_client)
+    # One augmenter per run, shared by planner + solver + dispatch policy.
+    # ``from_default`` resolves to the module-level retriever singleton
+    # (or ``None`` when fastembed / the dataset isn't available), so the
+    # caller never has to know whether RAG is wired up.
+    augmenter = KnowledgeAugmenter.from_default()
+
+    planner = LLMPlanner(llm_client, augmenter=augmenter)
     router = LLMWorkerRouter(llm_client)
 
     execution_plane = execution_plane or build_execution_plane()
@@ -212,8 +219,8 @@ def build_runtime(
             WebPwnExploitAgent(**common),
             ExploitReasoningAgent(**common),
             FlagHuntAgent(**common),
-            # Solver
-            SolverAgent(**common),
+            # Solver (gets the augmenter so its prompts include writeup hits).
+            SolverAgent(augmenter=augmenter, **common),
             # Flag validation (no execution_plane needed)
             FlagValidationAgent(llm_client=llm_client, expected_flag=expected_flag),
         ],
@@ -221,6 +228,7 @@ def build_runtime(
         router=router,
         emit=(recorder.emit if recorder is not None else print),
         checkpoint_callback=checkpoint_callback,
+        augmenter=augmenter,
     )
     return state, orchestrator, llm_client
 

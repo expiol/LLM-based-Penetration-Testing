@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
 from nyuctf_mutil_killchain.agents.reasoning import SolverCodeGuidance
 from nyuctf_mutil_killchain.agents.solver import (
@@ -19,6 +23,9 @@ from nyuctf_mutil_killchain.agents.solver.parser import (
     clean_near_miss_candidates,
     is_placeholder_flag,
 )
+from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter, KnowledgeRetriever
+from nyuctf_mutil_killchain.knowledge.corpus import KnowledgeEntry
+from nyuctf_mutil_killchain.knowledge.embedder import StubEmbedder
 from nyuctf_mutil_killchain.llm import StaticLLMClient
 from nyuctf_mutil_killchain.state import GlobalState, Task
 
@@ -74,6 +81,83 @@ class SolverEvidenceTests(unittest.TestCase):
         evidence = SolverEvidenceComposer().compose(task, state)
         self.assertEqual(evidence.attempt_number, 3)
         self.assertEqual(len(evidence.previous_attempts), 1)
+
+    def test_composer_without_augmenter_emits_empty_writeups(self):
+        state = _state_with_files(["solve.py"])
+        evidence = SolverEvidenceComposer().compose(_solve_task(), state)
+        self.assertEqual(evidence.related_writeups, [])
+        # ``to_snapshot`` should also drop the empty key entirely.
+        self.assertNotIn("related_writeups", evidence.to_snapshot())
+
+
+class SolverEvidenceRagTests(unittest.TestCase):
+    """Verify the augmenter feeds writeup hits into solver evidence + prompt."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        entries = [
+            KnowledgeEntry(
+                challenge_id="2013f-cry-stfu",
+                year="2013",
+                event="CSAW-Finals",
+                category="crypto",
+                name="stfu",
+                description="LFSR-based file encryption with 16-byte header.",
+                files=["stfu", "flag.stfu"],
+                writeup="",
+                solution_sketch=(
+                    "Read seed/tap/skip from header bytes 4-16, run LFSR, "
+                    "XOR the keystream against the body to recover the flag."
+                ),
+            ),
+        ]
+        self.retriever = KnowledgeRetriever(
+            entries, embedder=StubEmbedder(), cache_dir=self.tmp
+        )
+        self.augmenter = KnowledgeAugmenter(self.retriever)
+
+    def _stfu_state(self) -> GlobalState:
+        return GlobalState(
+            objective="LFSR-based file encryption stored in a Secure Test File Unit.",
+            authorized_scope=[],
+            metadata={
+                "challenge": {
+                    "name": "stfu",
+                    "category": "crypto",
+                    "flag_format": "",
+                    "files": ["stfu", "flag.stfu"],
+                    "year": "2013",
+                    "event": "CSAW-Finals",
+                    "canonical_name": "2013f-cry-stfu",
+                }
+            },
+        )
+
+    def test_evidence_carries_writeups_when_augmenter_present(self):
+        composer = SolverEvidenceComposer(augmenter=self.augmenter)
+        evidence = composer.compose(_solve_task(), self._stfu_state())
+        self.assertGreaterEqual(len(evidence.related_writeups), 1)
+        first = evidence.related_writeups[0]
+        for required in ("challenge_id", "solution_sketch", "score"):
+            self.assertIn(required, first)
+        self.assertIn("LFSR", first["solution_sketch"])
+
+    def test_user_prompt_serializes_writeups(self):
+        composer = SolverEvidenceComposer(augmenter=self.augmenter)
+        evidence = composer.compose(_solve_task(), self._stfu_state())
+        _sys, user = SolverPromptBuilder().build(evidence)
+        payload = json.loads(user)
+        self.assertIn("related_writeups", payload)
+        self.assertIn("LFSR", payload["related_writeups"][0]["solution_sketch"])
+
+    def test_solver_agent_propagates_augmenter_to_default_composer(self):
+        agent = SolverAgent(
+            llm_client=StaticLLMClient([]),
+            augmenter=self.augmenter,
+        )
+        evidence = agent.composer.compose(_solve_task(), self._stfu_state())
+        self.assertGreaterEqual(len(evidence.related_writeups), 1)
 
 
 class SolverParserTests(unittest.TestCase):
@@ -235,6 +319,88 @@ class SolverEmptyCodeRecoveryTests(unittest.TestCase):
         guidance, lint_attempts = agent._generate_lint_clean_solver_code(evidence)
         self.assertEqual(lint_attempts, 1)
         self.assertIn("flag{ok}", guidance.solver_code)
+
+
+class SolverLintExhaustionSoftFailTests(unittest.TestCase):
+    """Lint exhaustion must produce WorkerReport(success=False), NOT LLMClientError.
+
+    The orchestrator can then count the failed run toward the streak detector
+    and route the next cycle to a different worker, instead of tearing the
+    whole task down.
+    """
+
+    def test_all_empty_solver_code_yields_soft_failure(self):
+        from nyuctf_mutil_killchain.agents.solver.agent import (
+            SolverAgent,
+            _LINT_RETRY_BUDGET,
+        )
+
+        empty_payload = {
+            "summary": "always empty",
+            "solver_code": "",
+            "solver_language": "python",
+        }
+        # Provide one response per attempt the lint loop will make.
+        responses = [empty_payload] * (_LINT_RETRY_BUDGET + 1)
+
+        class _NoopExecutor:
+            def run(self, **kwargs):  # pragma: no cover - shouldn't be reached
+                raise AssertionError("Executor must not run when lint exhausts.")
+
+        agent = SolverAgent(
+            llm_client=StaticLLMClient(responses),
+            executor=_NoopExecutor(),
+        )
+        state = _state_with_files(["solve.py"])
+        report = agent.run(_solve_task(), state)
+        self.assertFalse(report.success)
+        self.assertIn("Solver execution failed", report.summary)
+        self.assertIn("lint", report.summary)
+        # Soft fail must not be retryable; planner should diversify.
+        self.assertFalse(report.retryable)
+
+
+class LLMClientSolverFallbackTests(unittest.TestCase):
+    """LLM transport / parse failures collapse to empty SolverCodeGuidance."""
+
+    def test_validation_failure_falls_back_to_empty_solver_code(self):
+        # Payload missing solver_code entirely — would previously raise
+        # LLMClientError("LLM response failed SolverCodeGuidance validation").
+        # Should now return an empty SolverCodeGuidance so the lint loop
+        # surfaces it as error_kind="empty" and re-prompts.
+        client = StaticLLMClient([{"summary": "no code field at all"}])
+        guidance = client.generate_json(
+            system_prompt="x",
+            user_prompt="y",
+            schema=SolverCodeGuidance,
+        )
+        self.assertEqual(guidance.solver_code, "")
+        self.assertIn("validation", guidance.summary.lower())
+
+    def test_solver_validation_fallback_is_not_an_exception(self):
+        # The solver-side fallback returns an empty SolverCodeGuidance rather
+        # than letting Pydantic ValidationError out — so the lint loop sees
+        # the failure as ``error_kind="empty"`` and re-prompts.  Verifies
+        # the fallback path is actually exercised (no exception leaks).
+        client = StaticLLMClient(
+            [
+                {
+                    "summary": "x",
+                    "solver_code": "import sys\nprint('a')\n",
+                    "confidence": "not-a-number-or-label",
+                }
+            ]
+        )
+        guidance = client.generate_json(
+            system_prompt="x",
+            user_prompt="y",
+            schema=SolverCodeGuidance,
+        )
+        # Either the bad confidence got swallowed by fallback (empty
+        # solver_code with diagnostic summary) or the schema's existing
+        # ``coerce_confidence`` validator absorbed it.  Both are acceptable;
+        # the contract is "no exception escapes for SolverCodeGuidance".
+        self.assertIsNotNone(guidance)
 
 
 class SolverCodeRecoveryTests(unittest.TestCase):

@@ -26,3 +26,8 @@ tiktoken
 nyuctf
 google-generativeai
 together
+# Knowledge / RAG: tiny local ONNX embedder over the NYUCTF development
+# split.  Default model is BAAI/bge-small-en-v1.5 (~67MB).  Set
+# AUTOPENTEST_RAG_DISABLED=1 to skip augmentation entirely.
+fastembed
+numpy

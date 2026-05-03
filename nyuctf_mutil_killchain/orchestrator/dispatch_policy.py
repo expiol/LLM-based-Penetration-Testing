@@ -6,6 +6,12 @@ Responsibilities (only these):
 - Ready-task batch selection (priority order, capped per task-type prefix).
 - Bounded batching / streak-suppression shortcuts that temporarily skip rows
   in the ready-set so stalled workers do not hog the orchestrator cycles.
+
+When a :class:`KnowledgeAugmenter` is wired in, the solver-streak threshold
+becomes RAG-aware: a strong top-1 retrieval score signals the solver is on
+the right track, so we tolerate more retries before giving up and forcing
+diversification.  Without the augmenter the policy degrades to the old
+fixed threshold.
 """
 
 from __future__ import annotations
@@ -15,6 +21,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
+from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
+from nyuctf_mutil_killchain.prompts.rag import HIGH_CONFIDENCE_SCORE
 from nyuctf_mutil_killchain.state import (
     FileKind,
     GlobalState,
@@ -75,20 +83,40 @@ class DispatchPolicy:
     # uniformly via :meth:`_streak_too_long`.
     _VALIDATION_FAILURE_STREAK_LIMIT = 5
     _SOLVER_FAILURE_STREAK_LIMIT = 4
+    # When the top-1 RAG hit's cosine score is at least
+    # ``HIGH_CONFIDENCE_SCORE``, the planner / solver are looking at a
+    # writeup that closely matches the live challenge — most "no
+    # progress" runs in that regime are bug-fix iterations on the right
+    # algorithm rather than the wrong direction, so we tolerate more
+    # retries before forcing diversification.  The bonus stacks on top
+    # of the base limit (4 + 4 = 8 retries before suppression).
+    _SOLVER_RAG_BONUS_STREAK = 4
 
-    # Failure fingerprints surfaced by ``WorkerReport.summary`` that should
-    # count toward the solver streak.  These are the dominant fingerprints in
-    # ``2013f-cry-stfu`` and ``2013f-web-historypeats`` runs — the LLM keeps
-    # producing scripts that exit 0 with empty stdout or exit 0 without any
-    # canonical flag candidate.
+    # Failure fingerprints surfaced by ``WorkerReport.summary`` / error that
+    # should count toward the solver streak.  Generic across challenges:
+    # exit-0 with no flag, exit-1 from a buggy script, or aborted-pre-execute
+    # cycles where the LLM client raised LLMClientError before the container
+    # ever ran (empty body, missing solver_code field, lint failure).
     _SOLVER_NO_PROGRESS_FINGERPRINTS = (
         "ran without recovering a flag",
         "exit code 1",
         "exit code -1",
+        "raised llmclienterror",
+        "failed in-process lint",
+        "field required",
+        "content is empty",
+        "invalid json",
+        "execution failed",
     )
 
-    def __init__(self, emit: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        emit: Callable[[str], None],
+        *,
+        augmenter: KnowledgeAugmenter | None = None,
+    ) -> None:
         self.emit = emit
+        self.augmenter = augmenter
 
     def validate_task_for_dispatch(self, task: Task, state: GlobalState) -> DispatchValidation:
         """Check that asset references in *task* point to known state.assets entries."""
@@ -283,30 +311,51 @@ class DispatchPolicy:
     def _solver_streak_too_long(self, state: GlobalState) -> bool:
         """Return True if the recent execution log shows the solver-agent spinning.
 
-        We treat a solver run as "no progress" when its summary contains one
-        of :attr:`_SOLVER_NO_PROGRESS_FINGERPRINTS`.  Once that streak hits
-        the configured limit we drop new ``solve.*`` dispatches for one
-        cycle so the planner has to propose a different task type (web
-        probe, computation analysis, etc.).
+        Treats a solver run as "no progress" when its summary/error matches
+        one of :attr:`_SOLVER_NO_PROGRESS_FINGERPRINTS` *or* the record is
+        flagged ``success=False``.  See :meth:`_streak_too_long` for the
+        cross-worker scan strategy.
+
+        When a high-confidence RAG hit is available
+        (top-1 cosine ≥ :data:`HIGH_CONFIDENCE_SCORE`), the limit is
+        relaxed by :attr:`_SOLVER_RAG_BONUS_STREAK` because most failures
+        in that regime are debugging cycles on the right algorithm rather
+        than the wrong direction.
         """
-        limit = self._SOLVER_FAILURE_STREAK_LIMIT
+        limit = self._effective_solver_streak_limit(state)
         if limit <= 0 or state.solved:
             return False
-        streak = 0
-        for record in reversed(state.execution_log):
-            if record.worker_name != "solver-agent":
-                return False
-            summary = (record.summary or "").lower()
-            if not any(fp in summary for fp in self._SOLVER_NO_PROGRESS_FINGERPRINTS):
-                return False
-            streak += 1
-            if streak >= limit:
-                self.emit(
-                    f"[dispatch] suppressing solve.* this cycle: "
-                    f"{streak} consecutive no-progress solver runs"
-                )
-                return True
+        streak = self._count_no_progress_streak(
+            state,
+            worker_name="solver-agent",
+            fingerprints=self._SOLVER_NO_PROGRESS_FINGERPRINTS,
+            require_fingerprint=True,
+        )
+        if streak >= limit:
+            self.emit(
+                f"[dispatch] suppressing solve.* this cycle: "
+                f"{streak} consecutive no-progress solver runs (limit={limit})"
+            )
+            return True
         return False
+
+    def _effective_solver_streak_limit(self, state: GlobalState) -> int:
+        """Solver streak limit, optionally relaxed when RAG signals a strong hit.
+
+        Returns the base limit when no augmenter is wired up or the top-1
+        score falls below :data:`HIGH_CONFIDENCE_SCORE`; adds
+        :attr:`_SOLVER_RAG_BONUS_STREAK` otherwise.
+        """
+        base = self._SOLVER_FAILURE_STREAK_LIMIT
+        if self.augmenter is None or not self.augmenter.enabled:
+            return base
+        try:
+            top_score = self.augmenter.top_score(state)
+        except Exception:
+            return base
+        if top_score >= HIGH_CONFIDENCE_SCORE:
+            return base + self._SOLVER_RAG_BONUS_STREAK
+        return base
 
     def _streak_too_long(
         self,
@@ -318,23 +367,55 @@ class DispatchPolicy:
     ) -> bool:
         """Generic anti-spin: ``limit`` consecutive failures from *worker_name*.
 
-        Walks the execution log backwards: every failed record from the
-        target worker contributes to the streak, the first record from a
-        *different* worker resets it (i.e. resets when other progress is
-        made).  Once the streak hits ``limit`` we emit a debug note and
-        return True so the caller can suppress that work for the cycle.
+        Records from *other* workers are skipped (not used to reset the
+        streak) — that way unrelated probes / source-reviews running on the
+        same cycle don't mask the fact that the target worker is stuck.  A
+        successful record from *worker_name* DOES reset the streak.
         """
         if limit <= 0 or state.solved:
             return False
+        streak = self._count_no_progress_streak(
+            state,
+            worker_name=worker_name,
+            fingerprints=(),
+            require_fingerprint=False,
+        )
+        if streak >= limit:
+            self.emit(
+                f"[dispatch] suppressing {kind} this cycle: "
+                f"{streak} consecutive {worker_name} records without progress"
+            )
+            return True
+        return False
+
+    @staticmethod
+    def _count_no_progress_streak(
+        state: GlobalState,
+        *,
+        worker_name: str,
+        fingerprints: tuple[str, ...],
+        require_fingerprint: bool,
+    ) -> int:
+        """Walk ``state.execution_log`` backwards, counting failed *worker_name* records.
+
+        Records from *other* workers are SKIPPED (do not reset the streak) so
+        unrelated workers running in the same cycle do not mask a stuck
+        worker.  A *successful* record from *worker_name* resets the streak.
+        When ``require_fingerprint`` is True, the record's
+        ``summary`` / ``error`` text must contain at least one of the
+        provided ``fingerprints`` for it to count.
+        """
         streak = 0
         for record in reversed(state.execution_log):
             if record.worker_name != worker_name:
-                return False
+                continue
+            if record.success:
+                return 0
+            if require_fingerprint:
+                blob = " ".join(
+                    part for part in (record.summary, record.error) if part
+                ).lower()
+                if not any(fp in blob for fp in fingerprints):
+                    continue
             streak += 1
-            if streak >= limit:
-                self.emit(
-                    f"[dispatch] suppressing {kind} this cycle: "
-                    f"{streak} consecutive {worker_name} records without progress"
-                )
-                return True
-        return False
+        return streak

@@ -7,6 +7,7 @@ chooses task types from the open vocabulary documented below.
 
 from __future__ import annotations
 
+from nyuctf_mutil_killchain.prompts.rag import PLANNER_RAG_GUIDE
 from nyuctf_mutil_killchain.prompts.types import lookup
 
 TASK_TYPE_VOCABULARY: list[str] = [
@@ -153,6 +154,8 @@ def build_planner_system_prompt(category: str | None) -> str:
         + _TASK_TYPE_REQUIREMENTS
         + "\n"
         + _DECISION_GUIDE
+        + "\n"
+        + PLANNER_RAG_GUIDE
         + "\nFull task-type vocabulary: "
         + ", ".join(TASK_TYPE_VOCABULARY)
     )

@@ -13,6 +13,7 @@ from typing import Any
 from nyuctf_mutil_killchain.prompts import categories  # noqa: F401
 from nyuctf_mutil_killchain.prompts.planner import build_planner_system_prompt
 from nyuctf_mutil_killchain.prompts.router import build_router_system_prompt
+from nyuctf_mutil_killchain.prompts.rag import SOLVER_RAG_GUIDE
 from nyuctf_mutil_killchain.prompts.solver import (
     SOLVER_SYSTEM_PROMPT_TEMPLATE,
     TECHNIQUE_HINTS,
@@ -114,4 +115,5 @@ def build_solver_system_prompt(
         category_strategy=prompts.exploit_strategy,
         timeout=timeout,
         technique_hints=technique_hints,
+        rag_guide=SOLVER_RAG_GUIDE,
     )

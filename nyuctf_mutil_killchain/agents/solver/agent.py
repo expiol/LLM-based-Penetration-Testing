@@ -23,7 +23,8 @@ from nyuctf_mutil_killchain.agents.solver.lint import (
 from nyuctf_mutil_killchain.agents.solver.parser import SolverResultParser
 from nyuctf_mutil_killchain.agents.solver.prompts import SolverPromptBuilder
 from nyuctf_mutil_killchain.agents.solver.retry import SolverRetryPolicy
-from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
+from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
+from nyuctf_mutil_killchain.llm import LLMClient
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.state.task_factory import build_flag_validation_tasks
 from nyuctf_mutil_killchain.tools import ExecutionPlane
@@ -38,11 +39,38 @@ _CATEGORY_TIMEOUT: dict[str, int] = {
     "misc": 120,
 }
 
+
+class _SolverLintExhausted(RuntimeError):
+    """Raised internally when the lint budget is exhausted.
+
+    Bubbles up to :meth:`SolverAgent.run`, which translates it into a soft
+    :class:`WorkerReport` failure (the orchestrator's streak detector then
+    folds it in like any other ``Solver execution failed`` record).
+    """
+
+    def __init__(
+        self,
+        *,
+        attempts: int,
+        fingerprint: str,
+        last_lint: SolverLintResult,
+    ) -> None:
+        super().__init__(
+            f"LLM solver_code failed in-process lint after {attempts} attempt(s): {fingerprint}"
+        )
+        self.attempts = attempts
+        self.fingerprint = fingerprint
+        self.last_lint = last_lint
+
 # How many extra LLM round-trips we'll spend regenerating solver code that
-# fails the cheap in-process lint (SyntaxError or missing-stdlib-import).
-# Two extra attempts is enough to absorb DeepSeek's typical "stray colon"
-# / "forgot ``import sys``" noise without spending the full retry budget.
-_LINT_RETRY_BUDGET = 2
+# fails the cheap in-process lint (SyntaxError, missing-stdlib-import, or
+# empty body).  Four extra attempts (5 total) absorbs the common case where
+# the upstream model returns one or two empty / truncated bodies in a row
+# before stabilising — observed with DeepSeek and the OpenAI-compatible
+# proxy on long ``onlythisprogram``-style prompts.  Each retry folds the
+# concrete fingerprint (offending line, missing import name) back into the
+# prompt, so the cost is bounded and informative.
+_LINT_RETRY_BUDGET = 4
 
 
 class SolverAgent(WorkerAgent):
@@ -66,9 +94,15 @@ class SolverAgent(WorkerAgent):
         executor: SolverCodeExecutor | None = None,
         parser: SolverResultParser | None = None,
         retry_policy: SolverRetryPolicy | None = None,
+        augmenter: KnowledgeAugmenter | None = None,
     ) -> None:
         super().__init__(llm_client=llm_client, execution_plane=execution_plane)
-        self.composer = composer or SolverEvidenceComposer()
+        # If the caller passes a custom composer we honour it as-is —
+        # tests in particular construct a bare ``SolverEvidenceComposer()``
+        # to exercise the no-RAG path.  Otherwise we hand the augmenter
+        # to a freshly built composer so the solver prompt receives the
+        # same writeup hits the planner sees.
+        self.composer = composer or SolverEvidenceComposer(augmenter=augmenter)
         self.prompt_builder = prompt_builder or SolverPromptBuilder()
         self._executor = executor
         self.parser = parser or SolverResultParser()
@@ -106,7 +140,33 @@ class SolverAgent(WorkerAgent):
         evidence = self.composer.compose(task, state)
         evidence.timeout_s = self._resolve_timeout(task, evidence.category)
 
-        guidance, lint_attempts = self._generate_lint_clean_solver_code(evidence)
+        try:
+            guidance, lint_attempts = self._generate_lint_clean_solver_code(evidence)
+        except _SolverLintExhausted as exc:
+            # Lint failures are NOT a fatal LLMClientError — the orchestrator
+            # should treat this exactly like a script that exits non-zero in
+            # the container: log it as a soft solver failure, count it toward
+            # the streak detector, and let the planner pick a different task
+            # type.  Aborting the whole run on N missed imports is wasteful
+            # when the next planner cycle can route to a non-solver worker.
+            return WorkerReport(
+                task_id=task.task_id,
+                worker_name=self.name,
+                success=False,
+                summary=(
+                    "Solver execution failed: "
+                    f"LLM solver_code failed in-process lint after {exc.attempts} "
+                    f"attempt(s) with fingerprint {exc.fingerprint!r}."
+                ),
+                error=str(exc),
+                retryable=False,
+                notes=[
+                    f"Last lint failure: {exc.fingerprint}",
+                    "Skipping solver dispatch this cycle; planner should "
+                    "propose a different task_type or fundamentally different "
+                    "solver approach next.",
+                ],
+            )
         worker_lint_notes: list[str] = []
         if lint_attempts > 0:
             worker_lint_notes.append(
@@ -222,9 +282,10 @@ class SolverAgent(WorkerAgent):
         :data:`_LINT_RETRY_BUDGET` times on lint failures, with the concrete
         :class:`SolverLintResult` fingerprint folded into the next user
         prompt as ``CRITICAL_LINT_FAILURE``.  When the budget is exhausted
-        we raise :class:`LLMClientError` so the orchestrator can spawn a
-        fresh retry task — this is cheaper than running broken code in
-        the container and waiting for the runtime ``SyntaxError``.
+        we raise :class:`_SolverLintExhausted` so :meth:`run` can convert it
+        into a soft ``WorkerReport(success=False)`` instead of an
+        ``LLMClientError`` that would tear down the whole orchestrator
+        cycle for one buggy script.
         """
         sys_p, base_user_p = self.prompt_builder.build(evidence)
         last_lint: SolverLintResult | None = None
@@ -239,11 +300,6 @@ class SolverAgent(WorkerAgent):
                 schema=SolverCodeGuidance,
                 temperature=0.3,
             )
-            if not guidance.solver_code.strip():
-                # Treat as the same class of failure: the LLM's structured
-                # output passed pydantic but produced an empty body.  Fall
-                # through to lint, which will report ``error_kind="empty"``.
-                pass
 
             lint = lint_solver_code(guidance.solver_code, guidance.solver_language)
             if lint.ok:
@@ -251,10 +307,10 @@ class SolverAgent(WorkerAgent):
             last_lint = lint
 
         assert last_lint is not None
-        raise LLMClientError(
-            "LLM solver_code failed in-process lint after "
-            f"{_LINT_RETRY_BUDGET + 1} attempt(s): {last_lint.fingerprint()}",
-            transient=True,
+        raise _SolverLintExhausted(
+            attempts=_LINT_RETRY_BUDGET + 1,
+            fingerprint=last_lint.fingerprint(),
+            last_lint=last_lint,
         )
 
     @staticmethod

@@ -13,6 +13,7 @@ stop_run.  The pipeline only:
 
 from __future__ import annotations
 
+from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
 from nyuctf_mutil_killchain.llm import LLMClient
 from nyuctf_mutil_killchain.orchestrator.planning.bootstrap import BootstrapSeeder
 from nyuctf_mutil_killchain.orchestrator.planning.deduper import TaskDeduper
@@ -36,9 +37,10 @@ class LLMPlanner(TaskPlanner):
         strategy: PlanStrategy | None = None,
         normalizer: TaskNormalizer | None = None,
         deduper: TaskDeduper | None = None,
+        augmenter: KnowledgeAugmenter | None = None,
     ) -> None:
         self.bootstrap = bootstrap or BootstrapSeeder()
-        self.strategy = strategy or PlanStrategy(llm_client)
+        self.strategy = strategy or PlanStrategy(llm_client, augmenter=augmenter)
         self.normalizer = normalizer or TaskNormalizer()
         self.deduper = deduper or TaskDeduper()
 

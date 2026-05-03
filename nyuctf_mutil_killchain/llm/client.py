@@ -666,14 +666,15 @@ class StaticLLMClient:
         try:
             return schema.model_validate(massaged)
         except ValidationError as exc:
-            # ``solver_code`` schemas have their own in-worker lint+retry loop
-            # that handles empty bodies via ``SolverLintResult(error_kind="empty")``.
-            # We surface ValidationError as transient so the worker keeps the
-            # cycle and re-prompts.
-            transient = "solver_code" in schema.model_fields
+            if "solver_code" in schema.model_fields:
+                # The solver agent's lint loop will surface this as
+                # ``error_kind="empty"`` and re-prompt with the concrete
+                # diagnostic — much cheaper than aborting the whole task.
+                return schema.model_validate(
+                    _empty_solver_code_payload(f"validation: {exc.error_count()} error(s)")
+                )
             raise LLMClientError(
                 f"LLM response failed {schema.__name__} validation: {exc}",
-                transient=transient,
             ) from exc
 
 
@@ -865,6 +866,29 @@ def _recover_solver_code_payload(raw_text: str, schema: type[BaseModel]) -> dict
     }
 
 
+def _empty_solver_code_payload(reason: str) -> dict[str, Any]:
+    """Synthesize a minimal SolverCodeGuidance-shaped payload with empty code.
+
+    Used when the LLM returns an unusable response (empty body, invalid JSON,
+    missing solver_code, schema-validation failure).  The solver agent's
+    in-process lint loop then treats this as ``error_kind="empty"`` and
+    re-prompts with the diagnostic in ``CRITICAL_LINT_FAILURE`` instead of
+    aborting the whole task with ``LLMClientError``.  Generalises across all
+    challenge categories — the solver loop owns retry policy, the LLM client
+    only owns transport.
+    """
+    return {
+        "summary": f"LLM response unusable: {reason}",
+        "solver_code": "",
+        "solver_language": "python",
+        "reasoning": (
+            "Upstream model returned an unusable response.  Lint loop will "
+            "re-prompt with the concrete failure fingerprint."
+        ),
+        "confidence": 0.0,
+    }
+
+
 class OpenAICompatibleLLMClient:
     """Structured-output client for OpenAI-compatible chat completion endpoints."""
 
@@ -988,6 +1012,16 @@ class OpenAICompatibleLLMClient:
             if raw_text.strip():
                 break
             if empty_attempt >= max_empty_retries:
+                if "solver_code" in schema.model_fields:
+                    log.warning(
+                        "LLM returned empty content for %s after %d attempt(s); "
+                        "synthesizing empty SolverCodeGuidance for lint loop.",
+                        schema.__name__,
+                        max_empty_retries + 1,
+                    )
+                    return schema.model_validate(
+                        _empty_solver_code_payload("upstream returned empty content")
+                    )
                 raise LLMClientError("LLM content is empty.", transient=True)
             log.warning(
                 "LLM returned empty content for %s (attempt %d/%d); retrying once.",
@@ -1000,29 +1034,41 @@ class OpenAICompatibleLLMClient:
             structured = json.loads(_coerce_json_text(raw_text))
         except (json.JSONDecodeError, LLMClientError) as exc:
             recovered = _recover_solver_code_payload(raw_text, schema)
-            if recovered is None:
+            if recovered is not None:
+                log.warning(
+                    "LLM returned non-JSON solver script for %s; wrapping raw text as solver_code.",
+                    schema.__name__,
+                )
+                structured = recovered
+            elif "solver_code" in schema.model_fields:
+                log.warning(
+                    "LLM produced non-JSON content for %s; falling back to empty "
+                    "SolverCodeGuidance so the lint loop can re-prompt.",
+                    schema.__name__,
+                )
+                return schema.model_validate(
+                    _empty_solver_code_payload(f"non-JSON body: {str(exc)[:120]}")
+                )
+            else:
                 if isinstance(exc, LLMClientError):
                     raise
                 raise LLMClientError(
                     f"LLM content is not valid JSON: {exc}", transient=True,
                 ) from exc
-            log.warning(
-                "LLM returned non-JSON solver script for %s; wrapping raw text as solver_code.",
-                schema.__name__,
-            )
-            structured = recovered
         massaged = _massage_payload_for_schema(structured, schema)
         try:
             return schema.model_validate(massaged)
         except ValidationError as exc:
-            # ``solver_code`` schemas have their own in-worker lint+retry loop
-            # that handles empty bodies via ``SolverLintResult(error_kind="empty")``.
-            # We surface ValidationError as transient so the worker keeps the
-            # cycle and re-prompts.
-            transient = "solver_code" in schema.model_fields
+            if "solver_code" in schema.model_fields:
+                log.warning(
+                    "LLM response failed %s validation; falling back to empty solver_code.",
+                    schema.__name__,
+                )
+                return schema.model_validate(
+                    _empty_solver_code_payload(f"validation: {exc.error_count()} error(s)")
+                )
             raise LLMClientError(
                 f"LLM response failed {schema.__name__} validation: {exc}",
-                transient=transient,
             ) from exc
 
 

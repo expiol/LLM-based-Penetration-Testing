@@ -9,35 +9,22 @@ from __future__ import annotations
 
 import json
 
+from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
 from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
 from nyuctf_mutil_killchain.orchestrator.planning.schemas import PlannerDecision
-from nyuctf_mutil_killchain.prompts import (
-    get_analysis_strategy,
-    get_exploit_strategy,
-    get_planner_system_prompt,
-    get_prompts,
-)
+from nyuctf_mutil_killchain.prompts import get_planner_system_prompt, get_prompts
 from nyuctf_mutil_killchain.state import GlobalState
 
 
 class PlanStrategy:
-    """Submit the current state to the LLM and return a raw PlannerDecision."""
+    """Submit the current state to the LLM and return a raw PlannerDecision.
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        if llm_client is None:
-            raise LLMClientError("PlanStrategy requires an LLM client.")
-        self.llm_client = llm_client
-
-    def propose(self, state: GlobalState) -> PlannerDecision:
-        return self.llm_client.generate_json(
-            system_prompt=self._system_prompt(state),
-            user_prompt=self._user_prompt(state),
-            schema=PlannerDecision,
-        )
-
-    def _system_prompt(self, state: GlobalState) -> str:
-        category = self._category(state)
-        return get_planner_system_prompt(category)
+    The strategy receives a :class:`KnowledgeAugmenter` and asks it for
+    planner-shaped writeup hits; passing
+    ``KnowledgeAugmenter(retriever=None)`` (or omitting the argument and
+    letting :meth:`KnowledgeAugmenter.from_default` decide) cleanly
+    disables RAG without leaving sentinel branches in this class.
+    """
 
     # Tunable bounds for the planner prompt.  The previous implementation
     # serialized every finding and every task ever queued, which on long runs
@@ -48,6 +35,27 @@ class PlanStrategy:
     _MAX_FINDING_DESCRIPTION_CHARS = 280
     _MAX_FINDING_METADATA_CHARS = 240
     _MAX_TASK_HISTORY = 60
+
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        *,
+        augmenter: KnowledgeAugmenter | None = None,
+    ) -> None:
+        if llm_client is None:
+            raise LLMClientError("PlanStrategy requires an LLM client.")
+        self.llm_client = llm_client
+        self.augmenter = augmenter or KnowledgeAugmenter.from_default()
+
+    def propose(self, state: GlobalState) -> PlannerDecision:
+        return self.llm_client.generate_json(
+            system_prompt=self._system_prompt(state),
+            user_prompt=self._user_prompt(state),
+            schema=PlannerDecision,
+        )
+
+    def _system_prompt(self, state: GlobalState) -> str:
+        return get_planner_system_prompt(self._category(state))
 
     def _user_prompt(self, state: GlobalState) -> str:
         category = self._category(state)
@@ -93,6 +101,9 @@ class PlanStrategy:
             "task_history": self._serialize_task_history(state),
             "recent_execution_log": self._collect_execution_log(state),
         }
+        related_writeups = self.augmenter.for_planner(state)
+        if related_writeups:
+            snapshot["related_writeups"] = related_writeups
         return json.dumps(snapshot, ensure_ascii=True, indent=2)
 
     def _serialize_findings(self, state: GlobalState) -> list[dict[str, object]]:

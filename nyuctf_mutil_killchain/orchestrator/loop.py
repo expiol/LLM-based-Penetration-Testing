@@ -6,6 +6,7 @@ import traceback
 from collections.abc import Callable, Iterable
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
+from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
 from nyuctf_mutil_killchain.llm import LLMClientError
 from nyuctf_mutil_killchain.orchestrator.dispatch_policy import DispatchPolicy
 from nyuctf_mutil_killchain.orchestrator.planning import BootstrapSeeder, TaskPlanner
@@ -46,13 +47,14 @@ class Orchestrator:
         router: WorkerRouter | None = None,
         emit: Callable[[str], None] = print,
         checkpoint_callback: Callable[[GlobalState], None] | None = None,
+        augmenter: KnowledgeAugmenter | None = None,
     ) -> None:
         self.state = state
         self.workers = list(workers)
         self.planner = planner or BootstrapSeeder()
         self.router = router
         self.emit = emit
-        self.dispatch_policy = DispatchPolicy(emit=self.emit)
+        self.dispatch_policy = DispatchPolicy(emit=self.emit, augmenter=augmenter)
         self.checkpoint_callback = checkpoint_callback
         self._consecutive_planner_errors = 0
         self._consecutive_empty_queues = 0
