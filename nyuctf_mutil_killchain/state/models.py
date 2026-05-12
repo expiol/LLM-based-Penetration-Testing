@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from nyuctf_mutil_killchain.compat import StrEnum
 from typing import Any
@@ -13,6 +14,50 @@ from pydantic import BaseModel, ConfigDict, Field
 def utc_now() -> datetime:
     """Return a timezone-aware UTC timestamp."""
     return datetime.now(timezone.utc)
+
+
+_PY_ERROR_RE = re.compile(r"^([A-Z]\w+(?:Error|Exception)):\s*(.+)$")
+
+
+def smart_truncate_code(code: str, *, budget: int = 6000) -> str:
+    """Return *code* unchanged when short; otherwise keep head + tail.
+
+    Most solver bugs are in either (a) the imports/constants at the top or
+    (b) the ``main()`` body at the bottom that parses the challenge file.
+    Naive ``code[:budget]`` chops off the bottom, which is exactly where
+    header-parsing / output-formatting logic lives.  This helper keeps
+    ~55% of the budget at the top and ~45% at the bottom with a marker
+    between, so the LLM can always see how its previous attempt opened
+    and closed the file.
+    """
+    if len(code) <= budget:
+        return code
+    head_budget = int(budget * 0.55)
+    tail_budget = budget - head_budget - 40  # 40 reserved for the marker
+    omitted = len(code) - head_budget - tail_budget
+    marker = f"\n\n# ... [omitted {omitted} chars from middle] ...\n\n"
+    return code[:head_budget] + marker + code[-tail_budget:]
+
+
+def _derive_error_fingerprint(stderr: str, error: str | None) -> str:
+    """Return a stable, dedupable fingerprint for a failed worker run.
+
+    Prefers the last Python-style ``XxxError: msg`` line in *stderr*; falls
+    back to the last non-empty stderr line (trimmed) or *error*. Used by
+    :meth:`GlobalState._record_task_attempt` so the cross-chain memory has
+    a meaningful key for dedup.
+    """
+    if stderr:
+        lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+        for line in reversed(lines):
+            m = _PY_ERROR_RE.match(line)
+            if m:
+                return f"{m.group(1)}: {m.group(2)}"[:200]
+        if lines:
+            return lines[-1][:200]
+    if error:
+        return str(error).strip().splitlines()[0][:200] if str(error).strip() else ""
+    return ""
 
 
 def _task_id() -> str:
@@ -223,7 +268,7 @@ _TASK_INPUT_LIST_KEYS: frozenset[str] = frozenset({
     "source_files", "binary_files", "archive_files", "database_files",
     "pcap_files", "repo_paths", "ports", "paths", "forms",
     "credential_ids", "focus_asset_ids", "seed_terms", "previous_attempts",
-    "challenge_files",
+    "challenge_files", "must_avoid", "required_checks",
 })
 
 
@@ -457,6 +502,15 @@ class WorkerReport(BaseModel):
 #: from growing unbounded on long runs.
 TASK_TYPE_MEMORY_LIMIT = 8
 
+#: FIFO caps applied at write time inside :meth:`GlobalState.apply_worker_report`
+#: so a long batch run cannot bloat ``state.json`` past hundreds of MB.  Caps
+#: are deliberately generous (planner serialization trims further when feeding
+#: LLM prompts); they only bound disk/RAM growth, not what the LLM sees.
+EXECUTION_LOG_LIMIT = 500
+NOTES_LIMIT = 500
+ORCHESTRATION_NOTES_LIMIT = 500
+EVIDENCE_DICT_LIMIT = 800
+
 
 class TaskAttemptMemory(BaseModel):
     """Snapshot of a single failed task attempt, indexed by task_type.
@@ -498,7 +552,16 @@ class GlobalState(BaseModel):
     task_type_memory: dict[str, list[TaskAttemptMemory]] = Field(
         default_factory=dict
     )
+    #: Worker-emitted notes (free-form context lines from
+    #: :attr:`WorkerReport.notes`).  Read by sibling workers via
+    #: ``recent_notes`` slices to share lightweight worker-to-worker hints.
     notes: list[str] = Field(default_factory=list)
+    #: Orchestrator / planner / dispatch / recovery messages (queue empty
+    #: hints, LLM error notes, dispatch refusals, …).  Persisted to
+    #: ``state.json`` and ``report.md`` but **not** fed back into worker
+    #: prompts, so internal chatter does not contaminate downstream LLM
+    #: reasoning.
+    orchestration_notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     solved: bool = False
     validated_flag: str | None = None
@@ -508,6 +571,29 @@ class GlobalState(BaseModel):
 
     def touch(self) -> None:
         self.updated_at = utc_now()
+        self._enforce_caps()
+
+    def _enforce_caps(self) -> None:
+        """Trim unbounded collections to their FIFO write-end caps.
+
+        Runs on every state write so disk/RAM growth stays bounded even when
+        external callers (orchestrator loop, recovery policy, dispatch policy)
+        append to ``notes`` / ``execution_log`` outside ``apply_worker_report``.
+        """
+        if len(self.execution_log) > EXECUTION_LOG_LIMIT:
+            del self.execution_log[: len(self.execution_log) - EXECUTION_LOG_LIMIT]
+        if len(self.notes) > NOTES_LIMIT:
+            del self.notes[: len(self.notes) - NOTES_LIMIT]
+        if len(self.orchestration_notes) > ORCHESTRATION_NOTES_LIMIT:
+            del self.orchestration_notes[
+                : len(self.orchestration_notes) - ORCHESTRATION_NOTES_LIMIT
+            ]
+        if len(self.evidence) > EVIDENCE_DICT_LIMIT:
+            # Insertion-order eviction; in Python 3.7+ dicts preserve order so
+            # this is roughly oldest-first by creation.
+            excess = len(self.evidence) - EVIDENCE_DICT_LIMIT
+            for evidence_id in list(self.evidence.keys())[:excess]:
+                del self.evidence[evidence_id]
 
     def queue_task(self, task: Task) -> Task:
         queued = self.task_chain.add_task(task)
@@ -596,6 +682,93 @@ class GlobalState(BaseModel):
         self.notes.extend(report.notes)
         self.touch()
 
+    def recent_attempt_memory_for(
+        self,
+        task_type: str,
+        *,
+        limit: int = 5,
+    ) -> list[TaskAttemptMemory]:
+        """Return up to *limit* deduped :class:`TaskAttemptMemory` entries.
+
+        Walks ``task_type_memory[task_type]`` newest→oldest, keeps **one
+        entry per non-empty ``error_fingerprint``** (so long-tail failure
+        modes are not pushed out of a small window by recent retries),
+        then returns oldest→newest.  Empty-fingerprint entries are always
+        kept since they convey distinct information.
+
+        Used by every consumer of cross-chain memory (solver evidence,
+        recovery policy, …) so dedup semantics stay consistent.
+        """
+        memory = self.task_type_memory.get(task_type) or []
+        seen_fp: set[str] = set()
+        picked: list[TaskAttemptMemory] = []
+        for entry in reversed(memory):
+            fp = (entry.error_fingerprint or "").strip()
+            if fp and fp in seen_fp:
+                continue
+            if fp:
+                seen_fp.add(fp)
+            picked.append(entry)
+            if len(picked) >= max(1, limit):
+                break
+        picked.reverse()
+        return picked
+
+    def fingerprint_counts_for(
+        self,
+        task_type: str,
+    ) -> dict[str, int]:
+        """Return ``{fingerprint: occurrences}`` across cross-chain memory.
+
+        Critical for downstream prompts: without this, dedup hides the
+        fact that the LLM has produced *the same garbled output N times*
+        — and the prompt builder cannot warn the LLM to switch strategy.
+        Empty fingerprints are skipped.
+        """
+        counts: dict[str, int] = {}
+        for entry in self.task_type_memory.get(task_type) or []:
+            fp = (entry.error_fingerprint or "").strip()
+            if not fp:
+                continue
+            counts[fp] = counts.get(fp, 0) + 1
+        return counts
+
+    def recent_attempts_for(
+        self,
+        task_type: str,
+        *,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Return deduped failed-attempt snapshots shaped like ``previous_attempts``.
+
+        See :meth:`recent_attempt_memory_for` for the dedup contract; this
+        helper just renders each picked entry as the dict shape that solver
+        evidence + recovery payloads consume.  Each entry also carries an
+        ``occurrences`` count so consumers can warn the LLM when it has
+        re-produced the same garbled output multiple times.
+        """
+        counts = self.fingerprint_counts_for(task_type)
+        attempts: list[dict[str, Any]] = []
+        for entry in self.recent_attempt_memory_for(task_type, limit=limit):
+            fp = (entry.error_fingerprint or "").strip()
+            attempts.append(
+                {
+                    "attempt": 0,
+                    "task_id": entry.task_id,
+                    "title": entry.title,
+                    "worker_name": entry.worker_name,
+                    "summary": entry.summary,
+                    "error": entry.error,
+                    "stdout": entry.stdout_preview,
+                    "stderr": entry.stderr_preview,
+                    "solver_code_preview": entry.solver_code_preview,
+                    "error_fingerprint": entry.error_fingerprint,
+                    "occurrences": counts.get(fp, 1),
+                    "source": "cross_chain_memory",
+                }
+            )
+        return attempts
+
     def _record_task_attempt(self, task: Task, report: WorkerReport) -> None:
         """Append a :class:`TaskAttemptMemory` entry for failed *report*.
 
@@ -606,13 +779,23 @@ class GlobalState(BaseModel):
         ctx = report.output_context or {}
         stdout_preview = str(ctx.get("stdout", ""))[:1500]
         stderr_preview = str(ctx.get("stderr", ""))[:1500]
-        solver_code_preview = str(ctx.get("solver_code_preview", ""))[:2000]
-        prev_attempts = task.input_context.get("previous_attempts") or []
-        last_fingerprint = ""
-        if prev_attempts and isinstance(prev_attempts, list):
-            last = prev_attempts[-1]
-            if isinstance(last, dict):
-                last_fingerprint = str(last.get("error_fingerprint", ""))
+        # Smart-truncate so we don't lose the (often-critical) tail of the
+        # script (header-parsing / main() body) when it overflows the
+        # budget.  Solver scripts >6k chars are rare in practice.
+        solver_code_preview = smart_truncate_code(
+            str(ctx.get("solver_code_preview", "")), budget=6000,
+        )
+
+        # Prefer a worker-classified fingerprint when present: solver-agent
+        # and recovery emit semantic fingerprints (``timeout after 60s``,
+        # ``near-miss flags …``) via ``output_context["error_fingerprint"]``
+        # that beat what regex over stderr can produce.  Fall back to the
+        # generic stderr/error derivation only when the worker did not
+        # classify the failure itself.
+        reported_fp = str(ctx.get("error_fingerprint") or "").strip()[:200]
+        fingerprint = reported_fp or _derive_error_fingerprint(
+            stderr_preview, report.error
+        )
 
         snapshot = TaskAttemptMemory(
             task_id=task.task_id,
@@ -623,7 +806,7 @@ class GlobalState(BaseModel):
             stdout_preview=stdout_preview,
             stderr_preview=stderr_preview,
             solver_code_preview=solver_code_preview,
-            error_fingerprint=last_fingerprint,
+            error_fingerprint=fingerprint,
         )
         memory = self.task_type_memory.setdefault(task.task_type, [])
         memory.append(snapshot)

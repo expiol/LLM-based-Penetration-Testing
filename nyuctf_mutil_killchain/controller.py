@@ -42,6 +42,7 @@ from nyuctf_mutil_killchain.orchestrator import (
     LLMPlanner,
     LLMWorkerRouter,
     Orchestrator,
+    RecoveryPolicy,
 )
 from nyuctf_mutil_killchain.reporting import render_markdown_report
 from nyuctf_mutil_killchain.state import GlobalState
@@ -172,7 +173,7 @@ def build_runtime(
     if llm_client is None:
         llm_client = build_llm_client_from_env()
 
-    # One augmenter per run, shared by planner + solver + dispatch policy.
+    # One augmenter per run, shared by planner, solver, and recovery policy.
     # ``from_default`` resolves to the module-level retriever singleton
     # (or ``None`` when fastembed / the dataset isn't available), so the
     # caller never has to know whether RAG is wired up.
@@ -180,6 +181,8 @@ def build_runtime(
 
     planner = LLMPlanner(llm_client, augmenter=augmenter)
     router = LLMWorkerRouter(llm_client)
+    emit = recorder.emit if recorder is not None else print
+    recovery_policy = RecoveryPolicy(augmenter=augmenter, emit=emit)
 
     execution_plane = execution_plane or build_execution_plane()
     state = GlobalState(
@@ -226,9 +229,9 @@ def build_runtime(
         ],
         planner=planner,
         router=router,
-        emit=(recorder.emit if recorder is not None else print),
+        emit=emit,
         checkpoint_callback=checkpoint_callback,
-        augmenter=augmenter,
+        recovery_policy=recovery_policy,
     )
     return state, orchestrator, llm_client
 
@@ -248,6 +251,8 @@ def build_summary(state: GlobalState, token_ledger: TokenLedger | None = None) -
         "credentials": len(state.credentials),
         "evidence": len(state.evidence),
         "executions": len(state.execution_log),
+        "worker_notes": len(state.notes),
+        "orchestration_notes": len(state.orchestration_notes),
     }
     if token_ledger is not None:
         summary["token_usage"] = token_ledger.to_dict()

@@ -21,6 +21,8 @@ _EXPECTED_TASK_TYPES = {
     # static analysis (one worker per task)
     "artifact.triage",
     "artifact.binary_triage",
+    "artifact.binary_disassembly",
+    "artifact.binary_run",
     "artifact.archive_triage",
     "artifact.sqlite_review",
     "artifact.pcap_review",
@@ -82,13 +84,16 @@ class GroupsRegistryTests(unittest.TestCase):
             )
 
     def test_static_analysis_workers_are_focused(self):
-        # Each static analysis worker handles 1-2 task types (its primary +
-        # optionally artifact.deep_review when analysis_kind matches).
+        # Each static analysis worker handles 1-4 task types: its primary,
+        # optionally ``artifact.deep_review`` when ``analysis_kind`` matches,
+        # and (binary worker only) two extras (``binary_disassembly`` for
+        # deep-RE and ``binary_run`` for sandboxed execution).  Tightly
+        # bounded so workers stay focused.
         for cls in STATIC_ANALYSIS_WORKERS:
             count = len(_supported(cls))
             self.assertIn(
-                count, (1, 2),
-                f"{cls.__name__} should claim 1-2 task types (got {count})",
+                count, (1, 2, 3, 4),
+                f"{cls.__name__} should claim 1-4 task types (got {count})",
             )
 
     def test_artifact_deep_review_has_multiple_candidates(self):

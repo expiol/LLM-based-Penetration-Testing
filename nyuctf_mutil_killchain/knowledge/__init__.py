@@ -20,17 +20,23 @@ from __future__ import annotations
 from nyuctf_mutil_killchain.knowledge.augmenter import (
     MAX_HITS,
     KnowledgeAugmenter,
+    RagContext,
+    RagHit,
 )
 from nyuctf_mutil_killchain.knowledge.retriever import (
     KnowledgeRetriever,
     RetrievalHit,
     get_retriever,
+    reset_retriever_cache,
 )
 
 __all__ = [
     "MAX_HITS",
     "KnowledgeAugmenter",
     "KnowledgeRetriever",
+    "RagContext",
+    "RagHit",
     "RetrievalHit",
     "get_retriever",
+    "reset_retriever_cache",
 ]

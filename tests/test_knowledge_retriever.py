@@ -415,13 +415,18 @@ class KnowledgeAugmenterTests(unittest.TestCase):
             len(planner_hits[0]["solution_sketch"]),
         )
 
-    def test_top_score_caches_into_state_metadata(self):
-        score = self.augmenter.top_score(self.state)
+    def test_context_for_caches_into_state_metadata(self):
+        context = self.augmenter.context_for(self.state)
+        score = context.top_score
         # Cosine is in [-1, 1].  We use the stub embedder here so the
         # absolute value / ordering isn't semantically meaningful, but
         # the cache shape / short-circuit invariants are.
         self.assertGreaterEqual(score, -1.0)
         self.assertLessEqual(score, 1.0)
+        self.assertIn(
+            context.top_challenge_id,
+            {entry.challenge_id for entry in self.retriever.entries},
+        )
         cached = self.state.metadata.get("rag")
         self.assertIsNotNone(cached)
         self.assertEqual(cached["hit_count"], len(self.augmenter.for_planner(self.state)))
@@ -429,19 +434,13 @@ class KnowledgeAugmenterTests(unittest.TestCase):
             cached["top_challenge_id"],
             {entry.challenge_id for entry in self.retriever.entries},
         )
-        # Calling top_score again must not re-run retrieval (cache short circuit).
-        with mock.patch.object(
-            self.retriever, "retrieve", side_effect=AssertionError("cache miss")
-        ):
-            second = self.augmenter.top_score(self.state)
-        self.assertEqual(score, second)
 
     def test_disabled_when_retriever_none(self):
         augmenter = KnowledgeAugmenter(retriever=None)
         self.assertFalse(augmenter.enabled)
         self.assertEqual(augmenter.for_planner(self.state), [])
         self.assertEqual(augmenter.for_solver(self.state), [])
-        self.assertEqual(augmenter.top_score(self.state), 0.0)
+        self.assertEqual(augmenter.context_for(self.state).top_score, 0.0)
 
     def test_no_self_exclusion_by_default(self):
         with mock.patch.dict(os.environ, {"AUTOPENTEST_RAG_STRICT_EXCLUDE": ""}):

@@ -12,8 +12,8 @@ Centralizing the logic here keeps a few rules consistent across callers:
 * exactly one place applies the self-exclusion / strict-event-exclusion
   policy controlled by ``AUTOPENTEST_RAG_STRICT_EXCLUDE``;
 * the per-state top-1 score is cached on ``state.metadata["rag"]`` so
-  downstream consumers (dispatch policy in particular) can read it
-  cheaply without re-running the retriever every cycle.
+  downstream consumers can inspect the last retrieval signal without
+  knowing retriever internals.
 
 Callers that already hold a :class:`KnowledgeRetriever` (tests, unusual
 embedding setups) construct the augmenter with that retriever directly.
@@ -25,6 +25,7 @@ or the dataset is missing — in that case ``augment`` simply returns
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from nyuctf_mutil_killchain.knowledge.retriever import (
@@ -58,6 +59,87 @@ MAX_HITS = 3
 # Snapshot key on ``state.metadata`` where the augmenter caches its last
 # call.  See :meth:`_cache_run_result`.
 _STATE_RAG_KEY = "rag"
+
+
+@dataclass(frozen=True)
+class RagHit:
+    """Typed writeup hit used by planner, solver, and recovery logic."""
+
+    challenge_id: str
+    name: str
+    category: str
+    year: str
+    event: str
+    description: str
+    files: list[str]
+    solution_sketch: str
+    score: float
+
+    @classmethod
+    def from_retrieval(cls, hit: RetrievalHit) -> "RagHit":
+        return cls(
+            challenge_id=hit.challenge_id,
+            name=hit.name,
+            category=hit.category,
+            year=hit.year,
+            event=hit.event,
+            description=hit.description,
+            files=list(hit.files),
+            solution_sketch=hit.solution_sketch,
+            score=float(hit.score),
+        )
+
+    def to_prompt_dict(
+        self,
+        *,
+        max_solution_chars: int,
+        max_description_chars: int,
+        max_files: int,
+    ) -> dict[str, Any]:
+        return {
+            "challenge_id": self.challenge_id,
+            "name": self.name,
+            "category": self.category,
+            "year": self.year,
+            "event": self.event,
+            "description": self.description[:max_description_chars],
+            "files": self.files[:max_files],
+            "solution_sketch": self.solution_sketch[:max_solution_chars],
+            "score": round(float(self.score), 4),
+        }
+
+
+@dataclass(frozen=True)
+class RagContext:
+    """One retrieval snapshot for the current run."""
+
+    enabled: bool
+    top_score: float = 0.0
+    top_challenge_id: str | None = None
+    exact_self_hit: bool = False
+    hits: list[RagHit] | None = None
+
+    @property
+    def high_confidence(self) -> bool:
+        from nyuctf_mutil_killchain.prompts.rag import HIGH_CONFIDENCE_SCORE
+
+        return self.top_score >= HIGH_CONFIDENCE_SCORE
+
+    def prompt_hits(
+        self,
+        *,
+        max_solution_chars: int,
+        max_description_chars: int,
+        max_files: int,
+    ) -> list[dict[str, Any]]:
+        return [
+            hit.to_prompt_dict(
+                max_solution_chars=max_solution_chars,
+                max_description_chars=max_description_chars,
+                max_files=max_files,
+            )
+            for hit in list(self.hits or [])
+        ]
 
 
 class KnowledgeAugmenter:
@@ -109,8 +191,7 @@ class KnowledgeAugmenter:
 
     def for_planner(self, state: GlobalState) -> list[dict[str, Any]]:
         """Render hits with the planner-side per-field budget."""
-        return self._augment(
-            state,
+        return self.context_for(state).prompt_hits(
             max_solution_chars=PLANNER_SOLUTION_CHARS,
             max_description_chars=PLANNER_DESCRIPTION_CHARS,
             max_files=PLANNER_FILES,
@@ -124,65 +205,31 @@ class KnowledgeAugmenter:
         solver actually needs the algorithm details rather than a
         category-only summary.
         """
-        return self._augment(
-            state,
+        return self.context_for(state).prompt_hits(
             max_solution_chars=SOLVER_SOLUTION_CHARS,
             max_description_chars=SOLVER_DESCRIPTION_CHARS,
             max_files=SOLVER_FILES,
         )
 
-    def top_score(self, state: GlobalState) -> float:
-        """Return the cosine of the top-1 hit, ``0.0`` when no hit exists.
+    def context_for(self, state: GlobalState) -> RagContext:
+        """Return typed retrieval context for the run.
 
-        Used by the dispatch policy to relax solver-streak suppression
-        when RAG strongly identifies a similar past challenge — a 4-streak
-        of buggy scripts is much less likely to be a wrong-direction
-        signal when the planner is being shown the *exact* writeup at
-        score ≥ 0.6.
-
-        Reads from the :data:`_STATE_RAG_KEY` cache when available; falls
-        back to a fresh retrieval otherwise.  We deliberately do NOT
-        invalidate the cache mid-run: the retrieval depends only on the
-        immutable ``state.metadata["challenge"]``, so once we have it
-        the score is good for the whole run.
+        This is the single RAG integration point. Planner and solver still
+        render prompt-shaped dicts, while recovery policy consumes the same
+        typed context to decide whether a failed solver streak deserves a
+        calibrated recovery task.
         """
         if not self.enabled:
-            return 0.0
-        cached = self._cached_top_score(state)
-        if cached is not None:
-            return cached
-        # Force one retrieval; this also populates the cache.
-        self._augment(
-            state,
-            max_solution_chars=PLANNER_SOLUTION_CHARS,
-            max_description_chars=PLANNER_DESCRIPTION_CHARS,
-            max_files=PLANNER_FILES,
-        )
-        return self._cached_top_score(state) or 0.0
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _augment(
-        self,
-        state: GlobalState,
-        *,
-        max_solution_chars: int,
-        max_description_chars: int,
-        max_files: int,
-    ) -> list[dict[str, Any]]:
-        if not self.enabled:
-            return []
+            return RagContext(enabled=False, hits=[])
         category = self._infer_category(state)
         query = self._build_query(state, category)
         if not query:
-            return []
+            return RagContext(enabled=True, hits=[])
         excluded_ids, excluded_events = self._exclusion_keys(state)
 
         try:
-            assert self.retriever is not None  # narrowed by self.enabled
-            hits: list[RetrievalHit] = self.retriever.retrieve(
+            assert self.retriever is not None
+            raw_hits = self.retriever.retrieve(
                 query,
                 category=category,
                 top_k=self.top_k,
@@ -191,19 +238,25 @@ class KnowledgeAugmenter:
                 require_solution_sketch=True,
             )
         except Exception:
-            # Retrieval failure is never fatal: degrade to "no augmentation".
-            return []
+            return RagContext(enabled=True, hits=[])
 
-        rendered = [
-            hit.to_prompt_dict(
-                max_solution_chars=max_solution_chars,
-                max_description_chars=max_description_chars,
-                max_files=max_files,
-            )
-            for hit in hits
-        ]
-        self._cache_run_result(state, hits)
-        return rendered
+        hits = [RagHit.from_retrieval(hit) for hit in raw_hits]
+        self._cache_run_result(state, raw_hits)
+        canonical_id = str(
+            (state.metadata.get("challenge", {}) or {}).get("canonical_name") or ""
+        ).strip()
+        top_hit = hits[0] if hits else None
+        return RagContext(
+            enabled=True,
+            top_score=float(top_hit.score) if top_hit else 0.0,
+            top_challenge_id=top_hit.challenge_id if top_hit else None,
+            exact_self_hit=bool(top_hit and canonical_id and top_hit.challenge_id == canonical_id),
+            hits=hits,
+        )
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _infer_category(state: GlobalState) -> str:
@@ -287,14 +340,3 @@ class KnowledgeAugmenter:
             "hit_count": len(hits),
         }
         state.metadata[_STATE_RAG_KEY] = cache
-
-    @staticmethod
-    def _cached_top_score(state: GlobalState) -> float | None:
-        cache = state.metadata.get(_STATE_RAG_KEY)
-        if not isinstance(cache, dict):
-            return None
-        value = cache.get("top_score")
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None

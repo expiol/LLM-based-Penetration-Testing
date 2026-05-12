@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
+from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter, RagContext
 from nyuctf_mutil_killchain.state import FileKind, GlobalState, Task, classify
 
 
@@ -35,9 +35,13 @@ class SolverEvidence:
     credentials: list[dict[str, Any]] = field(default_factory=list)
     key_findings: list[dict[str, Any]] = field(default_factory=list)
     file_contents: list[dict[str, str]] = field(default_factory=list)
+    binary_disassembly: dict[str, Any] = field(default_factory=dict)
+    binary_runs: dict[str, Any] = field(default_factory=dict)
+    live_http_observations: list[dict[str, Any]] = field(default_factory=list)
     previous_attempts: list[dict[str, Any]] = field(default_factory=list)
     solver_hints: list[str] = field(default_factory=list)
     related_writeups: list[dict[str, Any]] = field(default_factory=list)
+    solver_contract: dict[str, Any] = field(default_factory=dict)
 
     @property
     def category(self) -> str:
@@ -78,12 +82,20 @@ class SolverEvidence:
             snapshot["key_findings"] = self.key_findings
         if self.file_contents:
             snapshot["file_contents"] = self.file_contents
+        if self.binary_disassembly:
+            snapshot["binary_disassembly"] = self.binary_disassembly
+        if self.binary_runs:
+            snapshot["binary_runs"] = self.binary_runs
+        if self.live_http_observations:
+            snapshot["live_http_observations"] = self.live_http_observations
         if self.previous_attempts:
             snapshot["previous_solver_attempts"] = self.previous_attempts
         if self.solver_hints:
             snapshot["solver_hints"] = self.solver_hints
         if self.related_writeups:
             snapshot["related_writeups"] = self.related_writeups
+        if self.solver_contract:
+            snapshot["SOLVER_CONTRACT"] = self.solver_contract
         return snapshot
 
 
@@ -127,57 +139,97 @@ class SolverEvidenceComposer:
         evidence.credentials = self._collect_credentials(state)
         evidence.key_findings = self._collect_key_findings(state)
         evidence.file_contents = self._collect_file_contents(state)
+        evidence.binary_disassembly = self._collect_binary_disassembly(state)
+        evidence.binary_runs = self._collect_binary_runs(state)
+        evidence.live_http_observations = self._collect_live_http_observations(state)
+        rag_context = (
+            self.augmenter.context_for(state) if self.augmenter is not None else None
+        )
         evidence.related_writeups = (
-            self.augmenter.for_solver(state) if self.augmenter is not None else []
+            rag_context.prompt_hits(
+                max_solution_chars=2400,
+                max_description_chars=320,
+                max_files=8,
+            )
+            if rag_context is not None
+            else []
         )
 
         in_chain_attempts = list(task.input_context.get("previous_attempts") or [])
         if in_chain_attempts:
             # Solver-retry path: the in-chain context already carries the
             # last attempts (with structured fingerprint + diagnosis).
-            evidence.previous_attempts = in_chain_attempts[-3:]
+            evidence.previous_attempts = in_chain_attempts[-5:]
         else:
-            # Planner-proposed path: this is a *fresh* solver chain.  Pull
-            # the last failed attempts of the same task_type from the
-            # cross-task memory so the LLM doesn't repeat the previous
-            # chain's broad approach verbatim (the historypeats failure
-            # mode: 22 unique solver titles, none of which inherited the
-            # previous chain's stdout/stderr).
+            # Planner-proposed path: this is a *fresh* solver chain. Pull the
+            # last failed attempts of the same task_type from the cross-task
+            # memory so the LLM doesn't repeat the previous chain's broad
+            # approach verbatim. Dedup by error_fingerprint so long-tail
+            # failure modes (e.g. the same "Could not open output file"
+            # stderr across cycles 7 and 11) are preserved even when there
+            # are >5 raw failures.
             evidence.previous_attempts = self._memory_to_previous_attempts(
                 state, task.task_type
             )
+        evidence.solver_contract = self._build_solver_contract(
+            task=task,
+            evidence=evidence,
+            rag_context=rag_context,
+        )
         evidence.solver_hints = self._build_solver_hints(evidence)
         return evidence
+
+    @staticmethod
+    def _build_solver_contract(
+        *,
+        task: Task,
+        evidence: SolverEvidence,
+        rag_context: RagContext | None,
+    ) -> dict[str, Any]:
+        """Turn task/RAG state into hard requirements for the solver prompt."""
+
+        ctx = task.input_context
+        contract: dict[str, Any] = {
+            "solver_mode": str(ctx.get("solver_mode") or "standard"),
+        }
+        failure_class = str(ctx.get("failure_class") or "").strip()
+        if failure_class:
+            contract["failure_class"] = failure_class
+        must_avoid = [str(item) for item in list(ctx.get("must_avoid") or []) if str(item).strip()]
+        if must_avoid:
+            contract["must_avoid"] = must_avoid[:12]
+        required_checks = [
+            str(item) for item in list(ctx.get("required_checks") or []) if str(item).strip()
+        ]
+
+        if rag_context is not None and (
+            rag_context.high_confidence or rag_context.exact_self_hit
+        ):
+            contract["rag_confidence"] = round(rag_context.top_score, 4)
+            contract["rag_top_challenge_id"] = rag_context.top_challenge_id
+            contract["rag_exact_self_hit"] = rag_context.exact_self_hit
+
+        if required_checks:
+            contract["required_checks"] = required_checks[:16]
+
+        if contract["solver_mode"] == "standard" and not any(
+            key in contract for key in ("failure_class", "must_avoid", "required_checks", "rag_confidence")
+        ):
+            return {}
+        return contract
 
     @staticmethod
     def _memory_to_previous_attempts(
         state: GlobalState, task_type: str
     ) -> list[dict[str, Any]]:
-        """Convert the last K :class:`TaskAttemptMemory` entries into snapshot dicts.
+        """Convert recent :class:`TaskAttemptMemory` entries into snapshot dicts.
 
-        Returns at most 3 entries (newest last) shaped like the in-chain
-        ``previous_attempts`` list so the prompt builder doesn't have to
-        special-case the source.
+        Thin wrapper around :meth:`GlobalState.recent_attempts_for` kept for
+        backwards-compatibility with the composer's call sites; the real
+        dedup/limit logic lives on the state model now so recovery and
+        other consumers share it.
         """
-        memory = state.task_type_memory.get(task_type) or []
-        attempts: list[dict[str, Any]] = []
-        # Only surface the most recent 3 to keep the prompt tight.
-        for entry in memory[-3:]:
-            attempts.append(
-                {
-                    "attempt": 0,  # cross-chain: no in-chain attempt number
-                    "task_id": entry.task_id,
-                    "title": entry.title,
-                    "summary": entry.summary,
-                    "error": entry.error,
-                    "stdout": entry.stdout_preview,
-                    "stderr": entry.stderr_preview,
-                    "solver_code_preview": entry.solver_code_preview,
-                    "error_fingerprint": entry.error_fingerprint,
-                    "source": "cross_chain_memory",
-                }
-            )
-        return attempts
+        return state.recent_attempts_for(task_type, limit=5)
 
     # -----------------------------------------------------------------
     # Internal collectors
@@ -354,6 +406,112 @@ class SolverEvidenceComposer:
                 if ctx.get(key):
                     results.append({key: str(ctx[key])[:1500]})
         return results[:12]
+
+    @staticmethod
+    def _collect_binary_runs(state: GlobalState) -> dict[str, Any]:
+        """Surface ``binary_run`` plugin output for the solver prompt.
+
+        Reads every evidence record whose ``tool_name == 'binary_run'`` and
+        merges its ``output_context['binary_runs']`` payload keyed by the
+        binary filename.  Returns ``{}`` when no run probe has been
+        executed.  Recent runs overwrite older entries on conflict so the
+        solver sees the freshest observation per binary.
+        """
+        merged: dict[str, Any] = {}
+        for record in state.evidence.values():
+            if record.tool_name != "binary_run":
+                continue
+            payload = (record.extracted or {}).get("output_context", {}) or {}
+            runs = payload.get("binary_runs") or {}
+            if not isinstance(runs, dict):
+                continue
+            for binary_name, body in runs.items():
+                if isinstance(body, dict) and body.get("invocations"):
+                    merged[binary_name] = body
+        return merged
+
+    @staticmethod
+    def _collect_live_http_observations(state: GlobalState) -> list[dict[str, Any]]:
+        """Surface real HTTP responses (headers + set-cookie) for the solver.
+
+        Web exploit writers cannot guess the cookie name or framework from
+        a writeup hint — they need to see what the live server *actually*
+        sends.  This collector walks ``state.evidence`` for any HTTP tool
+        (``http_metadata``, ``http_content``, ``http_path_probe``) and
+        extracts ``response_headers`` / ``set_cookie`` / ``http_status``
+        into a compact list the solver prompt can read directly.
+
+        Returns at most 6 observations newest-first to bound prompt size.
+        """
+        http_tools = {"http_metadata", "http_content", "http_path_probe", "http_form_probe"}
+        observations: list[dict[str, Any]] = []
+        for record in state.evidence.values():
+            if record.tool_name not in http_tools:
+                continue
+            payload = (record.extracted or {}).get("output_context", {}) or {}
+            headers = payload.get("response_headers") or {}
+            set_cookie = payload.get("set_cookie") or headers.get("set-cookie") or ""
+            status = payload.get("http_status")
+            url = (
+                payload.get("observed_base_url")
+                or payload.get("target_url")
+                or payload.get("base_url")
+                or ""
+            )
+            if not headers and not set_cookie and status is None:
+                continue
+            entry: dict[str, Any] = {
+                "tool": record.tool_name,
+                "url": str(url)[:200],
+            }
+            if status is not None:
+                entry["http_status"] = status
+            if set_cookie:
+                entry["set_cookie"] = str(set_cookie)[:500]
+            if headers:
+                # Show the headers most useful for exploit writing.  Drop
+                # noise like Date/Etag/X-Trace which bloat prompt with no
+                # actionable signal.
+                _SKIP = {"date", "etag", "x-trace", "x-runtime", "x-served-by", "via"}
+                filtered = {
+                    k: str(v)[:300]
+                    for k, v in headers.items()
+                    if k.lower() not in _SKIP
+                }
+                if filtered:
+                    entry["headers"] = filtered
+            observations.append(entry)
+        # Most recently observed first, capped.
+        observations.reverse()
+        return observations[:6]
+
+    @staticmethod
+    def _collect_binary_disassembly(state: GlobalState) -> dict[str, Any]:
+        """Surface ``binary_disassembly`` evidence for the solver prompt.
+
+        Looks at every evidence record produced by the ``binary_disassembly``
+        tool and merges its ``extracted.output_context["disassembly"]``
+        payload by binary filename.  Most recent run wins on conflict.
+        Returns ``{}`` when no disassembly has been produced this run.
+        """
+        merged: dict[str, Any] = {}
+        # Iterate in insertion order; dict preserves the order evidence was
+        # added so newer entries overwrite older per-binary payloads.
+        for record in state.evidence.values():
+            if record.tool_name != "binary_disassembly":
+                continue
+            payload = (
+                (record.extracted or {}).get("output_context", {})
+                or record.result.get("output_context", {})
+                or {}
+            )
+            disasm = payload.get("disassembly") or {}
+            if not isinstance(disasm, dict):
+                continue
+            for binary_name, body in disasm.items():
+                if isinstance(body, dict) and (body.get("functions") or body.get("rodata")):
+                    merged[binary_name] = body
+        return merged
 
     @staticmethod
     def _build_solver_hints(evidence: SolverEvidence) -> list[str]:

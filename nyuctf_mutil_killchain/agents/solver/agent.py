@@ -15,17 +15,21 @@ from nyuctf_mutil_killchain.agents.solver.evidence import (
     SolverEvidence,
     SolverEvidenceComposer,
 )
-from nyuctf_mutil_killchain.agents.solver.executor import SolverCodeExecutor
+from nyuctf_mutil_killchain.agents.solver.executor import (
+    SolverCodeExecutor,
+    SolverExecutionOutcome,
+)
 from nyuctf_mutil_killchain.agents.solver.lint import (
     SolverLintResult,
     lint_solver_code,
 )
-from nyuctf_mutil_killchain.agents.solver.parser import SolverResultParser
+from nyuctf_mutil_killchain.agents.solver.parser import SolverFlagSet, SolverResultParser
 from nyuctf_mutil_killchain.agents.solver.prompts import SolverPromptBuilder
 from nyuctf_mutil_killchain.agents.solver.retry import SolverRetryPolicy
 from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
 from nyuctf_mutil_killchain.llm import LLMClient
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
+from nyuctf_mutil_killchain.state.models import smart_truncate_code
 from nyuctf_mutil_killchain.state.task_factory import build_flag_validation_tasks
 from nyuctf_mutil_killchain.tools import ExecutionPlane
 
@@ -62,15 +66,12 @@ class _SolverLintExhausted(RuntimeError):
         self.fingerprint = fingerprint
         self.last_lint = last_lint
 
-# How many extra LLM round-trips we'll spend regenerating solver code that
-# fails the cheap in-process lint (SyntaxError, missing-stdlib-import, or
-# empty body).  Four extra attempts (5 total) absorbs the common case where
-# the upstream model returns one or two empty / truncated bodies in a row
-# before stabilising — observed with DeepSeek and the OpenAI-compatible
-# proxy on long ``onlythisprogram``-style prompts.  Each retry folds the
-# concrete fingerprint (offending line, missing import name) back into the
-# prompt, so the cost is bounded and informative.
-_LINT_RETRY_BUDGET = 4
+# Extra LLM round-trips we spend regenerating solver code that fails the
+# cheap in-process lint (empty / SyntaxError / missing-stdlib-import).
+# One retry is enough: the lint only catches deterministic, single-line
+# bugs, and the fingerprint we fold back into the next prompt makes the
+# fix mechanical. More retries on the same fingerprint never converge.
+_LINT_RETRY_BUDGET = 1
 
 
 class SolverAgent(WorkerAgent):
@@ -181,17 +182,48 @@ class SolverAgent(WorkerAgent):
             evidence=evidence,
         )
         if not outcome.success:
+            classified_context = {
+                "returncode": -1,
+                "stdout": "",
+                "stderr": outcome.error or outcome.summary,
+                "solver_code_preview": smart_truncate_code(
+                    guidance.solver_code, budget=6000
+                ),
+                "solver_reasoning": guidance.reasoning,
+                "solver_confidence": guidance.confidence,
+            }
+            classified_outcome = SolverExecutionOutcome(
+                success=False,
+                bundle=None,
+                error=outcome.error,
+                output_context=classified_context,
+                summary=outcome.summary,
+            )
+            retry_plan = self.retry_policy.decide(
+                task=task,
+                evidence=evidence,
+                outcome=classified_outcome,
+                flags=SolverFlagSet(),
+                guidance=guidance,
+            )
+            if retry_plan.signal is not None:
+                classified_context["error_fingerprint"] = (
+                    retry_plan.signal.error_fingerprint
+                )
+                classified_context["failure_class"] = retry_plan.signal.failure_class
             return WorkerReport(
                 task_id=task.task_id,
                 worker_name=self.name,
                 success=False,
                 summary="Solver execution failed.",
                 error=outcome.error,
+                output_context=classified_context,
+                new_tasks=([retry_plan.retry_task] if retry_plan.retry_task is not None else []),
                 retryable=False,
                 notes=[
                     f"LLM generated {guidance.solver_language} solver "
                     f"(confidence: {guidance.confidence:.1%}).",
-                ],
+                ] + retry_plan.notes,
             )
 
         flag_format = (evidence.flag_format or "").strip()
@@ -227,11 +259,20 @@ class SolverAgent(WorkerAgent):
 
         output_context = dict(outcome.output_context)
         output_context["flag_candidates"] = flags.flag_candidates
-        output_context["solver_code_preview"] = guidance.solver_code[:2000]
+        output_context["solver_code_preview"] = smart_truncate_code(
+            guidance.solver_code, budget=6000
+        )
         output_context["solver_reasoning"] = guidance.reasoning
         output_context["solver_confidence"] = guidance.confidence
         if guidance.reasoning:
             output_context["llm_summary"] = guidance.summary
+        # Surface the classifier's fingerprint so ``GlobalState._record_task_attempt``
+        # stores the semantic key (e.g. ``timeout after 60s``, ``near-miss flags …``)
+        # instead of falling back to regex-derived stderr lines.  Only set on
+        # failure paths; success reports do not record task attempts.
+        if not flags.has_real_flag and retry_plan.signal is not None:
+            output_context["error_fingerprint"] = retry_plan.signal.error_fingerprint
+            output_context["failure_class"] = retry_plan.signal.failure_class
 
         worker_notes: list[str] = [
             f"LLM generated {guidance.solver_language} solver "
@@ -301,7 +342,10 @@ class SolverAgent(WorkerAgent):
                 temperature=0.3,
             )
 
-            lint = lint_solver_code(guidance.solver_code, guidance.solver_language)
+            lint = lint_solver_code(
+                guidance.solver_code,
+                guidance.solver_language,
+            )
             if lint.ok:
                 return guidance, attempt
             last_lint = lint

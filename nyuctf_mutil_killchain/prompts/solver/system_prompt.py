@@ -34,6 +34,13 @@ e.g. running ``./stfu flag.stfu`` re-encodes ``flag.stfu`` IN PLACE and \
 destroys the original ciphertext.  Always copy the challenge file to a \
 ``/tmp/...`` working path or an in-memory buffer before passing it to a \
 binary that *might* write back to its input.
+- READ ``binary_runs`` in the user prompt JSON when present.  It contains \
+the actual stdout / stderr / new files captured from running each bundled \
+binary in a /tmp sandbox.  When a sandbox invocation already produced text \
+that looks like decoded plaintext or a flag pattern, the solver script \
+just needs to REPRODUCE that invocation (mkdir /tmp/work, copy binary + \
+inputs, run identical args) — do not reinvent the algorithm from \
+disassembly when the binary already demonstrated it.
 - Print ONLY the flag to stdout, exactly once.  Flag format depends on \
 ``challenge.flag_format`` in the user-prompt JSON:
   * ``flag{{...}}`` (or any other ``prefix{{...}}`` shape) — emit that exact shape.
@@ -52,12 +59,30 @@ extraction regex requires the ``prefix`` to touch ``{{`` directly with no \
 intervening whitespace.
 - The script must be self-contained - do not import from custom challenge modules \
 unless they are bundled files you've analyzed
+- REUSE bundled crypto code verbatim.  If ``challenge_source_files`` contains a \
+file that defines ``encrypt`` / ``decrypt`` / ``genTables`` / ``derive_key`` etc., \
+COPY THOSE FUNCTIONS into your solver script byte-for-byte (after porting any \
+Python-2 syntax: ``xrange``→``range``, ``print x``→``print(x)``, ``map(...)`` \
+returns iterator now → wrap with ``list()``).  Do NOT reimplement the cipher \
+yourself as XOR / addition / generic operation — many CTF ciphers use \
+substitution tables, lookup boxes, or stateful PRNGs that a one-line guess \
+will silently corrupt.  When the source uses ``f[padByte, ptextByte]`` style \
+2D-tuple indexing, that is a SUBSTITUTION TABLE, NOT bitwise XOR; treat the \
+table literally.
 - Use standard library + common packages (requests, pwntools, pycryptodome, gmpy2, \
 z3-solver, pyshark, scapy, PIL, binascii, struct, etc.)
 - ALWAYS ``import sys`` at the top if you reference ``sys.exit`` / ``sys.stderr`` / \
 ``sys.argv`` anywhere — a missing ``import sys`` is a frequent NameError fingerprint.
 - If the challenge has a remote service, connect to the hostname and port from the \
 evidence (NOT localhost unless explicitly stated)
+- WEB / network challenges: BEFORE writing the exploit body, inspect the \
+``live_http_observations`` field in the user prompt JSON.  Each entry contains \
+the actual response headers the server sent (set-cookie, content-type, location, \
+www-authenticate, server, x-powered-by, …).  USE THE OBSERVED COOKIE NAME — do \
+NOT assume a name from the writeup (e.g. writeup says ``fuel_sess`` but server \
+might set ``PHPSESSID``; only the live header is authoritative).  When the \
+exploit needs a session, FIRST do a plain GET to ``/`` to capture the actual \
+cookie, then build subsequent requests with that exact cookie name.
 - Maximum runtime: {timeout}s
 - Do NOT guess or hallucinate the flag - compute it from the evidence
 - If challenge_source_files are provided in the evidence, study them carefully to \
@@ -93,6 +118,11 @@ that exact failure. If the failure was a Python exception, fix the offending lin
 If the failure was logical (wrong header offset, wrong key length, decode produced \
 near-miss garbage), pick a fundamentally different parsing/decoding strategy — do \
 NOT just tweak constants in the previous attempt.
+- If `SOLVER_CONTRACT` is present in the user prompt, treat it as mandatory. \
+Every item in `required_checks` must be implemented in the script, and every \
+item in `must_avoid` must be avoided. In `solver_mode=recovery`, prefer a \
+short diagnostic script over another broad guess: print compact diagnostics \
+to stderr and compute the flag only after the checks pass.
 
 {technique_hints}
 

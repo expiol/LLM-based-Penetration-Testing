@@ -167,6 +167,65 @@ class TestTaskTypeMemory(unittest.TestCase):
         # FIFO trim: the latest entries are kept, oldest are dropped.
         self.assertEqual(memory[-1].summary, f"failure {TASK_TYPE_MEMORY_LIMIT + 4}")
 
+    def test_memory_dedups_recurring_fingerprints(self) -> None:
+        """Long-tail recurring failures must survive the 5-entry window.
+
+        Without fingerprint-dedup, 8 fresh failures all with the same stderr
+        would push the original recurring fingerprint out of view. After
+        the fix we keep one entry per fingerprint (newest), capped at 5.
+        """
+        state = _state_with_challenge()
+        # 8 failures, 3 of which share the same fingerprint, plus 5 unique.
+        fingerprints = [
+            "ValueError: a",
+            "stfu: Could not open output file for writing",
+            "NameError: b",
+            "stfu: Could not open output file for writing",
+            "UnicodeDecodeError: c",
+            "TypeError: d",
+            "stfu: Could not open output file for writing",
+            "ValueError: a",
+        ]
+        for i, fp in enumerate(fingerprints):
+            t = Task(
+                title=f"Task {i}",
+                description="solver",
+                task_type="solve.generate_script",
+                input_context={"files_root": "/tmp"},
+            )
+            state.queue_task(t)
+            state.apply_worker_report(
+                WorkerReport(
+                    task_id=t.task_id,
+                    worker_name="solver-agent",
+                    success=False,
+                    summary=f"failure {i}: {fp}",
+                    output_context={"stderr": fp, "stdout": ""},
+                    error=fp,
+                )
+            )
+
+        fresh = Task(
+            title="Planner fresh chain",
+            description="solver",
+            task_type="solve.generate_script",
+            input_context={"files_root": "/tmp"},
+        )
+        state.queue_task(fresh)
+        evidence = SolverEvidenceComposer().compose(fresh, state)
+        seen_fps = [a.get("error_fingerprint") for a in evidence.previous_attempts]
+
+        # Each distinct fingerprint appears at most once.
+        self.assertEqual(len(seen_fps), len(set(seen_fps)))
+        # All 5 distinct fingerprints from the 8 failures are preserved.
+        self.assertIn(
+            "stfu: Could not open output file for writing", seen_fps
+        )
+        self.assertIn("ValueError: a", seen_fps)
+        self.assertIn("NameError: b", seen_fps)
+        self.assertIn("UnicodeDecodeError: c", seen_fps)
+        self.assertIn("TypeError: d", seen_fps)
+
 
 if __name__ == "__main__":
     unittest.main()

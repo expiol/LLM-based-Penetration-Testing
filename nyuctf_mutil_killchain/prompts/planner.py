@@ -19,6 +19,8 @@ TASK_TYPE_VOCABULARY: list[str] = [
     "artifact.triage",
     "artifact.archive_triage",
     "artifact.binary_triage",
+    "artifact.binary_disassembly",
+    "artifact.binary_run",
     "artifact.computation_analysis",
     "artifact.deep_review",
     "artifact.runtime_probe",
@@ -53,7 +55,14 @@ Task-type input_context requirements (omit a required field and the task will be
 
   Static analysis (challenge files):
     artifact.triage              - {files_root}
-    artifact.binary_triage       - {files_root, binary_files: [...]}
+    artifact.binary_triage       - {files_root, binary_files: [...]}     (fast: file + strings)
+    artifact.binary_disassembly  - {files_root, binary_files: [...]}     (deep: objdump per-function + .rodata)
+                                   Use AFTER binary_triage when no flag was found and the algorithm
+                                   itself is the challenge (custom ciphers, packed parsers, rev/pwn).
+    artifact.binary_run          - {files_root, binary_files: [...]}     (sandboxed execution)
+                                   Use as LAST resort when neither triage nor disassembly produced
+                                   a flag and the binary likely IS the algorithm's oracle (XOR
+                                   self-inverse, decoder behind an undocumented flag, etc.).
     artifact.archive_triage      - {files_root, archive_files: [...]}
     artifact.sqlite_review       - {files_root, database_files: [...]}
     artifact.pcap_review         - {files_root, pcap_files: [...]}
@@ -126,10 +135,12 @@ Decision guidance:
     Either fix the missing input_context fields or pivot to a different task type.
   - If a worker returned success=False, do NOT re-propose the same task type with the
     same input_context.
-  - When the orchestrator emits "[dispatch] suppressing solve.* this cycle" in the
-    notes, the dispatch policy is forcing diversification.  Propose a non-solver task
-    (e.g. web.path_probe, exploit.cve_probe, artifact.computation_analysis) for the
-    next cycle and wait to re-propose solver work until other workers report progress.
+  - When there is already a pending solve.generate_script task with
+    input_context.solver_mode="recovery", do NOT add another ordinary
+    solve.generate_script task. Let the recovery task run first.
+  - When notes mention "recovery: queued solver task", treat that as the
+    solver plan for the next cycle and propose only genuinely different non-solver work
+    if useful.
 
 * Returning an empty tasks list means the run halts. ONLY do that when you have either:
   (a) validated a flag, or (b) genuinely exhausted every applicable tool including

@@ -3,6 +3,8 @@
 from . import (
     archive_triage,
     artifact_triage,
+    binary_disassembly,
+    binary_run,
     binary_triage,
     computation_analysis,
     credential_login_probe,
@@ -31,6 +33,8 @@ ALL_COMMAND_TOOLS = (
     artifact_triage,
     archive_triage,
     binary_triage,
+    binary_disassembly,
+    binary_run,
     computation_analysis,
     credential_login_probe,
     credential_harvest,

@@ -6,23 +6,15 @@ Responsibilities (only these):
 - Ready-task batch selection (priority order, capped per task-type prefix).
 - Bounded batching / streak-suppression shortcuts that temporarily skip rows
   in the ready-set so stalled workers do not hog the orchestrator cycles.
-
-When a :class:`KnowledgeAugmenter` is wired in, the solver-streak threshold
-becomes RAG-aware: a strong top-1 retrieval score signals the solver is on
-the right track, so we tolerate more retries before giving up and forcing
-diversification.  Without the augmenter the policy degrades to the old
-fixed threshold.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
-from nyuctf_mutil_killchain.prompts.rag import HIGH_CONFIDENCE_SCORE
 from nyuctf_mutil_killchain.state import (
     FileKind,
     GlobalState,
@@ -74,49 +66,17 @@ class DispatchPolicy:
     _PER_PREFIX_LIMITS: dict[str, int] = {"solve": 1}
     _DEFAULT_PER_PREFIX_LIMIT = 2
 
-    # Anti-spin: when this many tasks of the same task_type / worker have run
-    # consecutively without a single one returning ``solved=True``, stop
-    # dispatching more of them this cycle until other work makes progress.
-    # Generic for any worker; single-purpose ``flag.validate`` suppression
-    # lives in :meth:`_validation_streak_too_long` for backwards readability,
-    # but solver / vuln / web workers can also spin and we suppress those
-    # uniformly via :meth:`_streak_too_long`.
+    # Anti-spin: when this many validations have run consecutively without
+    # progress, skip more validation tasks for the current cycle.  Solver
+    # recovery is handled by orchestrator.recovery.RecoveryPolicy; dispatch
+    # no longer reads RAG state or suppresses solve.* tasks.
     _VALIDATION_FAILURE_STREAK_LIMIT = 5
-    _SOLVER_FAILURE_STREAK_LIMIT = 4
-    # When the top-1 RAG hit's cosine score is at least
-    # ``HIGH_CONFIDENCE_SCORE``, the planner / solver are looking at a
-    # writeup that closely matches the live challenge — most "no
-    # progress" runs in that regime are bug-fix iterations on the right
-    # algorithm rather than the wrong direction, so we tolerate more
-    # retries before forcing diversification.  The bonus stacks on top
-    # of the base limit (4 + 4 = 8 retries before suppression).
-    _SOLVER_RAG_BONUS_STREAK = 4
-
-    # Failure fingerprints surfaced by ``WorkerReport.summary`` / error that
-    # should count toward the solver streak.  Generic across challenges:
-    # exit-0 with no flag, exit-1 from a buggy script, or aborted-pre-execute
-    # cycles where the LLM client raised LLMClientError before the container
-    # ever ran (empty body, missing solver_code field, lint failure).
-    _SOLVER_NO_PROGRESS_FINGERPRINTS = (
-        "ran without recovering a flag",
-        "exit code 1",
-        "exit code -1",
-        "raised llmclienterror",
-        "failed in-process lint",
-        "field required",
-        "content is empty",
-        "invalid json",
-        "execution failed",
-    )
 
     def __init__(
         self,
         emit: Callable[[str], None],
-        *,
-        augmenter: KnowledgeAugmenter | None = None,
     ) -> None:
         self.emit = emit
-        self.augmenter = augmenter
 
     def validate_task_for_dispatch(self, task: Task, state: GlobalState) -> DispatchValidation:
         """Check that asset references in *task* point to known state.assets entries."""
@@ -139,7 +99,13 @@ class DispatchPolicy:
         state: GlobalState,
         candidates: list[WorkerAgent],
     ) -> bool:
-        """Fill in missing required-context fields when possible."""
+        """Fill in missing required-context fields when possible.
+
+        Each repair is recorded both via :meth:`emit` (for live logs) and on
+        ``task.metadata["_repaired_fields"]`` so workers / downstream
+        debugging can tell which fields the orchestrator inferred vs which
+        ones the planner supplied.
+        """
         ctx = task.input_context
         missing: set[str] = set()
         for worker in candidates:
@@ -151,7 +117,12 @@ class DispatchPolicy:
         if not missing:
             return False
 
-        repaired = False
+        repaired_fields: list[dict[str, Any]] = []
+
+        def _record(field: str, summary: str) -> None:
+            repaired_fields.append({"field": field, "summary": summary})
+            self.emit(f"[repair] {task.task_id}: filled {summary}")
+
         challenge_meta = state.metadata.get("challenge", {}) or {}
         challenge_files: list[str] = list(challenge_meta.get("files", []) or [])
 
@@ -160,54 +131,51 @@ class DispatchPolicy:
 
             if "files_root" in missing:
                 ctx["files_root"] = _DEFAULT_FILES_ROOT
-                self.emit(f"[repair] {task.task_id}: filled files_root={_DEFAULT_FILES_ROOT}")
-                repaired = True
+                _record("files_root", f"files_root={_DEFAULT_FILES_ROOT}")
 
             if "source_files" in missing:
                 inferred = list(kinds.get(FileKind.SOURCE, []))
                 ctx["source_files"] = inferred or challenge_files
-                self.emit(
-                    f"[repair] {task.task_id}: filled source_files "
-                    f"({len(ctx['source_files'])} file(s))"
+                _record(
+                    "source_files",
+                    f"source_files ({len(ctx['source_files'])} file(s))",
                 )
-                repaired = True
 
             if "binary_files" in missing:
                 inferred = list(kinds.get(FileKind.BINARY, []))
                 if inferred:
                     ctx["binary_files"] = inferred
-                    self.emit(
-                        f"[repair] {task.task_id}: filled binary_files "
-                        f"({len(inferred)} file(s))"
+                    _record(
+                        "binary_files",
+                        f"binary_files ({len(inferred)} file(s))",
                     )
-                    repaired = True
 
             if "pcap_files" in missing:
                 inferred = list(kinds.get(FileKind.PCAP, []))
                 if inferred:
                     ctx["pcap_files"] = inferred
-                    self.emit(
-                        f"[repair] {task.task_id}: filled pcap_files ({len(inferred)} file(s))"
+                    _record(
+                        "pcap_files",
+                        f"pcap_files ({len(inferred)} file(s))",
                     )
-                    repaired = True
 
             if "database_files" in missing:
                 inferred = list(kinds.get(FileKind.SQLITE, []))
                 if inferred:
                     ctx["database_files"] = inferred
-                    self.emit(
-                        f"[repair] {task.task_id}: filled database_files ({len(inferred)} file(s))"
+                    _record(
+                        "database_files",
+                        f"database_files ({len(inferred)} file(s))",
                     )
-                    repaired = True
 
             if "archive_files" in missing:
                 inferred = list(kinds.get(FileKind.ARCHIVE, []))
                 if inferred:
                     ctx["archive_files"] = inferred
-                    self.emit(
-                        f"[repair] {task.task_id}: filled archive_files ({len(inferred)} file(s))"
+                    _record(
+                        "archive_files",
+                        f"archive_files ({len(inferred)} file(s))",
                     )
-                    repaired = True
 
         if "paths" in missing and task.task_type == "web.path_probe":
             paths = ["/", "/index.php", "/index.html", "/robots.txt", "/flag", "/admin"]
@@ -219,20 +187,24 @@ class DispatchPolicy:
                         if path and path.startswith("/") and ":" not in path and path not in paths:
                             paths.append(path)
             ctx["paths"] = paths[:20]
-            self.emit(f"[repair] {task.task_id}: filled paths ({len(ctx['paths'])} path(s))")
-            repaired = True
+            _record("paths", f"paths ({len(ctx['paths'])} path(s))")
 
         if "scope" in missing and state.authorized_scope:
             ctx["scope"] = state.authorized_scope[0]
-            self.emit(f"[repair] {task.task_id}: filled scope={ctx['scope']}")
-            repaired = True
+            _record("scope", f"scope={ctx['scope']}")
 
         filled = state.infer_asset_identity(ctx)
         for field_name, field_value in filled.items():
-            self.emit(f"[repair] {task.task_id}: filled {field_name}={field_value}")
-            repaired = True
+            _record(field_name, f"{field_name}={field_value}")
 
-        return repaired
+        if repaired_fields:
+            # Append so multiple repair passes in one run accumulate rather
+            # than overwrite.  Workers that care can read this off
+            # ``task.metadata`` without scanning events.log.
+            prior = list(task.metadata.get("_repaired_fields") or [])
+            task.metadata["_repaired_fields"] = prior + repaired_fields
+            return True
+        return False
 
     def dequeue_batch(self, state: GlobalState, *, max_batch: int = 6) -> DequeueBatchResult:
         """Dequeue up to *max_batch* independent ready tasks in priority order.
@@ -245,11 +217,10 @@ class DispatchPolicy:
         starves validations / web probes (`2013f-cry-stfu` ran cycles 4-20
         with exactly two solver tasks each cycle).
 
-        When the recent execution log shows a long streak of failed tasks of
-        the same kind (validates with no progress, solvers with empty stdout,
-        etc.), suppress further dispatch of that kind this cycle so the
-        planner is forced to diversify.  The suppression event is also
-        pushed to ``state.notes`` so the next planner call sees the hint.
+        When the recent execution log shows a long streak of failed
+        validations, suppress further validation dispatch this cycle.  Solver
+        streaks are intentionally not handled here; high-confidence RAG
+        recovery is an explicit task-generation policy.
 
         Returns a :class:`DequeueBatchResult` so callers can tell when ready
         tasks exist but were withheld by policy (``withheld_due_to_policy``).
@@ -259,14 +230,8 @@ class DispatchPolicy:
         ready.sort(key=lambda t: (-t.priority, t.created_at))
 
         suppress_validates = self._validation_streak_too_long(state)
-        suppress_solver = self._solver_streak_too_long(state)
-        if suppress_solver:
-            state.notes.append(
-                "dispatch: solver suppressed this cycle due to a streak of "
-                "no-progress runs; propose a non-solver task type next."
-            )
         if suppress_validates:
-            state.notes.append(
+            state.orchestration_notes.append(
                 "dispatch: flag.validate suppressed this cycle due to a streak "
                 "of failed validations; propose a different task type."
             )
@@ -283,8 +248,6 @@ class DispatchPolicy:
                     continue
                 batchable_count += 1
             else:
-                if suppress_solver and prefix == "solve":
-                    continue
                 limit = self._PER_PREFIX_LIMITS.get(
                     prefix, self._DEFAULT_PER_PREFIX_LIMIT
                 )
@@ -307,55 +270,6 @@ class DispatchPolicy:
             limit=self._VALIDATION_FAILURE_STREAK_LIMIT,
             kind="flag.validate",
         )
-
-    def _solver_streak_too_long(self, state: GlobalState) -> bool:
-        """Return True if the recent execution log shows the solver-agent spinning.
-
-        Treats a solver run as "no progress" when its summary/error matches
-        one of :attr:`_SOLVER_NO_PROGRESS_FINGERPRINTS` *or* the record is
-        flagged ``success=False``.  See :meth:`_streak_too_long` for the
-        cross-worker scan strategy.
-
-        When a high-confidence RAG hit is available
-        (top-1 cosine ≥ :data:`HIGH_CONFIDENCE_SCORE`), the limit is
-        relaxed by :attr:`_SOLVER_RAG_BONUS_STREAK` because most failures
-        in that regime are debugging cycles on the right algorithm rather
-        than the wrong direction.
-        """
-        limit = self._effective_solver_streak_limit(state)
-        if limit <= 0 or state.solved:
-            return False
-        streak = self._count_no_progress_streak(
-            state,
-            worker_name="solver-agent",
-            fingerprints=self._SOLVER_NO_PROGRESS_FINGERPRINTS,
-            require_fingerprint=True,
-        )
-        if streak >= limit:
-            self.emit(
-                f"[dispatch] suppressing solve.* this cycle: "
-                f"{streak} consecutive no-progress solver runs (limit={limit})"
-            )
-            return True
-        return False
-
-    def _effective_solver_streak_limit(self, state: GlobalState) -> int:
-        """Solver streak limit, optionally relaxed when RAG signals a strong hit.
-
-        Returns the base limit when no augmenter is wired up or the top-1
-        score falls below :data:`HIGH_CONFIDENCE_SCORE`; adds
-        :attr:`_SOLVER_RAG_BONUS_STREAK` otherwise.
-        """
-        base = self._SOLVER_FAILURE_STREAK_LIMIT
-        if self.augmenter is None or not self.augmenter.enabled:
-            return base
-        try:
-            top_score = self.augmenter.top_score(state)
-        except Exception:
-            return base
-        if top_score >= HIGH_CONFIDENCE_SCORE:
-            return base + self._SOLVER_RAG_BONUS_STREAK
-        return base
 
     def _streak_too_long(
         self,

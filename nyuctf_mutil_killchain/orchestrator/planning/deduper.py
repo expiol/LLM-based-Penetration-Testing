@@ -2,10 +2,18 @@
 
 Computes a stable :attr:`Task.dedupe_key` for each :class:`PlannedTask` so
 that follow-up cycles converge on the same task identity, and drops any
-proposal whose dedupe_key already lives in the task chain.
+proposal whose dedupe_key collides with another proposal **in the same
+batch**.
 
-This is the only "filtering" allowed in the planner pipeline - it strips
-duplicates only.  It never suppresses unique tasks.
+Note: this module only de-duplicates **within the current planner batch**.
+Collisions against tasks already living in :attr:`GlobalState.task_chain`
+are handled later by :meth:`TaskChain.add_task`, which short-circuits any
+``add_task`` whose ``dedupe_key`` already exists on a non-terminal task.
+So a clean "drop if already queued" pipeline still emerges, just not all
+in this one class.
+
+This is the only "filtering" allowed in the planner pipeline — it strips
+duplicates only and never suppresses unique tasks.
 """
 
 from __future__ import annotations
@@ -61,6 +69,12 @@ class TaskDeduper:
         if task.task_type == "artifact.binary_triage":
             files = ctx.get("binary_files", [])
             return "artifact-binary-triage:" + ",".join(files[:8])
+        if task.task_type == "artifact.binary_disassembly":
+            files = ctx.get("binary_files", [])
+            return "artifact-binary-disassembly:" + ",".join(files[:8])
+        if task.task_type == "artifact.binary_run":
+            files = ctx.get("binary_files", [])
+            return "artifact-binary-run:" + ",".join(files[:8])
         if task.task_type == "artifact.computation_analysis":
             files = ctx.get("source_files", [])
             return "artifact-computation-analysis:" + ",".join(files[:8])

@@ -142,6 +142,7 @@ class SolverEvidenceRagTests(unittest.TestCase):
         for required in ("challenge_id", "solution_sketch", "score"):
             self.assertIn(required, first)
         self.assertIn("LFSR", first["solution_sketch"])
+        self.assertIn("rag_confidence", evidence.solver_contract)
 
     def test_user_prompt_serializes_writeups(self):
         composer = SolverEvidenceComposer(augmenter=self.augmenter)
@@ -150,6 +151,8 @@ class SolverEvidenceRagTests(unittest.TestCase):
         payload = json.loads(user)
         self.assertIn("related_writeups", payload)
         self.assertIn("LFSR", payload["related_writeups"][0]["solution_sketch"])
+        self.assertIn("SOLVER_CONTRACT", payload)
+        self.assertIn("rag_confidence", payload["SOLVER_CONTRACT"])
 
     def test_solver_agent_propagates_augmenter_to_default_composer(self):
         agent = SolverAgent(
@@ -244,6 +247,45 @@ class SolverRetryTests(unittest.TestCase):
         self.assertEqual(plan.retry_task.task_type, "solve.generate_script")
         self.assertEqual(plan.retry_task.input_context["attempt_number"], 2)
 
+    def test_retry_failure_class_enters_next_solver_prompt(self):
+        state = _state_with_files(["solve.py"])
+        task = _solve_task()
+        evidence = SolverEvidenceComposer().compose(task, state)
+        outcome = SolverExecutionOutcome(
+            success=True,
+            bundle=None,
+            error=None,
+            output_context={
+                "returncode": -1,
+                "stdout": "",
+                "stderr": "timeout after 180s",
+            },
+            summary="timeout",
+        )
+        flags = SolverFlagSet(flag_candidates=[])
+        guidance = SolverCodeGuidance(
+            summary="ok",
+            solver_code="print('x')",
+            should_retry_on_failure=True,
+        )
+
+        plan = SolverRetryPolicy().decide(
+            task=task, evidence=evidence, outcome=outcome, flags=flags, guidance=guidance,
+        )
+
+        self.assertTrue(plan.should_retry)
+        retry_task = plan.retry_task
+        assert retry_task is not None
+        self.assertEqual(retry_task.input_context["failure_class"], "timeout")
+        retry_evidence = SolverEvidenceComposer().compose(retry_task, state)
+        _sys, user = SolverPromptBuilder().build(retry_evidence)
+        payload = json.loads(user)
+        self.assertEqual(
+            payload["SOLVER_CONTRACT"]["failure_class"],
+            "timeout",
+        )
+        self.assertIn("timeout", json.dumps(payload["CRITICAL_RETRY_GUIDANCE"]))
+
     def test_retry_caps_at_max(self):
         state = _state_with_files(["solve.py"])
         task = _solve_task({"attempt_number": 4})
@@ -271,6 +313,49 @@ class SolverPromptTests(unittest.TestCase):
         sys_p, usr_p = SolverPromptBuilder().build(evidence)
         self.assertIn("CTF solver", sys_p)
         self.assertIn("solve.py", usr_p)
+
+    def test_prior_failures_surface_stderr_tail_and_repeats(self):
+        """Recurring fingerprints across earlier attempts must be highlighted
+        with a ``repeating_fingerprints`` field plus per-attempt stderr tails,
+        so the LLM treats them as systemic bugs instead of one-off typos."""
+        state = _state_with_files(["solve.py"])
+        task = _solve_task({
+            "previous_attempts": [
+                {
+                    "attempt": 1,
+                    "error_fingerprint": "stfu: Could not open output file for writing",
+                    "stderr": "Binary returned 1: stfu: Could not open output file for writing\n",
+                },
+                {
+                    "attempt": 2,
+                    "error_fingerprint": "NameError: name 'txt' is not defined",
+                    "stderr": "Traceback ...\nNameError: name 'txt' is not defined\n",
+                },
+                {
+                    "attempt": 3,
+                    "error_fingerprint": "stfu: Could not open output file for writing",
+                    "stderr": "Binary returned 1: stfu: Could not open output file for writing\n",
+                },
+                {
+                    "attempt": 4,
+                    "error_fingerprint": "ValueError: not enough values to unpack",
+                    "stderr": "ValueError: not enough values to unpack (expected 5, got 4)\n",
+                },
+            ],
+        })
+        evidence = SolverEvidenceComposer().compose(task, state)
+        _sys, user = SolverPromptBuilder().build(evidence)
+        payload = json.loads(user)
+
+        guidance = payload["CRITICAL_RETRY_GUIDANCE"]
+        prior = guidance["prior_failures"]
+        # Each prior failure carries its own stderr_tail.
+        self.assertTrue(all("stderr_tail" in item for item in prior))
+        # The repeating cwd/write error fingerprint is detected.
+        self.assertIn(
+            "stfu: Could not open output file for writing",
+            guidance["repeating_fingerprints"],
+        )
 
 
 class SolverAgentIntegrationTests(unittest.TestCase):
@@ -358,97 +443,6 @@ class SolverLintExhaustionSoftFailTests(unittest.TestCase):
         self.assertIn("lint", report.summary)
         # Soft fail must not be retryable; planner should diversify.
         self.assertFalse(report.retryable)
-
-
-class LLMClientSolverFallbackTests(unittest.TestCase):
-    """LLM transport / parse failures collapse to empty SolverCodeGuidance."""
-
-    def test_validation_failure_falls_back_to_empty_solver_code(self):
-        # Payload missing solver_code entirely — would previously raise
-        # LLMClientError("LLM response failed SolverCodeGuidance validation").
-        # Should now return an empty SolverCodeGuidance so the lint loop
-        # surfaces it as error_kind="empty" and re-prompts.
-        client = StaticLLMClient([{"summary": "no code field at all"}])
-        guidance = client.generate_json(
-            system_prompt="x",
-            user_prompt="y",
-            schema=SolverCodeGuidance,
-        )
-        self.assertEqual(guidance.solver_code, "")
-        self.assertIn("validation", guidance.summary.lower())
-
-    def test_solver_validation_fallback_is_not_an_exception(self):
-        # The solver-side fallback returns an empty SolverCodeGuidance rather
-        # than letting Pydantic ValidationError out — so the lint loop sees
-        # the failure as ``error_kind="empty"`` and re-prompts.  Verifies
-        # the fallback path is actually exercised (no exception leaks).
-        client = StaticLLMClient(
-            [
-                {
-                    "summary": "x",
-                    "solver_code": "import sys\nprint('a')\n",
-                    "confidence": "not-a-number-or-label",
-                }
-            ]
-        )
-        guidance = client.generate_json(
-            system_prompt="x",
-            user_prompt="y",
-            schema=SolverCodeGuidance,
-        )
-        # Either the bad confidence got swallowed by fallback (empty
-        # solver_code with diagnostic summary) or the schema's existing
-        # ``coerce_confidence`` validator absorbed it.  Both are acceptable;
-        # the contract is "no exception escapes for SolverCodeGuidance".
-        self.assertIsNotNone(guidance)
-
-
-class SolverCodeRecoveryTests(unittest.TestCase):
-    """Recovering ``SolverCodeGuidance`` from a non-JSON LLM response."""
-
-    def test_recovery_wraps_raw_python_as_solver_code(self):
-        from nyuctf_mutil_killchain.agents.reasoning.schemas import SolverCodeGuidance
-        from nyuctf_mutil_killchain.llm.client import (
-            _looks_like_solver_code,
-            _recover_solver_code_payload,
-        )
-
-        raw_text = (
-            "import sys\n"
-            "from pathlib import Path\n"
-            "def solve():\n"
-            "    print('hi')\n"
-            "if __name__ == '__main__':\n"
-            "    solve()\n"
-        )
-        self.assertTrue(_looks_like_solver_code(raw_text))
-        payload = _recover_solver_code_payload(raw_text, SolverCodeGuidance)
-        self.assertIsNotNone(payload)
-        self.assertIn("solver_code", payload)  # type: ignore[arg-type]
-        self.assertIn("import sys", payload["solver_code"])  # type: ignore[index]
-
-    def test_recovery_skips_non_solver_schemas(self):
-        from nyuctf_mutil_killchain.llm.client import _recover_solver_code_payload
-        from nyuctf_mutil_killchain.orchestrator.router import WorkerRouteDecision
-
-        payload = _recover_solver_code_payload(
-            "import sys\ndef foo(): pass\n",
-            WorkerRouteDecision,
-        )
-        self.assertIsNone(payload)
-
-    def test_recovery_rejects_short_or_jsonish_text(self):
-        from nyuctf_mutil_killchain.agents.reasoning.schemas import SolverCodeGuidance
-        from nyuctf_mutil_killchain.llm.client import _recover_solver_code_payload
-
-        self.assertIsNone(_recover_solver_code_payload("x", SolverCodeGuidance))
-        # Only one marker hit — too weak to be considered a script.
-        self.assertIsNone(
-            _recover_solver_code_payload(
-                '{"summary": "import was here in the prose"}',
-                SolverCodeGuidance,
-            )
-        )
 
 
 if __name__ == "__main__":

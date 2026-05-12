@@ -16,6 +16,10 @@ from nyuctf_mutil_killchain.orchestrator.router import (
     WorkerRouteDecision,
     WorkerRouter,
 )
+from nyuctf_mutil_killchain.orchestrator.recovery import (
+    RecoveryPolicy,
+    RecoveryResult,
+)
 
 __all__ = [
     "BootstrapSeeder",
@@ -25,6 +29,8 @@ __all__ = [
     "PlanStrategy",
     "PlannedTask",
     "PlannerDecision",
+    "RecoveryPolicy",
+    "RecoveryResult",
     "TaskDeduper",
     "TaskNormalizer",
     "TaskPlanner",

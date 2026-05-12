@@ -157,9 +157,16 @@ records.append({
         "observed_headers": {
             k: v for k, v in hdr.items()
             if k in {
+                # Security headers
                 "server", "x-powered-by", "content-security-policy",
                 "x-frame-options", "strict-transport-security",
                 "x-content-type-options", "access-control-allow-origin",
+                # Critical for exploit writers — what cookie name does
+                # the server actually set?  What auth scheme is in use?
+                # What does redirect/Content-Type say about the framework?
+                "set-cookie", "content-type", "content-length",
+                "location", "www-authenticate", "x-aspnet-version",
+                "x-csrf-token", "x-request-id",
             }
         },
     },
@@ -178,6 +185,13 @@ records.append({
     "powered_by": powered_by,
     "security_issues": security_issues,
     "open_ports": [port],
+    # Surface the actual response headers — set-cookie / location / etc —
+    # into output_context so the solver agent can read them through
+    # ``state.evidence`` and write an exploit that talks to the server
+    # the way it ACTUALLY behaves (correct cookie name, redirect target,
+    # framework hint), not the way the writeup says it should behave.
+    "response_headers": {k: v for k, v in hdr.items()},
+    "set_cookie": set_cookie,
     "manual_checks": [
         f"Review all HTTP response headers for {base_url}",
         f"Inspect authentication and session handling at {base_url}",

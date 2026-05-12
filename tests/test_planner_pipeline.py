@@ -113,6 +113,45 @@ class TaskNormalizerTests(unittest.TestCase):
         TaskNormalizer().fill(task, state)
         self.assertEqual(task.input_context["files_root"], "/home/ctfplayer/ctf_files")
 
+    def test_drops_fabricated_dependency_ids(self):
+        # LLM planners often invent semantic dependency strings like
+        # ``"binary_triage_stfu"`` instead of real ``task-<hex>`` ids.  Such
+        # deps deadlock the queue (the task stays PENDING forever because
+        # the bogus id never lands in completed_task_ids).  Normalizer must
+        # silently drop them and record what was dropped for debugging.
+        state = _state_with(["x.py"])
+        task = PlannedTask(
+            title="solve",
+            description="d",
+            task_type="solve.generate_script",
+            input_context={},
+            dependencies=["binary_triage_stfu", "step_1", "recon_done"],
+        )
+        TaskNormalizer().fill(task, state)
+        self.assertEqual(task.dependencies, [])
+        self.assertEqual(
+            task.metadata.get("_dropped_dependencies"),
+            ["binary_triage_stfu", "step_1", "recon_done"],
+        )
+
+    def test_keeps_real_task_ids_that_exist_in_chain(self):
+        from nyuctf_mutil_killchain.state import Task as RealTask
+        state = _state_with(["x.py"])
+        existing = RealTask(
+            title="prev", description="d", task_type="artifact.triage",
+            input_context={"files_root": "/home/ctfplayer/ctf_files"},
+        )
+        state.queue_task(existing)
+        task = PlannedTask(
+            title="solve", description="d",
+            task_type="solve.generate_script",
+            input_context={},
+            dependencies=[existing.task_id, "bogus_id"],
+        )
+        TaskNormalizer().fill(task, state)
+        self.assertEqual(task.dependencies, [existing.task_id])
+        self.assertEqual(task.metadata.get("_dropped_dependencies"), ["bogus_id"])
+
 
 class TaskDeduperTests(unittest.TestCase):
     def test_assigns_default_dedupe_keys(self):

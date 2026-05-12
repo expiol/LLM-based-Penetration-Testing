@@ -50,11 +50,18 @@ def render_markdown_report(state: GlobalState) -> str:
     else:
         lines.append("- No evidence recorded.")
 
-    lines.extend(["", "## Notes", ""])
+    lines.extend(["", "## Worker Notes", ""])
     if state.notes:
         for note in state.notes:
             lines.append(f"- {note}")
     else:
-        lines.append("- No notes recorded.")
+        lines.append("- No worker notes recorded.")
+
+    lines.extend(["", "## Orchestration Notes", ""])
+    if state.orchestration_notes:
+        for note in state.orchestration_notes:
+            lines.append(f"- {note}")
+    else:
+        lines.append("- No orchestration notes recorded.")
 
     return "\n".join(lines) + "\n"

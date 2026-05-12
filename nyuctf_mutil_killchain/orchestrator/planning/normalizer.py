@@ -7,6 +7,7 @@ data-shape consolidation - it does not filter or re-prioritize tasks.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from nyuctf_mutil_killchain.orchestrator.planning.schemas import PlannedTask
@@ -20,6 +21,13 @@ from nyuctf_mutil_killchain.state import (
 
 _DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
 
+# Real Task ids look like ``task-<10 hex>`` — see ``state.models._task_id``.
+# The LLM does not see these random ids in its prompt, so any "dependency"
+# string it emits (e.g. ``"binary_triage_stfu"``, ``"recon_step_1"``) is
+# fabricated and will deadlock the queue because ``Task.is_ready`` checks
+# ``deps.issubset(completed_ids)``.
+_REAL_TASK_ID_RE = re.compile(r"^task-[0-9a-f]{10}$")
+
 _ARTIFACT_FIELD_MAP: dict[str, FileKind] = {
     "binary_files": FileKind.BINARY,
     "archive_files": FileKind.ARCHIVE,
@@ -32,6 +40,11 @@ class TaskNormalizer:
     """Normalize task input_context against challenge metadata and known assets."""
 
     def fill(self, task: PlannedTask, state: GlobalState) -> None:
+        # Drop fabricated dependency ids before anything else — see comment
+        # on ``_REAL_TASK_ID_RE`` for why this matters.  Without this the
+        # whole queue can deadlock on a single hallucinated id.
+        self._clean_dependencies(task, state)
+
         ctx = task.input_context
         challenge_meta = state.metadata.get("challenge", {}) or {}
         challenge_files: list[str] = list(challenge_meta.get("files", []) or [])
@@ -82,6 +95,34 @@ class TaskNormalizer:
 
         if task.task_type == "web.form_probe" and not ctx.get("page_url") and ctx.get("base_url"):
             ctx["page_url"] = ctx["base_url"]
+
+    @staticmethod
+    def _clean_dependencies(task: PlannedTask, state: GlobalState) -> None:
+        """Drop dependency ids the planner hallucinated.
+
+        The planner LLM does not see real ``task-<hex>`` ids in its prompt,
+        so anything it puts under ``dependencies`` is invented (typical
+        garbage: ``"binary_triage_stfu"``, ``"step_1"``, ``"recon_done"``).
+        Such strings will never match :meth:`TaskChain.completed_task_ids`,
+        so the task stays PENDING forever and the orchestrator eventually
+        halts on an empty-queue stall.
+
+        Resolution: keep only deps that (a) look like a real id AND (b)
+        exist on the live task chain.  Anything else is dropped silently;
+        the planner intent ("this task depends on triage") is preserved
+        anyway by task priorities + the cycle re-plan.
+        """
+        if not task.dependencies:
+            return
+        known_ids = {t.task_id for t in state.task_chain.tasks}
+        filtered = [
+            dep for dep in task.dependencies
+            if _REAL_TASK_ID_RE.match(dep) and dep in known_ids
+        ]
+        if len(filtered) != len(task.dependencies):
+            dropped = [d for d in task.dependencies if d not in filtered]
+            task.metadata.setdefault("_dropped_dependencies", []).extend(dropped)
+        task.dependencies = filtered
 
     @staticmethod
     def _infer_source_files(

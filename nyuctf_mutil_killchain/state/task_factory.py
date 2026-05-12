@@ -253,6 +253,72 @@ def build_binary_triage_task(
     )
 
 
+def build_binary_disassembly_task(
+    *,
+    files_root: str,
+    binary_files: list[str],
+    priority: int = 82,
+) -> Task:
+    """Build a deterministic follow-up task for deep binary disassembly.
+
+    Lower default priority than :func:`build_binary_triage_task` so triage
+    (cheap) always runs first; this one only fires after triage failed to
+    surface a flag candidate but the algorithm-in-binary signal is clearly
+    needed (rev/pwn/crypto + a non-trivial ELF).
+    """
+
+    return Task(
+        title="Disassemble binary artifacts",
+        description=(
+            "Run objdump-based disassembly on bundled binaries to recover "
+            "per-function code, .rodata constants, and string xrefs that "
+            "expose the embedded algorithm."
+        ),
+        task_type="artifact.binary_disassembly",
+        priority=priority,
+        input_context={
+            "files_root": files_root,
+            "binary_files": binary_files,
+        },
+        dedupe_key="artifact-binary-disassembly:" + ",".join(binary_files[:8]),
+        metadata={"planned_by": "worker-followup"},
+    )
+
+
+def build_binary_run_task(
+    *,
+    files_root: str,
+    binary_files: list[str],
+    priority: int = 80,
+) -> Task:
+    """Build a deterministic follow-up task for sandboxed binary execution.
+
+    Lowest of the three binary-stage priorities (84 triage → 82 disasm →
+    80 run) so the cheap signal is exhausted first; this one fires last
+    when neither strings nor disassembly produced a flag and the binary
+    might *be* the oracle for its own algorithm (XOR cipher that is
+    self-inverse, decoder toggled by an undocumented flag, etc.).
+    """
+
+    return Task(
+        title="Run binary artifacts in a sandbox",
+        description=(
+            "Copy the bundled binary + challenge files into a /tmp working "
+            "directory and try several invocations (no-args, --help, with "
+            "each non-binary file positionally, stdin variants).  Capture "
+            "stdout / stderr / new files for solver evidence."
+        ),
+        task_type="artifact.binary_run",
+        priority=priority,
+        input_context={
+            "files_root": files_root,
+            "binary_files": binary_files,
+        },
+        dedupe_key="artifact-binary-run:" + ",".join(binary_files[:8]),
+        metadata={"planned_by": "worker-followup"},
+    )
+
+
 def build_archive_triage_task(
     *,
     files_root: str,

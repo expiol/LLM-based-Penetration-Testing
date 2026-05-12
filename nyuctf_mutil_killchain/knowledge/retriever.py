@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -209,7 +210,15 @@ class KnowledgeRetriever:
 _LOCK = threading.Lock()
 _RETRIEVER: KnowledgeRetriever | None = None
 _RETRIEVER_KEY: tuple[str, str, str] | None = None
-_LOAD_FAILED: bool = False
+#: Permanent disable: dataset / corpus / embedding lib is structurally absent.
+#: Never retried in-process because the cause cannot self-heal without a
+#: code or environment change.
+_LOAD_FAILED_PERMANENTLY: bool = False
+#: Transient disable: ONNX init crash, model download race, etc.  Backoff
+#: for ``_LOAD_RETRY_AFTER_S`` seconds then try again so a single hiccup
+#: does not disable RAG for the rest of the process.
+_LOAD_FAILED_AT: float | None = None
+_LOAD_RETRY_AFTER_S: float = 60.0
 
 
 def _env_flag(name: str) -> bool:
@@ -278,6 +287,20 @@ def _resolve_dataset_paths(
     return root, candidate
 
 
+def reset_retriever_cache() -> None:
+    """Forget the cached retriever and clear failure latches.
+
+    Useful for tests and for callers that want to re-init RAG after fixing
+    a missing dataset or model without restarting the process.
+    """
+    global _RETRIEVER, _RETRIEVER_KEY, _LOAD_FAILED_PERMANENTLY, _LOAD_FAILED_AT
+    with _LOCK:
+        _RETRIEVER = None
+        _RETRIEVER_KEY = None
+        _LOAD_FAILED_PERMANENTLY = False
+        _LOAD_FAILED_AT = None
+
+
 def get_retriever(
     *,
     dataset_root: str | None = None,
@@ -287,16 +310,34 @@ def get_retriever(
     Returns ``None`` when RAG is disabled, the dataset is unavailable, the
     embedding backend is missing, or the corpus is empty.  Callers should
     treat ``None`` as "no augmentation available" and proceed normally.
+
+    Failure modes are split:
+
+    * **Permanent** (missing dataset / empty corpus / missing embedding lib)
+      → ``_LOAD_FAILED_PERMANENTLY`` latches True for the rest of the
+      process; the env needs a real change to recover.
+    * **Transient** (ONNX init crash, model download race, etc.) → backoff
+      for :data:`_LOAD_RETRY_AFTER_S` seconds via ``_LOAD_FAILED_AT``,
+      then retry on the next call so a single hiccup does not disable
+      RAG forever.
     """
-    global _RETRIEVER, _RETRIEVER_KEY, _LOAD_FAILED
+    global _RETRIEVER, _RETRIEVER_KEY, _LOAD_FAILED_PERMANENTLY, _LOAD_FAILED_AT
 
     if _env_flag("AUTOPENTEST_RAG_DISABLED"):
         return None
-    if _LOAD_FAILED:
+    if _LOAD_FAILED_PERMANENTLY:
         return None
+    if _LOAD_FAILED_AT is not None:
+        if (time.monotonic() - _LOAD_FAILED_AT) < _LOAD_RETRY_AFTER_S:
+            return None
+        _LOAD_FAILED_AT = None  # cooldown elapsed; allow one retry
 
     paths = _resolve_dataset_paths(dataset_root)
     if paths is None:
+        # Treat as permanent: dataset path resolution failed (no env var,
+        # no nyuctf CTFDataset, or root not a directory).  A retry won't
+        # help until the operator fixes the install.
+        _LOAD_FAILED_PERMANENTLY = True
         return None
     root, idx = paths
 
@@ -309,20 +350,19 @@ def get_retriever(
         try:
             entries = load_corpus(root, idx)
             if not entries:
-                _LOAD_FAILED = True
+                _LOAD_FAILED_PERMANENTLY = True
                 return None
             embedder = build_default_embedder()
             _RETRIEVER = KnowledgeRetriever(entries, embedder)
             _RETRIEVER_KEY = key
             return _RETRIEVER
         except EmbeddingUnavailable:
-            _LOAD_FAILED = True
+            # Embedding library missing — permanent until pip install.
+            _LOAD_FAILED_PERMANENTLY = True
             return None
         except Exception:
-            # Defensive: any other init failure (model download, ONNX init,
-            # corrupted cache) should disable augmentation but never crash
-            # the orchestrator cycle.  We log via stderr instead of
-            # ``self.emit`` because this happens before the orchestrator
-            # has wired up an emitter.
-            _LOAD_FAILED = True
+            # ONNX init, model download race, transient corrupted cache, …
+            # Latch with a timestamp so we don't hammer on every cycle, but
+            # allow recovery without a restart.
+            _LOAD_FAILED_AT = time.monotonic()
             return None

@@ -19,6 +19,10 @@ from nyuctf_mutil_killchain.agents.solver.executor import (
     SolverCodeExecutor,
     SolverExecutionOutcome,
 )
+from nyuctf_mutil_killchain.agents.solver.failure import (
+    SolverFailureClassifier,
+    SolverFailureSignal,
+)
 from nyuctf_mutil_killchain.agents.solver.parser import (
     SolverFlagSet,
     SolverResultParser,
@@ -35,6 +39,8 @@ __all__ = [
     "SolverEvidence",
     "SolverEvidenceComposer",
     "SolverExecutionOutcome",
+    "SolverFailureClassifier",
+    "SolverFailureSignal",
     "SolverFlagSet",
     "SolverPromptBuilder",
     "SolverResultParser",

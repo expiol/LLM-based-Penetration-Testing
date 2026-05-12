@@ -6,10 +6,10 @@ import traceback
 from collections.abc import Callable, Iterable
 
 from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
 from nyuctf_mutil_killchain.llm import LLMClientError
 from nyuctf_mutil_killchain.orchestrator.dispatch_policy import DispatchPolicy
 from nyuctf_mutil_killchain.orchestrator.planning import BootstrapSeeder, TaskPlanner
+from nyuctf_mutil_killchain.orchestrator.recovery import RecoveryPolicy
 from nyuctf_mutil_killchain.orchestrator.router import (
     WorkerRouteDecision,
     WorkerRouter,
@@ -47,14 +47,15 @@ class Orchestrator:
         router: WorkerRouter | None = None,
         emit: Callable[[str], None] = print,
         checkpoint_callback: Callable[[GlobalState], None] | None = None,
-        augmenter: KnowledgeAugmenter | None = None,
+        recovery_policy: RecoveryPolicy | None = None,
     ) -> None:
         self.state = state
         self.workers = list(workers)
         self.planner = planner or BootstrapSeeder()
         self.router = router
         self.emit = emit
-        self.dispatch_policy = DispatchPolicy(emit=self.emit, augmenter=augmenter)
+        self.dispatch_policy = DispatchPolicy(emit=self.emit)
+        self.recovery_policy = recovery_policy
         self.checkpoint_callback = checkpoint_callback
         self._consecutive_planner_errors = 0
         self._consecutive_empty_queues = 0
@@ -118,7 +119,7 @@ class Orchestrator:
                 created += 1
 
         if decision.notes:
-            self.state.notes.extend(decision.notes)
+            self.state.orchestration_notes.extend(decision.notes)
             self.state.touch()
 
         proposed = len(decision.tasks)
@@ -148,7 +149,7 @@ class Orchestrator:
                 self._consecutive_planner_errors = 0
             except LLMClientError as exc:
                 self._consecutive_planner_errors += 1
-                self.state.notes.append(
+                self.state.orchestration_notes.append(
                     f"cycle {cycle}: planner {type(exc).__name__}"
                     f" (consecutive={self._consecutive_planner_errors}): {exc}"
                 )
@@ -170,6 +171,9 @@ class Orchestrator:
                 )
                 # Fall through — we still try to dispatch already-queued tasks
                 # so the cycle isn't wasted.
+
+            if self.recovery_policy is not None:
+                self.recovery_policy.apply(self.state)
 
             dequeued = self.dispatch_policy.dequeue_batch(self.state)
             batch = dequeued.tasks
@@ -199,7 +203,7 @@ class Orchestrator:
                     f" Next plan should propose a structurally different task"
                     f" (different task_type or distinct input_context)."
                 )
-                self.state.notes.append(hint)
+                self.state.orchestration_notes.append(hint)
                 self.state.touch()
                 self.emit(
                     f"[cycle {cycle}] task queue empty — recorded hint for next planner call"
@@ -234,7 +238,7 @@ class Orchestrator:
                     self.emit(
                         f"[cycle {cycle}] LLM router error, stopping run: {exc}"
                     )
-                    self.state.notes.append(
+                    self.state.orchestration_notes.append(
                         f"cycle {cycle}: router {type(exc).__name__}: {exc}"
                     )
                     self.state.status = RunStatus.STOPPED
@@ -264,7 +268,7 @@ class Orchestrator:
                         f"[cycle {cycle}] {tag} in {worker.name} "
                         f"while executing {task.task_id}: {exc}"
                     )
-                    self.state.notes.append(
+                    self.state.orchestration_notes.append(
                         f"cycle {cycle}: worker {worker.name} {type(exc).__name__}: {exc}"
                     )
                     report = WorkerReport(
@@ -327,7 +331,7 @@ class Orchestrator:
                     f"[cycle {max_cycles}] max cycles exhausted — "
                     f"{len(remaining_open_tasks)} task(s) still open"
                 )
-                self.state.notes.append(message)
+                self.state.orchestration_notes.append(message)
                 self.state.touch()
 
         # Determine final run status from task outcomes
