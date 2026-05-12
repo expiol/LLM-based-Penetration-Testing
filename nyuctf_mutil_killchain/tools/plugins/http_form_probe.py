@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from urllib.parse import urlsplit, urlunsplit
 
 from nyuctf_mutil_killchain.tools.core import ToolExecutionError, ToolExecutionRequest
@@ -11,11 +12,53 @@ from nyuctf_mutil_killchain.tools.plugins._shared import SHARED_FLAG_DETECTION_S
 
 TOOL_NAME = "http_form_probe"
 
+_RAW_HTTP_RE = re.compile(
+    r"\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+\S+\s+HTTP/\d(?:\.\d)?",
+    re.IGNORECASE,
+)
+_ENCODED_RAW_HTTP_RE = re.compile(
+    r"\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)%20[^&]*HTTP/",
+    re.IGNORECASE,
+)
+_CONTROL_OR_SPACE_RE = re.compile(r"[\x00-\x20\x7f]")
+_SAFE_QUERY_VARIANT_RE = re.compile(r"^[A-Za-z0-9._~!$&()*+,;=:@/?%\[\]-]+$")
+
+
+def _looks_like_raw_http(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        bool(_RAW_HTTP_RE.search(text))
+        or bool(_ENCODED_RAW_HTTP_RE.search(text))
+        or "http/1.1" in lowered
+        or "http/1.0" in lowered
+        or "content-type:" in lowered
+        or "content-disposition:" in lowered
+    )
+
+
+def _is_safe_query_variant(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text or len(text) > 180:
+        return False
+    if _CONTROL_OR_SPACE_RE.search(text) or _looks_like_raw_http(text):
+        return False
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return False
+    if parsed.scheme or parsed.netloc:
+        return False
+    return bool(_SAFE_QUERY_VARIANT_RE.fullmatch(text))
+
 
 def _iter_query_variants(query_variants: list[str] | None) -> list[str]:
     """Return every non-empty query variant, or a single baseline empty variant."""
 
-    normalized = [str(item).strip() for item in (query_variants or []) if str(item).strip()]
+    normalized = [
+        str(item).strip().lstrip("?")
+        for item in (query_variants or [])
+        if _is_safe_query_variant(item)
+    ]
     return normalized or [""]
 
 
@@ -124,8 +167,64 @@ _SCRIPT_BODY = r"""
 
 
 def iter_query_variants(items):
-    normalized = [str(item).strip() for item in (items or []) if str(item).strip()]
+    normalized = []
+    for item in items or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if text.startswith("?"):
+            text = text[1:]
+        if not is_safe_query_variant(text):
+            notes_list.append(f"Skipped unsafe query variant: {text[:120]}")
+            continue
+        if text not in normalized:
+            normalized.append(text)
+        if len(normalized) >= 8:
+            break
     return normalized or [""]
+
+
+def looks_like_raw_http(text):
+    lowered = text.lower()
+    return (
+        bool(re.search(r"\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+\S+\s+HTTP/\d(?:\.\d)?", text, re.I))
+        or bool(re.search(r"\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)%20[^&]*HTTP/", text, re.I))
+        or "http/1.1" in lowered
+        or "http/1.0" in lowered
+        or "content-type:" in lowered
+        or "content-disposition:" in lowered
+    )
+
+
+def is_safe_query_variant(text):
+    if not text or len(text) > 180:
+        return False
+    if re.search(r"[\x00-\x20\x7f]", text):
+        return False
+    if looks_like_raw_http(text):
+        return False
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return False
+    if parsed.scheme or parsed.netloc:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9._~!$&()*+,;=:@/?%\[\]-]+", text))
+
+
+def is_safe_submission_url(url):
+    text = str(url or "").strip()
+    if not text:
+        return False
+    if re.search(r"[\x00-\x20\x7f]", text):
+        return False
+    if looks_like_raw_http(text):
+        return False
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def merge_query_variant_url(target, query_variant):
@@ -329,6 +428,9 @@ def encode_multipart(fields, files):
 
 
 def submit(url, *, method, body=None, headers=None):
+    if not is_safe_submission_url(url):
+        notes_list.append(f"Skipped unsafe form submission URL: {str(url)[:160]}")
+        return None, url, ""
     req = urllib.request.Request(
         url,
         data=body,
@@ -450,6 +552,7 @@ else:
                                 "form_index": form_index,
                                 "method": request_method,
                                 "url": submission_url,
+                                "final_url": final_url,
                                 "status": status,
                                 "query_variant": query_variant,
                                 "marker": marker,

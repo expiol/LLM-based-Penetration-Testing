@@ -30,6 +30,10 @@ class SolverPromptBuilder:
 
         retry_block = self._build_retry_block(evidence.previous_attempts)
         if retry_block is not None:
+            # ``CRITICAL_RETRY_GUIDANCE`` is the compact retry surface the LLM
+            # should read.  Drop the raw snapshot key to avoid carrying the
+            # same prior attempts twice in every retry prompt.
+            snapshot.pop("previous_solver_attempts", None)
             snapshot["CRITICAL_RETRY_GUIDANCE"] = retry_block
 
         user_prompt = json.dumps(snapshot, ensure_ascii=True, indent=2)

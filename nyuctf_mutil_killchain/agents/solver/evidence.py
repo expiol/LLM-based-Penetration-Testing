@@ -12,11 +12,107 @@ from typing import Any
 
 from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter, RagContext
 from nyuctf_mutil_killchain.state import FileKind, GlobalState, Task, classify
+from nyuctf_mutil_killchain.state.models import smart_truncate_code
 
 
 _DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
 _MAX_SOURCE_CHARS_PER_FILE = 12000
 _MAX_TOTAL_SOURCE_CHARS = 36000
+_MAX_PREVIOUS_ATTEMPTS = 5
+_MAX_PREVIOUS_ATTEMPT_STDERR = 900
+_MAX_PREVIOUS_ATTEMPT_STDOUT = 700
+_MAX_PREVIOUS_ATTEMPT_CODE = 1200
+_MAX_PREVIOUS_ATTEMPTS_TOTAL = 5200
+
+
+def _tail_text(value: Any, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def compact_previous_attempt(
+    attempt: dict[str, Any],
+    *,
+    include_code: bool = False,
+) -> dict[str, Any]:
+    """Return a bounded retry-memory item suitable for solver prompts.
+
+    The raw retry context can contain multi-kilobyte solver scripts and stderr
+    dumps.  Keeping a compact, stable shape here prevents retry prompts and
+    persisted task contexts from growing every cycle.
+    """
+
+    compact: dict[str, Any] = {}
+    for key in ("attempt", "task_id", "worker_name", "source", "returncode", "occurrences"):
+        if key in attempt and attempt.get(key) not in (None, "", [], {}):
+            compact[key] = attempt.get(key)
+
+    for key, limit in (
+        ("title", 160),
+        ("summary", 300),
+        ("error", 300),
+        ("error_summary", 220),
+        ("error_diagnosis", 420),
+        ("error_fingerprint", 240),
+        ("failure_class", 80),
+    ):
+        value = str(attempt.get(key) or "").strip()
+        if value:
+            compact[key] = value[:limit]
+
+    stdout = attempt.get("stdout", attempt.get("stdout_preview", ""))
+    stderr = attempt.get("stderr", attempt.get("stderr_preview", ""))
+    stdout_tail = _tail_text(stdout, _MAX_PREVIOUS_ATTEMPT_STDOUT)
+    stderr_tail = _tail_text(stderr, _MAX_PREVIOUS_ATTEMPT_STDERR)
+    if stdout_tail:
+        compact["stdout"] = stdout_tail
+    if stderr_tail:
+        compact["stderr"] = stderr_tail
+
+    near_miss = list(attempt.get("near_miss_candidates") or [])
+    if near_miss:
+        compact["near_miss_candidates"] = [str(item)[:160] for item in near_miss[:3]]
+
+    code = str(attempt.get("solver_code_preview") or "").strip()
+    if include_code and code:
+        compact["solver_code_preview"] = smart_truncate_code(
+            code,
+            budget=_MAX_PREVIOUS_ATTEMPT_CODE,
+        )
+
+    return compact
+
+
+def compact_previous_attempts(
+    attempts: list[dict[str, Any]],
+    *,
+    limit: int = _MAX_PREVIOUS_ATTEMPTS,
+    include_latest_code: bool = True,
+) -> list[dict[str, Any]]:
+    """Compact and total-budget prior solver attempts newest-last."""
+
+    selected = list(attempts or [])[-max(1, limit):]
+    compacted: list[dict[str, Any]] = []
+    last_index = len(selected) - 1
+    for index, attempt in enumerate(selected):
+        if not isinstance(attempt, dict):
+            continue
+        compacted.append(
+            compact_previous_attempt(
+                attempt,
+                include_code=include_latest_code and index == last_index,
+            )
+        )
+
+    # Keep the most recent entries while bounding the serialized prompt slice.
+    while compacted:
+        total = sum(len(str(item)) for item in compacted)
+        if total <= _MAX_PREVIOUS_ATTEMPTS_TOTAL:
+            break
+        compacted.pop(0)
+    return compacted
 
 
 @dataclass
@@ -159,7 +255,10 @@ class SolverEvidenceComposer:
         if in_chain_attempts:
             # Solver-retry path: the in-chain context already carries the
             # last attempts (with structured fingerprint + diagnosis).
-            evidence.previous_attempts = in_chain_attempts[-5:]
+            evidence.previous_attempts = compact_previous_attempts(
+                in_chain_attempts,
+                limit=_MAX_PREVIOUS_ATTEMPTS,
+            )
         else:
             # Planner-proposed path: this is a *fresh* solver chain. Pull the
             # last failed attempts of the same task_type from the cross-task
@@ -168,8 +267,9 @@ class SolverEvidenceComposer:
             # failure modes (e.g. the same "Could not open output file"
             # stderr across cycles 7 and 11) are preserved even when there
             # are >5 raw failures.
-            evidence.previous_attempts = self._memory_to_previous_attempts(
-                state, task.task_type
+            evidence.previous_attempts = compact_previous_attempts(
+                self._memory_to_previous_attempts(state, task.task_type),
+                limit=_MAX_PREVIOUS_ATTEMPTS,
             )
         evidence.solver_contract = self._build_solver_contract(
             task=task,

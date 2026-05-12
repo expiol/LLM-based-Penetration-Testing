@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from urllib.parse import urlparse
+import re
+from urllib.parse import urljoin, urlparse
 
 from nyuctf_mutil_killchain.agents.base import (
     WorkerAgent,
@@ -15,6 +16,87 @@ from nyuctf_mutil_killchain.agents.base import (
 from nyuctf_mutil_killchain.agents.llm_guidance import FormProbeGuidance
 from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
 from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
+
+
+_RAW_HTTP_RE = re.compile(
+    r"\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+\S+\s+HTTP/\d(?:\.\d)?",
+    re.IGNORECASE,
+)
+_ENCODED_RAW_HTTP_RE = re.compile(
+    r"\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)%20[^&]*HTTP/",
+    re.IGNORECASE,
+)
+_CONTROL_OR_SPACE_RE = re.compile(r"[\x00-\x20\x7f]")
+_SAFE_QUERY_VARIANT_RE = re.compile(r"^[A-Za-z0-9._~!$&()*+,;=:@/?%\[\]-]+$")
+
+
+def _looks_like_raw_http(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        bool(_RAW_HTTP_RE.search(text))
+        or bool(_ENCODED_RAW_HTTP_RE.search(text))
+        or "http/1.1" in lowered
+        or "http/1.0" in lowered
+        or "content-type:" in lowered
+        or "content-disposition:" in lowered
+    )
+
+
+def _safe_query_variant(value: object) -> str | None:
+    """Return a safe query string fragment, or ``None`` for LLM drift.
+
+    ``query_variants`` are fragments like ``file=ARGV&cmd=id%20%7C``.  They
+    are not free-form HTTP transcripts or natural-language test plans.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) > 180:
+        return None
+    if _CONTROL_OR_SPACE_RE.search(text):
+        return None
+    if _looks_like_raw_http(text):
+        return None
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc:
+        return None
+    if not _SAFE_QUERY_VARIANT_RE.fullmatch(text):
+        return None
+    return text[1:] if text.startswith("?") else text
+
+
+def _filter_query_variants(values: list[object]) -> list[str]:
+    filtered: list[str] = []
+    for value in values:
+        item = _safe_query_variant(value)
+        if item and item not in filtered:
+            filtered.append(item)
+        if len(filtered) >= 8:
+            break
+    return filtered
+
+
+def _safe_same_origin_url(page_url: str, candidate: object) -> str | None:
+    text = str(candidate or "").strip()
+    if not text:
+        return None
+    if _CONTROL_OR_SPACE_RE.search(text) or _looks_like_raw_http(text):
+        return None
+    try:
+        base = urlparse(page_url)
+        normalized = urljoin(page_url, text)
+        parsed = urlparse(normalized)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if base.netloc and parsed.netloc != base.netloc:
+        return None
+    return normalized
 
 
 def _script_like_upload_query_variants(page_url: str, forms: list[dict[str, object]]) -> list[str]:
@@ -83,23 +165,30 @@ def _candidate_replay_urls(
     if not _supports_stateful_form_replay(forms):
         return []
 
-    page_parts = urlparse(page_url)
-    replay_urls: list[str] = []
-    for candidate in merge_unique_strings(
-        output_context.get("interesting_paths") or [],
-        output_context.get("action_urls") or [],
-        limit=12,
+    if not (
+        output_context.get("interesting_paths")
+        or output_context.get("reflected_markers")
+        or output_context.get("reflected_filenames")
+        or output_context.get("flag_candidates")
     ):
-        text = str(candidate).strip()
-        if not text or text == page_url:
+        return []
+
+    replay_urls: list[str] = []
+    submitted: list[str] = []
+    for result in list(output_context.get("submission_results") or []):
+        if not isinstance(result, dict) or result.get("status") is None:
             continue
-        parsed = urlparse(text)
-        if parsed.scheme and page_parts.scheme and parsed.scheme != page_parts.scheme:
+        for key in ("final_url", "url"):
+            value = _safe_same_origin_url(page_url, result.get(key))
+            if value and value not in submitted:
+                submitted.append(value)
+
+    for candidate in merge_unique_strings(submitted, limit=12):
+        safe_url = _safe_same_origin_url(page_url, candidate)
+        if not safe_url or safe_url == page_url:
             continue
-        if parsed.netloc and page_parts.netloc and parsed.netloc != page_parts.netloc:
-            continue
-        if text not in replay_urls:
-            replay_urls.append(text)
+        if safe_url not in replay_urls:
+            replay_urls.append(safe_url)
         if len(replay_urls) >= 3:
             break
     return replay_urls
@@ -179,9 +268,8 @@ class WebFormProbeAgent(WorkerAgent):
             llm_guidance.filename_variants,
             limit=4,
         )
-        llm_query_variants = merge_unique_strings(
-            llm_guidance.query_variants,
-            limit=8,
+        llm_query_variants = _filter_query_variants(
+            list(llm_guidance.query_variants or [])
         )
         query_variants = llm_query_variants or _script_like_upload_query_variants(page_url, forms)
 
@@ -210,11 +298,13 @@ class WebFormProbeAgent(WorkerAgent):
             )
 
         output_context = dict(bundle.parsed.output_context)
-        flag_candidates = list(output_context.get("flag_candidates") or [])
         flag_candidates = merge_unique_strings(
-            flag_candidates,
-            llm_guidance.grounded_flag_candidates,
+            output_context.get("flag_candidates") or [],
             limit=12,
+        )
+        output_context["llm_grounded_flag_candidates"] = merge_unique_strings(
+            llm_guidance.grounded_flag_candidates,
+            limit=8,
         )
         output_context["llm_summary"] = llm_guidance.summary
         output_context["manual_checks"] = merge_unique_strings(

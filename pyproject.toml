@@ -45,5 +45,17 @@ Homepage = "https://nyu-llm-ctf.github.io"
 [project.scripts]
 autopentest = "nyuctf_mutil_killchain.cli:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+norecursedirs = [
+  ".git",
+  ".venv",
+  "docker",
+  "logs*",
+  "logs_mutil_killchain",
+  "leaderboard_submissions",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["nyuctf_multiagent", "nyuctf_mutil_killchain"]

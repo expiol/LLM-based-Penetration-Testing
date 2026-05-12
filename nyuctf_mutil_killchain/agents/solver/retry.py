@@ -15,7 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from nyuctf_mutil_killchain.agents.reasoning import SolverCodeGuidance
-from nyuctf_mutil_killchain.agents.solver.evidence import SolverEvidence
+from nyuctf_mutil_killchain.agents.solver.evidence import (
+    SolverEvidence,
+    compact_previous_attempt,
+    compact_previous_attempts,
+)
 from nyuctf_mutil_killchain.agents.solver.executor import SolverExecutionOutcome
 from nyuctf_mutil_killchain.agents.solver.failure import (
     SolverFailureClassifier,
@@ -23,7 +27,6 @@ from nyuctf_mutil_killchain.agents.solver.failure import (
 )
 from nyuctf_mutil_killchain.agents.solver.parser import SolverFlagSet
 from nyuctf_mutil_killchain.state import Task
-from nyuctf_mutil_killchain.state.models import smart_truncate_code
 
 
 @dataclass
@@ -92,6 +95,26 @@ class SolverRetryPolicy:
             )
 
         retry_timeout = evidence.timeout_s + 30 if near_miss else evidence.timeout_s
+        prior_attempts = compact_previous_attempts(
+            list(task.input_context.get("previous_attempts") or []),
+            limit=max(1, self.max_retries - 1),
+            include_latest_code=False,
+        )
+        current_attempt = compact_previous_attempt(
+            {
+                "attempt": attempt,
+                "solver_code_preview": guidance.solver_code,
+                "returncode": returncode,
+                "stderr": stderr,
+                "stdout": stdout,
+                "near_miss_candidates": near_miss[:5],
+                "error_summary": f"Attempt {attempt} failed: exit code {returncode}",
+                "error_diagnosis": signal.diagnosis,
+                "error_fingerprint": signal.error_fingerprint,
+                "failure_class": signal.failure_class,
+            },
+            include_code=True,
+        )
         retry_task = Task(
             title=f"Solver retry (attempt {attempt + 1})",
             description="Retry solver generation with previous failure context.",
@@ -101,22 +124,7 @@ class SolverRetryPolicy:
                 "files_root": evidence.files_root,
                 "attempt_number": attempt + 1,
                 "solver_timeout_s": retry_timeout,
-                "previous_attempts": (task.input_context.get("previous_attempts") or []) + [
-                    {
-                        "attempt": attempt,
-                        "solver_code_preview": smart_truncate_code(
-                            guidance.solver_code, budget=6000
-                        ),
-                        "returncode": returncode,
-                        "stderr": stderr,
-                        "stdout": stdout,
-                        "near_miss_candidates": near_miss[:5],
-                        "error_summary": f"Attempt {attempt} failed: exit code {returncode}",
-                        "error_diagnosis": signal.diagnosis,
-                        "error_fingerprint": signal.error_fingerprint,
-                        "failure_class": signal.failure_class,
-                    }
-                ],
+                "previous_attempts": prior_attempts + [current_attempt],
                 "failure_class": signal.failure_class,
                 "must_avoid": signal.must_avoid,
                 "required_checks": signal.required_checks,

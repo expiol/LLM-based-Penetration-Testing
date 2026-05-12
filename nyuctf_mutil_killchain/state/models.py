@@ -511,6 +511,12 @@ NOTES_LIMIT = 500
 ORCHESTRATION_NOTES_LIMIT = 500
 EVIDENCE_DICT_LIMIT = 800
 
+# Queue fan-out guards.  These only cap still-open backlog; completed history
+# remains available for reporting while pathological planner/worker follow-up
+# loops cannot fill the queue with hundreds of equivalent probes.
+PENDING_WEB_FORM_PROBE_LIMIT_PER_ASSET = 12
+PENDING_FLAG_VALIDATE_LIMIT = 20
+
 
 class TaskAttemptMemory(BaseModel):
     """Snapshot of a single failed task attempt, indexed by task_type.
@@ -595,7 +601,51 @@ class GlobalState(BaseModel):
             for evidence_id in list(self.evidence.keys())[:excess]:
                 del self.evidence[evidence_id]
 
+    def _queue_guard_existing_task(self, task: Task) -> Task | None:
+        """Return an existing open task when adding *task* would fan out."""
+
+        if task.task_type == "web.form_probe":
+            asset_id = str(task.input_context.get("asset_id") or "")
+            pending = [
+                item for item in self.task_chain.tasks
+                if item.task_type == "web.form_probe"
+                and item.status == TaskStatus.PENDING
+                and str(item.input_context.get("asset_id") or "") == asset_id
+            ]
+            if len(pending) >= PENDING_WEB_FORM_PROBE_LIMIT_PER_ASSET:
+                return pending[0]
+
+        if task.task_type == "flag.validate":
+            pending = [
+                item for item in self.task_chain.tasks
+                if item.task_type == "flag.validate"
+                and item.status == TaskStatus.PENDING
+            ]
+            if len(pending) >= PENDING_FLAG_VALIDATE_LIMIT:
+                return pending[0]
+
+        if (
+            task.task_type == "solve.generate_script"
+            and task.metadata.get("planned_by") == "llm-planner"
+        ):
+            open_solver = next(
+                (
+                    item for item in self.task_chain.tasks
+                    if item.task_type == "solve.generate_script"
+                    and item.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
+                ),
+                None,
+            )
+            if open_solver is not None:
+                return open_solver
+
+        return None
+
     def queue_task(self, task: Task) -> Task:
+        guarded = self._queue_guard_existing_task(task)
+        if guarded is not None:
+            self.touch()
+            return guarded
         queued = self.task_chain.add_task(task)
         self.touch()
         return queued
@@ -665,7 +715,8 @@ class GlobalState(BaseModel):
         for edge in report.network_updates:
             self.add_network_edge(edge)
 
-        self.task_chain.extend(report.new_tasks)
+        for new_task in report.new_tasks:
+            self.queue_task(new_task)
         if report.solved:
             self.solved = True
         if report.validated_flag:

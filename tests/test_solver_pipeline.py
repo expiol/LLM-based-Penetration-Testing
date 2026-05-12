@@ -357,6 +357,30 @@ class SolverPromptTests(unittest.TestCase):
             guidance["repeating_fingerprints"],
         )
 
+    def test_retry_prompt_uses_compact_guidance_only(self):
+        state = _state_with_files(["solve.py"])
+        long_code = "print('x')\n" * 500
+        task = _solve_task({
+            "previous_attempts": [
+                {
+                    "attempt": 1,
+                    "solver_code_preview": long_code,
+                    "stderr": "boom\n" * 500,
+                    "stdout": "noise\n" * 500,
+                    "error_fingerprint": "RuntimeError: boom",
+                }
+            ],
+        })
+        evidence = SolverEvidenceComposer().compose(task, state)
+        _sys, user = SolverPromptBuilder().build(evidence)
+        payload = json.loads(user)
+
+        self.assertNotIn("previous_solver_attempts", payload)
+        guidance = payload["CRITICAL_RETRY_GUIDANCE"]
+        self.assertLessEqual(len(guidance.get("last_attempt_code", "")), 1300)
+        self.assertLessEqual(len(guidance.get("last_attempt_stderr", "")), 1200)
+        self.assertIn("RuntimeError: boom", json.dumps(guidance))
+
 
 class SolverAgentIntegrationTests(unittest.TestCase):
     def test_agent_fails_without_llm(self):
