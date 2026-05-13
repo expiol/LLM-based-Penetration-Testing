@@ -8,15 +8,15 @@ appropriate concrete worker.
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.agents.artifact.archive import ArchiveTriageAgent
-from nyuctf_mutil_killchain.agents.artifact.binary import BinaryTriageAgent
-from nyuctf_mutil_killchain.agents.artifact.pcap import PcapReviewAgent
-from nyuctf_mutil_killchain.agents.artifact.repo import RepoReviewAgent
-from nyuctf_mutil_killchain.agents.artifact.sqlite import SqliteReviewAgent
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.llm import LLMClient
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
-from nyuctf_mutil_killchain.tools import ExecutionPlane
+from killchain_docker.agents.artifact.archive import ArchiveTriageAgent
+from killchain_docker.agents.artifact.binary import BinaryTriageAgent
+from killchain_docker.agents.artifact.pcap import PcapReviewAgent
+from killchain_docker.agents.artifact.repo import RepoReviewAgent
+from killchain_docker.agents.artifact.sqlite import SqliteReviewAgent
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.llm import LLMClient
+from killchain_docker.state import GlobalState, Task, WorkerReport
+from killchain_docker.tools import ExecutionPlane
 
 
 _KIND_TO_FIELD = {

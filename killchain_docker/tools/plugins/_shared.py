@@ -1,7 +1,7 @@
 """Plugin-internal helpers.
 
 This module re-exports the canonical constants from
-``nyuctf_mutil_killchain.state.constants`` for backwards compatibility, and
+``killchain_docker.state.constants`` for backwards compatibility, and
 owns the inline-script snippet that gets concatenated into the SCRIPT string
 of plugins running in subprocesses.
 
@@ -14,7 +14,7 @@ imports keep working during refactors.
 from __future__ import annotations
 
 # Re-export from the canonical home in state.constants.
-from nyuctf_mutil_killchain.state.constants import (  # noqa: F401
+from killchain_docker.state.constants import (  # noqa: F401
     CODE_FALSE_POSITIVE_PREFIXES,
     CSS_BODY_RE,
     FLAG_PATTERN,

@@ -27,16 +27,16 @@ agents.
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.agents.artifact._helpers import (
+from killchain_docker.agents.artifact._helpers import (
     attempt_plugin,
     challenge_meta,
     files_root_of,
     success_report,
 )
-from nyuctf_mutil_killchain.agents.artifact._simple_review import run_simple_review
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
-from nyuctf_mutil_killchain.state.task_factory import build_flag_validation_tasks
+from killchain_docker.agents.artifact._simple_review import run_simple_review
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.state import GlobalState, Task, WorkerReport
+from killchain_docker.state.task_factory import build_flag_validation_tasks
 
 
 class BinaryTriageAgent(WorkerAgent):
@@ -161,7 +161,7 @@ class BinaryTriageAgent(WorkerAgent):
         if category and category not in self._DISASM_FOLLOWUP_CATEGORIES:
             return
 
-        from nyuctf_mutil_killchain.state.task_factory import (
+        from killchain_docker.state.task_factory import (
             build_binary_run_task,
         )
         files_root = str(task.input_context.get("files_root") or "/home/ctfplayer/ctf_files")
@@ -243,7 +243,7 @@ class BinaryTriageAgent(WorkerAgent):
 
         # Local import to keep agents.artifact.binary side-effect free at
         # import time (state.task_factory pulls in pydantic models).
-        from nyuctf_mutil_killchain.state.task_factory import (
+        from killchain_docker.state.task_factory import (
             build_binary_disassembly_task,
         )
 

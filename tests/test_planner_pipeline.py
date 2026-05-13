@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.llm import StaticLLMClient
-from nyuctf_mutil_killchain.orchestrator.planning import (
+from killchain_docker.llm import StaticLLMClient
+from killchain_docker.orchestrator.planning import (
     BootstrapSeeder,
     LLMPlanner,
     PlannedTask,
@@ -13,7 +13,7 @@ from nyuctf_mutil_killchain.orchestrator.planning import (
     TaskDeduper,
     TaskNormalizer,
 )
-from nyuctf_mutil_killchain.state import GlobalState
+from killchain_docker.state import GlobalState
 
 
 def _state_with(files: list[str], scope: list[str] | None = None) -> GlobalState:
@@ -135,7 +135,7 @@ class TaskNormalizerTests(unittest.TestCase):
         )
 
     def test_keeps_real_task_ids_that_exist_in_chain(self):
-        from nyuctf_mutil_killchain.state import Task as RealTask
+        from killchain_docker.state import Task as RealTask
         state = _state_with(["x.py"])
         existing = RealTask(
             title="prev", description="d", task_type="artifact.triage",
@@ -216,8 +216,8 @@ class LLMPlannerPipelineTests(unittest.TestCase):
         can route around blocked tasks instead of re-issuing them."""
 
         import json
-        from nyuctf_mutil_killchain.orchestrator.planning import PlanStrategy
-        from nyuctf_mutil_killchain.state import Task, TaskErrorCode
+        from killchain_docker.orchestrator.planning import PlanStrategy
+        from killchain_docker.state import Task, TaskErrorCode
 
         state = _state_with(["x.bin"])
         bad_task = Task(
@@ -284,7 +284,7 @@ class PlannedTaskPriorityCoercionTests(unittest.TestCase):
 
 class ConfidenceCoercionTests(unittest.TestCase):
     def test_solver_guidance_accepts_string_confidence(self):
-        from nyuctf_mutil_killchain.agents.reasoning.schemas import SolverCodeGuidance
+        from killchain_docker.agents.reasoning.schemas import SolverCodeGuidance
 
         guidance = SolverCodeGuidance(
             summary="x",
@@ -294,13 +294,13 @@ class ConfidenceCoercionTests(unittest.TestCase):
         self.assertEqual(guidance.confidence, 0.75)
 
     def test_router_decision_accepts_string_confidence(self):
-        from nyuctf_mutil_killchain.orchestrator.router import WorkerRouteDecision
+        from killchain_docker.orchestrator.router import WorkerRouteDecision
 
         decision = WorkerRouteDecision(worker_name="w", confidence="medium")
         self.assertEqual(decision.confidence, 0.5)
 
     def test_flag_validation_accepts_string_confidence(self):
-        from nyuctf_mutil_killchain.agents.flag import FlagValidationAssessment
+        from killchain_docker.agents.flag import FlagValidationAssessment
 
         assessment = FlagValidationAssessment(summary="ok", confidence="low")
         self.assertEqual(assessment.confidence, 0.25)

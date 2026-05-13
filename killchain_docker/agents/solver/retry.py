@@ -14,19 +14,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from nyuctf_mutil_killchain.agents.reasoning import SolverCodeGuidance
-from nyuctf_mutil_killchain.agents.solver.evidence import (
+from killchain_docker.agents.reasoning import SolverCodeGuidance
+from killchain_docker.agents.solver.evidence import (
     SolverEvidence,
     compact_previous_attempt,
     compact_previous_attempts,
 )
-from nyuctf_mutil_killchain.agents.solver.executor import SolverExecutionOutcome
-from nyuctf_mutil_killchain.agents.solver.failure import (
+from killchain_docker.agents.solver.executor import SolverExecutionOutcome
+from killchain_docker.agents.solver.failure import (
     SolverFailureClassifier,
     SolverFailureSignal,
 )
-from nyuctf_mutil_killchain.agents.solver.parser import SolverFlagSet
-from nyuctf_mutil_killchain.state import Task
+from killchain_docker.agents.solver.parser import SolverFlagSet
+from killchain_docker.state import Task
 
 
 @dataclass

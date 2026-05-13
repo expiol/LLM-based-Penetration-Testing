@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.knowledge import RagContext, RagHit
-from nyuctf_mutil_killchain.orchestrator.recovery import RecoveryPolicy
-from nyuctf_mutil_killchain.state import ExecutionRecord, GlobalState, Task
+from killchain_docker.knowledge import RagContext, RagHit
+from killchain_docker.orchestrator.recovery import RecoveryPolicy
+from killchain_docker.state import ExecutionRecord, GlobalState, Task
 
 
 def _stfu_hit(score: float) -> RagHit:

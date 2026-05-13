@@ -14,8 +14,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.state import (
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.state import (
     FileKind,
     GlobalState,
     Task,

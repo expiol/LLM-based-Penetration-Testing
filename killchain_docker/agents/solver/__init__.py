@@ -10,25 +10,25 @@ Public surface:
 - :class:`SolverRetryPolicy` / :class:`SolverRetryPlan` - retry decisions.
 """
 
-from nyuctf_mutil_killchain.agents.solver.agent import SolverAgent
-from nyuctf_mutil_killchain.agents.solver.evidence import (
+from killchain_docker.agents.solver.agent import SolverAgent
+from killchain_docker.agents.solver.evidence import (
     SolverEvidence,
     SolverEvidenceComposer,
 )
-from nyuctf_mutil_killchain.agents.solver.executor import (
+from killchain_docker.agents.solver.executor import (
     SolverCodeExecutor,
     SolverExecutionOutcome,
 )
-from nyuctf_mutil_killchain.agents.solver.failure import (
+from killchain_docker.agents.solver.failure import (
     SolverFailureClassifier,
     SolverFailureSignal,
 )
-from nyuctf_mutil_killchain.agents.solver.parser import (
+from killchain_docker.agents.solver.parser import (
     SolverFlagSet,
     SolverResultParser,
 )
-from nyuctf_mutil_killchain.agents.solver.prompts import SolverPromptBuilder
-from nyuctf_mutil_killchain.agents.solver.retry import (
+from killchain_docker.agents.solver.prompts import SolverPromptBuilder
+from killchain_docker.agents.solver.retry import (
     SolverRetryPlan,
     SolverRetryPolicy,
 )

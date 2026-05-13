@@ -9,10 +9,10 @@ import traceback
 from pathlib import Path
 from typing import Sequence
 
-from nyuctf_mutil_killchain.controller import RunConfig, run_assessment
-from nyuctf_mutil_killchain.lab import DEFAULT_COMPOSE_REL, lab_down, lab_health_check, lab_up
-from nyuctf_mutil_killchain.llm import LLMClientError
-from nyuctf_mutil_killchain.selftest import run_selftest
+from killchain_docker.controller import RunConfig, run_assessment
+from killchain_docker.lab import DEFAULT_COMPOSE_REL, lab_down, lab_health_check, lab_up
+from killchain_docker.llm import LLMClientError
+from killchain_docker.selftest import run_selftest
 
 
 def build_parser() -> argparse.ArgumentParser:

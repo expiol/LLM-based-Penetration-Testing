@@ -1,6 +1,6 @@
 """Shared state models for the orchestrator."""
 
-from nyuctf_mutil_killchain.state.file_classification import (
+from killchain_docker.state.file_classification import (
     EXT_TO_KIND,
     FileKind,
     classify,
@@ -12,7 +12,7 @@ from nyuctf_mutil_killchain.state.file_classification import (
     looks_like_sqlite,
     split_source_and_binary,
 )
-from nyuctf_mutil_killchain.state.models import (
+from killchain_docker.state.models import (
     Asset,
     AssetKind,
     Credential,

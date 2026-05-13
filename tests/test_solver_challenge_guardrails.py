@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import unittest
 
-from nyuctf_mutil_killchain.agents._helpers.flag import (
+from killchain_docker.agents._helpers.flag import (
     _bracket_span_candidates,
     extract_flag_candidates,
 )
-from nyuctf_mutil_killchain.state.constants import plausible_flag
-from nyuctf_mutil_killchain.state.task_factory import is_validatable_flag_candidate
-from nyuctf_mutil_killchain.tools.core import ToolExecutionRequest
-from nyuctf_mutil_killchain.tools.plugins import solver_execution
+from killchain_docker.state.constants import plausible_flag
+from killchain_docker.state.task_factory import is_validatable_flag_candidate
+from killchain_docker.tools.core import ToolExecutionRequest
+from killchain_docker.tools.plugins import solver_execution
 
 
 class TestPlausibleFlagFormatEcho(unittest.TestCase):

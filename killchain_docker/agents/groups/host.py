@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.agents.enrichment import ServiceBannerAgent
-from nyuctf_mutil_killchain.agents.host import HostAuditAgent
-from nyuctf_mutil_killchain.agents.recon import ReconAgent
+from killchain_docker.agents.enrichment import ServiceBannerAgent
+from killchain_docker.agents.host import HostAuditAgent
+from killchain_docker.agents.recon import ReconAgent
 
 HOST_WORKERS: tuple[type, ...] = (
     ReconAgent,

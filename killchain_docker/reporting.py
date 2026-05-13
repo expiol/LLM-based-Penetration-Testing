@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.state import GlobalState
+from killchain_docker.state import GlobalState
 
 
 def render_markdown_report(state: GlobalState) -> str:

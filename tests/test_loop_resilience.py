@@ -10,15 +10,15 @@ from __future__ import annotations
 import unittest
 from collections.abc import Iterable
 
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.llm import LLMClientError
-from nyuctf_mutil_killchain.orchestrator.loop import Orchestrator
-from nyuctf_mutil_killchain.orchestrator.planning import (
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.llm import LLMClientError
+from killchain_docker.orchestrator.loop import Orchestrator
+from killchain_docker.orchestrator.planning import (
     PlannedTask,
     PlannerDecision,
     TaskPlanner,
 )
-from nyuctf_mutil_killchain.state import (
+from killchain_docker.state import (
     GlobalState,
     RunStatus,
     Task,

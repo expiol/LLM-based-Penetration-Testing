@@ -36,8 +36,8 @@ from typing import Iterable
 
 import numpy as np
 
-from nyuctf_mutil_killchain.knowledge.corpus import KnowledgeEntry, load_corpus
-from nyuctf_mutil_killchain.knowledge.embedder import (
+from killchain_docker.knowledge.corpus import KnowledgeEntry, load_corpus
+from killchain_docker.knowledge.embedder import (
     CachedEmbeddingMatrix,
     EmbeddingBackend,
     EmbeddingUnavailable,

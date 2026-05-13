@@ -14,11 +14,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from nyuctf_mutil_killchain.agents._helpers.strings import merge_unique_strings
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.agents.reasoning import EvidenceReviewGuidance
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
-from nyuctf_mutil_killchain.tools import (
+from killchain_docker.agents._helpers.strings import merge_unique_strings
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.agents.reasoning import EvidenceReviewGuidance
+from killchain_docker.state import GlobalState, Task, WorkerReport
+from killchain_docker.tools import (
     ExecutionPlane,
     ToolExecutionBundle,
     ToolExecutionError,

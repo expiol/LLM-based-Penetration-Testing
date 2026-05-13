@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from nyuctf_mutil_killchain.agents.reasoning import SolverCodeGuidance
-from nyuctf_mutil_killchain.agents.solver import (
+from killchain_docker.agents.reasoning import SolverCodeGuidance
+from killchain_docker.agents.solver import (
     SolverAgent,
     SolverEvidence,
     SolverEvidenceComposer,
@@ -19,15 +19,15 @@ from nyuctf_mutil_killchain.agents.solver import (
     SolverResultParser,
     SolverRetryPolicy,
 )
-from nyuctf_mutil_killchain.agents.solver.parser import (
+from killchain_docker.agents.solver.parser import (
     clean_near_miss_candidates,
     is_placeholder_flag,
 )
-from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter, KnowledgeRetriever
-from nyuctf_mutil_killchain.knowledge.corpus import KnowledgeEntry
-from nyuctf_mutil_killchain.knowledge.embedder import StubEmbedder
-from nyuctf_mutil_killchain.llm import StaticLLMClient
-from nyuctf_mutil_killchain.state import GlobalState, Task
+from killchain_docker.knowledge import KnowledgeAugmenter, KnowledgeRetriever
+from killchain_docker.knowledge.corpus import KnowledgeEntry
+from killchain_docker.knowledge.embedder import StubEmbedder
+from killchain_docker.llm import StaticLLMClient
+from killchain_docker.state import GlobalState, Task
 
 
 def _state_with_files(files: list[str], category: str = "crypto") -> GlobalState:
@@ -403,7 +403,7 @@ class SolverEmptyCodeRecoveryTests(unittest.TestCase):
     not raised at the LLM-client level (which would kill the cycle)."""
 
     def test_empty_then_valid_recovers(self):
-        from nyuctf_mutil_killchain.agents.solver.agent import SolverAgent
+        from killchain_docker.agents.solver.agent import SolverAgent
 
         # First response is empty; second response is a valid script.  The
         # lint loop should re-prompt and accept the second.
@@ -439,7 +439,7 @@ class SolverLintExhaustionSoftFailTests(unittest.TestCase):
     """
 
     def test_all_empty_solver_code_yields_soft_failure(self):
-        from nyuctf_mutil_killchain.agents.solver.agent import (
+        from killchain_docker.agents.solver.agent import (
             SolverAgent,
             _LINT_RETRY_BUDGET,
         )

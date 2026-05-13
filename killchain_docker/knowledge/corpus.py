@@ -8,8 +8,8 @@ block isolated as a compact ``solution_sketch``).
 The shape is intentionally minimal so a downstream embedder can encode each
 entry into a single dense vector without us having to pick which paragraphs
 "matter".  The retriever then uses dense cosine similarity (no BM25) for
-ranking — see :mod:`nyuctf_mutil_killchain.knowledge.embedder` and
-:mod:`nyuctf_mutil_killchain.knowledge.retriever`.
+ranking — see :mod:`killchain_docker.knowledge.embedder` and
+:mod:`killchain_docker.knowledge.retriever`.
 """
 
 from __future__ import annotations

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.orchestrator.dispatch_policy import DispatchPolicy
-from nyuctf_mutil_killchain.state.models import (
+from killchain_docker.orchestrator.dispatch_policy import DispatchPolicy
+from killchain_docker.state.models import (
     ExecutionRecord,
     GlobalState,
     Task,

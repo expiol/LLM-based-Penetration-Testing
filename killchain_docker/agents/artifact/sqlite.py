@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.agents.artifact._simple_review import run_simple_review
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
+from killchain_docker.agents.artifact._simple_review import run_simple_review
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.state import GlobalState, Task, WorkerReport
 
 
 class SqliteReviewAgent(WorkerAgent):

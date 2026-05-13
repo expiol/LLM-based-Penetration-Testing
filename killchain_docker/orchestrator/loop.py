@@ -5,17 +5,17 @@ from __future__ import annotations
 import traceback
 from collections.abc import Callable, Iterable
 
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.llm import LLMClientError
-from nyuctf_mutil_killchain.orchestrator.dispatch_policy import DispatchPolicy
-from nyuctf_mutil_killchain.orchestrator.planning import BootstrapSeeder, TaskPlanner
-from nyuctf_mutil_killchain.orchestrator.recovery import RecoveryPolicy
-from nyuctf_mutil_killchain.orchestrator.router import (
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.llm import LLMClientError
+from killchain_docker.orchestrator.dispatch_policy import DispatchPolicy
+from killchain_docker.orchestrator.planning import BootstrapSeeder, TaskPlanner
+from killchain_docker.orchestrator.recovery import RecoveryPolicy
+from killchain_docker.orchestrator.router import (
     WorkerRouteDecision,
     WorkerRouter,
 )
-from nyuctf_mutil_killchain.state import GlobalState, RunStatus, Task, TaskErrorCode, TaskStatus, WorkerReport
-from nyuctf_mutil_killchain.state.models import utc_now
+from killchain_docker.state import GlobalState, RunStatus, Task, TaskErrorCode, TaskStatus, WorkerReport
+from killchain_docker.state.models import utc_now
 
 
 class Orchestrator:

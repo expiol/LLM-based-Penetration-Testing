@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.prompts.rag import SOLVER_RAG_GUIDE
+from killchain_docker.prompts.rag import SOLVER_RAG_GUIDE
 
 SOLVER_SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert CTF solver. Your job is to write a complete, executable \

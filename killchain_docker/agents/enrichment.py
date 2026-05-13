@@ -1,7 +1,7 @@
 """Service-banner and web-path-probe enrichment workers.
 
 The artifact-stage workers historically aliased here have moved to
-:mod:`nyuctf_mutil_killchain.agents.artifact`.  This module retains the
+:mod:`killchain_docker.agents.artifact`.  This module retains the
 runtime workers it actually owns (banner grab, web path probe).
 """
 
@@ -9,23 +9,23 @@ from __future__ import annotations
 
 import json
 
-from nyuctf_mutil_killchain.agents._helpers.network import infer_web_urls_from_banners
-from nyuctf_mutil_killchain.agents._helpers.strings import merge_unique_strings
-from nyuctf_mutil_killchain.agents.artifact import (
+from killchain_docker.agents._helpers.network import infer_web_urls_from_banners
+from killchain_docker.agents._helpers.strings import merge_unique_strings
+from killchain_docker.agents.artifact import (
     ArchiveTriageAgent,
     PcapReviewAgent,
     RepoReviewAgent,
     SqliteReviewAgent,
 )
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.agents.reasoning import EvidenceReviewGuidance
-from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, WorkerReport
-from nyuctf_mutil_killchain.state.task_factory import (
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.agents.reasoning import EvidenceReviewGuidance
+from killchain_docker.state import GlobalState, Task, TaskErrorCode, WorkerReport
+from killchain_docker.state.task_factory import (
     build_flag_validation_tasks,
     build_web_content_task,
     build_web_review_task,
 )
-from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
+from killchain_docker.tools import ToolExecutionError, ToolExecutionRequest
 
 # Backwards-compat alias kept for callers that import SQLiteReviewAgent.
 SQLiteReviewAgent = SqliteReviewAgent

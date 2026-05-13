@@ -8,14 +8,14 @@ The actual worker classes live in the ``artifact``, ``recon``, ``host``, etc.
 modules; this package is a thin organizational layer.
 """
 
-from nyuctf_mutil_killchain.agents.groups.credential import CREDENTIAL_WORKERS
-from nyuctf_mutil_killchain.agents.groups.exploit import EXPLOIT_WORKERS
-from nyuctf_mutil_killchain.agents.groups.flag import FLAG_WORKERS
-from nyuctf_mutil_killchain.agents.groups.host import HOST_WORKERS
-from nyuctf_mutil_killchain.agents.groups.solver import SOLVER_WORKERS
-from nyuctf_mutil_killchain.agents.groups.static_analysis import STATIC_ANALYSIS_WORKERS
-from nyuctf_mutil_killchain.agents.groups.vuln import VULN_WORKERS
-from nyuctf_mutil_killchain.agents.groups.web import WEB_WORKERS
+from killchain_docker.agents.groups.credential import CREDENTIAL_WORKERS
+from killchain_docker.agents.groups.exploit import EXPLOIT_WORKERS
+from killchain_docker.agents.groups.flag import FLAG_WORKERS
+from killchain_docker.agents.groups.host import HOST_WORKERS
+from killchain_docker.agents.groups.solver import SOLVER_WORKERS
+from killchain_docker.agents.groups.static_analysis import STATIC_ANALYSIS_WORKERS
+from killchain_docker.agents.groups.vuln import VULN_WORKERS
+from killchain_docker.agents.groups.web import WEB_WORKERS
 
 
 def all_worker_classes() -> list[type]:

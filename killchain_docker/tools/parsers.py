@@ -7,8 +7,8 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from nyuctf_mutil_killchain.state import Asset, Credential, Finding, NetworkEdge
-from nyuctf_mutil_killchain.tools.core import (
+from killchain_docker.state import Asset, Credential, Finding, NetworkEdge
+from killchain_docker.tools.core import (
     ParsedToolOutput,
     ToolExecutionError,
     ToolExecutionRequest,

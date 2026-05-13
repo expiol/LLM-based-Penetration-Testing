@@ -21,11 +21,11 @@ import re
 
 from pydantic import BaseModel, Field, field_validator
 
-from nyuctf_mutil_killchain.agents._helpers.coercion import coerce_confidence
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.llm import LLMClient
-from nyuctf_mutil_killchain.state import GlobalState, Severity, Task, TaskErrorCode, WorkerReport, Finding
-from nyuctf_mutil_killchain.state.task_factory import is_validatable_flag_candidate
+from killchain_docker.agents._helpers.coercion import coerce_confidence
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.llm import LLMClient
+from killchain_docker.state import GlobalState, Severity, Task, TaskErrorCode, WorkerReport, Finding
+from killchain_docker.state.task_factory import is_validatable_flag_candidate
 
 
 # Common "transport noise" wrappers that obscure an otherwise correct flag.

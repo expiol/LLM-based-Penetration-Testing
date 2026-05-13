@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import json
 
-from nyuctf_mutil_killchain.agents.base import (
+from killchain_docker.agents.base import (
     WorkerAgent,
     build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
     merge_unique_strings,
 )
-from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
-from nyuctf_mutil_killchain.prompts import get_worker_system_prompt, get_flag_hints
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
-from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
+from killchain_docker.agents.llm_guidance import StageAnalysisGuidance
+from killchain_docker.prompts import get_worker_system_prompt, get_flag_hints
+from killchain_docker.state import GlobalState, Task, WorkerReport
+from killchain_docker.tools import ToolExecutionError, ToolExecutionRequest
 
 
 class FlagHuntAgent(WorkerAgent):

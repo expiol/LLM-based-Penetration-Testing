@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from nyuctf_mutil_killchain.tools.core import ToolExecutionError, ToolExecutionRequest
+from killchain_docker.tools.core import ToolExecutionError, ToolExecutionRequest
 
 TOOL_NAME = "local_http_metadata"
 

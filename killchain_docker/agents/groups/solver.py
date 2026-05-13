@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.agents.solver import SolverAgent
+from killchain_docker.agents.solver import SolverAgent
 
 SOLVER_WORKERS: tuple[type, ...] = (SolverAgent,)
 

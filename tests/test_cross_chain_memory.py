@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.agents.solver.evidence import SolverEvidenceComposer
-from nyuctf_mutil_killchain.state.models import (
+from killchain_docker.agents.solver.evidence import SolverEvidenceComposer
+from killchain_docker.state.models import (
     GlobalState,
     Task,
     WorkerReport,
@@ -143,7 +143,7 @@ class TestTaskTypeMemory(unittest.TestCase):
         self.assertEqual(evidence.previous_attempts[0]["summary"], "in-chain summary")
 
     def test_memory_capped(self) -> None:
-        from nyuctf_mutil_killchain.state.models import TASK_TYPE_MEMORY_LIMIT
+        from killchain_docker.state.models import TASK_TYPE_MEMORY_LIMIT
 
         state = _state_with_challenge()
         for i in range(TASK_TYPE_MEMORY_LIMIT + 5):

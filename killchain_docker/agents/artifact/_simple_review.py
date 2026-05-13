@@ -7,16 +7,16 @@ Used by binary/sqlite/pcap/repo workers - they all share the same shape:
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.agents.artifact._helpers import (
+from killchain_docker.agents.artifact._helpers import (
     attempt_plugin,
     evidence_review_guidance,
     files_root_of,
     merge_review_outputs,
     success_report,
 )
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
-from nyuctf_mutil_killchain.state.task_factory import (
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.state import GlobalState, Task, WorkerReport
+from killchain_docker.state.task_factory import (
     build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
 )

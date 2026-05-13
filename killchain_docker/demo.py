@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from nyuctf_mutil_killchain.controller import RunConfig, run_assessment
+from killchain_docker.controller import RunConfig, run_assessment
 
 
 def main() -> None:

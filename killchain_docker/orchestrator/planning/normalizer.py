@@ -10,8 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from nyuctf_mutil_killchain.orchestrator.planning.schemas import PlannedTask
-from nyuctf_mutil_killchain.state import (
+from killchain_docker.orchestrator.planning.schemas import PlannedTask
+from killchain_docker.state import (
     FileKind,
     GlobalState,
     classify,

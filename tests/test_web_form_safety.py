@@ -4,25 +4,25 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.agents.web_form import (
+from killchain_docker.agents.web_form import (
     WebFormProbeAgent,
     _candidate_replay_urls,
     _filter_query_variants,
 )
-from nyuctf_mutil_killchain.llm import StaticLLMClient
-from nyuctf_mutil_killchain.state import (
+from killchain_docker.llm import StaticLLMClient
+from killchain_docker.state import (
     EvidenceRecord,
     GlobalState,
     Task,
 )
-from nyuctf_mutil_killchain.tools import (
+from killchain_docker.tools import (
     ExecutionMode,
     ParsedToolOutput,
     ToolExecutionBundle,
     ToolExecutionRequest,
     ToolExecutionResult,
 )
-from nyuctf_mutil_killchain.tools.plugins.http_form_probe import _iter_query_variants
+from killchain_docker.tools.plugins.http_form_probe import _iter_query_variants
 
 
 class WebFormSafetyTests(unittest.TestCase):

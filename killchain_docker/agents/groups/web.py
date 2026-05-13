@@ -5,10 +5,10 @@ Each web task type maps to its own per-task worker class.
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.agents.enrichment import WebPathProbeAgent
-from nyuctf_mutil_killchain.agents.web import WebAssessmentAgent
-from nyuctf_mutil_killchain.agents.web_content import WebContentAgent
-from nyuctf_mutil_killchain.agents.web_form import WebFormProbeAgent
+from killchain_docker.agents.enrichment import WebPathProbeAgent
+from killchain_docker.agents.web import WebAssessmentAgent
+from killchain_docker.agents.web_content import WebContentAgent
+from killchain_docker.agents.web_form import WebFormProbeAgent
 
 WEB_WORKERS: tuple[type, ...] = (
     WebAssessmentAgent,

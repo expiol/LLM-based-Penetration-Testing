@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.state.file_classification import (
+from killchain_docker.state.file_classification import (
     EXT_TO_KIND,
     FileKind,
     SOURCE_EXTS,

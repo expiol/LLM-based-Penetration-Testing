@@ -1,6 +1,6 @@
 """LLM client abstractions."""
 
-from nyuctf_mutil_killchain.llm.gateway import (
+from killchain_docker.llm.gateway import (
     GatewayLLMClient,
     LLMClient,
     LLMClientError,

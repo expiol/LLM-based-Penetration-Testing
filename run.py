@@ -17,10 +17,10 @@ from typing import Any
 from nyuctf.challenge import CTFChallenge
 from nyuctf.dataset import CTFDataset
 
-from nyuctf_mutil_killchain.controller import RunConfig, run_assessment
-from nyuctf_mutil_killchain.environment import CTFEnvironment
-from nyuctf_mutil_killchain.llm import build_llm_client_from_env
-from nyuctf_mutil_killchain.tools import build_execution_plane
+from killchain_docker.controller import RunConfig, run_assessment
+from killchain_docker.environment import CTFEnvironment
+from killchain_docker.llm import build_llm_client_from_env
+from killchain_docker.tools import build_execution_plane
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                    运行参数配置                        ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -38,7 +38,7 @@ QUIET           = False                     # 静默模式（不输出编排事�
 DEBUG           = True                      # 调试模式（失败时打印详细上下文）
 SKIP_EXIST      = False                     # 跳过已存在的日志
 LOGDIR          = None                      # 日志目录；留 None 使用默认路径 logs/<user>
-NAME            = "5.13_development_1"                      # 实验名称（在日志目录下创建子目录）
+NAME            = "5.14_development_1"                      # 实验名称（在日志目录下创建子目录）
 INDEX           = None                      # 实验轮次（在日志目录下创建子目录）
 OUTPUT_ROOT     = None                      # 运行产物目录；留 None 使用默认路径
 PARALLEL_WORKERS = 1                       # 并发 worker 数（run-all 或 replicas）
@@ -405,7 +405,7 @@ def estimate_max_cycles(challenge: CTFChallenge, authorized_scope: list[str], ba
 
 
 def derive_objective(challenge: CTFChallenge, authorized_scope: list[str]) -> str:
-    from nyuctf_mutil_killchain.prompts import get_objective_hint
+    from killchain_docker.prompts import get_objective_hint
 
     category = str(challenge.category or "").lower()
     lines = [

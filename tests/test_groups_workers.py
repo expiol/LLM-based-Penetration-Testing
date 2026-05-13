@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.agents.groups import (
+from killchain_docker.agents.groups import (
     CREDENTIAL_WORKERS,
     EXPLOIT_WORKERS,
     FLAG_WORKERS,
@@ -99,7 +99,7 @@ class GroupsRegistryTests(unittest.TestCase):
     def test_artifact_deep_review_has_multiple_candidates(self):
         # binary/archive/sqlite/pcap/repo workers all claim deep_review
         # with their respective analysis_kind so the Router gets exercised.
-        from nyuctf_mutil_killchain.state import Task
+        from killchain_docker.state import Task
         kinds_with_candidates = {
             "binary": "binary_files",
             "archive": "archive_files",

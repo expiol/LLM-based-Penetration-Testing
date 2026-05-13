@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.agents.artifact import BinaryTriageAgent
-from nyuctf_mutil_killchain.agents.solver import SolverEvidenceComposer
-from nyuctf_mutil_killchain.state import GlobalState, Task
-from nyuctf_mutil_killchain.state.models import EvidenceRecord
-from nyuctf_mutil_killchain.state.task_factory import (
+from killchain_docker.agents.artifact import BinaryTriageAgent
+from killchain_docker.agents.solver import SolverEvidenceComposer
+from killchain_docker.state import GlobalState, Task
+from killchain_docker.state.models import EvidenceRecord
+from killchain_docker.state.task_factory import (
     build_binary_disassembly_task,
     build_binary_run_task,
     build_binary_triage_task,
@@ -124,7 +124,7 @@ class BinaryTriageFollowupTests(unittest.TestCase):
     def _build_triage_report_via_post_process(
         self, *, category: str, flag_candidates: list[str],
     ):
-        from nyuctf_mutil_killchain.state import WorkerReport
+        from killchain_docker.state import WorkerReport
 
         agent = BinaryTriageAgent()
         task = Task(
@@ -220,7 +220,7 @@ class BinaryDisassemblyToRunFollowupTests(unittest.TestCase):
     """
 
     def _build_disasm_report(self, *, category: str, flag_candidates: list[str]):
-        from nyuctf_mutil_killchain.state import WorkerReport
+        from killchain_docker.state import WorkerReport
 
         agent = BinaryTriageAgent()
         task = Task(

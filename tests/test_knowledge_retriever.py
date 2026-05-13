@@ -14,20 +14,20 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
-from nyuctf_mutil_killchain.knowledge.corpus import (
+from killchain_docker.knowledge import KnowledgeAugmenter
+from killchain_docker.knowledge.corpus import (
     KnowledgeEntry,
     extract_solution_sketch,
     load_corpus,
 )
-from nyuctf_mutil_killchain.knowledge.embedder import (
+from killchain_docker.knowledge.embedder import (
     CachedEmbeddingMatrix,
     StubEmbedder,
 )
-from nyuctf_mutil_killchain.knowledge.retriever import KnowledgeRetriever
-from nyuctf_mutil_killchain.llm import StaticLLMClient
-from nyuctf_mutil_killchain.orchestrator.planning.strategy import PlanStrategy
-from nyuctf_mutil_killchain.state import GlobalState
+from killchain_docker.knowledge.retriever import KnowledgeRetriever
+from killchain_docker.llm import StaticLLMClient
+from killchain_docker.orchestrator.planning.strategy import PlanStrategy
+from killchain_docker.state import GlobalState
 
 
 def _entry(
@@ -380,7 +380,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         # planner budget so the algorithm body fits.  We compare the two
         # budgets indirectly by reading the rendered ``solution_sketch``
         # length for the same hit.
-        from nyuctf_mutil_killchain.knowledge.augmenter import (
+        from killchain_docker.knowledge.augmenter import (
             PLANNER_SOLUTION_CHARS,
             SOLVER_SOLUTION_CHARS,
         )

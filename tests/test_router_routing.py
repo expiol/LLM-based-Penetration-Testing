@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.llm import LLMClientError, StaticLLMClient
-from nyuctf_mutil_killchain.orchestrator.router import LLMWorkerRouter, WorkerRouteDecision
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.llm import LLMClientError, StaticLLMClient
+from killchain_docker.orchestrator.router import LLMWorkerRouter, WorkerRouteDecision
+from killchain_docker.state import GlobalState, Task, WorkerReport
 
 
 class _StubWorker(WorkerAgent):

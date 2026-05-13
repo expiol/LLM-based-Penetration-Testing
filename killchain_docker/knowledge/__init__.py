@@ -17,13 +17,13 @@ Public surface:
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.knowledge.augmenter import (
+from killchain_docker.knowledge.augmenter import (
     MAX_HITS,
     KnowledgeAugmenter,
     RagContext,
     RagHit,
 )
-from nyuctf_mutil_killchain.knowledge.retriever import (
+from killchain_docker.knowledge.retriever import (
     KnowledgeRetriever,
     RetrievalHit,
     get_retriever,

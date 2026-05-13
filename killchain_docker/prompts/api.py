@@ -10,16 +10,16 @@ from __future__ import annotations
 from typing import Any
 
 # Importing categories registers each bundle into the global registry.
-from nyuctf_mutil_killchain.prompts import categories  # noqa: F401
-from nyuctf_mutil_killchain.prompts.planner import build_planner_system_prompt
-from nyuctf_mutil_killchain.prompts.router import build_router_system_prompt
-from nyuctf_mutil_killchain.prompts.rag import SOLVER_RAG_GUIDE
-from nyuctf_mutil_killchain.prompts.solver import (
+from killchain_docker.prompts import categories  # noqa: F401
+from killchain_docker.prompts.planner import build_planner_system_prompt
+from killchain_docker.prompts.router import build_router_system_prompt
+from killchain_docker.prompts.rag import SOLVER_RAG_GUIDE
+from killchain_docker.prompts.solver import (
     SOLVER_SYSTEM_PROMPT_TEMPLATE,
     TECHNIQUE_HINTS,
 )
-from nyuctf_mutil_killchain.prompts.types import CategoryPrompts, lookup
-from nyuctf_mutil_killchain.prompts.worker import build_worker_system_prompt
+from killchain_docker.prompts.types import CategoryPrompts, lookup
+from killchain_docker.prompts.worker import build_worker_system_prompt
 
 
 def get_prompts(category: str | None) -> CategoryPrompts:

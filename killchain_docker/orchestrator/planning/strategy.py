@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import json
 
-from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
-from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
-from nyuctf_mutil_killchain.orchestrator.planning.schemas import PlannerDecision
-from nyuctf_mutil_killchain.prompts import get_planner_system_prompt, get_prompts
-from nyuctf_mutil_killchain.state import GlobalState
+from killchain_docker.knowledge import KnowledgeAugmenter
+from killchain_docker.llm import LLMClient, LLMClientError
+from killchain_docker.orchestrator.planning.schemas import PlannerDecision
+from killchain_docker.prompts import get_planner_system_prompt, get_prompts
+from killchain_docker.state import GlobalState
 
 
 class PlanStrategy:
@@ -145,7 +145,7 @@ class PlanStrategy:
         avoid duplicating in-flight work, plus the tail of the queue for
         recent context.
         """
-        from nyuctf_mutil_killchain.state import TaskStatus
+        from killchain_docker.state import TaskStatus
 
         all_tasks = state.task_chain.tasks
         seen_ids: set[str] = set()

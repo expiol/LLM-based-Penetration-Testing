@@ -16,7 +16,7 @@ pip install -e .
 说明：
 
 - 要求 **Python ≥ 3.10**；若使用 RAG / 向量相关能力，建议 **3.11** 并预先装好 PyTorch 等（见 `requirements.txt` 与依赖报错按需补全）。
-- 安装完成后可使用控制台命令 **`autopentest`**（定义在 `pyproject.toml` 的 `[project.scripts]`），等价于 `python -m nyuctf_mutil_killchain`。
+- 安装完成后可使用控制台命令 **`autopentest`**（定义在 `pyproject.toml` 的 `[project.scripts]`），等价于 `python -m killchain_docker`。
 
 ## 一次性：Docker 与网络
 
@@ -61,8 +61,7 @@ autopentest selftest --help   # 默认产物目录 selftest_output/
 
 | 路径 | 说明 |
 |------|------|
-| `killchain_docker/` | 核心包实现（orchestrator、agents、tools、LLM 网关等） |
-| `nyuctf_mutil_killchain` | 指向 `killchain_docker/` 的符号链接，保证 import 名 `nyuctf_mutil_killchain` 与历史代码一致 |
+| `killchain_docker/` | 核心 Python 包（包名 `killchain_docker`：orchestrator、agents、tools、LLM 网关等） |
 | `run.py` | 批量/单题运行入口脚本 |
 | `setup.sh` | Docker 网络 + 镜像构建 + 可编辑安装 |
 | `Dockerfile` / `docker_entrypoint.sh` | CTF 解题侧容器 |

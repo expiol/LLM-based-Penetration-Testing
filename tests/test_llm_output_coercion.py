@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.agents._helpers.coercion import coerce_llm_bool
-from nyuctf_mutil_killchain.agents.reasoning.schemas import (
+from killchain_docker.agents._helpers.coercion import coerce_llm_bool
+from killchain_docker.agents.reasoning.schemas import (
     EvidenceReviewGuidance,
     SolverCodeGuidance,
 )

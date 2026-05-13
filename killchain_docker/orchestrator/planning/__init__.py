@@ -12,16 +12,16 @@ No tasks are filtered, suppressed, or capped here.  The LLM owns
 prioritization and stopping decisions.
 """
 
-from nyuctf_mutil_killchain.orchestrator.planning.bootstrap import BootstrapSeeder
-from nyuctf_mutil_killchain.orchestrator.planning.deduper import TaskDeduper
-from nyuctf_mutil_killchain.orchestrator.planning.normalizer import TaskNormalizer
-from nyuctf_mutil_killchain.orchestrator.planning.planner import LLMPlanner
-from nyuctf_mutil_killchain.orchestrator.planning.schemas import (
+from killchain_docker.orchestrator.planning.bootstrap import BootstrapSeeder
+from killchain_docker.orchestrator.planning.deduper import TaskDeduper
+from killchain_docker.orchestrator.planning.normalizer import TaskNormalizer
+from killchain_docker.orchestrator.planning.planner import LLMPlanner
+from killchain_docker.orchestrator.planning.schemas import (
     PlannedTask,
     PlannerDecision,
     TaskPlanner,
 )
-from nyuctf_mutil_killchain.orchestrator.planning.strategy import PlanStrategy
+from killchain_docker.orchestrator.planning.strategy import PlanStrategy
 
 __all__ = [
     "BootstrapSeeder",

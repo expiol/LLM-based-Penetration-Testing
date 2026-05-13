@@ -6,7 +6,7 @@ disassemble, extract.  Each task type maps to exactly one worker class.
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.agents.artifact import (
+from killchain_docker.agents.artifact import (
     ArchiveTriageAgent,
     ArtifactTriageAgent,
     BinaryTriageAgent,

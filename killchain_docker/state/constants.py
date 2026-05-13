@@ -129,7 +129,7 @@ COMMON_FLAG_PREFIXES: tuple[str, ...] = (
 # Re-exported from file_classification.SOURCE_EXTS so older imports keep working
 # during the refactor.
 
-from nyuctf_mutil_killchain.state.file_classification import SOURCE_EXTS as SOURCE_EXTENSIONS  # noqa: E402, F401
+from killchain_docker.state.file_classification import SOURCE_EXTS as SOURCE_EXTENSIONS  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------------------

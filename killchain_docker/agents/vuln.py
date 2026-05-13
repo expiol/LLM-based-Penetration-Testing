@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import json
 
-from nyuctf_mutil_killchain.agents.base import (
+from killchain_docker.agents.base import (
     WorkerAgent,
     build_exploit_hypothesis_task,
     build_flag_hunt_task,
     build_flag_validation_tasks,
     build_path_probe_tasks_for_assets,
 )
-from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
-from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, WorkerReport
-from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
+from killchain_docker.agents.llm_guidance import StageAnalysisGuidance
+from killchain_docker.state import GlobalState, Task, TaskErrorCode, WorkerReport
+from killchain_docker.tools import ToolExecutionError, ToolExecutionRequest
 
 
 class VulnScanAgent(WorkerAgent):

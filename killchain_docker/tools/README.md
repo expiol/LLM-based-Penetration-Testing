@@ -1,6 +1,6 @@
 # Tools Package
 
-`nyuctf_mutil_killchain.tools` is organized around a small execution framework plus one module per tool.
+`killchain_docker.tools` is organized around a small execution framework plus one module per tool.
 
 ## Layout
 

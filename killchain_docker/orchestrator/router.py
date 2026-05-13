@@ -8,11 +8,11 @@ from collections.abc import Sequence
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
-from nyuctf_mutil_killchain.agents._helpers.coercion import coerce_confidence
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
-from nyuctf_mutil_killchain.prompts import get_router_system_prompt
-from nyuctf_mutil_killchain.state import GlobalState, Task
+from killchain_docker.agents._helpers.coercion import coerce_confidence
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.llm import LLMClient, LLMClientError
+from killchain_docker.prompts import get_router_system_prompt
+from killchain_docker.state import GlobalState, Task
 
 
 class WorkerRouteDecision(BaseModel):

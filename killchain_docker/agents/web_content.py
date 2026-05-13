@@ -6,16 +6,16 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from nyuctf_mutil_killchain.agents.base import (
+from killchain_docker.agents.base import (
     WorkerAgent,
     build_flag_validation_tasks,
     build_web_form_probe_task,
     build_http_path_probe_task,
 )
-from nyuctf_mutil_killchain.llm import LLMClientError
-from nyuctf_mutil_killchain.prompts import get_worker_system_prompt
-from nyuctf_mutil_killchain.state import Finding, GlobalState, Severity, Task, TaskErrorCode, WorkerReport
-from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
+from killchain_docker.llm import LLMClientError
+from killchain_docker.prompts import get_worker_system_prompt
+from killchain_docker.state import Finding, GlobalState, Severity, Task, TaskErrorCode, WorkerReport
+from killchain_docker.tools import ToolExecutionError, ToolExecutionRequest
 
 
 class WebContentNote(BaseModel):

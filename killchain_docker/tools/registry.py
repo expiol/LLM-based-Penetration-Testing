@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import sys
 
-from nyuctf_mutil_killchain.tools.core import AllowlistedCommandPlugin, ExecutionPlane
-from nyuctf_mutil_killchain.tools.parsers import json_payload_parser, jsonl_signal_parser
-from nyuctf_mutil_killchain.tools.plugins import ALL_COMMAND_TOOLS
+from killchain_docker.tools.core import AllowlistedCommandPlugin, ExecutionPlane
+from killchain_docker.tools.parsers import json_payload_parser, jsonl_signal_parser
+from killchain_docker.tools.plugins import ALL_COMMAND_TOOLS
 
 
 def build_execution_plane(

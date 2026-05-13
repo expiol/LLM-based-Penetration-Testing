@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.state.models import Task
+from killchain_docker.state.models import Task
 
 
 class TestScalarCoercion(unittest.TestCase):

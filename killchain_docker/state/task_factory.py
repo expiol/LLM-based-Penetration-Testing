@@ -17,7 +17,7 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
-from nyuctf_mutil_killchain.state.models import GlobalState, Task
+from killchain_docker.state.models import GlobalState, Task
 
 
 # ---------------------------------------------------------------------------
@@ -604,7 +604,7 @@ def build_flag_hunt_task(
 #    the flag is a single underscored/dashed identifier (e.g. CSAW 2013 stfu's
 #    ``STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME``).  We require: starts alnum,
 #    only alnum + ``_-.``, length 12-200, not a Python exception name.
-from nyuctf_mutil_killchain.state.constants import (  # noqa: E402
+from killchain_docker.state.constants import (  # noqa: E402
     FLAG_PREFIX_SHAPE as _FLAG_PREFIX_SHAPE,
     plausible_flag as _plausible_flag,
 )

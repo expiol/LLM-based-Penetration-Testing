@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 
-from nyuctf_mutil_killchain.tools.core import ToolExecutionRequest
+from killchain_docker.tools.core import ToolExecutionRequest
 
 TOOL_NAME = "binary_disassembly"
 

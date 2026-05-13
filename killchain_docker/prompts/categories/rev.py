@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.prompts.types import CategoryPrompts, register
+from killchain_docker.prompts.types import CategoryPrompts, register
 
 register(CategoryPrompts(
     category="rev",

@@ -8,7 +8,7 @@ The schemas (Pydantic ``BaseModel`` subclasses) live in :mod:`schemas` so
 they can be imported without pulling in the prompt text or state types.
 """
 
-from nyuctf_mutil_killchain.agents.reasoning.schemas import (
+from killchain_docker.agents.reasoning.schemas import (
     ArtifactTriageGuidance,
     CredentialHarvestGuidance,
     CredentialTestGuidance,

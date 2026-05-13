@@ -6,14 +6,14 @@ import json
 import subprocess
 from collections.abc import Callable
 from datetime import datetime, timezone
-from nyuctf_mutil_killchain.compat import StrEnum
+from killchain_docker.compat import StrEnum
 from typing import Any, Protocol
 from urllib import error, parse, request
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from nyuctf_mutil_killchain.state import (
+from killchain_docker.state import (
     Asset,
     Credential,
     EvidenceRecord,

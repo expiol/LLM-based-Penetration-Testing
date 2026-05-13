@@ -3,8 +3,8 @@
 This module owns the :class:`WorkerAgent` abstract base class and the two
 template subclasses (:class:`ToolBackedWorker`, :class:`ReasoningOnlyWorker`)
 that share the dispatch pattern.  Helpers for flag extraction, network context,
-and string normalization live in :mod:`nyuctf_mutil_killchain.agents._helpers`.
-Task constructors live in :mod:`nyuctf_mutil_killchain.state.task_factory`.
+and string normalization live in :mod:`killchain_docker.agents._helpers`.
+Task constructors live in :mod:`killchain_docker.state.task_factory`.
 
 The bottom of this module re-exports those helpers for backwards
 compatibility with existing worker imports.  Once all workers have been
@@ -18,9 +18,9 @@ from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
-from nyuctf_mutil_killchain.llm import LLMClient, LLMClientError
-from nyuctf_mutil_killchain.state import GlobalState, Task, TaskErrorCode, WorkerReport
-from nyuctf_mutil_killchain.tools import ExecutionPlane, ToolExecutionError, ToolExecutionRequest
+from killchain_docker.llm import LLMClient, LLMClientError
+from killchain_docker.state import GlobalState, Task, TaskErrorCode, WorkerReport
+from killchain_docker.tools import ExecutionPlane, ToolExecutionError, ToolExecutionRequest
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -241,7 +241,7 @@ class ToolBackedWorker(WorkerAgent):
         if step.followups is not None:
             new_tasks = step.followups(self, state, task, bundle, output_context, flag_candidates)
         else:
-            from nyuctf_mutil_killchain.state.task_factory import build_flag_validation_tasks
+            from killchain_docker.state.task_factory import build_flag_validation_tasks
 
             new_tasks = build_flag_validation_tasks(flag_candidates, source=step.tool_name)
 
@@ -290,10 +290,10 @@ class ReasoningOnlyWorker(WorkerAgent):
 #   - agents._helpers.strings    string/list normalization
 #   - state.task_factory         build_*_task constructors
 
-from nyuctf_mutil_killchain.agents._helpers.flag import (  # noqa: E402, F401
+from killchain_docker.agents._helpers.flag import (  # noqa: E402, F401
     extract_flag_candidates,
 )
-from nyuctf_mutil_killchain.agents._helpers.network import (  # noqa: E402, F401
+from killchain_docker.agents._helpers.network import (  # noqa: E402, F401
     AMBIGUOUS_WEB_SERVICE_NAMES,
     COMMON_WEB_PORTS,
     DEFAULT_WEB_PORTS,
@@ -308,11 +308,11 @@ from nyuctf_mutil_killchain.agents._helpers.network import (  # noqa: E402, F401
     infer_web_urls_from_banners,
     service_looks_like_web,
 )
-from nyuctf_mutil_killchain.agents._helpers.strings import (  # noqa: E402, F401
+from killchain_docker.agents._helpers.strings import (  # noqa: E402, F401
     merge_unique_strings,
     normalize_probe_paths,
 )
-from nyuctf_mutil_killchain.state.task_factory import (  # noqa: E402, F401
+from killchain_docker.state.task_factory import (  # noqa: E402, F401
     build_archive_triage_task,
     build_artifact_deep_review_task,
     build_binary_triage_task,

@@ -10,9 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter, RagContext
-from nyuctf_mutil_killchain.state import FileKind, GlobalState, Task, classify
-from nyuctf_mutil_killchain.state.models import smart_truncate_code
+from killchain_docker.knowledge import KnowledgeAugmenter, RagContext
+from killchain_docker.state import FileKind, GlobalState, Task, classify
+from killchain_docker.state.models import smart_truncate_code
 
 
 _DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"

@@ -9,29 +9,29 @@ from __future__ import annotations
 
 import json
 
-from nyuctf_mutil_killchain.agents.base import WorkerAgent
-from nyuctf_mutil_killchain.agents.reasoning import SolverCodeGuidance
-from nyuctf_mutil_killchain.agents.solver.evidence import (
+from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.agents.reasoning import SolverCodeGuidance
+from killchain_docker.agents.solver.evidence import (
     SolverEvidence,
     SolverEvidenceComposer,
 )
-from nyuctf_mutil_killchain.agents.solver.executor import (
+from killchain_docker.agents.solver.executor import (
     SolverCodeExecutor,
     SolverExecutionOutcome,
 )
-from nyuctf_mutil_killchain.agents.solver.lint import (
+from killchain_docker.agents.solver.lint import (
     SolverLintResult,
     lint_solver_code,
 )
-from nyuctf_mutil_killchain.agents.solver.parser import SolverFlagSet, SolverResultParser
-from nyuctf_mutil_killchain.agents.solver.prompts import SolverPromptBuilder
-from nyuctf_mutil_killchain.agents.solver.retry import SolverRetryPolicy
-from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
-from nyuctf_mutil_killchain.llm import LLMClient
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
-from nyuctf_mutil_killchain.state.models import smart_truncate_code
-from nyuctf_mutil_killchain.state.task_factory import build_flag_validation_tasks
-from nyuctf_mutil_killchain.tools import ExecutionPlane
+from killchain_docker.agents.solver.parser import SolverFlagSet, SolverResultParser
+from killchain_docker.agents.solver.prompts import SolverPromptBuilder
+from killchain_docker.agents.solver.retry import SolverRetryPolicy
+from killchain_docker.knowledge import KnowledgeAugmenter
+from killchain_docker.llm import LLMClient
+from killchain_docker.state import GlobalState, Task, WorkerReport
+from killchain_docker.state.models import smart_truncate_code
+from killchain_docker.state.task_factory import build_flag_validation_tasks
+from killchain_docker.tools import ExecutionPlane
 
 
 _CATEGORY_TIMEOUT: dict[str, int] = {

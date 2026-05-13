@@ -7,7 +7,7 @@ import binascii
 import codecs
 import re
 
-from nyuctf_mutil_killchain.state.constants import (
+from killchain_docker.state.constants import (
     BRACKET_SPAN_PATTERN,
     COMMON_FLAG_PREFIXES,
     FLAG_PATTERN,

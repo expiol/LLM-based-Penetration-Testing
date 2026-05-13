@@ -17,14 +17,14 @@ from __future__ import annotations
 import json
 from typing import Any, TYPE_CHECKING
 
-from nyuctf_mutil_killchain.agents._helpers.strings import merge_unique_strings
-from nyuctf_mutil_killchain.agents.reasoning.schemas import EvidenceReviewGuidance
-from nyuctf_mutil_killchain.prompts import get_analysis_strategy, get_worker_system_prompt
-from nyuctf_mutil_killchain.state import GlobalState, Task
+from killchain_docker.agents._helpers.strings import merge_unique_strings
+from killchain_docker.agents.reasoning.schemas import EvidenceReviewGuidance
+from killchain_docker.prompts import get_analysis_strategy, get_worker_system_prompt
+from killchain_docker.state import GlobalState, Task
 
 if TYPE_CHECKING:
-    from nyuctf_mutil_killchain.agents.base import WorkerAgent
-    from nyuctf_mutil_killchain.tools.core import ToolExecutionBundle
+    from killchain_docker.agents.base import WorkerAgent
+    from killchain_docker.tools.core import ToolExecutionBundle
 
 
 def review_evidence_with_llm(

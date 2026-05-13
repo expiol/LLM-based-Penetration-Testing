@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.agents.vuln import VulnScanAgent
+from killchain_docker.agents.vuln import VulnScanAgent
 
 VULN_WORKERS: tuple[type, ...] = (VulnScanAgent,)
 

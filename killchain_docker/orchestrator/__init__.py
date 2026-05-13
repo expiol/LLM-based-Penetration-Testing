@@ -1,7 +1,7 @@
 """Orchestrator components."""
 
-from nyuctf_mutil_killchain.orchestrator.loop import Orchestrator
-from nyuctf_mutil_killchain.orchestrator.planning import (
+from killchain_docker.orchestrator.loop import Orchestrator
+from killchain_docker.orchestrator.planning import (
     BootstrapSeeder,
     LLMPlanner,
     PlanStrategy,
@@ -11,12 +11,12 @@ from nyuctf_mutil_killchain.orchestrator.planning import (
     TaskNormalizer,
     TaskPlanner,
 )
-from nyuctf_mutil_killchain.orchestrator.router import (
+from killchain_docker.orchestrator.router import (
     LLMWorkerRouter,
     WorkerRouteDecision,
     WorkerRouter,
 )
-from nyuctf_mutil_killchain.orchestrator.recovery import (
+from killchain_docker.orchestrator.recovery import (
     RecoveryPolicy,
     RecoveryResult,
 )

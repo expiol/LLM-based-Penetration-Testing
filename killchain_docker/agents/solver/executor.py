@@ -10,8 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from nyuctf_mutil_killchain.agents.solver.evidence import SolverEvidence
-from nyuctf_mutil_killchain.tools import (
+from killchain_docker.agents.solver.evidence import SolverEvidence
+from killchain_docker.tools import (
     ExecutionPlane,
     ToolExecutionBundle,
     ToolExecutionError,

@@ -13,12 +13,12 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
-from nyuctf_mutil_killchain.agents.solver.failure import (
+from killchain_docker.agents.solver.failure import (
     SolverFailureClassifier,
     SolverFailureSignal,
 )
-from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter, RagContext
-from nyuctf_mutil_killchain.state import (
+from killchain_docker.knowledge import KnowledgeAugmenter, RagContext
+from killchain_docker.state import (
     ExecutionRecord,
     GlobalState,
     Task,

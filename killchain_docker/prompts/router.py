@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.prompts.types import lookup
+from killchain_docker.prompts.types import lookup
 
 
 def build_router_system_prompt(category: str | None) -> str:

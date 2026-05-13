@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from nyuctf_mutil_killchain.state import GlobalState, Service, Task
+from killchain_docker.state import GlobalState, Service, Task
 
 COMMON_WEB_PORTS = frozenset({80, 443, 8000, 8080, 8443, 8888, 3000, 5000, 5601, 9200})
 DEFAULT_WEB_PORTS = frozenset({80, 443})

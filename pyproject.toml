@@ -43,7 +43,7 @@ dependencies = [
 Homepage = "https://nyu-llm-ctf.github.io"
 
 [project.scripts]
-autopentest = "nyuctf_mutil_killchain.cli:main"
+autopentest = "killchain_docker.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -57,4 +57,4 @@ norecursedirs = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["nyuctf_mutil_killchain"]
+packages = ["killchain_docker"]

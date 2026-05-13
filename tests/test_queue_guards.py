@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.state import GlobalState, Task, TaskStatus
-from nyuctf_mutil_killchain.state.models import (
+from killchain_docker.state import GlobalState, Task, TaskStatus
+from killchain_docker.state.models import (
     PENDING_FLAG_VALIDATE_LIMIT,
     PENDING_WEB_FORM_PROBE_LIMIT_PER_ASSET,
 )

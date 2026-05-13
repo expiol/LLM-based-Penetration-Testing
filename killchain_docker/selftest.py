@@ -7,14 +7,14 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from nyuctf_mutil_killchain.controller import RunConfig, run_assessment
-from nyuctf_mutil_killchain.llm import StaticLLMClient
-from nyuctf_mutil_killchain.score import (
+from killchain_docker.controller import RunConfig, run_assessment
+from killchain_docker.llm import StaticLLMClient
+from killchain_docker.score import (
     build_validation_payload,
     summarize_logdir,
     summarize_run_dir,
 )
-from nyuctf_mutil_killchain.tools import (
+from killchain_docker.tools import (
     ExecutionMode,
     ExecutionPlane,
     ToolExecutionRequest,

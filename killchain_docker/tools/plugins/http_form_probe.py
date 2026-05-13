@@ -6,8 +6,8 @@ import json
 import re
 from urllib.parse import urlsplit, urlunsplit
 
-from nyuctf_mutil_killchain.tools.core import ToolExecutionError, ToolExecutionRequest
-from nyuctf_mutil_killchain.tools.plugins._shared import SHARED_FLAG_DETECTION_SNIPPET
+from killchain_docker.tools.core import ToolExecutionError, ToolExecutionRequest
+from killchain_docker.tools.plugins._shared import SHARED_FLAG_DETECTION_SNIPPET
 
 
 TOOL_NAME = "http_form_probe"

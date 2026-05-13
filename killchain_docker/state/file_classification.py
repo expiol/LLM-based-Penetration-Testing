@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 
-from nyuctf_mutil_killchain.compat import StrEnum
+from killchain_docker.compat import StrEnum
 
 
 class FileKind(StrEnum):

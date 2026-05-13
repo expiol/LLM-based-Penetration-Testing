@@ -28,14 +28,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from nyuctf_mutil_killchain.knowledge.retriever import (
+from killchain_docker.knowledge.retriever import (
     KnowledgeRetriever,
     RetrievalHit,
     default_top_k,
     get_retriever,
     strict_event_exclusion_enabled,
 )
-from nyuctf_mutil_killchain.state import GlobalState
+from killchain_docker.state import GlobalState
 
 
 # Per-hit budgets shared by every consumer.  Solver gets a more generous
@@ -121,7 +121,7 @@ class RagContext:
 
     @property
     def high_confidence(self) -> bool:
-        from nyuctf_mutil_killchain.prompts.rag import HIGH_CONFIDENCE_SCORE
+        from killchain_docker.prompts.rag import HIGH_CONFIDENCE_SCORE
 
         return self.top_score >= HIGH_CONFIDENCE_SCORE
 

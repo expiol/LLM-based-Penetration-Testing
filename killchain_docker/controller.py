@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nyuctf_mutil_killchain.agents import (
+from killchain_docker.agents import (
     ArchiveTriageAgent,
     ArtifactTriageAgent,
     BinaryTriageAgent,
@@ -36,17 +36,17 @@ from nyuctf_mutil_killchain.agents import (
     WebPathProbeAgent,
     WebPwnExploitAgent,
 )
-from nyuctf_mutil_killchain.knowledge import KnowledgeAugmenter
-from nyuctf_mutil_killchain.llm import LLMClient, TokenLedger, build_llm_client_from_env
-from nyuctf_mutil_killchain.orchestrator import (
+from killchain_docker.knowledge import KnowledgeAugmenter
+from killchain_docker.llm import LLMClient, TokenLedger, build_llm_client_from_env
+from killchain_docker.orchestrator import (
     LLMPlanner,
     LLMWorkerRouter,
     Orchestrator,
     RecoveryPolicy,
 )
-from nyuctf_mutil_killchain.reporting import render_markdown_report
-from nyuctf_mutil_killchain.state import GlobalState
-from nyuctf_mutil_killchain.tools import ExecutionPlane, build_execution_plane
+from killchain_docker.reporting import render_markdown_report
+from killchain_docker.state import GlobalState
+from killchain_docker.tools import ExecutionPlane, build_execution_plane
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

@@ -11,8 +11,8 @@ from collections.abc import Iterable
 
 from pydantic import BaseModel, Field, field_validator
 
-from nyuctf_mutil_killchain.agents._helpers.coercion import coerce_confidence, coerce_llm_bool
-from nyuctf_mutil_killchain.state import Task
+from killchain_docker.agents._helpers.coercion import coerce_confidence, coerce_llm_bool
+from killchain_docker.state import Task
 
 
 class ArtifactTriageGuidance(BaseModel):

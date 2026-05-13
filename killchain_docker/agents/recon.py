@@ -7,7 +7,7 @@ import json
 import socket
 from urllib.parse import urlparse
 
-from nyuctf_mutil_killchain.agents.base import (
+from killchain_docker.agents.base import (
     WorkerAgent,
     build_credential_hunt_task,
     build_flag_hunt_task,
@@ -16,10 +16,10 @@ from nyuctf_mutil_killchain.agents.base import (
     build_web_review_task,
     infer_web_urls,
 )
-from nyuctf_mutil_killchain.agents.llm_guidance import StageAnalysisGuidance
-from nyuctf_mutil_killchain.prompts import get_worker_system_prompt
-from nyuctf_mutil_killchain.state import Asset, AssetKind, GlobalState, Service, Task, WorkerReport
-from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
+from killchain_docker.agents.llm_guidance import StageAnalysisGuidance
+from killchain_docker.prompts import get_worker_system_prompt
+from killchain_docker.state import Asset, AssetKind, GlobalState, Service, Task, WorkerReport
+from killchain_docker.tools import ToolExecutionError, ToolExecutionRequest
 
 
 def _resolve_hostname(hostname: str) -> str | None:

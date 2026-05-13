@@ -11,11 +11,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from nyuctf_mutil_killchain.agents._helpers.flag import extract_flag_candidates
-from nyuctf_mutil_killchain.agents._helpers.strings import merge_unique_strings
-from nyuctf_mutil_killchain.agents.reasoning import SolverCodeGuidance
-from nyuctf_mutil_killchain.agents.solver.executor import SolverExecutionOutcome
-from nyuctf_mutil_killchain.state.task_factory import is_validatable_flag_candidate
+from killchain_docker.agents._helpers.flag import extract_flag_candidates
+from killchain_docker.agents._helpers.strings import merge_unique_strings
+from killchain_docker.agents.reasoning import SolverCodeGuidance
+from killchain_docker.agents.solver.executor import SolverExecutionOutcome
+from killchain_docker.state.task_factory import is_validatable_flag_candidate
 
 
 _PLACEHOLDER_FLAGS = frozenset({

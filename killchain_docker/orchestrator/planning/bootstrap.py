@@ -12,12 +12,12 @@ starting point.  No filtering or stopping logic lives here.
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.orchestrator.planning.schemas import (
+from killchain_docker.orchestrator.planning.schemas import (
     PlannedTask,
     PlannerDecision,
     TaskPlanner,
 )
-from nyuctf_mutil_killchain.state import GlobalState
+from killchain_docker.state import GlobalState
 
 
 class BootstrapSeeder(TaskPlanner):

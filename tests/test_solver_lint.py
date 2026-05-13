@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from nyuctf_mutil_killchain.agents.solver.lint import (
+from killchain_docker.agents.solver.lint import (
     SolverLintResult,
     lint_solver_code,
 )

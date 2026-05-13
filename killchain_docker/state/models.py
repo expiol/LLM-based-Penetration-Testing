@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from nyuctf_mutil_killchain.compat import StrEnum
+from killchain_docker.compat import StrEnum
 from typing import Any
 from uuid import uuid4
 

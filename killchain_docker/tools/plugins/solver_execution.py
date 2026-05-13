@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from nyuctf_mutil_killchain.tools.core import ToolExecutionRequest
-from nyuctf_mutil_killchain.tools.plugins._shared import SHARED_FLAG_DETECTION_SNIPPET
+from killchain_docker.tools.core import ToolExecutionRequest
+from killchain_docker.tools.plugins._shared import SHARED_FLAG_DETECTION_SNIPPET
 
 TOOL_NAME = "solver_execution"
 

@@ -18,8 +18,8 @@ duplicates only and never suppresses unique tasks.
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.orchestrator.planning.schemas import PlannedTask
-from nyuctf_mutil_killchain.state import GlobalState
+from killchain_docker.orchestrator.planning.schemas import PlannedTask
+from killchain_docker.state import GlobalState
 
 
 class TaskDeduper:

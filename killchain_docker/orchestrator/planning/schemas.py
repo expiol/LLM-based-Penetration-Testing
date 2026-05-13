@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from nyuctf_mutil_killchain.state import GlobalState, Task
+from killchain_docker.state import GlobalState, Task
 
 _PRIORITY_WORD_TO_INT: dict[str, int] = {
     "lowest": 10, "very_low": 15, "very low": 15,

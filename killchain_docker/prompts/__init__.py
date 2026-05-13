@@ -19,7 +19,7 @@ Public API:
 - :func:`build_solver_system_prompt` — solver-specific system prompt
 """
 
-from nyuctf_mutil_killchain.prompts.api import (
+from killchain_docker.prompts.api import (
     build_solver_system_prompt,
     build_worker_context,
     get_analysis_strategy,
@@ -32,7 +32,7 @@ from nyuctf_mutil_killchain.prompts.api import (
     get_solver_technique_examples,
     get_worker_system_prompt,
 )
-from nyuctf_mutil_killchain.prompts.types import CategoryPrompts
+from killchain_docker.prompts.types import CategoryPrompts
 
 __all__ = [
     "CategoryPrompts",

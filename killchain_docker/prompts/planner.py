@@ -7,8 +7,8 @@ chooses task types from the open vocabulary documented below.
 
 from __future__ import annotations
 
-from nyuctf_mutil_killchain.prompts.rag import PLANNER_RAG_GUIDE
-from nyuctf_mutil_killchain.prompts.types import lookup
+from killchain_docker.prompts.rag import PLANNER_RAG_GUIDE
+from killchain_docker.prompts.types import lookup
 
 TASK_TYPE_VOCABULARY: list[str] = [
     "recon.enumerate_scope",

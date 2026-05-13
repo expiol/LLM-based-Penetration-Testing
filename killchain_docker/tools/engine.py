@@ -6,7 +6,7 @@ The implementation is split across:
 - ``registry.py`` for default tool registration
 """
 
-from nyuctf_mutil_killchain.tools.core import (
+from killchain_docker.tools.core import (
     AllowlistedCommandPlugin,
     ExecutionMode,
     ExecutionPlane,
@@ -17,8 +17,8 @@ from nyuctf_mutil_killchain.tools.core import (
     ToolExecutionRequest,
     ToolExecutionResult,
 )
-from nyuctf_mutil_killchain.tools.parsers import json_payload_parser, jsonl_signal_parser
-from nyuctf_mutil_killchain.tools.registry import build_execution_plane, build_safe_execution_plane
+from killchain_docker.tools.parsers import json_payload_parser, jsonl_signal_parser
+from killchain_docker.tools.registry import build_execution_plane, build_safe_execution_plane
 
 __all__ = [
     "AllowlistedCommandPlugin",

@@ -6,16 +6,16 @@ import json
 import re
 from urllib.parse import urljoin, urlparse
 
-from nyuctf_mutil_killchain.agents.base import (
+from killchain_docker.agents.base import (
     WorkerAgent,
     build_exploit_hypothesis_task,
     build_flag_validation_tasks,
     build_web_form_probe_task,
     merge_unique_strings,
 )
-from nyuctf_mutil_killchain.agents.llm_guidance import FormProbeGuidance
-from nyuctf_mutil_killchain.state import GlobalState, Task, WorkerReport
-from nyuctf_mutil_killchain.tools import ToolExecutionError, ToolExecutionRequest
+from killchain_docker.agents.llm_guidance import FormProbeGuidance
+from killchain_docker.state import GlobalState, Task, WorkerReport
+from killchain_docker.tools import ToolExecutionError, ToolExecutionRequest
 
 
 _RAW_HTTP_RE = re.compile(

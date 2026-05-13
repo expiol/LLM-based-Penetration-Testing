@@ -14,8 +14,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from nyuctf_mutil_killchain.agents.solver.evidence import SolverEvidence
-from nyuctf_mutil_killchain.prompts import build_solver_system_prompt
+from killchain_docker.agents.solver.evidence import SolverEvidence
+from killchain_docker.prompts import build_solver_system_prompt
 
 
 class SolverPromptBuilder:
