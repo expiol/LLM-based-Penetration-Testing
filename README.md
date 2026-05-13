@@ -1,105 +1,81 @@
-# NYU CTF Automation
+# LLM-based Penetration Testing（结构化 Killchain）
 
-这个仓库包含 3 条主要能力线：
+面向 CTF / 授权渗透测试场景的 **LLM 编排 + 工具执行** 流水线：在 Docker 内运行题目环境，在宿主机通过 OpenAI 兼容网关调用大模型，按任务链调度 recon、solver、web 等 worker。
 
-- `D-CIPHER`
-- `NYU CTF Baseline`
-- `NYU Multi-Killchain`
+## 运行环境：Conda `autopentest`
 
-如果你需要一份适合组会汇报的完整中文项目介绍，见：
-
-- `docs/project_overview_zh.md`
-
-
-## 环境准备
-
-1. 克隆仓库并进入目录。
-2. 准备 Python 3.10+ 环境
-3. 按需执行安装脚本：
+日常开发与运行请在 **名为 `autopentest` 的 Conda 环境** 中进行（与入口命令 `autopentest` 同名，便于记忆）。
 
 ```bash
-./setup_mutil_killchain.sh
-./setup_baseline.sh
-./setup_dcipher.sh
+conda create -n autopentest python=3.11 -y
+conda activate autopentest
+cd /path/to/LLM-based-Penetration-Testing
+pip install -e .
 ```
 
-4. 如需真实 NYUCTF 题目运行，下载数据集：
+说明：
+
+- 要求 **Python ≥ 3.10**；若使用 RAG / 向量相关能力，建议 **3.11** 并预先装好 PyTorch 等（见 `requirements.txt` 与依赖报错按需补全）。
+- 安装完成后可使用控制台命令 **`autopentest`**（定义在 `pyproject.toml` 的 `[project.scripts]`），等价于 `python -m nyuctf_mutil_killchain`。
+
+## 一次性：Docker 与网络
+
+题目容器默认镜像 **`ctfenv:latest`**，网络 **`ctfnet`**。在项目根目录执行：
 
 ```bash
-python -m nyuctf.download
+./setup.sh
 ```
 
+该脚本会：创建 `ctfnet`（若不存在）、构建根目录 `Dockerfile` 并打标签 `ctfenv:latest`、在当前环境中执行 `pip install -e .`。
 
+Apple Silicon 上构建/运行需与 `Dockerfile` 一致使用 **`linux/amd64`**（脚本已带 `--platform linux/amd64`）。
 
+## LLM 网关配置
 
-### 2. 回归测试
+网关从仓库根目录下的 **`configs/llm_gateway.json`** 读取（OpenAI 兼容 `base_url` / `api_key` / `default_model` 等）。请勿将含真实密钥的文件提交到公开仓库；可用本地覆盖或环境管理密钥。
 
-运行当前仓库维护的针对性单测与回归测试。
+## 运行题目
+
+### 方式一：根目录 `run.py`（适合改顶部常量快速试跑）
 
 ```bash
-python -m pytest tests/test_mutil_killchain_optimizations.py
+conda activate autopentest
+python run.py --help
+# 无参数时使用脚本内默认常量；也可传 CLI 覆盖
+python run.py --challenge <name> --split development
+python run.py --run-all --split development
 ```
 
-当前覆盖重点：
+默认日志目录为 **`logs/<当前系统用户名>/`**（可通过 `--logdir` 或脚本内 `LOGDIR` 修改）。
 
-- web 服务识别逻辑
-- artifact / archive 分类
-- source review 的归档成员读取
-- `max_cycles` 用尽时的状态判定
-
-适用场景：
-
-- 提交前回归
-- 改分类规则、planner、orchestrator 后验证行为
-
-### 3. 真实题目运行
-
-连接 NYUCTF 数据集和 Docker 环境，实际跑单题。
+### 方式二：`autopentest` CLI（子命令）
 
 ```bash
-python run_mutil_killchain.py \
-  --split test \
-  --challenge <challenge-name>
+conda activate autopentest
+autopentest --help
+autopentest run --help
+autopentest selftest --help   # 默认产物目录 selftest_output/
 ```
 
-常用附加参数：
+## 仓库结构（简要）
+
+| 路径 | 说明 |
+|------|------|
+| `killchain_docker/` | 核心包实现（orchestrator、agents、tools、LLM 网关等） |
+| `nyuctf_mutil_killchain` | 指向 `killchain_docker/` 的符号链接，保证 import 名 `nyuctf_mutil_killchain` 与历史代码一致 |
+| `run.py` | 批量/单题运行入口脚本 |
+| `setup.sh` | Docker 网络 + 镜像构建 + 可编辑安装 |
+| `Dockerfile` / `docker_entrypoint.sh` | CTF 解题侧容器 |
+| `configs/llm_gateway.json` | LLM 网关 JSON |
+
+## 测试
 
 ```bash
---api-endpoint <base_url>
---api-key <key>
---model <model_name>
---max-cycles 8
---debug
+conda activate autopentest
+pip install -e .   # 确保依赖齐全
+pytest tests/ -q
 ```
 
-适用场景：
+## 许可与来源
 
-- 验证真实 challenge 上的端到端行为
-- 检查 Docker 启动、challenge 文件挂载、日志产物是否正常
-
-## Multi-Killchain 主要入口
-
-- `run_mutil_killchain.py`: 单题真实运行入口
-- `run_mutil_killchain_test.py`: 本地自检包装脚本
-- `nyuctf_mutil_killchain/cli.py`: 包级 CLI，支持 `run` / `selftest` / `lab`
-
-## Multi-Killchain 输出
-
-真实单题运行默认会在 `logs_mutil_killchain/<user>/` 下写出：
-
-- 每题一个 `<challenge>.json` 总日志
-- `artifacts/<challenge>/<run-id>/state.json`
-- `artifacts/<challenge>/<run-id>/summary.json`
-- `artifacts/<challenge>/<run-id>/report.md`
-- `artifacts/<challenge>/<run-id>/events.log`
-- `artifacts/<challenge>/<run-id>/evidence.json`
-
-## 其他入口
-
-如果你需要跑仓库里另外两条能力线，入口仍然保留：
-
-```bash
-python run_dcipher.py --split <test|development> --challenge <challenge-name>
-python run_single_executor.py --split <test|development> --challenge <challenge-name>
-python run_baseline.py -c configs/baseline/base_config.yaml --split <test|development> --challenge <challenge-name>
-```
+见仓库内 `LICENSE`。上游数据集与 NYUCTF 相关约定以数据集与课程文档为准。

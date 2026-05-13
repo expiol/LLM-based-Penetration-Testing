@@ -1,0 +1,20 @@
+# Build context is repo root; keep the daemon upload small.
+.git
+.venv
+.env
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.cursor
+.vscode
+logs
+logs_*
+LLM_CTF_Database
+Sample_Database
+LLM_CTF_Dataset_Dev
+html
+decomp
+ghidra_11.0*
+batch_runs*

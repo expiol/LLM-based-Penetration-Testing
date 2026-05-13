@@ -9,7 +9,7 @@ authors = [
   { name="NYU CTF", email="nyuctf@gmail.com" },
   { name="Meet Udeshi", email="m.udeshi@nyu.edu" },
 ]
-description = "NYU CTF Multi-agent: Autonomous LLM agents for solving CTFs"
+description = "LLM-driven structured killchain for CTF / security assessment (NYUCTF)"
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
@@ -51,11 +51,10 @@ pythonpath = ["."]
 norecursedirs = [
   ".git",
   ".venv",
-  "docker",
   "logs*",
-  "logs_mutil_killchain",
+  "selftest_output",
   "leaderboard_submissions",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["nyuctf_multiagent", "nyuctf_mutil_killchain"]
+packages = ["nyuctf_mutil_killchain"]
