@@ -103,6 +103,19 @@ class PlanStrategy:
         snapshot["planning_contract"] = {
             "output": "Return PlannerDecision with todos, not worker names or tool names.",
             "todo_granularity": "Each todo is a high-level objective with context and success criteria.",
+            "todo_phases": "Use exactly one phase per todo: recon, analysis, exploit, or flag_validation.",
+            "single_phase_batch": (
+                "All todos returned in one PlannerDecision must be in the same current phase. "
+                "Do not mix recon/analysis/exploit/flag_validation in one batch."
+            ),
+            "dependency_rule": (
+                "If a todo needs information produced by another proposed todo, do not return both. "
+                "Return only the upstream todo now and wait for worker results before planning the dependent todo."
+            ),
+            "exploit_grounding": (
+                "Only propose exploit-phase todos when the current state already contains grounded findings, "
+                "vulnerabilities, credentials, sessions, hypotheses, evidence, or explicit ids in todo context."
+            ),
             "stop_rule": "Set stop_run=true only when solved or genuinely exhausted.",
             "open_todos": self._open_todo_count(state),
         }
@@ -117,6 +130,7 @@ class PlanStrategy:
             {
                 "todo_id": todo.todo_id,
                 "goal": todo.goal,
+                "phase": todo.phase,
                 "status": todo.status,
                 "priority": todo.priority,
                 "context": todo.context,

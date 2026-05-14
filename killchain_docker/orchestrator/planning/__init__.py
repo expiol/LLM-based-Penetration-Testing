@@ -10,6 +10,7 @@ from killchain_docker.orchestrator.planning.schemas import (
     PlannerDecision,
 )
 from killchain_docker.orchestrator.planning.strategy import PlanStrategy
+from killchain_docker.state import TodoPhase
 
 __all__ = [
     "BootstrapSeeder",
@@ -20,4 +21,5 @@ __all__ = [
     "PlannerAgent",
     "TodoDeduper",
     "TodoNormalizer",
+    "TodoPhase",
 ]

@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from killchain_docker.state import RunState, TodoItem
+from killchain_docker.state import RunState, TodoItem, TodoPhase, normalize_todo_phase
 
 _PRIORITY_WORD_TO_INT: dict[str, int] = {
     "lowest": 10, "very_low": 15, "very low": 15,
@@ -23,6 +23,7 @@ class PlannedTodo(BaseModel):
     """High-level todo emitted by the planner."""
 
     goal: str
+    phase: TodoPhase = TodoPhase.RECON
     context: dict[str, Any] = Field(default_factory=dict)
     priority: int = Field(default=50, ge=0, le=100)
     success_criteria: list[str] = Field(default_factory=list)
@@ -42,9 +43,15 @@ class PlannedTodo(BaseModel):
                 return value
         return value
 
+    @field_validator("phase", mode="before")
+    @classmethod
+    def _coerce_phase(cls, value: Any) -> TodoPhase:
+        return normalize_todo_phase(value)
+
     def to_todo(self) -> TodoItem:
         return TodoItem(
             goal=self.goal,
+            phase=self.phase,
             context=self.context,
             priority=self.priority,
             success_criteria=self.success_criteria,

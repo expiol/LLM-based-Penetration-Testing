@@ -10,10 +10,11 @@ from killchain_docker.orchestrator.planning import (
     LLMPlanner,
     PlannedTodo,
     PlannerDecision,
+    TodoPhase,
     TodoDeduper,
     TodoNormalizer,
 )
-from killchain_docker.state import RunState
+from killchain_docker.state import RunState, TodoItem
 
 
 def _state(files: list[str] | None = None, scope: list[str] | None = None) -> RunState:
@@ -50,6 +51,7 @@ class TodoNormalizerTests(unittest.TestCase):
 
         self.assertEqual(todo.context["files_root"], "/home/ctfplayer/ctf_files")
         self.assertEqual(todo.context["challenge_files"], ["solve.py"])
+        self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
 
 
 class TodoDeduperTests(unittest.TestCase):
@@ -70,13 +72,14 @@ class LLMPlannerTests(unittest.TestCase):
         planner = LLMPlanner(
             StaticLLMClient([
                 {
-                    "summary": "review source",
+                    "summary": "enumerate artifacts",
                     "todos": [
                         {
-                            "goal": "Review source for weak crypto.",
+                            "goal": "Enumerate bundled challenge artifacts.",
+                            "phase": "recon",
                             "priority": "high",
-                            "context": {"source_files": ["solve.py"]},
-                            "success_criteria": ["Find the algorithm."],
+                            "context": {"seed_terms": ["solve.py"]},
+                            "success_criteria": ["Confirm available artifact names."],
                             "constraints": ["Use local files only."],
                         }
                     ],
@@ -88,11 +91,98 @@ class LLMPlannerTests(unittest.TestCase):
 
         decision = planner.plan(state)
 
-        self.assertEqual(decision.summary, "review source")
+        self.assertEqual(decision.summary, "enumerate artifacts")
         self.assertGreaterEqual(len(decision.todos), 2)
-        llm_todo = next(todo for todo in decision.todos if "weak crypto" in todo.goal)
+        self.assertEqual({todo.phase for todo in decision.todos}, {TodoPhase.RECON})
+        llm_todo = next(todo for todo in decision.todos if "artifacts" in todo.goal)
         self.assertEqual(llm_todo.priority, 75)
         self.assertEqual(llm_todo.context["files_root"], "/home/ctfplayer/ctf_files")
+
+    def test_planner_keeps_only_frontier_phase_from_mixed_llm_batch(self) -> None:
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "mixed batch",
+                    "todos": [
+                        {
+                            "goal": "Map authorized scope.",
+                            "phase": "recon",
+                            "priority": 90,
+                            "context": {"scope": "http://example.test"},
+                        },
+                        {
+                            "goal": "Exploit the discovered issue.",
+                            "phase": "exploit",
+                            "priority": 80,
+                            "context": {"base_url": "http://example.test"},
+                        },
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(_state([]))
+
+        self.assertEqual([todo.phase for todo in decision.todos], [TodoPhase.RECON])
+        self.assertTrue(any("phase gate" in note for note in decision.notes))
+
+    def test_planner_continues_open_phase_before_downstream_phase(self) -> None:
+        state = _state([])
+        state.queue_todo(
+            TodoItem(
+                goal="Review source for vulnerability.",
+                phase=TodoPhase.ANALYSIS,
+                dedupe_key="open-analysis",
+            )
+        )
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "premature exploit",
+                    "todos": [
+                        {
+                            "goal": "Exploit reviewed vulnerability.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {"vulnerability_id": "vuln-1"},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(decision.todos, [])
+        self.assertTrue(any("dropped 1" in note for note in decision.notes))
+
+    def test_planner_drops_ungrounded_exploit_todo(self) -> None:
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "ungrounded exploit",
+                    "todos": [
+                        {
+                            "goal": "Exploit an assumed vulnerability.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {"base_url": "http://example.test"},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(_state([]))
+
+        self.assertEqual(decision.todos, [])
+        self.assertTrue(any("ungrounded exploit" in note for note in decision.notes))
 
     def test_planner_respects_stop_run(self) -> None:
         planner = LLMPlanner(

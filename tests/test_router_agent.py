@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from killchain_docker.llm import StaticLLMClient
 from killchain_docker.orchestrator.router import RouterAgent
-from killchain_docker.state import RunState, TodoItem, WorkerResult
+from killchain_docker.state import RunState, TodoItem, TodoPhase, WorkerResult
 
 
 class RouterAgentTests(unittest.TestCase):
@@ -47,6 +48,45 @@ class RouterAgentTests(unittest.TestCase):
             [(item.todo_id, item.worker_name) for item in decision.assignments],
             [(first.todo_id, "recon-worker"), (second.todo_id, "artifact-worker")],
         )
+
+    def test_routes_only_one_focus_phase_per_round(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        recon = state.queue_todo(TodoItem(goal="Map scope", phase=TodoPhase.RECON, priority=50))
+        exploit = state.queue_todo(
+            TodoItem(goal="Exploit confirmed issue", phase=TodoPhase.EXPLOIT, priority=100)
+        )
+        captured: dict[str, object] = {}
+
+        def respond(system_prompt: str, user_prompt: str):
+            del system_prompt
+            snapshot = json.loads(user_prompt)
+            captured.update(snapshot)
+            ready = snapshot["ready_todos"]
+            return {
+                "assignments": [
+                    {
+                        "todo_id": ready[0]["todo_id"],
+                        "worker_name": "recon-worker",
+                        "rationale": "earliest phase first",
+                    }
+                ],
+                "rationale": "single phase",
+            }
+
+        router = RouterAgent(StaticLLMClient(respond))
+
+        decision = router.route(
+            state,
+            worker_catalog=[
+                {"name": "recon-worker"},
+                {"name": "exploit-worker"},
+            ],
+            max_assignments=5,
+        )
+
+        self.assertEqual([todo["todo_id"] for todo in captured["ready_todos"]], [recon.todo_id])
+        self.assertNotIn(exploit.todo_id, [todo["todo_id"] for todo in captured["ready_todos"]])
+        self.assertEqual(decision.assignments[0].todo_id, recon.todo_id)
 
     def test_short_results_are_returned_directly_without_llm_summary(self) -> None:
         state = RunState(objective="Solve.", authorized_scope=[])
@@ -95,4 +135,3 @@ class RouterAgentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

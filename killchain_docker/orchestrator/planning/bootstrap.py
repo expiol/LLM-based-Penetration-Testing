@@ -7,7 +7,7 @@ from killchain_docker.orchestrator.planning.schemas import (
     PlannedTodo,
     PlannerDecision,
 )
-from killchain_docker.state import RunState
+from killchain_docker.state import RunState, TodoPhase
 
 
 class BootstrapSeeder(PlannerAgent):
@@ -23,6 +23,7 @@ class BootstrapSeeder(PlannerAgent):
             todos.append(
                 PlannedTodo(
                     goal="Inventory and classify bundled challenge files.",
+                    phase=TodoPhase.RECON,
                     priority=95,
                     context={
                         "files_root": "/home/ctfplayer/ctf_files",
@@ -44,6 +45,7 @@ class BootstrapSeeder(PlannerAgent):
             todos.append(
                 PlannedTodo(
                     goal=f"Map authorized scope entry {index}.",
+                    phase=TodoPhase.RECON,
                     priority=100,
                     context={
                         "scope": scope,

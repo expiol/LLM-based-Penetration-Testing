@@ -12,6 +12,7 @@ from killchain_docker.state import (
     TodoItem,
     WorkerAssignment,
     WorkerResult,
+    todo_phase_rank,
 )
 
 
@@ -33,12 +34,14 @@ class RouterAgent:
         worker_catalog: list[dict[str, object]],
         max_assignments: int,
     ) -> RouterDecision:
-        ready = state.ready_todos(limit=max(1, max_assignments))
+        ready = self._ready_todos_for_focus_phase(state, max_assignments=max_assignments)
         if not ready:
             return RouterDecision(rationale="No ready todos.")
+        focus_phase = ready[0].phase
         snapshot = {
             "objective": state.objective,
             "summary": state.summary(),
+            "focus_phase": focus_phase,
             "ready_todos": [self._serialize_todo(todo) for todo in ready],
             "worker_catalog": worker_catalog,
             "recent_round_summaries": [
@@ -150,6 +153,14 @@ class RouterAgent:
         )
 
     @staticmethod
+    def _ready_todos_for_focus_phase(state: RunState, *, max_assignments: int) -> list[TodoItem]:
+        ready = state.ready_todos(limit=None)
+        if not ready:
+            return []
+        focus_phase = min((todo.phase for todo in ready), key=todo_phase_rank)
+        return [todo for todo in ready if todo.phase == focus_phase][: max(1, max_assignments)]
+
+    @staticmethod
     def _fallback_worker_name(todo: TodoItem, worker_catalog: list[dict[str, object]]) -> str:
         goal = todo.goal.lower()
         context = todo.context
@@ -172,6 +183,7 @@ class RouterAgent:
         return {
             "todo_id": todo.todo_id,
             "goal": todo.goal,
+            "phase": todo.phase,
             "context": todo.context,
             "priority": todo.priority,
             "success_criteria": todo.success_criteria,
@@ -187,4 +199,3 @@ class RouterAgent:
             text = str(item)
             trimmed[key] = text[:1000] if len(text) > 1000 else item
         return trimmed
-

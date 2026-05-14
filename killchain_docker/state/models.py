@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def utc_now() -> datetime:
@@ -535,6 +535,68 @@ class TodoStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+class TodoPhase(StrEnum):
+    RECON = "recon"
+    ANALYSIS = "analysis"
+    EXPLOIT = "exploit"
+    FLAG_VALIDATION = "flag_validation"
+
+
+TODO_PHASE_ORDER: tuple[TodoPhase, ...] = (
+    TodoPhase.RECON,
+    TodoPhase.ANALYSIS,
+    TodoPhase.EXPLOIT,
+    TodoPhase.FLAG_VALIDATION,
+)
+
+_TODO_PHASE_RANK: dict[TodoPhase, int] = {
+    phase: index for index, phase in enumerate(TODO_PHASE_ORDER)
+}
+
+
+_TODO_PHASE_ALIASES: dict[str, TodoPhase] = {
+    "recon": TodoPhase.RECON,
+    "discovery": TodoPhase.RECON,
+    "enumeration": TodoPhase.RECON,
+    "info_gathering": TodoPhase.RECON,
+    "information_gathering": TodoPhase.RECON,
+    "mapping": TodoPhase.RECON,
+    "analysis": TodoPhase.ANALYSIS,
+    "analyze": TodoPhase.ANALYSIS,
+    "review": TodoPhase.ANALYSIS,
+    "triage": TodoPhase.ANALYSIS,
+    "vulnerability_identification": TodoPhase.ANALYSIS,
+    "vuln_identification": TodoPhase.ANALYSIS,
+    "exploit": TodoPhase.EXPLOIT,
+    "exploitation": TodoPhase.EXPLOIT,
+    "attack": TodoPhase.EXPLOIT,
+    "poc": TodoPhase.EXPLOIT,
+    "proof_of_concept": TodoPhase.EXPLOIT,
+    "flag": TodoPhase.FLAG_VALIDATION,
+    "flag_validation": TodoPhase.FLAG_VALIDATION,
+    "flag_validate": TodoPhase.FLAG_VALIDATION,
+    "validation": TodoPhase.FLAG_VALIDATION,
+    "validate_flag": TodoPhase.FLAG_VALIDATION,
+}
+
+
+def normalize_todo_phase(value: Any) -> TodoPhase:
+    """Coerce planner/legacy phase spellings into the canonical enum."""
+    if isinstance(value, TodoPhase):
+        return value
+    if value is None:
+        return TodoPhase.RECON
+    normalized = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if not normalized:
+        return TodoPhase.RECON
+    return _TODO_PHASE_ALIASES.get(normalized, TodoPhase(normalized))
+
+
+def todo_phase_rank(phase: TodoPhase | str | None) -> int:
+    """Return the ordered kill-chain rank for a todo phase."""
+    return _TODO_PHASE_RANK[normalize_todo_phase(phase)]
+
+
 class TodoItem(BaseModel):
     """High-level planner task consumed by the router and persona workers."""
 
@@ -542,6 +604,7 @@ class TodoItem(BaseModel):
 
     todo_id: str = Field(default_factory=_todo_id)
     goal: str
+    phase: TodoPhase = TodoPhase.RECON
     context: dict[str, Any] = Field(default_factory=dict)
     priority: int = Field(default=50, ge=0, le=100)
     success_criteria: list[str] = Field(default_factory=list)
@@ -555,6 +618,11 @@ class TodoItem(BaseModel):
     error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("phase", mode="before")
+    @classmethod
+    def _coerce_phase(cls, value: Any) -> TodoPhase:
+        return normalize_todo_phase(value)
 
     def is_ready(self) -> bool:
         return self.status == TodoStatus.PENDING
@@ -898,7 +966,7 @@ class RunState(BaseModel):
             values = context.get(list_key)
             if isinstance(values, list) and values:
                 important.append(",".join(str(item) for item in values[:8]))
-        tail = ":".join(important) if important else todo.goal[:80]
+        tail = f"{todo.phase}:{':'.join(important)}" if important else f"{todo.phase}:{todo.goal[:80]}"
         return f"todo:{tail}"
 
     def summary(self) -> dict[str, Any]:
