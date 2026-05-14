@@ -76,7 +76,9 @@ def _script_worker(plane: ExecutionPlane) -> ExploitWorker:
                 "metadata": {},
                 "rationale": "test-selected script execution",
                 "expected_signal": "script output",
-            }
+            },
+            # ContinueDecision: inner loop should not continue after first step
+            {"continue_loop": False, "reason": "single step sufficient"},
         ]),
         execution_plane=plane,
     )
