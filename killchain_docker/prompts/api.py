@@ -12,12 +12,6 @@ from typing import Any
 # Importing categories registers each bundle into the global registry.
 from killchain_docker.prompts import categories  # noqa: F401
 from killchain_docker.prompts.planner import build_planner_system_prompt
-from killchain_docker.prompts.router import build_router_system_prompt
-from killchain_docker.prompts.rag import SOLVER_RAG_GUIDE
-from killchain_docker.prompts.solver import (
-    SOLVER_SYSTEM_PROMPT_TEMPLATE,
-    TECHNIQUE_HINTS,
-)
 from killchain_docker.prompts.types import CategoryPrompts, lookup
 from killchain_docker.prompts.worker import build_worker_system_prompt
 
@@ -43,11 +37,6 @@ def get_objective_hint(category: str | None, *, has_files: bool, has_scope: bool
 def get_planner_system_prompt(category: str | None) -> str:
     """Build the LLM planner system prompt for the given category."""
     return build_planner_system_prompt(category)
-
-
-def get_router_system_prompt(category: str | None) -> str:
-    """Build the LLM router system prompt for the given category."""
-    return build_router_system_prompt(category)
 
 
 def get_worker_system_prompt(
@@ -81,11 +70,6 @@ def get_flag_hints(category: str | None) -> list[str]:
     return list(lookup(category).flag_recovery_hints)
 
 
-def get_solver_technique_examples(category: str | None) -> list[str]:
-    """Return code snippet examples for solver generation."""
-    return list(lookup(category).solver_technique_examples)
-
-
 def build_worker_context(state_metadata: dict[str, Any]) -> dict[str, str]:
     """Extract category and return useful prompt fragments for workers."""
     challenge = state_metadata.get("challenge", {})
@@ -98,22 +82,3 @@ def build_worker_context(state_metadata: dict[str, Any]) -> dict[str, str]:
         "worker_system_prefix": prompts.worker_system_prefix,
         "flag_hints": "\n".join(f"- {hint}" for hint in prompts.flag_recovery_hints),
     }
-
-
-def build_solver_system_prompt(
-    category: str,
-    *,
-    language: str = "Python",
-    timeout: int = 30,
-) -> str:
-    """Render the solver system prompt for the given category."""
-    prompts = lookup(category)
-    technique_hints = TECHNIQUE_HINTS.get(category, TECHNIQUE_HINTS["misc"])
-    return SOLVER_SYSTEM_PROMPT_TEMPLATE.format(
-        language=language,
-        category=category,
-        category_strategy=prompts.exploit_strategy,
-        timeout=timeout,
-        technique_hints=technique_hints,
-        rag_guide=SOLVER_RAG_GUIDE,
-    )

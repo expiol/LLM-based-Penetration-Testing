@@ -17,7 +17,7 @@ Design notes (kept algorithm-agnostic on purpose):
   This is not LFSR-specific; it is the standard "find which function
   prints this error string" workflow that works for every binary CTF
   category.
-* Output is capped to ~10 KB so it fits in a solver prompt.
+* Output is capped to ~10 KB so it fits in planner and worker prompts.
 * When the binary is non-ELF or ``objdump`` is missing, the tool returns
   a clear ``unsupported`` note rather than crashing.
 """
@@ -251,7 +251,9 @@ def _entry_set(symbols, funcs, xrefs):
 
 
 def _condense_function(body, budget=None):
-    # Drop blanks / section markers, trim to per-function budget.
+    # Drop blanks / section markers, trim to per-function budget.  Keep both
+    # head and tail when the body is large: parsers and output/decrypt loops
+    # commonly live near the end of main/.text.
     lines = []
     for raw in body.splitlines():
         stripped = raw.strip()
@@ -264,7 +266,10 @@ def _condense_function(body, budget=None):
     if budget is None:
         budget = MAX_FUNC_BODY_CHARS
     if len(out) > budget:
-        out = out[:budget] + "\n    ; ... [truncated]"
+        marker = "\n    ; ... [truncated middle] ...\n"
+        tail_budget = max(300, int(budget * 0.42))
+        head_budget = max(200, budget - tail_budget - len(marker))
+        out = out[:head_budget] + marker + out[-tail_budget:]
     return out
 
 
@@ -446,7 +451,7 @@ records.append({
     "manual_checks": [
         "Read the kept function bodies to recover the binary's per-step algorithm.",
         "Cross-reference rodata strings with the function that loads them to localize parsing logic.",
-        "If no flag is in .rodata, write a solver that mirrors the disassembled algorithm rather than guessing.",
+        "If no flag is in .rodata, run a script that mirrors the disassembled algorithm rather than guessing.",
     ],
 })
 

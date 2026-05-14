@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from killchain_docker.agents.web_form import (
+from killchain_docker.workers.web_form import (
     WebFormProbeAgent,
     _candidate_replay_urls,
     _filter_query_variants,
@@ -122,7 +122,7 @@ class WebFormSafetyTests(unittest.TestCase):
         report = agent.run(task, state)
 
         self.assertTrue(report.success)
-        self.assertEqual(report.new_tasks, [])
+        self.assertEqual(report.planner_signals, [])
         self.assertEqual(
             report.output_context["llm_grounded_flag_candidates"],
             ["key{ssti}"],

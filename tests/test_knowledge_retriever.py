@@ -361,7 +361,7 @@ class _AugmenterFixture:
 
 
 class KnowledgeAugmenterTests(unittest.TestCase):
-    """The augmenter is the single integration point for planner + solver."""
+    """The augmenter is the planner RAG integration point."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -374,46 +374,6 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         first = hits[0]
         for required in ("challenge_id", "category", "solution_sketch", "score"):
             self.assertIn(required, first)
-
-    def test_for_solver_uses_larger_solution_budget(self):
-        # The solver budget is meant to be at least as generous as the
-        # planner budget so the algorithm body fits.  We compare the two
-        # budgets indirectly by reading the rendered ``solution_sketch``
-        # length for the same hit.
-        from killchain_docker.knowledge.augmenter import (
-            PLANNER_SOLUTION_CHARS,
-            SOLVER_SOLUTION_CHARS,
-        )
-        self.assertGreater(SOLVER_SOLUTION_CHARS, PLANNER_SOLUTION_CHARS)
-        # Build an entry with a long sketch that stresses both budgets.
-        long_sketch = ("step. " * 800).strip()
-        entries = [
-            _entry(
-                "long-sketch",
-                name="longsketch",
-                category="crypto",
-                description="long sketch challenge",
-                solution=long_sketch,
-                files=["a"],
-            )
-        ]
-        retriever = KnowledgeRetriever(
-            entries, embedder=StubEmbedder(), cache_dir=self.tmp
-        )
-        augmenter = KnowledgeAugmenter(retriever)
-        state = GlobalState(
-            objective="long sketch",
-            authorized_scope=[],
-            metadata={"challenge": {"name": "longsketch", "category": "crypto"}},
-        )
-        planner_hits = augmenter.for_planner(state)
-        solver_hits = augmenter.for_solver(state)
-        self.assertGreaterEqual(len(planner_hits), 1)
-        self.assertGreaterEqual(len(solver_hits), 1)
-        self.assertGreater(
-            len(solver_hits[0]["solution_sketch"]),
-            len(planner_hits[0]["solution_sketch"]),
-        )
 
     def test_context_for_caches_into_state_metadata(self):
         context = self.augmenter.context_for(self.state)
@@ -439,7 +399,6 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         augmenter = KnowledgeAugmenter(retriever=None)
         self.assertFalse(augmenter.enabled)
         self.assertEqual(augmenter.for_planner(self.state), [])
-        self.assertEqual(augmenter.for_solver(self.state), [])
         self.assertEqual(augmenter.context_for(self.state).top_score, 0.0)
 
     def test_no_self_exclusion_by_default(self):

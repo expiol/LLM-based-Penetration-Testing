@@ -1,4 +1,4 @@
-"""Tests for the dispatch policy: per-prefix caps + anti-spin streak detection."""
+"""Tests for dispatch policy hard guardrails."""
 
 from __future__ import annotations
 
@@ -19,13 +19,13 @@ def _state_with_tasks(tasks: list[Task]) -> GlobalState:
     return state
 
 
-def _solve_task(idx: int, *, priority: int = 90) -> Task:
+def _artifact_task(idx: int, *, priority: int = 90) -> Task:
     return Task(
-        title=f"Solve #{idx}",
-        description=f"solver attempt {idx}",
-        task_type="solve.generate_script",
+        title=f"Review #{idx}",
+        description=f"artifact review {idx}",
+        task_type="artifact.source_review",
         priority=priority,
-        input_context={"files_root": "/tmp"},
+        input_context={"files_root": "/tmp", "source_files": [f"{idx}.py"]},
     )
 
 
@@ -39,14 +39,23 @@ def _validate_task(idx: int, candidate: str | None = None) -> Task:
     )
 
 
-class TestPerPrefixCaps(unittest.TestCase):
-    def test_solve_capped_to_one_per_cycle(self) -> None:
-        # Five solver tasks queued — only one should make it into the batch.
-        state = _state_with_tasks([_solve_task(i) for i in range(5)])
+class TestPlannerSelectedBatch(unittest.TestCase):
+    def test_selected_task_ids_control_dispatch_order(self) -> None:
+        tasks = [_artifact_task(i) for i in range(3)]
+        state = _state_with_tasks(tasks)
         policy = DispatchPolicy(emit=lambda _: None)
-        batch = policy.dequeue_batch(state).tasks
-        solve_tasks = [t for t in batch if t.task_type.startswith("solve.")]
-        self.assertEqual(len(solve_tasks), 1)
+        batch = policy.dequeue_batch(
+            state,
+            selected_task_ids=[tasks[2].task_id, tasks[0].task_id],
+        ).tasks
+        self.assertEqual([task.task_id for task in batch], [tasks[2].task_id, tasks[0].task_id])
+
+    def test_invalid_selected_ids_are_withheld(self) -> None:
+        state = _state_with_tasks([_artifact_task(0)])
+        policy = DispatchPolicy(emit=lambda _: None)
+        result = policy.dequeue_batch(state, selected_task_ids=["not-ready"])
+        self.assertEqual(result.tasks, [])
+        self.assertTrue(result.withheld_due_to_policy)
 
     def test_validates_use_batchable_cap(self) -> None:
         # Eight validate tasks — only 5 (the new batchable cap) per cycle.
@@ -59,22 +68,6 @@ class TestPerPrefixCaps(unittest.TestCase):
             sum(1 for t in batch if t.task_type == "flag.validate"), 5
         )
 
-    def test_solver_does_not_starve_other_workers(self) -> None:
-        # One solver + one web probe; both should run.
-        web_task = Task(
-            title="Probe",
-            description="probe",
-            task_type="web.path_probe",
-            priority=80,
-            input_context={"asset_id": "x", "base_url": "http://x", "paths": ["/"]},
-        )
-        state = _state_with_tasks([_solve_task(1), _solve_task(2), web_task])
-        policy = DispatchPolicy(emit=lambda _: None)
-        batch = policy.dequeue_batch(state).tasks
-        types = {t.task_type for t in batch}
-        self.assertIn("solve.generate_script", types)
-        self.assertIn("web.path_probe", types)
-
     def test_truly_idle_queue_reports_not_withheld(self) -> None:
         policy = DispatchPolicy(emit=lambda _: None)
         result = policy.dequeue_batch(_state_with_tasks([]))
@@ -82,33 +75,35 @@ class TestPerPrefixCaps(unittest.TestCase):
         self.assertFalse(result.withheld_due_to_policy)
 
 
-class TestDispatchNoSolverRecovery(unittest.TestCase):
-    def _push_solver_failure(
+class TestDispatchValidationSuppression(unittest.TestCase):
+    def _push_validation_failure(
         self, state: GlobalState, summary: str, *, error: str | None = None,
     ) -> None:
         state.execution_log.append(
             ExecutionRecord(
                 task_id=f"task-{len(state.execution_log)}",
-                worker_name="solver-agent",
+                worker_name="flag-validation-agent",
                 success=False,
                 summary=summary,
                 error=error,
             )
         )
 
-    def test_solver_failure_streak_does_not_suppress_solve(self) -> None:
-        state = _state_with_tasks([_solve_task(0)])
+    def test_validation_failure_streak_suppresses_validate(self) -> None:
+        task = _validate_task(0)
+        state = _state_with_tasks([task])
         for _ in range(8):
-            self._push_solver_failure(
+            self._push_validation_failure(
                 state,
-                "Solver execution ran without recovering a flag: exit code 0, 0 flag candidate(s).",
+                "candidate rejected",
             )
         policy = DispatchPolicy(emit=lambda _: None)
-        dq = policy.dequeue_batch(state)
-        self.assertTrue(
-            any(t.task_type.startswith("solve.") for t in dq.tasks)
+        dq = policy.dequeue_batch(
+            state,
+            selected_task_ids=[task.task_id],
         )
-        self.assertFalse(dq.withheld_due_to_policy)
+        self.assertEqual(dq.tasks, [])
+        self.assertTrue(dq.withheld_due_to_policy)
 
 
 if __name__ == "__main__":

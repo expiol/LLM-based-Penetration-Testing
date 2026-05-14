@@ -6,7 +6,7 @@ import json
 import subprocess
 from collections.abc import Callable
 from datetime import datetime, timezone
-from killchain_docker.compat import StrEnum
+from enum import StrEnum
 from typing import Any, Protocol
 from urllib import error, parse, request
 from uuid import uuid4
@@ -15,10 +15,18 @@ from pydantic import BaseModel, Field
 
 from killchain_docker.state import (
     Asset,
+    Artifact,
     Credential,
+    Endpoint,
     EvidenceRecord,
+    ExploitAttempt,
     Finding,
+    FlagCandidate,
     NetworkEdge,
+    Route,
+    Session,
+    StateDelta,
+    Vulnerability,
 )
 
 
@@ -36,6 +44,95 @@ def _truncate(value: str, limit: int = 4000) -> str:
     return f"{value[:limit]}...[truncated]"
 
 
+def _string_list(value: Any) -> list[str]:
+    if value in (None, "", [], {}, ()):
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, dict):
+        return []
+    result: list[str] = []
+    try:
+        iterator = iter(value)
+    except TypeError:
+        text = str(value).strip()
+        return [text] if text else []
+    for item in iterator:
+        text = str(item).strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        return [value]
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _first_string(value: Any) -> str | None:
+    values = _string_list(value)
+    return values[0] if values else None
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _looks_like_url(value: str) -> bool:
+    parsed = parse.urlparse(value)
+    return parsed.scheme in {"http", "https", "tcp"} and bool(parsed.netloc)
+
+
+def _normalize_route_url(
+    value: Any,
+    ctx: dict[str, Any],
+    request: ToolExecutionRequest,
+) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if _looks_like_url(text):
+        return text
+    if not text.startswith("/"):
+        return None
+    base = (
+        _first_string(ctx.get("base_url"))
+        or _first_string(ctx.get("observed_base_url"))
+        or _first_string(request.metadata.get("base_url"))
+    )
+    if not base or not _looks_like_url(base):
+        return text
+    return parse.urljoin(base.rstrip("/") + "/", text.lstrip("/"))
+
+
+def _iter_binary_run_files(binary_runs: Any) -> list[dict[str, Any]]:
+    if not isinstance(binary_runs, dict):
+        return []
+    result: list[dict[str, Any]] = []
+    for binary_name, body in binary_runs.items():
+        if not isinstance(body, dict):
+            continue
+        for invocation in body.get("invocations") or []:
+            if not isinstance(invocation, dict):
+                continue
+            for key, change_type in (("new_files", "created"), ("changed_files", "modified")):
+                for item in invocation.get(key) or []:
+                    if isinstance(item, dict):
+                        result.append({
+                            **item,
+                            "binary": binary_name,
+                            "invocation": invocation.get("label"),
+                            "change_type": change_type,
+                        })
+    return result
+
+
 class ToolExecutionError(RuntimeError):
     """Raised when a plugin cannot safely execute a request."""
 
@@ -50,6 +147,7 @@ class ToolExecutionRequest(BaseModel):
     """Standardized request routed through the execution plane."""
 
     request_id: str = Field(default_factory=_request_id)
+    capability: str | None = None
     tool_name: str
     parser_name: str = "jsonl_signals"
     arguments: list[str] = Field(default_factory=list)
@@ -95,6 +193,7 @@ class ToolExecutionBundle(BaseModel):
     result: ToolExecutionResult
     parsed: ParsedToolOutput
     evidence: EvidenceRecord
+    state_delta: StateDelta = Field(default_factory=StateDelta)
 
 
 class ToolPlugin(Protocol):
@@ -255,12 +354,179 @@ class ExecutionPlane:
                 ) from exc
 
         parsed = parser(request, result)
+        state_delta = self._build_state_delta(request, parsed)
         evidence = self._build_evidence(task_id, request, result, parsed)
         return ToolExecutionBundle(
             request=request,
             result=result,
             parsed=parsed,
             evidence=evidence,
+            state_delta=state_delta,
+        )
+
+    def _build_state_delta(
+        self,
+        request: ToolExecutionRequest,
+        parsed: ParsedToolOutput,
+    ) -> StateDelta:
+        """Lift common plugin output fields into typed state facts."""
+
+        ctx = parsed.output_context or {}
+        tool_name = request.tool_name
+        source_name = request.capability or tool_name
+        asset_ref = _first_string(request.metadata.get("asset_id"))
+        evidence_refs: list[str] = []
+
+        artifacts: list[Artifact] = []
+        for key, kind in (
+            ("challenge_files", "challenge_file"),
+            ("inspected_sources", "source"),
+            ("inspected_files", "file"),
+            ("inspected_binaries", "binary"),
+            ("binary_files", "binary"),
+            ("inspected_archives", "archive"),
+            ("archive_files", "archive"),
+            ("inspected_pcaps", "pcap"),
+            ("pcap_files", "pcap"),
+            ("inspected_databases", "database"),
+            ("database_files", "database"),
+            ("inspected_repos", "repository"),
+            ("repo_paths", "repository"),
+        ):
+            for path in _string_list(ctx.get(key)):
+                artifacts.append(
+                    Artifact(
+                        path=path,
+                        kind=kind,
+                        source=source_name,
+                        metadata={"field": key},
+                    )
+                )
+                evidence_refs.append(path)
+
+        for item in _iter_binary_run_files(ctx.get("binary_runs")):
+            path = str(item.get("name") or "").strip()
+            if not path:
+                continue
+            artifacts.append(
+                Artifact(
+                    path=path,
+                    kind=str(item.get("kind") or "generated_file"),
+                    source=source_name,
+                    size=_optional_int(item.get("size")),
+                    preview=str(item.get("preview") or "")[:1000] or None,
+                    metadata={
+                        "binary": item.get("binary"),
+                        "invocation": item.get("invocation"),
+                        "change_type": item.get("change_type", "created"),
+                    },
+                )
+            )
+
+        endpoints: list[Endpoint] = []
+        for url_key in ("observed_base_url", "base_url", "page_url", "target_url"):
+            url = _first_string(ctx.get(url_key))
+            if not url or not _looks_like_url(url):
+                continue
+            parsed_url = parse.urlparse(url)
+            endpoints.append(
+                Endpoint(
+                    asset_ref=asset_ref,
+                    url=url,
+                    hostname=parsed_url.hostname,
+                    port=parsed_url.port,
+                    protocol=parsed_url.scheme or None,
+                    status_code=_optional_int(ctx.get("http_status")),
+                    title=_first_string(ctx.get("title")),
+                    metadata={"field": url_key, "capability": source_name, "tool": tool_name},
+                )
+            )
+
+        routes: list[Route] = []
+        for url in _string_list(ctx.get("interesting_paths")):
+            route_url = _normalize_route_url(url, ctx, request)
+            if route_url:
+                routes.append(
+                    Route(
+                        asset_ref=asset_ref,
+                        url=route_url,
+                        path=parse.urlparse(route_url).path or route_url,
+                        source=source_name,
+                    )
+                )
+        for item in _dict_list(ctx.get("path_results")):
+            route_url = _normalize_route_url(item.get("url") or item.get("path"), ctx, request)
+            if not route_url:
+                continue
+            routes.append(
+                Route(
+                    asset_ref=asset_ref,
+                    url=route_url,
+                    path=parse.urlparse(route_url).path or route_url,
+                    status_code=_optional_int(item.get("status") or item.get("status_code")),
+                    source=source_name,
+                    metadata={
+                        key: item[key]
+                        for key in ("title", "content_type", "redirect")
+                        if key in item
+                    },
+                )
+            )
+
+        flag_candidates = [
+            FlagCandidate(
+                value=value,
+                source=source_name,
+                confidence=0.65,
+                evidence_refs=evidence_refs[:8],
+            )
+            for value in _string_list(ctx.get("flag_candidates"))
+        ]
+
+        vulnerabilities = [
+            Vulnerability(
+                title=issue[:160],
+                asset_ref=asset_ref,
+                description=issue,
+                metadata={"source": source_name, "tool": tool_name},
+            )
+            for issue in _string_list(ctx.get("security_issues"))
+        ]
+
+        sessions = [
+            Session(
+                asset_ref=asset_ref,
+                session_type="credential",
+                secret_ref=credential_id,
+                metadata={"source": source_name, "tool": tool_name},
+            )
+            for credential_id in _string_list(ctx.get("successful_credential_ids"))
+        ]
+
+        exploit_attempts: list[ExploitAttempt] = []
+        capability = source_name
+        if capability in {"script.execute", "exploit.probe", "credential.login"}:
+            exploit_attempts.append(
+                ExploitAttempt(
+                    technique=capability,
+                    success=bool(flag_candidates or sessions),
+                    summary=parsed.summary,
+                    flag_candidate_refs=[item.value for item in flag_candidates],
+                    metadata={
+                        "returncode": ctx.get("returncode"),
+                        "near_miss_candidates": ctx.get("near_miss_candidates") or [],
+                    },
+                )
+            )
+
+        return StateDelta(
+            artifacts=artifacts,
+            endpoints=endpoints,
+            routes=routes,
+            flag_candidates=flag_candidates,
+            vulnerabilities=vulnerabilities,
+            exploit_attempts=exploit_attempts,
+            sessions=sessions,
         )
 
     def _build_evidence(
@@ -272,6 +538,7 @@ class ExecutionPlane:
     ) -> EvidenceRecord:
         return EvidenceRecord(
             task_id=task_id,
+            capability=request.capability,
             tool_name=request.tool_name,
             mode=result.mode.value,
             summary=parsed.summary,

@@ -3,18 +3,16 @@
 Responsibilities (only these):
 - Validate task context (asset_id reference must exist in state.assets)
 - Conservative context repair (fill missing required keys from challenge_files / assets)
-- Ready-task batch selection (priority order, capped per task-type prefix).
-- Bounded batching / streak-suppression shortcuts that temporarily skip rows
-  in the ready-set so stalled workers do not hog the orchestrator cycles.
+- Hard dispatch guardrails: ready-set membership, batching bounds, and
+  validation suppression.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from killchain_docker.agents.base import WorkerAgent
+from killchain_docker.workers.base import WorkerAgent
 from killchain_docker.state import (
     FileKind,
     GlobalState,
@@ -51,25 +49,12 @@ class DispatchPolicy:
     """Encapsulates deterministic dispatch behavior for the orchestrator."""
 
     _BATCHABLE_TASK_TYPES = frozenset({"flag.validate"})
-    # Cap flag.validate fan-out per cycle.  Even after upstream filters (shape
-    # check at task-creation time, top-N cap inside the solver agent), a
-    # creative LLM planner can still propose many validations after a single
-    # solver run.  Raised to 5 so a flurry of bracket-span candidates from a
-    # single solver run can drain in one cycle.
+    # Cap flag.validate fan-out per cycle. A creative LLM planner can still
+    # propose many validations after one tool run, so keep validation bounded.
     _MAX_BATCHABLE_PER_CYCLE = 5
 
-    # Per-prefix cap dict: how many tasks of each ``<prefix>.*`` type can
-    # share a cycle.  Default is 2; ``solve`` is pinned to 1 so a single
-    # in-flight solver retry chain progresses one attempt per cycle without
-    # starving validations / web probes / source review.  Add prefixes here
-    # when a class of worker proves "hoggy" in production logs.
-    _PER_PREFIX_LIMITS: dict[str, int] = {"solve": 1}
-    _DEFAULT_PER_PREFIX_LIMIT = 2
-
     # Anti-spin: when this many validations have run consecutively without
-    # progress, skip more validation tasks for the current cycle.  Solver
-    # recovery is handled by orchestrator.recovery.RecoveryPolicy; dispatch
-    # no longer reads RAG state or suppresses solve.* tasks.
+    # progress, skip more validation tasks for the current cycle.
     _VALIDATION_FAILURE_STREAK_LIMIT = 5
 
     def __init__(
@@ -135,11 +120,12 @@ class DispatchPolicy:
 
             if "source_files" in missing:
                 inferred = list(kinds.get(FileKind.SOURCE, []))
-                ctx["source_files"] = inferred or challenge_files
-                _record(
-                    "source_files",
-                    f"source_files ({len(ctx['source_files'])} file(s))",
-                )
+                if inferred:
+                    ctx["source_files"] = inferred
+                    _record(
+                        "source_files",
+                        f"source_files ({len(ctx['source_files'])} file(s))",
+                    )
 
             if "binary_files" in missing:
                 inferred = list(kinds.get(FileKind.BINARY, []))
@@ -206,28 +192,28 @@ class DispatchPolicy:
             return True
         return False
 
-    def dequeue_batch(self, state: GlobalState, *, max_batch: int = 6) -> DequeueBatchResult:
-        """Dequeue up to *max_batch* independent ready tasks in priority order.
+    def dequeue_batch(
+        self,
+        state: GlobalState,
+        *,
+        max_batch: int = 6,
+        selected_task_ids: list[str] | None = None,
+    ) -> DequeueBatchResult:
+        """Return planner-selected ready tasks after hard guardrails.
 
-        Each ``<prefix>.*`` task type is capped via :attr:`_PER_PREFIX_LIMITS`
-        (defaulting to :attr:`_DEFAULT_PER_PREFIX_LIMIT`) so accumulated
-        planner proposals don't starve other work and the cycle budget is
-        actually consumed.  ``solve`` is pinned to 1 because solver retry
-        chains keep adding new tasks every cycle, and two of them per cycle
-        starves validations / web probes (`2013f-cry-stfu` ran cycles 4-20
-        with exactly two solver tasks each cycle).
-
-        When the recent execution log shows a long streak of failed
-        validations, suppress further validation dispatch this cycle.  Solver
-        streaks are intentionally not handled here; high-confidence RAG
-        recovery is an explicit task-generation policy.
-
-        Returns a :class:`DequeueBatchResult` so callers can tell when ready
-        tasks exist but were withheld by policy (``withheld_due_to_policy``).
+        Priority is deliberately not used here. The planner owns task choice;
+        this method only checks ready membership, de-duplicates ids, enforces
+        max batch, and suppresses validation spin.
         """
-        completed = state.task_chain.completed_task_ids()
-        ready = [t for t in state.task_chain.tasks if t.is_ready(completed)]
-        ready.sort(key=lambda t: (-t.priority, t.created_at))
+        ready = state.task_chain.ready_tasks()
+        had_ready = bool(ready)
+        ready_by_id = {task.task_id: task for task in ready}
+        if selected_task_ids is not None:
+            ordered_ids: list[str] = []
+            for task_id in selected_task_ids:
+                if task_id in ready_by_id and task_id not in ordered_ids:
+                    ordered_ids.append(task_id)
+            ready = [ready_by_id[task_id] for task_id in ordered_ids]
 
         suppress_validates = self._validation_streak_too_long(state)
         if suppress_validates:
@@ -237,29 +223,19 @@ class DispatchPolicy:
             )
 
         batch: list[Task] = []
-        prefix_counts: Counter[str] = Counter()
         batchable_count = 0
         for task in ready:
-            prefix = task.task_type.split(".")[0]
             if task.task_type in self._BATCHABLE_TASK_TYPES:
                 if suppress_validates:
                     continue
                 if batchable_count >= self._MAX_BATCHABLE_PER_CYCLE:
                     continue
                 batchable_count += 1
-            else:
-                limit = self._PER_PREFIX_LIMITS.get(
-                    prefix, self._DEFAULT_PER_PREFIX_LIMIT
-                )
-                if prefix_counts[prefix] >= limit:
-                    continue
-                prefix_counts[prefix] += 1
             batch.append(task)
-            non_batchable = len(batch) - batchable_count
-            if non_batchable >= max_batch:
+            if len(batch) >= max(1, max_batch):
                 break
 
-        withheld = bool(ready) and len(batch) == 0
+        withheld = had_ready and len(batch) == 0
         return DequeueBatchResult(tasks=batch, withheld_due_to_policy=withheld)
 
     def _validation_streak_too_long(self, state: GlobalState) -> bool:

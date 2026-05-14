@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from killchain_docker.agents._helpers.coercion import coerce_llm_bool
-from killchain_docker.agents.reasoning.schemas import (
+from killchain_docker.workers._helpers.coercion import coerce_llm_bool
+from killchain_docker.reasoning.schemas import (
     EvidenceReviewGuidance,
-    SolverCodeGuidance,
+    ScriptCodeGuidance,
 )
 
 
@@ -35,11 +35,11 @@ class TestCoerceLlmBool(unittest.TestCase):
         self.assertFalse(g.promote_runtime_probe)
         self.assertTrue(g.promote_computation_analysis)
 
-    def test_solver_should_retry_bool_field(self) -> None:
-        g = SolverCodeGuidance.model_validate(
+    def test_script_should_retry_bool_field(self) -> None:
+        g = ScriptCodeGuidance.model_validate(
             {
                 "summary": "s",
-                "solver_code": "print('ok')\n",
+                "script_code": "print('ok')\n",
                 "should_retry_on_failure": [],
             }
         )

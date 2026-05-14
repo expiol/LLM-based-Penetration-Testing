@@ -1,39 +1,28 @@
-"""Orchestrator components."""
+"""Orchestrator components for the planner-router persona runtime."""
 
 from killchain_docker.orchestrator.loop import Orchestrator
 from killchain_docker.orchestrator.planning import (
     BootstrapSeeder,
     LLMPlanner,
     PlanStrategy,
-    PlannedTask,
+    PlannedTodo,
     PlannerDecision,
     TaskDeduper,
     TaskNormalizer,
     TaskPlanner,
 )
-from killchain_docker.orchestrator.router import (
-    LLMWorkerRouter,
-    WorkerRouteDecision,
-    WorkerRouter,
-)
-from killchain_docker.orchestrator.recovery import (
-    RecoveryPolicy,
-    RecoveryResult,
-)
+from killchain_docker.orchestrator.router import RouterAgent
 
 __all__ = [
     "BootstrapSeeder",
     "LLMPlanner",
-    "LLMWorkerRouter",
     "Orchestrator",
     "PlanStrategy",
-    "PlannedTask",
+    "PlannedTodo",
     "PlannerDecision",
-    "RecoveryPolicy",
-    "RecoveryResult",
+    "RouterAgent",
     "TaskDeduper",
     "TaskNormalizer",
     "TaskPlanner",
-    "WorkerRouteDecision",
-    "WorkerRouter",
 ]
+

@@ -48,7 +48,7 @@ register(CategoryPrompts(
         "Look for patterns suggesting esoteric languages",
         "Check file for appended or hidden data sections",
     ],
-    solver_technique_examples=[
+    script_technique_examples=[
         "# Decode chain: import base64,codecs; d=base64.b64decode(data); d=bytes.fromhex(d.decode()); d=codecs.decode(d,'rot13')",
         "# Jail escape: __import__('os').system('cat flag*')",
         "# Brute-force: from itertools import product; [try_password(''.join(p)) for p in product(charset,repeat=n)]",

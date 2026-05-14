@@ -56,7 +56,7 @@ NEAR_MISS_FLAG_PATTERN = re.compile(
 
 #: Bracket span: a ``{...}`` substring with printable body, no nested braces.
 #: Used as a fallback when the canonical extractor finds no candidates but
-#: solver output has free-floating bracket-wrapped content (e.g. csawpad's
+#: tool output has free-floating bracket-wrapped content (e.g. csawpad's
 #: ``MY key for you is {And yes the nsa can read this to}``).
 BRACKET_SPAN_PATTERN = re.compile(
     rf"\{{({_FLAG_BODY_CLASS}{{{FLAG_BODY_MIN_LEN},{FLAG_BODY_MAX_LEN}}})\}}"
@@ -67,8 +67,8 @@ BRACKET_SPAN_PATTERN = re.compile(
 # False-positive filter sets
 # ---------------------------------------------------------------------------
 
-#: Python introspection / debug tokens mistaken for flag prefixes when the
-#: solver echoes introspection output (e.g. ``repr{bytes...}``-style glue).
+#: Python introspection / debug tokens mistaken for flag prefixes when a
+#: script echoes introspection output (e.g. ``repr{bytes...}``-style glue).
 PYTHON_DUMP_PREFIX_DENYLIST: frozenset[str] = frozenset({
     "repr", "ascii", "vars", "locals", "globals", "getattr", "setattr",
     "hasattr", "super", "object",     "help",

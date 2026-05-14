@@ -56,7 +56,7 @@ register(CategoryPrompts(
         "If credentials from the server fail on login, verify the page's JavaScript "
         "does not transform the password or token before POST",
     ],
-    solver_technique_examples=[
+    script_technique_examples=[
         "# LFI: requests.get(f'{base}/page?file=../../../flag.txt').text",
         "# SQLi: requests.post(url, data={'user': \"' OR 1=1 --\", 'pass': 'x'})",
         "# Match browser POST: js = requests.get(f'{base}/static/login.js').text; "

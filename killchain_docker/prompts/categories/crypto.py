@@ -23,7 +23,7 @@ register(CategoryPrompts(
         "Prioritize: 1) Source code review to identify the algorithm, "
         "2) Parameter extraction (keys, moduli, ciphertexts, IVs), "
         "3) Mathematical analysis of the cryptosystem weaknesses, "
-        "4) Writing and executing a decryption/solver script, "
+        "4) Writing and executing a decryption/script, "
         "5) Known-plaintext attacks if partial plaintext is available."
     ),
     worker_system_prefix=(
@@ -42,7 +42,7 @@ register(CategoryPrompts(
         "Apply the appropriate mathematical attack: factor RSA modulus if small, "
         "use Wiener's attack for large e, Hastad's broadcast attack for small e, "
         "XOR ciphertext with known plaintext to recover key, break LFSR with "
-        "known output bits. Write a Python solver script using standard crypto "
+        "known output bits. Write a Python script using standard crypto "
         "libraries (pycryptodome, gmpy2, sympy) and execute it."
     ),
     flag_recovery_hints=[
@@ -52,7 +52,7 @@ register(CategoryPrompts(
         "Try small exponent attacks for RSA",
         "Use z3 or sage for constraint-based solving",
     ],
-    solver_technique_examples=[
+    script_technique_examples=[
         "# AES decrypt: from Crypto.Cipher import AES; AES.new(key,AES.MODE_CBC,iv).decrypt(ct)",
         "# RSA: from gmpy2 import invert; d=invert(e,(p-1)*(q-1)); m=pow(c,d,n); print(m.to_bytes())",
         "# XOR key recovery: key=bytes(c^p for c,p in zip(ciphertext, b'flag{'))",

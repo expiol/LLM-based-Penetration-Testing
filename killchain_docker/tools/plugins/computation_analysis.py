@@ -241,7 +241,7 @@ else:
             continue
 
         inspected.append(relpath)
-        # Store a source preview so downstream agents (e.g. solver) can see the code
+        # Store a source preview so downstream workers can see the code
         preview_key = f"source_preview:{relpath}"
         if preview_key not in bitstring_constants:
             records.append({

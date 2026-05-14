@@ -1,13 +1,11 @@
-"""Tests for the binary disassembly agent path + solver evidence pickup."""
+"""Tests for the binary disassembly agent path and planner signals."""
 
 from __future__ import annotations
 
 import unittest
 
-from killchain_docker.agents.artifact import BinaryTriageAgent
-from killchain_docker.agents.solver import SolverEvidenceComposer
+from killchain_docker.workers.artifact import BinaryTriageAgent
 from killchain_docker.state import GlobalState, Task
-from killchain_docker.state.models import EvidenceRecord
 from killchain_docker.state.task_factory import (
     build_binary_disassembly_task,
     build_binary_run_task,
@@ -25,46 +23,6 @@ def _state(category: str = "crypto", files: tuple[str, ...] = ("stfu", "flag.stf
                 "category": category,
                 "flag_format": "flag{...}",
                 "files": list(files),
-            },
-        },
-    )
-
-
-def _disassembly_evidence(task_id: str, *, binary_name: str = "stfu") -> EvidenceRecord:
-    """Return a fake binary_disassembly tool record for solver evidence tests."""
-    return EvidenceRecord(
-        task_id=task_id,
-        tool_name="binary_disassembly",
-        mode="cli",
-        summary=f"Binary disassembly completed for 1 file(s).",
-        request={"tool": "binary_disassembly"},
-        result={},
-        extracted={
-            "output_context": {
-                "files_root": "/home/ctfplayer/ctf_files",
-                "inspected_binaries": [binary_name],
-                "disassembly": {
-                    binary_name: {
-                        "file_type": "ELF 32-bit LSB executable",
-                        "function_count_total": 14,
-                        "function_count_kept": 3,
-                        "symbol_table_present": True,
-                        "functions": [
-                            {
-                                "name": "main",
-                                "size_lines": 12,
-                                "xref_strings": ["Supplied tap values out of range"],
-                                "disassembly": "  mov eax, edi\n  call lfsr_step",
-                            },
-                        ],
-                        "rodata": [
-                            {
-                                "address": "0x40c0",
-                                "value": "Supplied tap values out of range",
-                            },
-                        ],
-                    },
-                },
             },
         },
     )
@@ -117,9 +75,9 @@ class BinaryTriageAgentDispatchTests(unittest.TestCase):
         self.assertIn("binary_files", reason or "")
 
 
-class BinaryTriageFollowupTests(unittest.TestCase):
+class BinaryTriageFollowupSignalTests(unittest.TestCase):
     """After a triage with no flag in a rev/pwn/crypto challenge, the agent
-    must auto-queue a disassembly follow-up via ``new_tasks``."""
+    should emit a planner signal for a disassembly follow-up."""
 
     def _build_triage_report_via_post_process(
         self, *, category: str, flag_candidates: list[str],
@@ -154,16 +112,22 @@ class BinaryTriageFollowupTests(unittest.TestCase):
         report = self._build_triage_report_via_post_process(
             category="crypto", flag_candidates=[],
         )
-        followups = [t for t in report.new_tasks if t.task_type == "artifact.binary_disassembly"]
-        self.assertEqual(len(followups), 1)
-        self.assertEqual(followups[0].input_context["binary_files"], ["stfu"])
+        signals = [
+            signal for signal in report.planner_signals
+            if signal.suggested_task_type == "artifact.binary_disassembly"
+        ]
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].suggested_input_context["binary_files"], ["stfu"])
 
     def test_skips_followup_when_flag_found(self):
         report = self._build_triage_report_via_post_process(
             category="crypto", flag_candidates=["flag{found}"],
         )
         self.assertFalse(
-            any(t.task_type == "artifact.binary_disassembly" for t in report.new_tasks)
+            any(
+                signal.suggested_task_type == "artifact.binary_disassembly"
+                for signal in report.planner_signals
+            )
         )
 
     def test_skips_followup_for_non_re_category(self):
@@ -171,7 +135,10 @@ class BinaryTriageFollowupTests(unittest.TestCase):
             category="web", flag_candidates=[],
         )
         self.assertFalse(
-            any(t.task_type == "artifact.binary_disassembly" for t in report.new_tasks)
+            any(
+                signal.suggested_task_type == "artifact.binary_disassembly"
+                for signal in report.planner_signals
+            )
         )
 
 
@@ -214,9 +181,9 @@ class BinaryRunTaskFactoryTests(unittest.TestCase):
         self.assertLess(disasm.priority, triage.priority)
 
 
-class BinaryDisassemblyToRunFollowupTests(unittest.TestCase):
+class BinaryDisassemblyToRunSignalTests(unittest.TestCase):
     """After a disassembly that yielded no flag in a rev/pwn/crypto challenge,
-    the agent must auto-queue a sandboxed ``artifact.binary_run`` follow-up.
+    the agent should emit a sandboxed ``artifact.binary_run`` planner signal.
     """
 
     def _build_disasm_report(self, *, category: str, flag_candidates: list[str]):
@@ -248,125 +215,32 @@ class BinaryDisassemblyToRunFollowupTests(unittest.TestCase):
 
     def test_queues_run_followup_when_no_flag_and_crypto(self):
         report = self._build_disasm_report(category="crypto", flag_candidates=[])
-        followups = [t for t in report.new_tasks if t.task_type == "artifact.binary_run"]
-        self.assertEqual(len(followups), 1)
-        self.assertEqual(followups[0].input_context["binary_files"], ["stfu"])
+        signals = [
+            signal for signal in report.planner_signals
+            if signal.suggested_task_type == "artifact.binary_run"
+        ]
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].suggested_input_context["binary_files"], ["stfu"])
 
     def test_skips_run_followup_when_flag_found(self):
         report = self._build_disasm_report(
             category="crypto", flag_candidates=["flag{found}"],
         )
         self.assertFalse(
-            any(t.task_type == "artifact.binary_run" for t in report.new_tasks)
+            any(
+                signal.suggested_task_type == "artifact.binary_run"
+                for signal in report.planner_signals
+            )
         )
 
     def test_skips_run_followup_for_non_re_category(self):
         report = self._build_disasm_report(category="web", flag_candidates=[])
         self.assertFalse(
-            any(t.task_type == "artifact.binary_run" for t in report.new_tasks)
+            any(
+                signal.suggested_task_type == "artifact.binary_run"
+                for signal in report.planner_signals
+            )
         )
-
-
-class SolverEvidenceBinaryRunsPickupTests(unittest.TestCase):
-    """Solver evidence must merge binary_run tool output into snapshot."""
-
-    def test_picks_up_single_binary_run_record(self):
-        state = _state()
-        ev = EvidenceRecord(
-            task_id="task-bin-run",
-            tool_name="binary_run",
-            mode="cli",
-            summary="run",
-            request={},
-            result={},
-            extracted={
-                "output_context": {
-                    "binary_runs": {
-                        "stfu": {
-                            "binary": "stfu",
-                            "invocations": [
-                                {
-                                    "label": "no-args",
-                                    "argv": ["./stfu"],
-                                    "returncode": 1,
-                                    "stdout_preview": "",
-                                    "stderr_preview": "Usage: stfu <FILE>",
-                                    "new_files": [],
-                                },
-                            ],
-                        },
-                    },
-                },
-            },
-        )
-        state.upsert_evidence(ev)
-        composer = SolverEvidenceComposer()
-        task = Task(
-            title="s", description="d",
-            task_type="solve.generate_script",
-            input_context={"files_root": "/home/ctfplayer/ctf_files"},
-        )
-        evidence = composer.compose(task, state)
-        self.assertIn("stfu", evidence.binary_runs)
-        snap = evidence.to_snapshot()
-        self.assertIn("binary_runs", snap)
-        self.assertEqual(
-            snap["binary_runs"]["stfu"]["invocations"][0]["label"], "no-args",
-        )
-
-
-class SolverEvidenceDisassemblyPickupTests(unittest.TestCase):
-    """The solver evidence composer must merge binary_disassembly tool output
-    into ``evidence.binary_disassembly`` so the prompt can show concrete
-    function bodies + .rodata to the LLM."""
-
-    def test_picks_up_single_disassembly_record(self):
-        state = _state()
-        ev = _disassembly_evidence(task_id="task-fake01")
-        state.upsert_evidence(ev)
-
-        composer = SolverEvidenceComposer()
-        task = Task(
-            title="Solve", description="d",
-            task_type="solve.generate_script",
-            input_context={"files_root": "/home/ctfplayer/ctf_files"},
-        )
-        evidence = composer.compose(task, state)
-        self.assertIn("stfu", evidence.binary_disassembly)
-        snap = evidence.to_snapshot()
-        self.assertIn("binary_disassembly", snap)
-        self.assertEqual(
-            snap["binary_disassembly"]["stfu"]["function_count_kept"], 3,
-        )
-
-    def test_ignores_unrelated_tools(self):
-        state = _state()
-        other = EvidenceRecord(
-            task_id="task-other",
-            tool_name="binary_triage",  # not the disassembly tool
-            mode="cli",
-            summary="strings only",
-            request={},
-            result={},
-            extracted={
-                "output_context": {
-                    "disassembly": {
-                        "stfu": {"functions": [{"name": "main"}]},
-                    },
-                },
-            },
-        )
-        state.upsert_evidence(other)
-        evidence = SolverEvidenceComposer().compose(
-            Task(
-                title="x", description="d",
-                task_type="solve.generate_script",
-                input_context={"files_root": "/home/ctfplayer/ctf_files"},
-            ),
-            state,
-        )
-        # Wrong tool_name -> must not be merged.
-        self.assertEqual(evidence.binary_disassembly, {})
 
 
 if __name__ == "__main__":

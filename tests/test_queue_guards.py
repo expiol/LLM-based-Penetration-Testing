@@ -4,14 +4,47 @@ from __future__ import annotations
 
 import unittest
 
-from killchain_docker.state import GlobalState, Task, TaskStatus
+from killchain_docker.state import Asset, AssetKind, GlobalState, Route, Task, TaskStatus
 from killchain_docker.state.models import (
+    PENDING_EXPLOIT_HYPOTHESIS_LIMIT,
     PENDING_FLAG_VALIDATE_LIMIT,
+    PENDING_WEB_CONTENT_LIMIT_PER_ASSET,
     PENDING_WEB_FORM_PROBE_LIMIT_PER_ASSET,
+    PENDING_WEB_PATH_PROBE_LIMIT_PER_ASSET,
 )
+from killchain_docker.state.task_factory import build_path_probe_tasks_for_assets
+from killchain_docker.tools import ToolCapability
 
 
 class QueueGuardTests(unittest.TestCase):
+    def test_path_probe_factory_skips_known_routes_and_caps_width(self) -> None:
+        state = GlobalState(objective="Solve web.", authorized_scope=[])
+        state.upsert_asset(
+            Asset(
+                asset_id="asset-1",
+                kind=AssetKind.WEB_APPLICATION,
+                base_url="http://example.test",
+            )
+        )
+        state.upsert_route(
+            Route(
+                asset_ref="asset-1",
+                url="http://example.test/admin",
+                path="/admin",
+                source=ToolCapability.HTTP_PROBE_PATHS.value,
+            )
+        )
+
+        tasks = build_path_probe_tasks_for_assets(
+            state,
+            ["/admin", *[f"/candidate-{idx}" for idx in range(20)]],
+        )
+
+        self.assertEqual(len(tasks), 1)
+        paths = tasks[0].input_context["paths"]
+        self.assertNotIn("/admin", paths)
+        self.assertLessEqual(len(paths), 12)
+
     def test_web_form_probe_pending_cap_is_per_asset(self) -> None:
         state = GlobalState(objective="Solve web.", authorized_scope=[])
         for idx in range(PENDING_WEB_FORM_PROBE_LIMIT_PER_ASSET):
@@ -94,70 +127,74 @@ class QueueGuardTests(unittest.TestCase):
         ]
         self.assertEqual(len(pending), PENDING_FLAG_VALIDATE_LIMIT)
 
-    def test_planner_solver_is_not_added_when_solver_already_pending(self) -> None:
+    def test_web_probe_and_content_pending_caps_are_per_asset(self) -> None:
+        state = GlobalState(objective="Solve web.", authorized_scope=[])
+        for idx in range(PENDING_WEB_PATH_PROBE_LIMIT_PER_ASSET):
+            state.queue_task(
+                Task(
+                    title="Probe",
+                    description="probe",
+                    task_type="web.path_probe",
+                    input_context={
+                        "asset_id": "asset-1",
+                        "base_url": "http://x",
+                        "paths": [f"/{idx}"],
+                    },
+                    dedupe_key=f"path:{idx}",
+                )
+            )
+        extra_path = Task(
+            title="Probe",
+            description="probe",
+            task_type="web.path_probe",
+            input_context={
+                "asset_id": "asset-1",
+                "base_url": "http://x",
+                "paths": ["/extra"],
+            },
+            dedupe_key="path:extra",
+        )
+        self.assertNotEqual(state.queue_task(extra_path).task_id, extra_path.task_id)
+
+        for idx in range(PENDING_WEB_CONTENT_LIMIT_PER_ASSET):
+            state.queue_task(
+                Task(
+                    title="Content",
+                    description="content",
+                    task_type="web.content_review",
+                    input_context={"asset_id": "asset-1", "base_url": f"http://x/{idx}"},
+                    dedupe_key=f"content:{idx}",
+                )
+            )
+        extra_content = Task(
+            title="Content",
+            description="content",
+            task_type="web.content_review",
+            input_context={"asset_id": "asset-1", "base_url": "http://x/extra"},
+            dedupe_key="content:extra",
+        )
+        self.assertNotEqual(state.queue_task(extra_content).task_id, extra_content.task_id)
+
+    def test_exploit_hypothesis_pending_cap(self) -> None:
         state = GlobalState(objective="Solve.", authorized_scope=[])
-        existing = Task(
-            title="Solver",
-            description="solve",
-            task_type="solve.generate_script",
-            input_context={"files_root": "/tmp"},
-            dedupe_key="solve:existing",
+        for idx in range(PENDING_EXPLOIT_HYPOTHESIS_LIMIT):
+            state.queue_task(
+                Task(
+                    title="Hypothesis",
+                    description="hypothesis",
+                    task_type="exploit.hypothesis",
+                    input_context={"seed_terms": [str(idx)]},
+                    dedupe_key=f"hyp:{idx}",
+                )
+            )
+        extra = Task(
+            title="Hypothesis",
+            description="hypothesis",
+            task_type="exploit.hypothesis",
+            input_context={"seed_terms": ["extra"]},
+            dedupe_key="hyp:extra",
         )
-        state.queue_task(existing)
-
-        planner_solver = Task(
-            title="Another solver",
-            description="solve",
-            task_type="solve.generate_script",
-            input_context={"files_root": "/tmp"},
-            dedupe_key="solve:planner",
-            metadata={"planned_by": "llm-planner"},
-        )
-        queued = state.queue_task(planner_solver)
-
-        self.assertEqual(queued.task_id, existing.task_id)
-        solvers = [
-            task for task in state.task_chain.tasks
-            if task.task_type == "solve.generate_script"
-        ]
-        self.assertEqual(len(solvers), 1)
-
-    def test_solver_retry_and_recovery_bypass_planner_solver_cap(self) -> None:
-        state = GlobalState(objective="Solve.", authorized_scope=[])
-        existing = Task(
-            title="Solver",
-            description="solve",
-            task_type="solve.generate_script",
-            input_context={"files_root": "/tmp"},
-            dedupe_key="solve:existing",
-        )
-        state.queue_task(existing)
-
-        retry = Task(
-            title="Solver retry",
-            description="retry",
-            task_type="solve.generate_script",
-            input_context={"files_root": "/tmp", "attempt_number": 2},
-            dedupe_key="solve:retry",
-            metadata={"planned_by": "solver-agent"},
-        )
-        recovery = Task(
-            title="Solver recovery",
-            description="recovery",
-            task_type="solve.generate_script",
-            input_context={"files_root": "/tmp", "solver_mode": "recovery"},
-            dedupe_key="solve:recovery",
-            metadata={"planned_by": "recovery-policy"},
-        )
-
-        self.assertEqual(state.queue_task(retry).task_id, retry.task_id)
-        self.assertEqual(state.queue_task(recovery).task_id, recovery.task_id)
-        solvers = [
-            task for task in state.task_chain.tasks
-            if task.task_type == "solve.generate_script"
-        ]
-        self.assertEqual(len(solvers), 3)
-
+        self.assertNotEqual(state.queue_task(extra).task_id, extra.task_id)
 
 if __name__ == "__main__":
     unittest.main()

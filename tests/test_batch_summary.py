@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from killchain_docker.score import diagnose_logdir
 from run import _save_batch_progress
 
 
@@ -67,8 +68,8 @@ class BatchSummaryTests(unittest.TestCase):
                     "task_count": 4,
                     "open_task_count": 0,
                     "task_status_counts": {"completed": 4},
-                    "task_type_counts": {"solve.generate_script": 1},
-                    "evidence_tool_counts": {"solver_execution": 1},
+                    "task_type_counts": {"artifact.source_review": 1},
+                    "evidence_tool_counts": {"script_execution": 1},
                 },
             }
 
@@ -84,8 +85,8 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(payload["token_usage"]["mean_per_attempt"]["prompt_tokens"], 100.0)
             self.assertEqual(payload["paper_metrics"]["success_rate"], 1.0)
             self.assertEqual(payload["paper_metrics"]["task_count_total"], 4)
-            self.assertEqual(payload["paper_metrics"]["task_type_totals"]["solve.generate_script"], 1)
-            self.assertEqual(payload["paper_metrics"]["evidence_tool_totals"]["solver_execution"], 1)
+            self.assertEqual(payload["paper_metrics"]["task_type_totals"]["artifact.source_review"], 1)
+            self.assertEqual(payload["paper_metrics"]["evidence_tool_totals"]["script_execution"], 1)
             self.assertEqual(payload["paper_metrics"]["category_counts"]["crypto"], 1)
             self.assertEqual(payload["experiment_config"]["max_cycles_arg"], 20)
             self.assertEqual(payload["experiment_config"]["parallel_workers"], 2)
@@ -140,7 +141,7 @@ class BatchSummaryTests(unittest.TestCase):
                                 "e1": {"tool_name": "http_probe"},
                                 "e2": {"tool_name": "http_form_probe"},
                             },
-                            "task_type_memory": {"solve.generate_script": [{"attempt": 1}]},
+                            "task_type_memory": {"artifact.source_review": [{"attempt": 1}]},
                         },
                     }
                 ),
@@ -175,7 +176,42 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(detail["max_cycles"], 16)
             self.assertEqual(detail["state_metrics"]["asset_count"], 1)
             self.assertEqual(detail["state_metrics"]["execution_count"], 1)
-            self.assertEqual(detail["state_metrics"]["task_type_memory_counts"]["solve.generate_script"], 1)
+            self.assertEqual(detail["state_metrics"]["task_type_memory_counts"]["artifact.source_review"], 1)
+
+    def test_logdir_diagnostics_bucket_failure_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "failed.json").write_text(
+                json.dumps(
+                    {
+                        "solved": False,
+                        "status": "stopped",
+                        "finish_reason": "stopped",
+                        "token_usage": {"total_tokens": 700000},
+                        "challenge_metadata": {
+                            "canonical_name": "failed-web",
+                            "category": "web",
+                        },
+                        "state_metrics": {
+                            "task_type_counts": {
+                                "artifact.source_review": 18,
+                                "flag.validate": 5,
+                                "web.path_probe": 50,
+                            },
+                            "evidence_tool_counts": {"script_execution": 18},
+                            "open_task_count": 4,
+                        },
+                        "state": {"task_type_memory": {}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = diagnose_logdir(root)
+
+        self.assertEqual(payload["failed"], 1)
+        self.assertEqual(payload["bucket_counts"]["script_tool_spin"], 1)
+        self.assertEqual(payload["bucket_counts"]["web_probe_fanout"], 1)
+        self.assertEqual(payload["bucket_counts"]["candidate_validation_loop"], 1)
 
 
 if __name__ == "__main__":

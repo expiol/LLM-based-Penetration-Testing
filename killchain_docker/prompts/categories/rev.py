@@ -38,10 +38,10 @@ register(CategoryPrompts(
         "functions that compare against expected output."
     ),
     exploit_strategy=(
-        "Write a solver script that reverses the identified transformation. "
+        "Write a script that reverses the identified transformation. "
         "If the transform is a known cipher, apply the standard decryption. "
         "If it is custom, reconstruct the inverse step by step. "
-        "Execute the solver in the container and capture the flag output."
+        "Execute the script in the container and capture the flag output."
     ),
     flag_recovery_hints=[
         "Run strings/objdump on binaries to find encoded flag data",
@@ -50,11 +50,11 @@ register(CategoryPrompts(
         "Try running the binary with various inputs and observe output patterns",
         "Use ltrace/strace to trace library calls for crypto functions",
     ],
-    solver_technique_examples=[
+    script_technique_examples=[
         "# XOR decrypt: key=[0x3f,0x42,...]; flag=bytes(c^k for c,k in zip(enc,key))",
         "# Inverse transform: for i in range(len(data)-1,-1,-1): data[i] ^= data[i-1]",
         "# String extraction: subprocess.run(['strings', binary], capture_output=True)",
         "# Brute-force checker: for c in range(32,127): if check(chr(c)): flag+=chr(c)",
-        "# Z3 solver: from z3 import *; s=Solver(); s.add(constraints); s.check()",
+        "# Z3 constraints: from z3 import *; s=Solver(); s.add(constraints); s.check()",
     ],
 ))

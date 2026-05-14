@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from contextlib import contextmanager
 import getpass
 import json
 import os
@@ -9,10 +10,16 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
 
 from nyuctf.challenge import CTFChallenge
 from nyuctf.dataset import CTFDataset
@@ -41,7 +48,7 @@ LOGDIR          = None                      # 日志目录；留 None 使用默�
 NAME            = "5.14_development_1"                      # 实验名称（在日志目录下创建子目录）
 INDEX           = None                      # 实验轮次（在日志目录下创建子目录）
 OUTPUT_ROOT     = None                      # 运行产物目录；留 None 使用默认路径
-PARALLEL_WORKERS = 1                       # 并发 worker 数（run-all 或 replicas）
+PARALLEL_WORKERS = 5                       # 并发 worker 数（run-all 或 replicas）
 REPLICAS        = 1                        # 单挑战重复运行次数（>1 时并发隔离运行；先压成 1，确认效果稳定再加）
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -49,6 +56,22 @@ REPLICAS        = 1                        # 单挑战重复运行次数（>1 �
 SENSITIVE_KEYS = frozenset({"api_key", "authorization", "token", "secret", "password"})
 PORT_CONFLICT_RE = re.compile(r"listen tcp [^:]+:(?P<port>\d+): bind: address already in use")
 TOKEN_USAGE_KEYS = ("llm_calls", "prompt_tokens", "completion_tokens", "total_tokens")
+SCRIPT_DIR = Path(__file__).parent.resolve()
+DEFAULT_LOGDIR = SCRIPT_DIR / "logs" / getpass.getuser()
+LLM_GATEWAY_CONFIG = SCRIPT_DIR / "configs" / "llm_gateway.json"
+COMPOSE_CHALLENGE_LOCK = Path(tempfile.gettempdir()) / "killchain_docker_compose_challenges.lock"
+LEGACY_LLM_ENV_KEYS = (
+    "AUTOPENTEST_LLM_MODE",
+    "AUTOPENTEST_LLM_CONFIG_PATH",
+    "AUTOPENTEST_LLM_PROVIDER",
+    "AUTOPENTEST_LLM_BASE_URL",
+    "AUTOPENTEST_LLM_MODEL",
+    "AUTOPENTEST_LLM_API_KEY",
+    "AUTOPENTEST_LLM_SCHEMA_MODELS",
+    "AUTOPENTEST_LLM_TIMEOUT_S",
+    "AUTOPENTEST_LLM_MAX_RETRIES",
+    "AUTOPENTEST_LLM_MAX_COMPLETION_TOKENS",
+)
 
 
 def _subprocess_stream_text(chunk: str | bytes | None) -> str:
@@ -104,6 +127,40 @@ def _challenge_compose_path(challenge: CTFChallenge) -> Path | None:
         return None
     compose = Path(candidate) / "docker-compose.yml"
     return compose if compose.exists() else None
+
+
+def _uses_compose(challenge: CTFChallenge) -> bool:
+    return bool(getattr(challenge, "container", False) and _challenge_compose_path(challenge))
+
+
+@contextmanager
+def _compose_challenge_run_lock(challenge: CTFChallenge):
+    """Serialize compose-backed challenges across process workers.
+
+    NYUCTF compose files reuse fixed host ports and shared network aliases
+    (for example ``web.chal.csaw.io``), so multiple service challenges cannot
+    safely share the same Docker network at the same time.
+    """
+    if not _uses_compose(challenge) or fcntl is None:
+        yield
+        return
+
+    COMPOSE_CHALLENGE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with COMPOSE_CHALLENGE_LOCK.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"  [compose-lock] waiting for Docker service slot: {challenge.canonical_name}")
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            print(f"  [compose-lock] acquired Docker service slot: {challenge.canonical_name}")
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()} {challenge.canonical_name}\n")
+        handle.flush()
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _docker_compose_down(challenge: CTFChallenge) -> None:
@@ -190,7 +247,6 @@ def _sanitize_for_log(value: Any, *, key: str | None = None) -> Any:
 
 def _args_from_config() -> argparse.Namespace:
     """Build an argparse.Namespace from the file-level config variables."""
-    script_dir = Path(__file__).parent.resolve()
     return argparse.Namespace(
         challenge=CHALLENGE,
         run_all=CHALLENGE == "__all__",
@@ -205,7 +261,7 @@ def _args_from_config() -> argparse.Namespace:
         quiet=QUIET,
         debug=DEBUG,
         skip_exist=SKIP_EXIST,
-        logdir=LOGDIR or str(script_dir / "logs" / getpass.getuser()),
+        logdir=LOGDIR or str(DEFAULT_LOGDIR),
         name=NAME,
         index=INDEX,
         output_root=OUTPUT_ROOT,
@@ -226,8 +282,6 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the structured LLM killchain on NYUCTF challenges",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    script_dir = Path(__file__).parent.resolve()
-
     parser.add_argument("--challenge", default=None, help="Name of the challenge (omit when using --run-all)")
     parser.add_argument(
         "--run-all",
@@ -284,7 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-L",
         "--logdir",
-        default=str(script_dir / "logs" / getpass.getuser()),
+        default=str(DEFAULT_LOGDIR),
         help="Log directory to write the run log",
     )
     parser.add_argument("-n", "--name", help="Experiment name (creates subdir in logdir)")
@@ -337,17 +391,22 @@ def load_challenge(args: argparse.Namespace) -> CTFChallenge:
     return CTFChallenge(challenge_info, dataset.basedir)
 
 
-def resolve_logfile(args: argparse.Namespace, challenge: CTFChallenge) -> Path:
+def resolve_experiment_logdir(args: argparse.Namespace) -> Path:
     logdir = Path(args.logdir).expanduser().resolve()
-    parts: list[str] = []
-    if args.name:
-        parts.append(args.name)
-    if args.index:
-        parts.append(f"round{args.index}")
-    if parts:
-        logdir = logdir / "_".join(parts)
+    suffix = "_".join(
+        part for part in (
+            getattr(args, "name", None),
+            f"round{args.index}" if getattr(args, "index", None) else None,
+        )
+        if part
+    )
+    logdir = logdir / suffix if suffix else logdir
     logdir.mkdir(parents=True, exist_ok=True)
-    return logdir / f"{challenge.canonical_name}.json"
+    return logdir
+
+
+def resolve_logfile(args: argparse.Namespace, challenge: CTFChallenge) -> Path:
+    return resolve_experiment_logdir(args) / f"{challenge.canonical_name}.json"
 
 
 def resolve_output_root(args: argparse.Namespace, challenge: CTFChallenge, logfile: Path) -> Path:
@@ -430,21 +489,9 @@ def derive_objective(challenge: CTFChallenge, authorized_scope: list[str]) -> st
     return "\n".join(lines)
 
 
-def configure_llm_environment(_args: argparse.Namespace) -> None:
-    # 网关层固定读取 configs/llm_gateway.json。
-    # 这里只做环境清理，避免旧变量影响历史逻辑或日志。
-    for key in (
-        "AUTOPENTEST_LLM_MODE",
-        "AUTOPENTEST_LLM_CONFIG_PATH",
-        "AUTOPENTEST_LLM_PROVIDER",
-        "AUTOPENTEST_LLM_BASE_URL",
-        "AUTOPENTEST_LLM_MODEL",
-        "AUTOPENTEST_LLM_API_KEY",
-        "AUTOPENTEST_LLM_SCHEMA_MODELS",
-        "AUTOPENTEST_LLM_TIMEOUT_S",
-        "AUTOPENTEST_LLM_MAX_RETRIES",
-        "AUTOPENTEST_LLM_MAX_COMPLETION_TOKENS",
-    ):
+def configure_llm_environment() -> None:
+    """Clear legacy LLM env overrides; the gateway reads configs/llm_gateway.json."""
+    for key in LEGACY_LLM_ENV_KEYS:
         os.environ.pop(key, None)
 
 
@@ -558,12 +605,11 @@ def _sum_numeric_dicts(items: list[dict[str, int]]) -> dict[str, int]:
 def _load_llm_experiment_config() -> dict[str, Any]:
     """Return sanitized gateway settings useful for experiment reporting."""
 
-    config_path = Path(__file__).parent / "configs" / "llm_gateway.json"
-    payload = _safe_read_json(config_path) or {}
+    payload = _safe_read_json(LLM_GATEWAY_CONFIG) or {}
     if not payload:
-        return {"config_path": str(config_path), "available": False}
+        return {"config_path": str(LLM_GATEWAY_CONFIG), "available": False}
     sanitized = _sanitize_for_log(payload)
-    sanitized["config_path"] = str(config_path)
+    sanitized["config_path"] = str(LLM_GATEWAY_CONFIG)
     sanitized["available"] = True
     return sanitized
 
@@ -656,6 +702,15 @@ def run_single_challenge(
         print(f"  [skip] {challenge.canonical_name} — log exists: {logfile}")
         return {"challenge": challenge.canonical_name, "status": "skipped", "solved": False, "api_error": False}
 
+    with _compose_challenge_run_lock(challenge):
+        return _run_single_challenge_inner(args, challenge, logfile)
+
+
+def _run_single_challenge_inner(
+    args: argparse.Namespace,
+    challenge: CTFChallenge,
+    logfile: Path,
+) -> dict[str, Any]:
     authorized_scope = args.scope or derive_authorized_scope(challenge)
     objective = args.objective or derive_objective(challenge, authorized_scope)
     output_root = resolve_output_root(args, challenge, logfile)
@@ -685,7 +740,7 @@ def run_single_challenge(
     is_api_error = False
 
     try:
-        configure_llm_environment(args)
+        configure_llm_environment()
         llm_client = build_llm_client_from_env(preflight=True)
         _start_challenge_with_retry(challenge, debug=args.debug)
         environment.setup()
@@ -865,8 +920,6 @@ def run_all_challenges(args: argparse.Namespace) -> int:
     print(f"  Batch run: {total} challenges in split='{args.split}'")
     print(f"{'='*72}\n")
 
-    configure_llm_environment(args)
-
     results: list[dict[str, Any]] = []
     solved_count = 0
     failed_count = 0
@@ -908,6 +961,7 @@ def run_all_challenges(args: argparse.Namespace) -> int:
                 break
     else:
         print(f"  Parallel mode enabled: {workers} isolated workers")
+        print("  Compose-backed service challenges are serialized to avoid Docker port/alias conflicts.")
         base_args = vars(args).copy()
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
             future_map = {
@@ -983,16 +1037,7 @@ def _save_batch_progress(
     finished: bool = False,
 ) -> Path:
     """Persist a JSON summary of batch progress after each challenge. Returns the summary path."""
-    logdir = Path(args.logdir).expanduser().resolve()
-    parts: list[str] = []
-    if args.name:
-        parts.append(args.name)
-    if args.index:
-        parts.append(f"round{args.index}")
-    if parts:
-        logdir = logdir / "_".join(parts)
-    logdir.mkdir(parents=True, exist_ok=True)
-
+    logdir = resolve_experiment_logdir(args)
     summary_path = logdir / "_batch_summary.json"
 
     solved_list = [r for r in results if r.get("solved")]
@@ -1200,7 +1245,6 @@ def _update_result_counters(
 def _run_named_challenge_worker(args_dict: dict[str, Any], challenge_name: str) -> dict[str, Any]:
     worker_args = argparse.Namespace(**args_dict)
     worker_args.challenge = challenge_name
-    configure_llm_environment(worker_args)
     try:
         challenge = load_challenge(worker_args)
     except Exception as exc:
@@ -1218,7 +1262,6 @@ def run_single_challenge_replicas(args: argparse.Namespace) -> int:
     replicas = max(1, int(getattr(args, "replicas", 1) or 1))
     if replicas == 1:
         challenge = load_challenge(args)
-        configure_llm_environment(args)
         result = run_single_challenge(args, challenge)
         if result.get("error"):
             print(f"Run failed: {result['error']['type']}: {result['error']['message']}")
@@ -1270,7 +1313,6 @@ def _run_single_replica_worker(
     worker_args.name = f"{base_name}_rep{replica_idx}_{label_prefix}"
     if worker_args.output_root:
         worker_args.output_root = str(Path(worker_args.output_root).expanduser().resolve() / worker_args.name)
-    configure_llm_environment(worker_args)
     challenge = load_challenge(worker_args)
     result = run_single_challenge(worker_args, challenge)
     result["replica"] = replica_idx

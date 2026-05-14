@@ -5,10 +5,8 @@ values so that worker follow-ups, planner proposals, and orchestrator repair all
 converge on the same task identity.
 
 The factories live in the ``state`` package because they depend only on
-``state`` models, and both the agent layer (L3) and the orchestrator layer (L4)
-need to construct tasks.  Keeping them here avoids the layering violation of
-having task constructors in ``agents.base`` while orchestrator/planner imports
-them.
+``state`` models, and both workers and the orchestrator need to construct
+tasks.  Keeping them here avoids coupling task construction to worker classes.
 """
 
 from __future__ import annotations
@@ -18,6 +16,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from killchain_docker.state.models import GlobalState, Task
+
+_DEFAULT_WEB_PATH_LIMIT = 12
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +39,11 @@ def _merge_unique(*groups: Iterable[str] | None, limit: int | None = None) -> li
     return merged
 
 
-def _normalize_paths(paths: Iterable[str] | None, *, limit: int = 20) -> list[str]:
+def _normalize_paths(
+    paths: Iterable[str] | None,
+    *,
+    limit: int = _DEFAULT_WEB_PATH_LIMIT,
+) -> list[str]:
     from urllib.parse import urlparse
 
     normalized: list[str] = []
@@ -73,6 +77,49 @@ def _normalize_paths(paths: Iterable[str] | None, *, limit: int = 20) -> list[st
         if len(normalized) >= limit:
             break
     return normalized
+
+
+def _route_path_key(url_or_path: str) -> str | None:
+    from urllib.parse import urlparse
+
+    normalized = _normalize_paths([url_or_path], limit=1)
+    if normalized:
+        return normalized[0]
+
+    parsed = urlparse(str(url_or_path or "").strip())
+    if parsed.path:
+        key = parsed.path
+        if parsed.query:
+            key = f"{key}?{parsed.query}"
+        return key
+    return None
+
+
+def _known_route_paths(state: GlobalState, *, asset_id: str, base_url: str) -> set[str]:
+    from urllib.parse import urlparse
+
+    base = str(base_url or "").rstrip("/")
+    known: set[str] = set()
+    for route in state.routes.values():
+        if route.asset_ref and route.asset_ref != asset_id:
+            continue
+        if not route.asset_ref and base and route.url and not str(route.url).startswith(base):
+            continue
+
+        for value in (route.path, route.url):
+            if not value:
+                continue
+            key = _route_path_key(value)
+            if key:
+                known.add(key)
+
+        parsed = urlparse(route.url)
+        if parsed.path:
+            key = parsed.path
+            if parsed.query:
+                key = f"{key}?{parsed.query}"
+            known.add(key)
+    return known
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +202,7 @@ def build_http_path_probe_task(
 ) -> Task:
     """Build a deterministic follow-up task for probing interesting HTTP paths."""
 
-    normalized_paths = _normalize_paths(paths, limit=20)
+    normalized_paths = _normalize_paths(paths)
     return Task(
         title=f"Probe interesting paths for {asset_id}",
         description="Fetch interesting application paths discovered from source, links, or content review.",
@@ -179,7 +226,7 @@ def build_path_probe_tasks_for_assets(
 ) -> list[Task]:
     """Create deterministic path-probe tasks for every known web asset."""
 
-    normalized_paths = _normalize_paths(paths, limit=20)
+    normalized_paths = _normalize_paths(paths, limit=40)
     if not normalized_paths:
         return []
 
@@ -187,11 +234,23 @@ def build_path_probe_tasks_for_assets(
     for asset in state.assets.values():
         if not asset.base_url:
             continue
+        known_paths = _known_route_paths(
+            state,
+            asset_id=asset.asset_id,
+            base_url=asset.base_url,
+        )
+        pending_paths = [
+            path
+            for path in normalized_paths
+            if path not in known_paths
+        ]
+        if not pending_paths:
+            continue
         tasks.append(
             build_http_path_probe_task(
                 asset_id=asset.asset_id,
                 base_url=asset.base_url,
-                paths=normalized_paths,
+                paths=pending_paths,
                 priority=priority,
             )
         )
@@ -306,7 +365,7 @@ def build_binary_run_task(
             "Copy the bundled binary + challenge files into a /tmp working "
             "directory and try several invocations (no-args, --help, with "
             "each non-binary file positionally, stdin variants).  Capture "
-            "stdout / stderr / new files for solver evidence."
+            "stdout / stderr / new files for planner evidence."
         ),
         task_type="artifact.binary_run",
         priority=priority,
@@ -419,7 +478,7 @@ def build_runtime_probe_task(
     return Task(
         title="Execute script-like source artifacts",
         description=(
-            "Run bundled scripts with the appropriate interpreter inside the agent container, "
+            "Run bundled scripts with the appropriate interpreter inside the runtime container, "
             "capture runtime output, and extract flag candidates or encoded blobs."
         ),
         task_type="artifact.runtime_probe",
@@ -615,10 +674,9 @@ _FLAG_PYTHON_EXCEPTION_RE = re.compile(
 )
 
 # Even when the shape regex matches, these substrings betray echoed source code
-# rather than a real answer (we saw the LLM solver write
+# rather than a real answer (generated scripts can write
 # ``debug("flag{...}")`` style strings that then surfaced in stderr).  Also
-# common LLM placeholders like ``test{test}`` that the placeholder filter in
-# solver/parser.py already catches but other producers miss.
+# common LLM placeholders like ``test{test}`` that producers may emit.
 _FLAG_VALIDATION_SOURCE_NEEDLES: tuple[str, ...] = (
     "re.findall", "re.search", "re.match",
     "subprocess.", "os.system", "shell=true",
@@ -626,7 +684,7 @@ _FLAG_VALIDATION_SOURCE_NEEDLES: tuple[str, ...] = (
     "{0}", "{1}", "{name}", "{flag}",
 )
 
-# Bare-token "give-up" sentinels that LLM solvers like to print when they
+# Bare-token "give-up" sentinels that generated scripts may print when they
 # can't recover the flag.  Matched as a case-insensitive substring (so
 # e.g. ``NO_FLAG_FOUND_HERE`` and ``flag_not_recovered_v2`` both reject).
 _FLAG_BARE_TOKEN_NOISE_NEEDLES: tuple[str, ...] = (

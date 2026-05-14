@@ -1,9 +1,4 @@
-"""LLM-driven task proposal.
-
-Calls the LLM with the current state snapshot and asks it to return a
-:class:`PlannerDecision`.  No filtering, no whitelist, no phase-guidance.
-The LLM owns task selection and stop_run.
-"""
+"""LLM-driven high-level todo proposal."""
 
 from __future__ import annotations
 
@@ -13,28 +8,15 @@ from killchain_docker.knowledge import KnowledgeAugmenter
 from killchain_docker.llm import LLMClient, LLMClientError
 from killchain_docker.orchestrator.planning.schemas import PlannerDecision
 from killchain_docker.prompts import get_planner_system_prompt, get_prompts
-from killchain_docker.state import GlobalState
+from killchain_docker.state import RunState, TodoStatus
 
 
 class PlanStrategy:
-    """Submit the current state to the LLM and return a raw PlannerDecision.
+    """Submit the current run state to the LLM and return high-level todos."""
 
-    The strategy receives a :class:`KnowledgeAugmenter` and asks it for
-    planner-shaped writeup hits; passing
-    ``KnowledgeAugmenter(retriever=None)`` (or omitting the argument and
-    letting :meth:`KnowledgeAugmenter.from_default` decide) cleanly
-    disables RAG without leaving sentinel branches in this class.
-    """
-
-    # Tunable bounds for the planner prompt.  The previous implementation
-    # serialized every finding and every task ever queued, which on long runs
-    # ballooned the prompt to >50 KB per cycle and added measurable LLM latency.
-    # These bounds keep the prompt under ~12 KB while still giving the planner
-    # the most actionable signals (recent failures + open tasks + key findings).
-    _MAX_FINDINGS = 24
-    _MAX_FINDING_DESCRIPTION_CHARS = 280
-    _MAX_FINDING_METADATA_CHARS = 240
-    _MAX_TASK_HISTORY = 60
+    _MAX_TODOS = 40
+    _MAX_FINDINGS = 20
+    _MAX_ROUNDS = 8
 
     def __init__(
         self,
@@ -47,17 +29,18 @@ class PlanStrategy:
         self.llm_client = llm_client
         self.augmenter = augmenter or KnowledgeAugmenter.from_default()
 
-    def propose(self, state: GlobalState) -> PlannerDecision:
+    def propose(self, state: RunState) -> PlannerDecision:
         return self.llm_client.generate_json(
             system_prompt=self._system_prompt(state),
             user_prompt=self._user_prompt(state),
             schema=PlannerDecision,
+            temperature=0.2,
         )
 
-    def _system_prompt(self, state: GlobalState) -> str:
+    def _system_prompt(self, state: RunState) -> str:
         return get_planner_system_prompt(self._category(state))
 
-    def _user_prompt(self, state: GlobalState) -> str:
+    def _user_prompt(self, state: RunState) -> str:
         category = self._category(state)
         prompts = get_prompts(category)
         snapshot = {
@@ -77,140 +60,98 @@ class PlanStrategy:
                     "base_url": asset.base_url,
                     "services": [
                         {
-                            "port": s.port,
-                            "name": s.name,
-                            "product": s.product,
-                            "version": s.version,
+                            "port": service.port,
+                            "name": service.name,
+                            "product": service.product,
+                            "version": service.version,
                         }
-                        for s in asset.services
+                        for service in asset.services
                     ],
                     "tags": sorted(asset.tags),
                 }
                 for asset in state.assets.values()
             ],
-            "findings": self._serialize_findings(state),
-            "credentials": [
+            "findings": [
                 {
-                    "credential_id": cred.credential_id,
-                    "username": cred.username,
-                    "credential_type": cred.credential_type,
-                    "asset_ref": cred.asset_ref,
+                    "finding_id": finding.finding_id,
+                    "title": finding.title,
+                    "severity": finding.severity,
+                    "description": (finding.description or "")[:360],
+                    "metadata_preview": str(finding.metadata)[:360],
                 }
-                for cred in list(state.credentials.values())[-8:]
+                for finding in list(state.findings.values())[-self._MAX_FINDINGS:]
             ],
-            "task_history": self._serialize_task_history(state),
-            "recent_execution_log": self._collect_execution_log(state),
+            "flag_candidates": [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "value": candidate.value,
+                    "source": candidate.source,
+                    "validated": candidate.validated,
+                }
+                for candidate in list(state.flag_candidates.values())[-12:]
+            ],
+            "todos": self._serialize_todos(state),
+            "recent_round_summaries": self._serialize_round_summaries(state),
+            "recent_execution_log": [
+                record.model_dump(mode="json")
+                for record in state.execution_log[-20:]
+            ],
         }
-        related_writeups = self.augmenter.for_planner(state)
+        related_writeups = self.augmenter.for_planner(state) if self.augmenter else []
         if related_writeups:
             snapshot["related_writeups"] = related_writeups
+        snapshot["planning_contract"] = {
+            "output": "Return PlannerDecision with todos, not worker names or tool names.",
+            "todo_granularity": "Each todo is a high-level objective with context and success criteria.",
+            "stop_rule": "Set stop_run=true only when solved or genuinely exhausted.",
+            "open_todos": self._open_todo_count(state),
+        }
         return json.dumps(snapshot, ensure_ascii=True, indent=2)
 
-    def _serialize_findings(self, state: GlobalState) -> list[dict[str, object]]:
-        """Cap findings at a reasonable size and trim long preview strings.
-
-        Prefer the most recent findings: the LLM doesn't need a 200-finding
-        backlog from earlier cycles to plan the next move.
-        """
-        findings = list(state.findings.values())[-self._MAX_FINDINGS:]
-        result: list[dict[str, object]] = []
-        for finding in findings:
-            metadata_preview = {}
-            for key in (
-                "stdout_preview", "source_snippet", "key_observations",
-                "interesting_routes", "interesting_paths", "flag_candidates",
-                "near_miss_candidates", "function_inventory", "archive_members",
-            ):
-                value = finding.metadata.get(key)
-                if not value:
-                    continue
-                metadata_preview[key] = str(value)[:self._MAX_FINDING_METADATA_CHARS]
-            result.append({
-                "finding_id": finding.finding_id,
-                "title": finding.title,
-                "severity": finding.severity,
-                "description": (finding.description or "")[:self._MAX_FINDING_DESCRIPTION_CHARS],
-                "asset_refs": finding.asset_refs,
-                "evidence_refs": finding.evidence_refs[:6],
-                "metadata_preview": metadata_preview,
-            })
-        return result
-
-    def _serialize_task_history(self, state: GlobalState) -> list[dict[str, object]]:
-        """Show the most recent tasks plus every still-open task.
-
-        Long-running runs accumulate hundreds of tasks; sending them all every
-        cycle costs LLM tokens without giving the planner extra signal.  We
-        always include open tasks (PENDING/RUNNING/BLOCKED) so the planner can
-        avoid duplicating in-flight work, plus the tail of the queue for
-        recent context.
-        """
-        from killchain_docker.state import TaskStatus
-
-        all_tasks = state.task_chain.tasks
-        seen_ids: set[str] = set()
-        ordered: list = []
-        # Open tasks first (they always matter regardless of recency).
-        for task in all_tasks:
-            if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.BLOCKED}:
-                seen_ids.add(task.task_id)
-                ordered.append(task)
-        # Then the tail of recently completed/failed tasks for context.
-        for task in reversed(all_tasks):
-            if task.task_id in seen_ids:
-                continue
-            seen_ids.add(task.task_id)
-            ordered.append(task)
-            if len(ordered) >= self._MAX_TASK_HISTORY:
-                break
-
-        return [
-            {
-                "task_id": task.task_id,
-                "task_type": task.task_type,
-                "status": task.status,
-                "title": task.title,
-                "dedupe_key": task.dedupe_key,
-                "last_error": (task.last_error or "")[:200] or None,
-                "error_code": task.error_code,
-            }
-            for task in ordered
-        ]
-
     @staticmethod
-    def _collect_execution_log(state: GlobalState) -> list[dict[str, object]]:
-        """Recent execution log for the planner.
-
-        Takes the last 24 records and overlays every recent failure that fell
-        outside the window — even when the cycle budget gets spent quickly,
-        the planner still sees *why* past attempts failed instead of replanning
-        the same dead-end task type.
-        """
-        recent = list(state.execution_log[-24:])
-        seen_ids = {record.task_id for record in recent}
-        recent_failures: list = []
-        for record in reversed(state.execution_log[:-24] if len(state.execution_log) > 24 else []):
-            if record.success:
-                continue
-            if record.task_id in seen_ids:
-                continue
-            recent_failures.append(record)
-            seen_ids.add(record.task_id)
-            if len(recent_failures) >= 12:
-                break
-        for record in reversed(recent_failures):
-            recent.insert(0, record)
-        return [
-            {
-                "task_id": record.task_id,
-                "worker_name": record.worker_name,
-                "success": record.success,
-                "summary": record.summary,
-                "error": record.error,
-            }
-            for record in recent
-        ]
-
-    @staticmethod
-    def _category(state: GlobalState) -> str:
+    def _category(state: RunState) -> str:
         return str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
+
+    def _serialize_todos(self, state: RunState) -> list[dict[str, object]]:
+        todos = list(getattr(state, "todos", []) or [])
+        if todos:
+            return [
+                {
+                    "todo_id": todo.todo_id,
+                    "goal": todo.goal,
+                    "status": todo.status,
+                    "priority": todo.priority,
+                    "context": todo.context,
+                    "result_summary": todo.result_summary[:300],
+                    "error": todo.error,
+                }
+                for todo in todos[-self._MAX_TODOS:]
+            ]
+        task_chain = getattr(state, "task_chain", None)
+        tasks = list(getattr(task_chain, "tasks", []) or [])
+        return [
+            {
+                "todo_id": task.task_id,
+                "goal": task.title,
+                "status": task.status,
+                "priority": task.priority,
+                "context": task.input_context,
+                "result_summary": str(task.output_context)[:300],
+                "error": task.last_error,
+            }
+            for task in tasks[-self._MAX_TODOS:]
+        ]
+
+    def _serialize_round_summaries(self, state: RunState) -> list[dict[str, object]]:
+        return [
+            round_record.summary.model_dump(mode="json")
+            for round_record in list(getattr(state, "rounds", []) or [])[-self._MAX_ROUNDS:]
+        ]
+
+    @staticmethod
+    def _open_todo_count(state: RunState) -> int:
+        todos = list(getattr(state, "todos", []) or [])
+        if todos:
+            return sum(1 for todo in todos if todo.status in {TodoStatus.PENDING, TodoStatus.RUNNING})
+        task_chain = getattr(state, "task_chain", None)
+        return len(list(getattr(task_chain, "ready_tasks", lambda: [])()))

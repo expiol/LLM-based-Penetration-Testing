@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +62,95 @@ def summarize_run_dir(run_dir: Path) -> dict[str, dict[str, Any]]:
     return results
 
 
+def diagnose_logdir(logdir: Path) -> dict[str, Any]:
+    """Classify per-challenge run logs into broad failure-mode buckets."""
+
+    rows: list[dict[str, Any]] = []
+    bucket_members: dict[str, list[str]] = defaultdict(list)
+    for path in sorted(logdir.glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        payload = load_json(path)
+        state = payload.get("state") or {}
+        metrics = payload.get("state_metrics") or {}
+        challenge = payload.get("challenge_metadata") or {}
+        canonical = challenge.get("canonical_name") or path.stem
+        category = challenge.get("category") or ""
+        solved = bool(payload.get("solved") or state.get("solved"))
+        task_counts = metrics.get("task_type_counts") or {}
+        status_counts = metrics.get("task_status_counts") or {}
+        token_usage = payload.get("token_usage") or payload.get("summary", {}).get("token_usage") or {}
+        total_tokens = int(token_usage.get("total_tokens") or token_usage.get("total") or 0)
+        execution_log = state.get("execution_log") or []
+        memory_text = json.dumps(
+            {
+                "memory": state.get("task_type_memory") or {},
+                "events": execution_log[-30:],
+            },
+            ensure_ascii=False,
+        )[:500000]
+
+        buckets: list[str] = []
+        if solved:
+            buckets.append("solved")
+        else:
+            web_tasks = sum(
+                int(task_counts.get(name, 0))
+                for name in ("web.path_probe", "web.content_review", "web.form_probe", "exploit.hypothesis")
+            )
+            script_tool_runs = int(
+                (metrics.get("evidence_tool_counts") or {}).get("script_execution", 0)
+            )
+            validations = int(task_counts.get("flag.validate", 0))
+            if payload.get("error"):
+                buckets.append("environment_or_startup_error")
+            if script_tool_runs >= 15:
+                buckets.append("script_tool_spin")
+            if validations > 0:
+                buckets.append("candidate_validation_loop")
+            if category == "web" and (web_tasks >= 40 or total_tokens >= 650000):
+                buckets.append("web_probe_fanout")
+            if re.search(r"\btimeout\b|timed out|time limit", memory_text, re.I):
+                buckets.append("timeout_loop")
+            if int(metrics.get("open_task_count") or status_counts.get("pending") or 0):
+                buckets.append("stopped_with_open_tasks")
+            if re.search(r"0 sources inspected|0 script\(s\) executed|none (appeared )?relevant", memory_text, re.I):
+                buckets.append("worker_contract_false_negative")
+            if "truncated" in memory_text.lower() and any(
+                marker in memory_text.lower() for marker in ("disassembly", "objdump", "decompil")
+            ):
+                buckets.append("binary_evidence_truncation")
+
+        if not buckets:
+            buckets.append("uncategorized_failure")
+        for bucket in buckets:
+            bucket_members[bucket].append(canonical)
+        rows.append(
+            {
+                "challenge": canonical,
+                "category": category,
+                "solved": solved,
+                "status": payload.get("status"),
+                "finish_reason": payload.get("finish_reason"),
+                "total_tokens": total_tokens,
+                "task_type_counts": task_counts,
+                "open_task_count": metrics.get("open_task_count", 0),
+                "buckets": buckets,
+            }
+        )
+
+    bucket_counts = Counter(bucket for row in rows for bucket in row["buckets"])
+    return {
+        "logdir": str(logdir),
+        "total": len(rows),
+        "solved": sum(1 for row in rows if row["solved"]),
+        "failed": sum(1 for row in rows if not row["solved"]),
+        "bucket_counts": dict(bucket_counts.most_common()),
+        "bucket_members": {key: sorted(value) for key, value in sorted(bucket_members.items())},
+        "details": rows,
+    }
+
+
 def build_validation_payload(
     *,
     results: dict[str, dict[str, Any]],
@@ -108,6 +199,11 @@ def main() -> int:
     parser.add_argument("--split", default="development", choices=["development", "test"])
     parser.add_argument("--dataset", help="Optional dataset JSON path")
     parser.add_argument("--output", help="Optional output JSON path")
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="When --logdir is used, also write broad failure-mode diagnostics.",
+    )
     args = parser.parse_args()
 
     if args.run_dir:
@@ -124,6 +220,13 @@ def main() -> int:
     output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
     print(json.dumps(payload["score"], indent=2, ensure_ascii=True))
     print(f"wrote: {output_path}")
+    if args.diagnose:
+        if not args.logdir:
+            raise ValueError("--diagnose requires --logdir")
+        diagnostics = diagnose_logdir(Path(args.logdir).expanduser().resolve())
+        diagnostics_path = output_path.with_name("log_diagnostics.json")
+        diagnostics_path.write_text(json.dumps(diagnostics, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        print(f"diagnostics: {diagnostics_path}")
     return 0
 
 

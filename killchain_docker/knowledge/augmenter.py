@@ -1,9 +1,9 @@
 """High-level RAG facade.
 
 This module owns the only piece of glue that turns a :class:`GlobalState`
-into prompt-ready writeup hints: build a query from challenge metadata,
-run :class:`KnowledgeRetriever`, and shape the hits into compact dicts that
-both planner and solver inject into their LLM prompts.
+into planner-ready writeup hints: build a query from challenge metadata,
+run :class:`KnowledgeRetriever`, and shape the hits into compact dicts for
+the planner prompt.
 
 Centralizing the logic here keeps a few rules consistent across callers:
 
@@ -38,17 +38,9 @@ from killchain_docker.knowledge.retriever import (
 from killchain_docker.state import GlobalState
 
 
-# Per-hit budgets shared by every consumer.  Solver gets a more generous
-# solution_sketch budget than the planner because solvers actually need
-# the algorithm body, while planners only need enough to bias the next
-# task title.
 PLANNER_SOLUTION_CHARS = 1500
 PLANNER_DESCRIPTION_CHARS = 280
 PLANNER_FILES = 8
-
-SOLVER_SOLUTION_CHARS = 2400
-SOLVER_DESCRIPTION_CHARS = 320
-SOLVER_FILES = 8
 
 # Cap the number of hits we ever feed to a single prompt.  Three is a
 # reasonable upper bound: the dense retriever's recall@3 on the dev set
@@ -63,7 +55,7 @@ _STATE_RAG_KEY = "rag"
 
 @dataclass(frozen=True)
 class RagHit:
-    """Typed writeup hit used by planner, solver, and recovery logic."""
+    """Typed writeup hit used by planner prompt injection."""
 
     challenge_id: str
     name: str
@@ -197,27 +189,11 @@ class KnowledgeAugmenter:
             max_files=PLANNER_FILES,
         )
 
-    def for_solver(self, state: GlobalState) -> list[dict[str, Any]]:
-        """Render hits with the solver-side per-field budget.
-
-        Solver evidence has fewer competing fields than the planner JSON,
-        so we let each ``solution_sketch`` claim more characters — the
-        solver actually needs the algorithm details rather than a
-        category-only summary.
-        """
-        return self.context_for(state).prompt_hits(
-            max_solution_chars=SOLVER_SOLUTION_CHARS,
-            max_description_chars=SOLVER_DESCRIPTION_CHARS,
-            max_files=SOLVER_FILES,
-        )
-
     def context_for(self, state: GlobalState) -> RagContext:
         """Return typed retrieval context for the run.
 
-        This is the single RAG integration point. Planner and solver still
-        render prompt-shaped dicts, while recovery policy consumes the same
-        typed context to decide whether a failed solver streak deserves a
-        calibrated recovery task.
+        This is the single RAG integration point. The planner renders
+        prompt-shaped dicts from this typed context.
         """
         if not self.enabled:
             return RagContext(enabled=False, hits=[])
@@ -330,8 +306,7 @@ class KnowledgeAugmenter:
         """Store top score + top-1 challenge id on ``state.metadata['rag']``.
 
         Only the cheap signals are cached; the rendered hit body lives
-        wherever the calling prompt builder put it (planner snapshot or
-        solver evidence).  We cache only what other components need
+        wherever the calling prompt builder put it. We cache only what other components need
         without re-running retrieval.
         """
         cache: dict[str, Any] = {

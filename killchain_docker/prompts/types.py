@@ -17,7 +17,7 @@ class CategoryPrompts:
     analysis_strategy: str
     exploit_strategy: str
     flag_recovery_hints: list[str] = field(default_factory=list)
-    solver_technique_examples: list[str] = field(default_factory=list)
+    script_technique_examples: list[str] = field(default_factory=list)
 
 
 _REGISTRY: dict[str, CategoryPrompts] = {}

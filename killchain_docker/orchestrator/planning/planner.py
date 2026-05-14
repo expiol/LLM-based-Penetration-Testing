@@ -1,15 +1,4 @@
-"""LLM planner: thin pipeline orchestrator.
-
-Combines :class:`BootstrapSeeder`, :class:`PlanStrategy`, :class:`TaskNormalizer`,
-and :class:`TaskDeduper` into a single ``plan(state)`` call.
-
-No filtering or capping happens here.  The LLM owns task selection and
-stop_run.  The pipeline only:
-- seeds initial tasks if there are none yet (BootstrapSeeder)
-- asks the LLM for the next batch (PlanStrategy)
-- normalizes input_context (TaskNormalizer)
-- drops duplicates by dedupe_key (TaskDeduper)
-"""
+"""PlannerAgent pipeline for high-level todo generation."""
 
 from __future__ import annotations
 
@@ -18,16 +7,13 @@ from killchain_docker.llm import LLMClient
 from killchain_docker.orchestrator.planning.bootstrap import BootstrapSeeder
 from killchain_docker.orchestrator.planning.deduper import TaskDeduper
 from killchain_docker.orchestrator.planning.normalizer import TaskNormalizer
-from killchain_docker.orchestrator.planning.schemas import (
-    PlannerDecision,
-    TaskPlanner,
-)
+from killchain_docker.orchestrator.planning.schemas import PlannerDecision, TaskPlanner
 from killchain_docker.orchestrator.planning.strategy import PlanStrategy
-from killchain_docker.state import GlobalState
+from killchain_docker.state import RunState
 
 
 class LLMPlanner(TaskPlanner):
-    """LLM-driven planner with no soft-policy guards."""
+    """PlannerAgent: observes the whole run and proposes small todo lists."""
 
     def __init__(
         self,
@@ -44,29 +30,28 @@ class LLMPlanner(TaskPlanner):
         self.normalizer = normalizer or TaskNormalizer()
         self.deduper = deduper or TaskDeduper()
 
-    def plan(self, state: GlobalState) -> PlannerDecision:
+    def plan(self, state: RunState) -> PlannerDecision:
         bootstrap_decision = self.bootstrap.plan(state)
         llm_decision = self.strategy.propose(state)
 
-        for task in llm_decision.tasks:
-            self.normalizer.fill(task, state)
-            task.metadata["planned_by"] = "llm-planner"
+        for todo in llm_decision.todos:
+            self.normalizer.fill(todo, state)
 
         existing_keys = {
-            task.dedupe_key
-            for task in bootstrap_decision.tasks
-            if task.dedupe_key
+            todo.dedupe_key
+            for todo in bootstrap_decision.todos
+            if todo.dedupe_key
         }
         deduped = self.deduper.merge(
-            llm_decision.tasks,
+            llm_decision.todos,
             state,
             existing_keys=existing_keys,
         )
-
-        merged_tasks = list(bootstrap_decision.tasks) + deduped
+        merged = list(bootstrap_decision.todos) + deduped
         return PlannerDecision(
             summary=llm_decision.summary or bootstrap_decision.summary,
-            tasks=merged_tasks,
+            todos=merged,
             notes=list(llm_decision.notes) + list(bootstrap_decision.notes),
             stop_run=llm_decision.stop_run,
         )
+

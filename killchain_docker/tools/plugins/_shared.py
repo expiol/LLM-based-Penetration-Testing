@@ -57,7 +57,7 @@ _TEMPLATE_NOISE_BODIES = frozenset({
     "name", "value", "key", "thing", "tablename", "fieldname",
     "id", "type", "class", "label", "placeholder", "input", "output",
 })
-# ``flag{And yes the nsa can read this to}``-style spans appear in solver
+# ``flag{And yes the nsa can read this to}``-style spans appear in tool
 # output as free-floating ``{body}`` text without an immediate alnum prefix.
 # Use this regex to mine those spans for the bracket-span fallback.
 _BRACKET_SPAN_RE = re.compile(r"\{([ -z|~]{4,200})\}")
@@ -122,9 +122,9 @@ def _near_miss_flag(m):
 _LOCAL_CONTEXT_WINDOW = 200
 
 def _bracket_span_candidates(text, flag_format_prefix=None, max_take=12):
-    # Inline subprocess analogue of agents._helpers.flag._bracket_span_candidates.
+    # Inline subprocess analogue of workers._helpers.flag._bracket_span_candidates.
     # Used as a fallback when the canonical extractor finds nothing but the
-    # solver output contains free-floating ``{body}`` spans, e.g.
+    # tool output contains free-floating ``{body}`` spans, e.g.
     # ``MY key for you is {And yes the nsa can read this to}``.
     if not text:
         return []

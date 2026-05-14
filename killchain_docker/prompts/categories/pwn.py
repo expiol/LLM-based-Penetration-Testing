@@ -51,7 +51,7 @@ register(CategoryPrompts(
         "Leak libc addresses via format string or GOT",
         "Use pwntools for scripted exploitation",
     ],
-    solver_technique_examples=[
+    script_technique_examples=[
         "# Basic overflow: from pwn import *; p=remote(host,port); p.sendline(b'A'*offset+p64(win_addr))",
         "# Format string leak: p.sendline(b'%p.'*20); leaked=p.recvline()",
         "# ROP: from pwn import *; rop=ROP(elf); rop.call('system',[next(elf.search(b'/bin/sh'))])",

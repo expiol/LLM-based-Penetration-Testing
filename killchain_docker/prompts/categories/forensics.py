@@ -53,7 +53,7 @@ register(CategoryPrompts(
         "Search git history: git log --all -p | grep -i flag",
         "Mount disk images and search for recently modified files",
     ],
-    solver_technique_examples=[
+    script_technique_examples=[
         "# PCAP: import pyshark; cap=FileCapture('f.pcap'); [p['DNS'].qry_name for p in cap if 'DNS' in p]",
         "# Binwalk: subprocess.run(['binwalk','-e','file.bin'],cwd=files_root)",
         "# Steghide: subprocess.run(['steghide','extract','-sf','img.jpg','-p','','-f'])",

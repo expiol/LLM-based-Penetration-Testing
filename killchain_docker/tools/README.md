@@ -7,7 +7,6 @@
 - `core.py`: shared execution-plane types, safe command/REST adapters, evidence bundling
 - `parsers.py`: JSONL and JSON payload parsers
 - `registry.py`: `build_execution_plane()` and default plugin registration
-- `engine.py`: compatibility facade for existing imports
 - `plugins/`: one Python module per concrete tool
 
 ## Plugin Convention

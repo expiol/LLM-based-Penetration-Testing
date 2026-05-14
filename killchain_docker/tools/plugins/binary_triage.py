@@ -58,11 +58,11 @@ for relpath in binary_files[:max_files]:
     # Two passes: explicit "interesting" tokens (credentials / endpoints /
     # crypto-algorithm hints / error messages that betray the algorithm) AND
     # a generic short-string fallback that ships the binary's distinctive
-    # printable strings to the solver even when none of the keyword tokens
+    # printable strings to later script experiments even when none of the keyword tokens
     # match.  This is critical for non-trivial CTF binaries where the giveaway
     # is something like ``Supplied tap values out of range`` (a stock LFSR
     # error message): without the fallback, ``interesting_strings`` would be
-    # ``{}`` and the LLM solver would never see the cipher-identifying string
+    # ``{}`` and the LLM would never see the cipher-identifying string
     # in the structured evidence.
     keyword_hits: list[str] = []
     fallback_hits: list[str] = []
@@ -106,8 +106,8 @@ for relpath in binary_files[:max_files]:
             fallback_hits.append(cleaned[:200])
 
     selected = keyword_hits[:12]
-    # Top up to 18 total with deduplicated fallback hits so the solver always
-    # gets at least a sample of the binary's printable strings, but never
+    # Top up to 18 total with deduplicated fallback hits so downstream workers
+    # get at least a sample of the binary's printable strings, but never
     # more than ~18 lines per binary (controls prompt size).
     seen = set(selected)
     for cand in fallback_hits:

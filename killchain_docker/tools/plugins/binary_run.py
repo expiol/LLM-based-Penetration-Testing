@@ -15,8 +15,9 @@ Design constraints (kept algorithm-agnostic):
   ``--help`` / ``-h``, each non-binary challenge file passed positionally,
   and stdin-piped variants.  Capped at ~6 invocations / 15 s each so the
   tool stays bounded.
-* Any file created during a run is captured (size, mode, hex preview)
-  because the binary's output file is frequently the decrypted plaintext.
+* Any file created or modified during a run is captured (size, mode, hex
+  preview) because many CTF binaries decrypt by rewriting the input file
+  in place.
 * Output is JSONL records compatible with the existing tool framework.
 """
 
@@ -51,7 +52,7 @@ max_invocations_per_binary = int(payload.get("max_invocations_per_binary", 6))
 # Per-stream byte caps so a chatty binary cannot blow up the prompt.
 STDOUT_PREVIEW_BYTES = 1800
 STDERR_PREVIEW_BYTES = 1200
-NEW_FILE_PREVIEW_BYTES = 800
+FILE_PREVIEW_BYTES = 800
 
 records = []
 inspected = []
@@ -109,10 +110,10 @@ def _classify_text(buf):
         printable = sum(1 for c in text if 32 <= ord(c) <= 126 or c in "\r\n\t")
         ratio = printable / len(text) if text else 0
         if ratio >= 0.92:
-            return "text", text[:NEW_FILE_PREVIEW_BYTES]
+            return "text", text[:FILE_PREVIEW_BYTES]
     except UnicodeDecodeError:
         pass
-    return "binary", _hex_preview(buf, NEW_FILE_PREVIEW_BYTES)
+    return "binary", _hex_preview(buf, FILE_PREVIEW_BYTES)
 
 
 def _build_invocations(binary_path, candidate_inputs):
@@ -205,7 +206,7 @@ for relpath in binary_files[:max_files]:
             for fname, (size_now, mtime_now) in after.items():
                 if fname not in before:
                     p = workdir / fname
-                    buf = _read_bytes(p, NEW_FILE_PREVIEW_BYTES * 2)
+                    buf = _read_bytes(p, FILE_PREVIEW_BYTES * 2)
                     kind, preview = _classify_text(buf)
                     new_files.append({
                         "name": fname,
@@ -218,6 +219,30 @@ for relpath in binary_files[:max_files]:
                         for m in flag_re.findall(preview):
                             if m not in flag_candidates:
                                 flag_candidates.append(m)
+            changed_files = []
+            for fname, (size_now, mtime_now) in after.items():
+                if fname not in before:
+                    continue
+                size_before, mtime_before = before[fname]
+                if size_before == size_now and mtime_before == mtime_now:
+                    continue
+                # Skip the executable itself unless it is the only changed file;
+                # self-modifying unpackers are less useful than transformed
+                # challenge inputs, but still capture them when present.
+                p = workdir / fname
+                buf = _read_bytes(p, FILE_PREVIEW_BYTES * 2)
+                kind, preview = _classify_text(buf)
+                changed_files.append({
+                    "name": fname,
+                    "size_before": size_before,
+                    "size": size_now,
+                    "kind": kind,
+                    "preview": preview,
+                })
+                if kind == "text":
+                    for m in flag_re.findall(preview):
+                        if m not in flag_candidates:
+                            flag_candidates.append(m)
 
             # Also mine flag candidates from stdout text.
             stdout_text = ""
@@ -241,6 +266,7 @@ for relpath in binary_files[:max_files]:
                 "stdout_preview": stdout_text[:STDOUT_PREVIEW_BYTES],
                 "stderr_preview": se.decode("utf-8", "replace")[:STDERR_PREVIEW_BYTES],
                 "new_files": new_files,
+                "changed_files": changed_files,
             }
             runs.append(run_entry)
 
@@ -253,7 +279,8 @@ for relpath in binary_files[:max_files]:
             "type": "note",
             "text": (
                 "Ran " + relpath + " " + str(len(runs)) + " invocation(s); "
-                "produced " + str(sum(len(r["new_files"]) for r in runs)) + " new file(s)."
+                "produced " + str(sum(len(r["new_files"]) for r in runs)) + " new file(s) and "
+                "modified " + str(sum(len(r.get("changed_files", [])) for r in runs)) + " existing file(s)."
             ),
         })
     finally:
@@ -307,8 +334,8 @@ records.append({
     "flag_candidates": flag_candidates[:10],
     "manual_checks": [
         "Read every invocation's stdout_preview / stderr_preview to learn what the binary expects.",
-        "When a new file appears in 'new_files', compare its size against the input — a same-size 'binary' kind file is usually a transformed (e.g. XOR-decrypted) copy of the input.",
-        "If '--help' or '-h' returned usage info, re-run with the documented flags via the solver.",
+        "When 'new_files' or 'changed_files' contains text, inspect it first; in-place rewrites often hold the decrypted flag.",
+        "If '--help' or '-h' returned usage info, re-run with the documented flags via script.execute.",
     ],
 })
 

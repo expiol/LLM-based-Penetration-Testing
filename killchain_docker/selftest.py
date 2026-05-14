@@ -68,6 +68,7 @@ def _required_plugin_names() -> set[str]:
         "archive_triage",
         "binary_triage",
         "http_path_probe",
+        "http_form_probe",
         "local_host_inventory",
         "local_http_content",
         "local_http_metadata",
@@ -173,7 +174,7 @@ def _build_selftest_plane(expected_flag: str) -> ExecutionPlane:
             {"type": "summary", "text": "Reviewed source artifacts."},
             {
                 "type": "output_context",
-                "inspected_files": inspected_files,
+                "inspected_sources": inspected_files,
                 "interesting_routes": ["/admin"],
                 "secret_files": ["app.py"],
                 "flag_candidates": [],
@@ -295,6 +296,19 @@ def _build_selftest_plane(expected_flag: str) -> ExecutionPlane:
             },
         ]
 
+    def emit_http_form_probe(request: ToolExecutionRequest) -> list[dict[str, Any]]:
+        page_url = str(request.metadata.get("page_url") or "http://127.0.0.1:8080/login")
+        return [
+            {"type": "summary", "text": f"HTTP form probe completed for {page_url}."},
+            {
+                "type": "output_context",
+                "page_url": page_url,
+                "submission_results": [],
+                "flag_candidates": [],
+                "interesting_paths": [],
+            },
+        ]
+
     def emit_vuln_scan(request: ToolExecutionRequest) -> list[dict[str, Any]]:
         target = str(request.metadata.get("target") or request.metadata.get("base_url") or "unknown")
         return [
@@ -338,6 +352,9 @@ def _build_selftest_plane(expected_flag: str) -> ExecutionPlane:
     plane.register_plugin(
         SimulatedJsonlPlugin(name="http_path_probe", emit_records=emit_http_path_probe)
     )
+    plane.register_plugin(
+        SimulatedJsonlPlugin(name="http_form_probe", emit_records=emit_http_form_probe)
+    )
     plane.register_plugin(SimulatedJsonlPlugin(name="vuln_scan", emit_records=emit_vuln_scan))
     return plane
 
@@ -354,17 +371,82 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
     expected_flag = "flag{selftest-ok}"
     simulated_plane = _build_selftest_plane(expected_flag)
     runtime_root = root / "runtime"
-    selftest_llm = StaticLLMClient(
-        lambda system_prompt, user_prompt: {
-            "summary": "Selftest planner decision.",
-            "tasks": [],
-            "notes": [],
-            "stop_run": False,
-            "worker_name": "recon-agent",
-            "rationale": "selftest routing",
-            "confidence": 1.0,
+    def selftest_llm_response(system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        if "PlannerDecision" in system_prompt or "PlannerAgent" in system_prompt:
+            snapshot = json.loads(user_prompt)
+            flag_candidates = snapshot.get("flag_candidates") or []
+            todos = snapshot.get("todos") or []
+            completed_goals = {
+                str(todo.get("goal") or "")
+                for todo in todos
+                if todo.get("status") == "completed"
+            }
+            pending_goals = {
+                str(todo.get("goal") or "")
+                for todo in todos
+                if todo.get("status") in {"pending", "running"}
+            }
+            if flag_candidates and "Validate selftest flag candidate." not in completed_goals | pending_goals:
+                return {
+                    "summary": "Validate discovered selftest flag.",
+                    "todos": [
+                        {
+                            "goal": "Validate selftest flag candidate.",
+                            "priority": 99,
+                            "context": {"candidate_flag": flag_candidates[-1]["value"]},
+                            "success_criteria": ["Confirm the candidate against the expected flag."],
+                            "constraints": ["Do not fabricate alternate flags."],
+                            "dedupe_key": f"selftest:validate:{flag_candidates[-1]['value']}",
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            assets = snapshot.get("assets") or []
+            if assets and "Review selftest web content." not in completed_goals | pending_goals:
+                asset = assets[0]
+                return {
+                    "summary": "Review discovered selftest web content.",
+                    "todos": [
+                        {
+                            "goal": "Review selftest web content.",
+                            "priority": 90,
+                            "context": {
+                                "asset_id": asset["asset_id"],
+                                "base_url": asset["base_url"],
+                            },
+                            "success_criteria": ["Fetch content and surface flag candidates."],
+                            "constraints": ["Stay on the known selftest base URL."],
+                            "dedupe_key": "selftest:web-content",
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            return {
+                "summary": "Selftest planner has no extra todo.",
+                "todos": [],
+                "notes": [],
+                "stop_run": False,
+            }
+        if "RouterDecision" in system_prompt:
+            return {"assignments": [], "rationale": "selftest uses router fallback"}
+        if "RouterRoundSummary" in system_prompt:
+            return {
+                "summary": "Selftest router summary.",
+                "direct_results": [],
+                "key_findings": [],
+                "next_focus": "",
+                "used_llm": True,
+            }
+        return {
+            "capability": "http.content",
+            "metadata": {},
+            "rationale": "selftest fallback capability",
+            "expected_signal": "selftest tool result",
         }
-    )
+
+    selftest_llm = StaticLLMClient(selftest_llm_response)
 
     config = RunConfig(
         objective="Self-test the NYU multi-killchain orchestrator without docker.",
@@ -470,7 +552,7 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                 "report_path": artifacts.report_path,
                 "state_path": artifacts.state_path,
                 "summary": summary,
-                "task_count": len(state.get("task_chain", {}).get("tasks", [])),
+                "todo_count": len(state.get("todos", [])),
                 "execution_count": len(state.get("execution_log", [])),
             },
             "score_run_dir": run_dir_validation["score"],

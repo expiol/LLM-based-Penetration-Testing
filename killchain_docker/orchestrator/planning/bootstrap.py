@@ -1,81 +1,68 @@
-"""Bootstrap seeder.
-
-Seeds the initial task queue when the LLM has no prior state to look at:
-
-- ``artifact.triage`` for any bundled challenge files
-- ``recon.enumerate_scope`` for each authorized scope entry
-
-This is the *only* deterministic logic in the planner pipeline.  It exists
-because the LLM cannot propose tasks against an empty state - it needs a
-starting point.  No filtering or stopping logic lives here.
-"""
+"""Bootstrap high-level todos for the persona runtime."""
 
 from __future__ import annotations
 
 from killchain_docker.orchestrator.planning.schemas import (
-    PlannedTask,
+    PlannedTodo,
     PlannerDecision,
     TaskPlanner,
 )
-from killchain_docker.state import GlobalState
+from killchain_docker.state import RunState
 
 
 class BootstrapSeeder(TaskPlanner):
-    """Inject mandatory seed tasks for artifact triage and scope enumeration."""
+    """Inject mandatory seed todos for challenge files and authorized scope."""
 
-    def plan(self, state: GlobalState) -> PlannerDecision:
-        tasks: list[PlannedTask] = []
+    def plan(self, state: RunState) -> PlannerDecision:
+        todos: list[PlannedTodo] = []
         notes: list[str] = []
+        challenge_meta = state.metadata.get("challenge", {}) or {}
+        challenge_files = list(challenge_meta.get("files", []) or [])
 
-        challenge_meta = state.metadata.get("challenge", {})
-        challenge_files = challenge_meta.get("files", [])
-
-        if challenge_files:
-            dedupe_key = "artifact-triage:challenge-files"
-            if state.task_chain.find_by_dedupe_key(dedupe_key) is None:
-                tasks.append(
-                    PlannedTask(
-                        title="Inventory challenge files",
-                        description=(
-                            "Enumerate bundled files in /home/ctfplayer/ctf_files "
-                            "and classify interesting artifacts."
-                        ),
-                        task_type="artifact.triage",
-                        priority=95,
-                        input_context={
-                            "files_root": "/home/ctfplayer/ctf_files",
-                            "max_files": 80,
-                        },
-                        dedupe_key=dedupe_key,
-                        metadata={
-                            "planned_by": "bootstrap",
-                            "challenge_files": challenge_files,
-                        },
-                    )
+        if challenge_files and not any(todo.dedupe_key == "bootstrap:artifact-inventory" for todo in state.todos):
+            todos.append(
+                PlannedTodo(
+                    goal="Inventory and classify bundled challenge files.",
+                    priority=95,
+                    context={
+                        "files_root": "/home/ctfplayer/ctf_files",
+                        "challenge_files": challenge_files,
+                    },
+                    success_criteria=[
+                        "Classify files by kind.",
+                        "Surface source, binary, archive, database, pcap, repo, and flag-like evidence.",
+                    ],
+                    constraints=["Use only files under /home/ctfplayer/ctf_files."],
+                    dedupe_key="bootstrap:artifact-inventory",
                 )
-
-        if not state.authorized_scope and not challenge_files:
-            notes.append("No authorized scope configured; planner cannot seed recon tasks.")
+            )
 
         for index, scope in enumerate(state.authorized_scope, start=1):
-            dedupe_key = f"bootstrap:recon:{scope}"
-            if state.task_chain.find_by_dedupe_key(dedupe_key) is None:
-                asset_id = (
-                    "seed-asset"
-                    if len(state.authorized_scope) == 1
-                    else f"seed-asset-{index}"
+            dedupe_key = f"bootstrap:scope:{scope}"
+            if any(todo.dedupe_key == dedupe_key for todo in state.todos):
+                continue
+            todos.append(
+                PlannedTodo(
+                    goal=f"Map authorized scope entry {index}.",
+                    priority=100,
+                    context={
+                        "scope": scope,
+                        "asset_id": "seed-asset" if len(state.authorized_scope) == 1 else f"seed-asset-{index}",
+                    },
+                    success_criteria=[
+                        "Create or update a tracked asset.",
+                        "Collect first-pass service or HTTP metadata when possible.",
+                    ],
+                    constraints=["Stay inside the authorized scope entry."],
+                    dedupe_key=dedupe_key,
                 )
-                tasks.append(
-                    PlannedTask(
-                        title=f"Map authorized surface {index}",
-                        description="Normalise a scope entry into a tracked asset with DNS resolution.",
-                        task_type="recon.enumerate_scope",
-                        priority=100,
-                        input_context={"scope": scope, "asset_id": asset_id},
-                        dedupe_key=dedupe_key,
-                        metadata={"planned_by": "bootstrap"},
-                    )
-                )
+            )
 
-        summary = f"Bootstrap planner proposed {len(tasks)} task(s)."
-        return PlannerDecision(summary=summary, tasks=tasks, notes=notes)
+        if not todos and not state.todos:
+            notes.append("No authorized scope or challenge files are available for bootstrap.")
+        return PlannerDecision(
+            summary=f"Bootstrap proposed {len(todos)} high-level todo(s).",
+            todos=todos,
+            notes=notes,
+        )
+

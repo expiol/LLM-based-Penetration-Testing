@@ -9,44 +9,17 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from killchain_docker.agents import (
-    ArchiveTriageAgent,
-    ArtifactTriageAgent,
-    BinaryTriageAgent,
-    ComputationAnalysisAgent,
-    CredentialExploitAgent,
-    CredentialHuntAgent,
-    DeepReviewAgent,
-    ExploitReasoningAgent,
-    FlagHuntAgent,
-    FlagValidationAgent,
-    HostAuditAgent,
-    PcapReviewAgent,
-    ReconAgent,
-    RepoReviewAgent,
-    RuntimeProbeAgent,
-    ServiceBannerAgent,
-    SolverAgent,
-    SourceReviewAgent,
-    SqliteReviewAgent,
-    VulnScanAgent,
-    WebAssessmentAgent,
-    WebContentAgent,
-    WebFormProbeAgent,
-    WebPathProbeAgent,
-    WebPwnExploitAgent,
-)
 from killchain_docker.knowledge import KnowledgeAugmenter
 from killchain_docker.llm import LLMClient, TokenLedger, build_llm_client_from_env
 from killchain_docker.orchestrator import (
     LLMPlanner,
-    LLMWorkerRouter,
     Orchestrator,
-    RecoveryPolicy,
+    RouterAgent,
 )
 from killchain_docker.reporting import render_markdown_report
-from killchain_docker.state import GlobalState
+from killchain_docker.state import RunState
 from killchain_docker.tools import ExecutionPlane, build_execution_plane
+from killchain_docker.workers import WorkerBuildContext, build_builtin_workers
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -83,7 +56,7 @@ class RunPersister:
         suffix = "\n" if messages else ""
         self.events_path.write_text("\n".join(messages) + suffix, encoding="utf-8")
 
-    def write_state(self, state: GlobalState) -> None:
+    def write_state(self, state: RunState) -> None:
         try:
             _write_json(self.state_path, state.model_dump(mode="json"))
             self._write_events()
@@ -94,7 +67,7 @@ class RunPersister:
 
     def write_all(
         self,
-        state: GlobalState,
+        state: RunState,
         token_ledger: TokenLedger | None,
     ) -> None:
         _write_json(self.state_path, state.model_dump(mode="json"))
@@ -166,77 +139,47 @@ def build_runtime(
     execution_plane: ExecutionPlane | None = None,
     expected_flag: str | None = None,
     llm_client: LLMClient | None = None,
-    checkpoint_callback: Callable[[GlobalState], None] | None = None,
-) -> tuple[GlobalState, Orchestrator, LLMClient]:
+    checkpoint_callback: Callable[[RunState], None] | None = None,
+) -> tuple[RunState, Orchestrator, LLMClient]:
     """Assemble state, planner, workers, and execution plane for one run."""
 
     if llm_client is None:
         llm_client = build_llm_client_from_env()
 
-    # One augmenter per run, shared by planner, solver, and recovery policy.
+    # One augmenter per run, used by the planner for RAG writeup context.
     # ``from_default`` resolves to the module-level retriever singleton
     # (or ``None`` when fastembed / the dataset isn't available), so the
     # caller never has to know whether RAG is wired up.
     augmenter = KnowledgeAugmenter.from_default()
 
     planner = LLMPlanner(llm_client, augmenter=augmenter)
-    router = LLMWorkerRouter(llm_client)
+    router = RouterAgent(llm_client)
     emit = recorder.emit if recorder is not None else print
-    recovery_policy = RecoveryPolicy(augmenter=augmenter, emit=emit)
 
     execution_plane = execution_plane or build_execution_plane()
-    state = GlobalState(
+    state = RunState(
         objective=config.objective,
         authorized_scope=config.authorized_scope,
         metadata=dict(config.metadata),
     )
-    common = {"llm_client": llm_client, "execution_plane": execution_plane}
+    worker_context = WorkerBuildContext(
+        llm_client=llm_client,
+        execution_plane=execution_plane,
+        augmenter=augmenter,
+        expected_flag=expected_flag,
+    )
     orchestrator = Orchestrator(
         state=state,
-        workers=[
-            # Recon / host
-            ReconAgent(**common),
-            HostAuditAgent(**common),
-            ServiceBannerAgent(**common),
-            # Artifact / static analysis
-            ArtifactTriageAgent(**common),
-            BinaryTriageAgent(**common),
-            ArchiveTriageAgent(**common),
-            SqliteReviewAgent(**common),
-            PcapReviewAgent(**common),
-            RepoReviewAgent(**common),
-            SourceReviewAgent(**common),
-            ComputationAnalysisAgent(**common),
-            RuntimeProbeAgent(**common),
-            DeepReviewAgent(**common),
-            # Web
-            WebAssessmentAgent(**common),
-            WebContentAgent(**common),
-            WebFormProbeAgent(**common),
-            WebPathProbeAgent(**common),
-            # Vuln
-            VulnScanAgent(**common),
-            # Credential / exploit
-            CredentialHuntAgent(**common),
-            CredentialExploitAgent(**common),
-            WebPwnExploitAgent(**common),
-            ExploitReasoningAgent(**common),
-            FlagHuntAgent(**common),
-            # Solver (gets the augmenter so its prompts include writeup hits).
-            SolverAgent(augmenter=augmenter, **common),
-            # Flag validation (no execution_plane needed)
-            FlagValidationAgent(llm_client=llm_client, expected_flag=expected_flag),
-        ],
+        workers=build_builtin_workers(worker_context),
         planner=planner,
         router=router,
         emit=emit,
         checkpoint_callback=checkpoint_callback,
-        recovery_policy=recovery_policy,
     )
     return state, orchestrator, llm_client
 
 
-def build_summary(state: GlobalState, token_ledger: TokenLedger | None = None) -> dict[str, Any]:
+def build_summary(state: RunState, token_ledger: TokenLedger | None = None) -> dict[str, Any]:
     """Create a compact JSON summary for one run."""
 
     summary: dict[str, Any] = {
@@ -246,9 +189,19 @@ def build_summary(state: GlobalState, token_ledger: TokenLedger | None = None) -
         "validated_flag": state.validated_flag,
         "objective": state.objective,
         "authorized_scope": state.authorized_scope,
+        "todos": len(state.todos),
+        "rounds": len(state.rounds),
         "assets": len(state.assets),
         "findings": len(state.findings),
         "credentials": len(state.credentials),
+        "artifacts": len(state.artifacts),
+        "endpoints": len(state.endpoints),
+        "routes": len(state.routes),
+        "flag_candidates": len(state.flag_candidates),
+        "hypotheses": len(state.hypotheses),
+        "vulnerabilities": len(state.vulnerabilities),
+        "exploit_attempts": len(state.exploit_attempts),
+        "sessions": len(state.sessions),
         "evidence": len(state.evidence),
         "executions": len(state.execution_log),
         "worker_notes": len(state.notes),

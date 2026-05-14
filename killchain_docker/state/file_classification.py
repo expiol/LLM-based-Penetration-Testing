@@ -1,7 +1,7 @@
 """Single source of truth for filename-to-kind classification.
 
-Used by planner, dispatch policy, solver evidence collector, and worker
-context normalization so all four layers agree on what counts as
+Used by planner, dispatch policy, tool execution, and worker context
+normalization so all layers agree on what counts as
 "source", "binary", "archive", "pcap", "sqlite", or "repo".
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 
-from killchain_docker.compat import StrEnum
+from enum import StrEnum
 
 
 class FileKind(StrEnum):

@@ -186,7 +186,7 @@ records.append({
     "security_issues": security_issues,
     "open_ports": [port],
     # Surface the actual response headers — set-cookie / location / etc —
-    # into output_context so the solver agent can read them through
+    # into output_context so downstream workers can read them through
     # ``state.evidence`` and write an exploit that talks to the server
     # the way it ACTUALLY behaves (correct cookie name, redirect target,
     # framework hint), not the way the writeup says it should behave.
