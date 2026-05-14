@@ -25,7 +25,7 @@ from killchain_docker.tools.plugins import (
     script_execution,
     source_review,
 )
-from killchain_docker.workers.persona import ExploitWorker
+from killchain_docker.workers.persona import ExploitWorker, WebWorker
 from killchain_docker.workers.tool_metadata import normalize_tool_metadata
 
 
@@ -83,6 +83,101 @@ def _script_worker(plane: ExecutionPlane) -> ExploitWorker:
 
 
 class ToolMetadataNormalizationTests(unittest.TestCase):
+    def test_non_script_worker_prompt_omits_script_execute_rules(self) -> None:
+        captured: dict[str, str] = {}
+
+        def responder(system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["system_prompt"] = system_prompt
+            captured["user_prompt"] = user_prompt
+            return {
+                "capability": "http.content",
+                "metadata": {"base_url": "http://safe.test"},
+                "rationale": "read known page",
+                "expected_signal": "http body",
+            }
+
+        worker = WebWorker(
+            llm_client=StaticLLMClient(responder),
+            execution_plane=ExecutionPlane(),
+        )
+
+        decision = worker.choose_tool_use(
+            task=TodoItem(
+                goal="Review known web content.",
+                context={"base_url": "http://safe.test"},
+            ),
+            state=RunState(objective="solve", authorized_scope=["http://safe.test"]),
+            allowed_capabilities=list(WebWorker.allowed_capabilities),
+        )
+
+        self.assertEqual(decision.capability, "http.content")
+        snapshot = json.loads(captured["user_prompt"])
+        self.assertNotIn("script.execute", captured["system_prompt"])
+        self.assertNotIn("script.execute", json.dumps(snapshot))
+        self.assertNotIn("script.execute", snapshot["allowed_capabilities"])
+
+    def test_script_worker_prompt_keeps_script_execute_rules(self) -> None:
+        captured: dict[str, str] = {}
+
+        def responder(system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["system_prompt"] = system_prompt
+            captured["user_prompt"] = user_prompt
+            return {
+                "capability": "script.execute",
+                "metadata": {"script_code": "print(1)"},
+                "rationale": "run a bounded script",
+                "expected_signal": "stdout",
+            }
+
+        worker = ExploitWorker(
+            llm_client=StaticLLMClient(responder),
+            execution_plane=ExecutionPlane(),
+        )
+
+        decision = worker.choose_tool_use(
+            task=TodoItem(goal="Recover the flag with a script.", phase="analysis"),
+            state=RunState(objective="solve"),
+            allowed_capabilities=list(ExploitWorker.allowed_capabilities),
+        )
+
+        self.assertEqual(decision.capability, "script.execute")
+        snapshot = json.loads(captured["user_prompt"])
+        rendered = json.dumps(snapshot)
+        self.assertNotIn("script.execute", captured["system_prompt"])
+        self.assertIn("script.execute", snapshot["allowed_capabilities"])
+        self.assertIn("For script.execute", rendered)
+
+    def test_unavailable_script_execute_is_worker_failure_without_plugin_call(self) -> None:
+        plane = ExecutionPlane()
+        plane.register_parser("jsonl_signals", jsonl_signal_parser)
+        plugin = _RecordingScriptPlugin()
+        plane.register_plugin(plugin)
+        worker = WebWorker(
+            llm_client=StaticLLMClient([
+                {
+                    "capability": "script.execute",
+                    "metadata": {"script_code": "print('should not run')"},
+                    "rationale": "bad capability",
+                    "expected_signal": "stdout",
+                }
+            ]),
+            execution_plane=plane,
+        )
+
+        result = worker.run(
+            TodoItem(
+                goal="Review web content.",
+                context={"base_url": "http://safe.test"},
+            ),
+            RunState(objective="solve", authorized_scope=["http://safe.test"]),
+        )
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.retryable)
+        self.assertIn("web-worker selected unavailable tool capability 'script.execute'", result.error or "")
+        self.assertIn("allowed capabilities:", result.error or "")
+        self.assertIsNone(plugin.last_request)
+
     def test_script_standard_metadata_only(self) -> None:
         state = RunState(objective="solve", metadata={"challenge": {"files": ["flag.enc"]}})
         todo = TodoItem(goal="run script", context={"script_code": "print(1)"})
