@@ -10,6 +10,7 @@ from killchain_docker.state import (
     Asset,
     AssetKind,
     FlagCandidate,
+    Hypothesis,
     RunState,
     Service,
     StateDelta,
@@ -63,16 +64,23 @@ class PersonaWorker(WorkerAgent):
         del todo
         return True
 
-    def _choose_capability(self, todo: TodoItem, state: RunState) -> tuple[ToolCapability, dict[str, object], str]:
+    def _choose_capability(
+        self,
+        todo: TodoItem,
+        state: RunState,
+        prior_steps: list[dict[str, object]] | None = None,
+    ) -> tuple[ToolCapability, dict[str, object], str, str | None]:
         decision = self.choose_tool_use(
             task=todo,
             state=state,
             allowed_capabilities=list(self.allowed_capabilities),
+            prior_steps=prior_steps,
         )
         return (
             ToolCapability(decision.capability),
             dict(decision.metadata),
             decision.rationale,
+            decision.hypothesis,
         )
 
     def _prepare_metadata(
@@ -141,6 +149,8 @@ class PersonaWorker(WorkerAgent):
             partial_reason=partial_reason,
         )
 
+    _MAX_INNER_STEPS = 3
+
     def run(self, task: TodoItem, state: RunState) -> WorkerResult:
         if self.tool_gateway is None:
             return WorkerResult(
@@ -151,43 +161,93 @@ class PersonaWorker(WorkerAgent):
                 error="tool gateway unavailable",
                 retryable=False,
             )
-        try:
-            capability, selected_metadata, rationale = self._choose_capability(task, state)
-            metadata = self._prepare_metadata(
-                capability=capability,
-                todo=task,
-                state=state,
-                selected_metadata=selected_metadata,
-            )
-            timeout_raw = metadata.pop("timeout_s", None)
-            timeout_s = int(timeout_raw) if timeout_raw not in (None, "") else None
-            bundle = self.run_capability(
-                task=task,
-                capability=capability,
-                metadata=metadata,
-                timeout_s=timeout_s,
-            )
-        except (ToolExecutionError, ValueError) as exc:
-            return WorkerResult(
-                todo_id=task.todo_id,
-                worker_name=self.name,
-                success=False,
-                summary=f"{self.name} failed to execute its selected tool: {exc}",
-                error=str(exc),
-                retryable=False,
-            )
 
-        output_context = dict(bundle.parsed.output_context)
-        success = _tool_success(capability, bundle, output_context)
-        return self._result_from_bundle(
+        prior_steps: list[dict[str, object]] = []
+        last_bundle = None
+        last_capability = None
+        last_rationale = ""
+        accumulated_hypotheses: list[Hypothesis] = []
+
+        for step in range(self._MAX_INNER_STEPS):
+            try:
+                capability, selected_metadata, rationale, hypothesis_text = self._choose_capability(
+                    task, state, prior_steps=prior_steps if prior_steps else None
+                )
+                if hypothesis_text:
+                    accumulated_hypotheses.append(Hypothesis(title=hypothesis_text))
+                metadata = self._prepare_metadata(
+                    capability=capability,
+                    todo=task,
+                    state=state,
+                    selected_metadata=selected_metadata,
+                )
+                timeout_raw = metadata.pop("timeout_s", None)
+                timeout_s = int(timeout_raw) if timeout_raw not in (None, "") else None
+                bundle = self.run_capability(
+                    task=task,
+                    capability=capability,
+                    metadata=metadata,
+                    timeout_s=timeout_s,
+                )
+            except (ToolExecutionError, ValueError) as exc:
+                return WorkerResult(
+                    todo_id=task.todo_id,
+                    worker_name=self.name,
+                    success=False,
+                    summary=f"{self.name} failed to execute its selected tool: {exc}",
+                    error=str(exc),
+                    retryable=False,
+                )
+
+            last_bundle = bundle
+            last_capability = capability
+            last_rationale = rationale
+
+            output_context = dict(bundle.parsed.output_context)
+            prior_steps.append({
+                "step": step,
+                "capability": capability.value,
+                "rationale": rationale,
+                "summary": bundle.parsed.summary,
+                "flag_candidates": output_context.get("flag_candidates", []),
+                "near_miss_candidates": output_context.get("near_miss_candidates", []),
+                "stdout_preview": str(output_context.get("stdout", ""))[:600],
+                "returncode": output_context.get("returncode"),
+            })
+
+            # Stop early if flag found
+            if bundle.state_delta.flag_candidates:
+                break
+
+            # On last step, skip the continue check
+            if step == self._MAX_INNER_STEPS - 1:
+                break
+
+            if not self._should_continue(task, state, prior_steps):
+                break
+
+        output_context = dict(last_bundle.parsed.output_context)
+        success = _tool_success(last_capability, last_bundle, output_context)
+        if len(prior_steps) > 1:
+            output_context["react_steps"] = len(prior_steps)
+        result = self._result_from_bundle(
             todo=task,
-            capability=capability,
+            capability=last_capability,
             output_context=output_context,
-            summary=bundle.parsed.summary,
+            summary=last_bundle.parsed.summary,
             success=success,
-            bundle=bundle,
-            rationale=rationale,
+            bundle=last_bundle,
+            rationale=last_rationale,
         )
+        if accumulated_hypotheses:
+            existing = list(result.state_delta.hypotheses) if result.state_delta else []
+            result.state_delta = StateDelta(
+                **{
+                    **result.state_delta.model_dump(),
+                    "hypotheses": existing + accumulated_hypotheses,
+                }
+            )
+        return result
 
 
 class ReconWorker(PersonaWorker):

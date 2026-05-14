@@ -12,7 +12,7 @@ from typing import Any
 
 from killchain_docker.evidence_context import EvidenceContextBuilder
 from killchain_docker.llm import LLMClient, LLMClientError
-from killchain_docker.reasoning import ToolUseDecision
+from killchain_docker.reasoning import ContinueDecision, ToolUseDecision
 from killchain_docker.state import RunState, TodoItem, WorkerResult
 from killchain_docker.tools import (
     ExecutionPlane,
@@ -93,12 +93,46 @@ class WorkerAgent(ABC):
             timeout_s=timeout_s,
         )
 
+    def _should_continue(
+        self,
+        task: TodoItem,
+        state: RunState,
+        prior_steps: list[dict[str, Any]],
+    ) -> bool:
+        """Ask the LLM whether to run another tool in the inner loop."""
+        if self.llm_client is None:
+            return False
+        decision = self.llm_client.generate_json(
+            system_prompt=(
+                "You are a worker deciding whether to run one more tool or return results. "
+                "Return continue_loop=true only if the last tool produced partial evidence "
+                "that a follow-up tool would concretely advance (e.g. disassembly found the "
+                "algorithm, now run a script to invert it). "
+                "Return continue_loop=false if a flag was found, the task is complete, "
+                "or another tool would not add new information. "
+                "Return only JSON matching ContinueDecision."
+            ),
+            user_prompt=json.dumps(
+                {
+                    "worker_name": self.name,
+                    "todo_goal": task.goal,
+                    "prior_steps": prior_steps,
+                },
+                ensure_ascii=True,
+                indent=2,
+            ),
+            schema=ContinueDecision,
+            temperature=0.0,
+        )
+        return bool(decision.continue_loop)
+
     def choose_tool_use(
         self,
         *,
         task: TodoItem,
         state: RunState,
         allowed_capabilities: list[ToolCapability | str] | None = None,
+        prior_steps: list[dict[str, Any]] | None = None,
     ) -> ToolUseDecision:
         """Ask the LLM to choose one lower-level tool capability for a task."""
 
@@ -137,6 +171,8 @@ class WorkerAgent(ABC):
                 "The tool_catalog is the complete allowed set; never choose a "
                 "capability that is not listed there. "
                 "Use recent_evidence_context as grounded facts from previous tools. "
+                "If prior_steps is non-empty, use those results to inform your choice — "
+                "do not repeat a tool that already produced its evidence. "
                 "Do not depend on /tmp files or other scratch files written by earlier todos; "
                 "read challenge files directly or regenerate needed diagnostics in the "
                 "same tool call. "
@@ -148,6 +184,7 @@ class WorkerAgent(ABC):
                     "todo": task.model_dump(mode="json"),
                     "state_summary": state.summary(),
                     "recent_evidence_context": evidence_context,
+                    "prior_steps": prior_steps or [],
                     "recent_failures": [
                         record.model_dump(mode="json")
                         for record in state.execution_log[-12:]

@@ -5,6 +5,23 @@ from __future__ import annotations
 from killchain_docker.prompts.rag import PLANNER_RAG_GUIDE
 from killchain_docker.prompts.types import lookup
 
+_FAILURE_ESCAPE_GUIDE = """\
+Failure escape patterns — when you see these signals, change strategy immediately:
+
+* result_quality=partial_no_candidate 3+ times for the same family:
+  The algorithm implementation is wrong. Disassemble again with a different focus,
+  or try a completely different cipher family.
+* near_miss_evidence is non-empty: The algorithm is correct but output encoding is wrong.
+  Try: bytes.fromhex(), base64.b64decode(), latin-1 decode, XOR with 0xFF, struct.unpack.
+* binary_traits.go_like=true: Use strings + grep for flag patterns first;
+  Go binaries have symbol names that objdump can surface without decompilation.
+* timeout 3+ times: The script has an infinite loop or wrong input size.
+  Reduce input, add timeout guards, or use a completely different approach.
+* same family in cooldown (escalation_required signal present): You MUST change the
+  attack vector — different algorithm, different tool, different input. Do NOT rephrase.
+"""
+
+
 _DECISION_GUIDE = """\
 Decision guidance:
 
@@ -57,6 +74,8 @@ def build_planner_system_prompt(category: str | None) -> str:
         "Never propose tasks outside the authorized_scope or the provided challenge files. "
         "Never fabricate vulnerability details, credentials, or flag candidates.\n\n"
         + _DECISION_GUIDE
+        + "\n"
+        + _FAILURE_ESCAPE_GUIDE
         + "\n"
         + PLANNER_RAG_GUIDE
     )

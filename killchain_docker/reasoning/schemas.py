@@ -14,3 +14,12 @@ class ToolUseDecision(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
     rationale: str = ""
     expected_signal: str = ""
+    hypothesis: str | None = None
+
+
+class ContinueDecision(BaseModel):
+    """Worker inner-loop decision: run another tool or return results."""
+
+    continue_loop: bool
+    reason: str = ""
+    next_hint: str = ""

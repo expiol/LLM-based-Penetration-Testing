@@ -101,6 +101,7 @@ class PlanStrategy:
                 for record in state.execution_log[-20:]
             ],
             "stagnation_signals": self._stagnation_signals(state),
+            "near_miss_evidence": self._near_miss_evidence(state),
         }
         RagPolicy.annotate(state)
         related_writeups = self.augmenter.for_planner(state) if self.augmenter else []
@@ -173,6 +174,23 @@ class PlanStrategy:
     @staticmethod
     def _open_todo_count(state: RunState) -> int:
         return sum(1 for todo in state.todos if todo.status in {TodoStatus.PENDING, TodoStatus.RUNNING})
+
+    @staticmethod
+    def _near_miss_evidence(state: RunState) -> list[dict[str, object]]:
+        out = []
+        for evidence_id, evidence in list(state.evidence.items())[-20:]:
+            extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
+            ctx = extracted.get("output_context") or {}
+            near_misses = list(ctx.get("near_miss_candidates") or [])
+            if not near_misses:
+                continue
+            out.append({
+                "evidence_id": evidence_id,
+                "tool_name": evidence.tool_name,
+                "near_miss_candidates": near_misses[:3],
+                "stdout_tail": str(ctx.get("stdout", ""))[-400:],
+            })
+        return out
 
     def _stagnation_signals(self, state: RunState) -> dict[str, object]:
         recent_records = state.execution_log[-20:]

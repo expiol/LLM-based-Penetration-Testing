@@ -43,6 +43,8 @@ register(CategoryPrompts(
         "Use checksec to identify binary protections",
         "Find offset to return address with cyclic pattern",
         "Look for win() or system('/bin/sh') gadgets",
+        "Use ROPgadget to enumerate ROP gadgets for chain construction",
+        "Use one_gadget to find one-shot shell gadgets in libc",
         "Leak libc addresses via format string or GOT",
         "Use pwntools for scripted exploitation",
     ],

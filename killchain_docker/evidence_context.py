@@ -72,8 +72,11 @@ class EvidenceContextBuilder:
             score = self._score_record(evidence.tool_name, evidence.summary, ctx)
             if score <= 0:
                 continue
-            recency_bonus = min(4.0, (index + 1) / total * 4.0)
-            scored.append((score + recency_bonus, index, evidence))
+            # Stronger recency: 0-8 (was 0-4) so recent evidence can overcome tool-type bias
+            recency_bonus = min(8.0, (index + 1) / total * 8.0)
+            # Near-miss evidence is the most actionable signal — boost it strongly
+            near_miss_boost = 6.0 if ctx.get("near_miss_candidates") else 0.0
+            scored.append((score + recency_bonus + near_miss_boost, index, evidence))
 
         mandatory_ids: set[str] = set()
         for tool_name in ("script_execution", "binary_disassembly", "binary_run"):
@@ -111,7 +114,7 @@ class EvidenceContextBuilder:
             if any(token in stdout.lower() for token in ("uint", "int32", "byte", "bit")):
                 score += 5.0
         elif tool_name == "binary_disassembly":
-            score += 9.0
+            score += 5.0  # reduced from 9 so recency can overcome old disassembly
             disassembly = ctx.get("disassembly")
             if isinstance(disassembly, dict) and disassembly:
                 score += 5.0

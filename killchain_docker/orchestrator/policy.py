@@ -285,14 +285,22 @@ class ProgressPolicy:
     """Detect stalled todo families and suppress repeated failed strategies."""
 
     FAILURE_COOLDOWN_THRESHOLD = 3
-    MAX_FAMILY_ATTEMPTS = 6
+    MAX_FAMILY_ATTEMPTS = 10  # raised from 6; iterative families are exempt below
+
+    # Families that are inherently iterative — apply cooldown but no hard cap.
+    _UNCAPPED_FAMILIES = frozenset({"artifact-inventory", "flag-recovery", "recon", "crypto-decrypt", "binary-analysis"})
 
     @classmethod
     def allows(cls, todo: "PlannedTodo", state: "RunState") -> tuple[bool, str]:
         family = str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context))
-        if family in {"artifact-inventory", "flag-recovery", "recon"}:
-            return True, ""
         total, failed = cls._family_counts(state, family)
+        if family in cls._UNCAPPED_FAMILIES:
+            # No hard cap; only cooldown applies.
+            if failed < cls.FAILURE_COOLDOWN_THRESHOLD:
+                return True, ""
+            if cls._has_new_novelty(todo, state, family):
+                return True, ""
+            return False, f"family {family!r} is in cooldown after {failed} failed/partial attempt(s)"
         if total >= cls.MAX_FAMILY_ATTEMPTS:
             return False, f"family {family!r} hit hard cap ({total} total attempts)"
         if failed < cls.FAILURE_COOLDOWN_THRESHOLD:

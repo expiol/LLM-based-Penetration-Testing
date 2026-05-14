@@ -124,6 +124,37 @@ class PlanningPipeline(PlannerAgent):
                 )
             )
 
+        # Seed near-miss refinement todos: garbled output is a strong signal
+        # that the algorithm is correct but has a byte-level encoding error.
+        for evidence_id, evidence in list(state.evidence.items()):
+            extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
+            ctx = extracted.get("output_context") or {}
+            near_misses = list(ctx.get("near_miss_candidates") or [])
+            if not near_misses:
+                continue
+            dedupe_key = f"bootstrap:near-miss-refinement:{evidence_id}"
+            if self._has_todo_key(state, dedupe_key):
+                continue
+            todos.append(
+                PlannedTodo(
+                    goal="Refine decryption script: near-miss output detected — fix byte-level encoding error.",
+                    phase=TodoPhase.ANALYSIS,
+                    priority=90,
+                    context={
+                        "family": "crypto-decrypt",
+                        "evidence_ids": [evidence_id],
+                        "near_miss_candidates": near_misses[:3],
+                        "novelty_key": f"near-miss:{evidence_id}",
+                        "files_root": str(ctx.get("files_root") or "/home/ctfplayer/ctf_files"),
+                        "challenge_files": challenge_files,
+                    },
+                    success_criteria=["Produce a valid flag candidate from the near-miss output."],
+                    constraints=["Try: bytes.fromhex(), base64.b64decode(), latin-1 decode, XOR with 0xFF."],
+                    dedupe_key=dedupe_key,
+                )
+            )
+            notes.append(f"Seeded near-miss refinement todo for evidence {evidence_id}.")
+
         if not todos and not state.todos:
             notes.append("No authorized scope or challenge files are available for bootstrap.")
         return todos, notes

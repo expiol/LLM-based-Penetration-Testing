@@ -20,10 +20,11 @@ register(CategoryPrompts(
     ),
     planner_focus=(
         "Prioritize: 1) File triage to identify binary format and architecture, "
-        "2) String extraction for hardcoded constants and flag fragments, "
-        "3) Disassembly/decompilation to understand the transform pipeline, "
-        "4) Writing and executing an inverse function, "
-        "5) Running the binary with instrumented input to capture output."
+        "2) ltrace/strace to observe library calls and I/O without full disassembly, "
+        "3) String extraction for hardcoded constants and flag fragments, "
+        "4) Disassembly/decompilation to understand the transform pipeline, "
+        "5) Writing and executing an inverse function, "
+        "6) Running the binary with instrumented input to capture output."
     ),
     analysis_strategy=(
         "For reversing challenges: identify the main transform chain (XOR with key, "
@@ -40,9 +41,11 @@ register(CategoryPrompts(
     ),
     flag_recovery_hints=[
         "Run strings/objdump on binaries to find encoded flag data",
+        "Use ltrace to trace library calls (crypto functions, strcmp, memcmp)",
+        "Use strace to observe file I/O and syscalls",
         "Look for comparison functions that validate flag input",
         "XOR encoded data with extracted keys",
         "Try running the binary with various inputs and observe output patterns",
-        "Use ltrace/strace to trace library calls for crypto functions",
+        "Use ROPgadget to find useful gadgets if exploitation is needed",
     ],
 ))

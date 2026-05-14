@@ -38,13 +38,16 @@ register(CategoryPrompts(
         "use Wiener's attack for large e, Hastad's broadcast attack for small e, "
         "XOR ciphertext with known plaintext to recover key, break LFSR with "
         "known output bits. Write a Python script using standard crypto "
-        "libraries (pycryptodome, gmpy2, sympy) and execute it."
+        "libraries (pycryptodome, gmpy2, sympy) and execute it. "
+        "For constraint-based challenges, use z3-solver to model the system."
     ),
     flag_recovery_hints=[
         "Factor RSA modulus using factordb or yafu",
         "XOR ciphertext with known flag format prefix to recover key fragment",
         "Check if ECB mode leaks block patterns",
         "Try small exponent attacks for RSA",
-        "Use z3 or sage for constraint-based solving",
+        "Use z3-solver for constraint-based solving (custom ciphers, hash preimage)",
+        "Use sage for number theory attacks (discrete log, lattice reduction)",
+        "If output is garbled/near-miss: try bytes.fromhex(), latin-1, XOR 0xFF",
     ],
 ))
