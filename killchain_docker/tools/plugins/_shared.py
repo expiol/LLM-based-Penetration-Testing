@@ -52,6 +52,10 @@ _CSS_BODY_RE = re.compile(
 _FLAG_BODY_FORMAT_SPEC_RE = re.compile(
     r"[A-Za-z_]\w*:[0-9]*[xXdDuifeEgGF](?:\b|(?=\})|$)|(?::[0-9]+[xXdDuifeEgGF](?:\b|(?=\})|$))",
 )
+_STRUCTURED_DIAGNOSTIC_BODY_RE = re.compile(
+    r"['\"]?(?:command|error|exception|traceback|stderr|stdout|returncode|help_output)['\"]?\s*:",
+    re.IGNORECASE,
+)
 _TEMPLATE_NOISE_BODIES = frozenset({
     "pagination", "link", "links", "count", "title", "description",
     "name", "value", "key", "thing", "tablename", "fieldname",
@@ -102,6 +106,8 @@ def _plausible_flag(m):
         return False
     if _FLAG_BODY_FORMAT_SPEC_RE.search(body):
         return False
+    if _STRUCTURED_DIAGNOSTIC_BODY_RE.search(body):
+        return False
     if body.lower().strip() in _TEMPLATE_NOISE_BODIES:
         return False
     return True
@@ -114,6 +120,8 @@ def _near_miss_flag(m):
     if not prefix or not body or len(prefix) < 2:
         return False
     if _FLAG_BODY_FORMAT_SPEC_RE.search(body):
+        return False
+    if _STRUCTURED_DIAGNOSTIC_BODY_RE.search(body):
         return False
     printable = sum(1 for c in body if 32 <= ord(c) <= 126)
     ratio = printable / len(body)
@@ -170,5 +178,243 @@ def _bracket_span_candidates(text, flag_format_prefix=None, max_take=12):
             out.append(cand)
             if len(out) >= max_take:
                 return out
+    return out
+"""
+
+
+#: Shared target expansion block embedded verbatim in file-oriented plugin
+#: SCRIPT strings. It accepts only standard metadata fields from callers; the
+#: helper expands the values inside those fields into concrete readable files.
+SHARED_FILE_TARGETS_SNIPPET = r"""
+import atexit as _target_atexit
+import fnmatch as _target_fnmatch
+import gzip as _target_gzip
+import shutil as _target_shutil
+import tarfile as _target_tarfile
+import tempfile as _target_tempfile
+import zipfile as _target_zipfile
+from pathlib import Path as _TargetPath, PurePosixPath as _TargetPurePosixPath
+
+_TARGET_TEMP_DIRS = []
+_TARGET_SOURCE_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".cxx", ".cs", ".go", ".h", ".hpp", ".htm", ".html",
+    ".java", ".js", ".jsx", ".kt", ".php", ".py", ".rb", ".rs", ".sh", ".sql",
+    ".sv", ".swift", ".tera", ".ts", ".tsx", ".v", ".xml", ".yaml", ".yml",
+    ".json", ".md", ".txt", ".cfg", ".ini", ".toml",
+}
+_TARGET_PCAP_SUFFIXES = {".pcap", ".pcapng", ".cap"}
+_TARGET_DATABASE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+_TARGET_ARCHIVE_SUFFIXES = {".zip", ".tar", ".tgz", ".gz", ".7z", ".rar"}
+
+
+def _target_cleanup():
+    for temp_dir in _TARGET_TEMP_DIRS:
+        _target_shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+_target_atexit.register(_target_cleanup)
+
+
+def _target_safe_rel(value):
+    rel = str(value or "").strip()
+    if not rel:
+        return ""
+    rel = str(_TargetPurePosixPath(rel)).lstrip("./")
+    if rel.startswith("/") or ".." in _TargetPurePosixPath(rel).parts:
+        return ""
+    return rel
+
+
+def _target_kind_accepts(path, kind, exact=False):
+    if exact:
+        return True
+    suffix = _TargetPath(str(path)).suffix.lower()
+    if kind == "source":
+        return suffix in _TARGET_SOURCE_SUFFIXES
+    if kind == "pcap":
+        return suffix in _TARGET_PCAP_SUFFIXES
+    if kind == "database":
+        return suffix in _TARGET_DATABASE_SUFFIXES
+    if kind == "archive":
+        return suffix in _TARGET_ARCHIVE_SUFFIXES
+    return True
+
+
+def _target_rel_display(path, root):
+    try:
+        return str(_TargetPath(path).resolve().relative_to(root))
+    except Exception:
+        return str(path)
+
+
+def _target_add_file(out, seen, display, path, kind, exact=False, limit=100):
+    if len(out) >= limit:
+        return
+    p = _TargetPath(path)
+    if not p.is_file():
+        return
+    if not _target_kind_accepts(display, kind, exact=exact):
+        return
+    key = str(p.resolve())
+    if key in seen:
+        return
+    seen.add(key)
+    out.append({"display": str(display), "path": str(p)})
+
+
+def _target_extract_archive_member(archive_path, member_name):
+    temp_dir = _target_tempfile.mkdtemp(prefix="tool-target-")
+    _TARGET_TEMP_DIRS.append(temp_dir)
+    dest = _TargetPath(temp_dir) / _TargetPath(member_name).name
+    suffix = archive_path.suffix.lower()
+    if _target_zipfile.is_zipfile(archive_path):
+        with _target_zipfile.ZipFile(archive_path) as zf:
+            with zf.open(member_name) as src, open(dest, "wb") as dst:
+                dst.write(src.read())
+        return dest
+    if _target_tarfile.is_tarfile(archive_path):
+        with _target_tarfile.open(archive_path, "r:*") as tf:
+            src = tf.extractfile(member_name)
+            if src is None:
+                return None
+            with src, open(dest, "wb") as dst:
+                dst.write(src.read())
+        return dest
+    if suffix == ".gz":
+        with _target_gzip.open(archive_path, "rb") as src, open(dest, "wb") as dst:
+            dst.write(src.read())
+        return dest
+    return None
+
+
+def _target_archive_members(archive_path):
+    if _target_zipfile.is_zipfile(archive_path):
+        with _target_zipfile.ZipFile(archive_path) as zf:
+            for info in zf.infolist():
+                if not info.is_dir():
+                    yield info.filename
+        return
+    if _target_tarfile.is_tarfile(archive_path):
+        with _target_tarfile.open(archive_path, "r:*") as tf:
+            for member in tf.getmembers():
+                if member.isfile():
+                    yield member.name
+        return
+    if archive_path.suffix.lower() == ".gz":
+        yield archive_path.stem
+
+
+def _resolve_file_targets(files_root, requested, max_files=12, kind=None):
+    root = _TargetPath(files_root).resolve()
+    out = []
+    seen = set()
+    limit = int(max_files)
+    raw_targets = [str(item).strip() for item in (requested or []) if str(item).strip()]
+    for raw in raw_targets:
+        if len(out) >= limit:
+            break
+        archive_ref = ":" in raw and not raw.startswith("/") and "://" not in raw
+        if archive_ref:
+            archive_name, member_pattern = raw.split(":", 1)
+            archive_rel = _target_safe_rel(archive_name)
+            member_pattern = _target_safe_rel(member_pattern)
+            if not archive_rel or not member_pattern:
+                continue
+            archive_path = (root / archive_rel).resolve()
+            try:
+                archive_path.relative_to(root)
+            except ValueError:
+                continue
+            if not archive_path.is_file():
+                continue
+            exact_member = not any(ch in member_pattern for ch in "*?[")
+            try:
+                for member in _target_archive_members(archive_path):
+                    member_rel = _target_safe_rel(member)
+                    if not member_rel:
+                        continue
+                    if exact_member and member_rel != member_pattern:
+                        continue
+                    if not exact_member and not _target_fnmatch.fnmatch(member_rel, member_pattern):
+                        continue
+                    if not _target_kind_accepts(member_rel, kind, exact=exact_member):
+                        continue
+                    extracted = _target_extract_archive_member(archive_path, member_rel)
+                    if extracted is not None:
+                        _target_add_file(
+                            out,
+                            seen,
+                            f"{archive_rel}:{member_rel}",
+                            extracted,
+                            kind,
+                            exact=True,
+                            limit=limit,
+                        )
+            except Exception:
+                continue
+            continue
+
+        text = raw
+        exact = not any(ch in text for ch in "*?[")
+        if text.startswith(str(root) + "/"):
+            text = text[len(str(root)) + 1 :]
+        if text.startswith("./"):
+            text = text[2:]
+
+        candidates = []
+        if exact:
+            path = _TargetPath(text)
+            if path.is_absolute():
+                try:
+                    resolved = path.resolve()
+                    resolved.relative_to(root)
+                except ValueError:
+                    continue
+                candidates = [resolved]
+            else:
+                safe = _target_safe_rel(text)
+                if not safe:
+                    continue
+                candidates = [(root / safe).resolve()]
+        else:
+            safe = _target_safe_rel(text)
+            if not safe:
+                continue
+            try:
+                candidates = sorted(root.glob(safe))
+            except Exception:
+                candidates = []
+
+        for path in candidates:
+            if len(out) >= limit:
+                break
+            try:
+                resolved = _TargetPath(path).resolve()
+                resolved.relative_to(root)
+            except Exception:
+                continue
+            if resolved.is_dir():
+                for nested in sorted(p for p in resolved.rglob("*") if p.is_file()):
+                    if len(out) >= limit:
+                        break
+                    _target_add_file(
+                        out,
+                        seen,
+                        _target_rel_display(nested, root),
+                        nested,
+                        kind,
+                        exact=False,
+                        limit=limit,
+                    )
+            else:
+                _target_add_file(
+                    out,
+                    seen,
+                    _target_rel_display(resolved, root),
+                    resolved,
+                    kind,
+                    exact=exact,
+                    limit=limit,
+                )
     return out
 """

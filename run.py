@@ -26,7 +26,7 @@ from nyuctf.dataset import CTFDataset
 
 from killchain_docker.controller import RunConfig, run_assessment
 from killchain_docker.environment import CTFEnvironment
-from killchain_docker.llm import build_llm_client_from_env
+from killchain_docker.llm import LLMClientError, build_llm_client_from_env
 from killchain_docker.tools import build_execution_plane
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                    运行参数配置                        ║
@@ -45,7 +45,7 @@ QUIET           = False                     # 静默模式（不输出编排事�
 DEBUG           = True                      # 调试模式（失败时打印详细上下文）
 SKIP_EXIST      = False                     # 跳过已存在的日志
 LOGDIR          = None                      # 日志目录；留 None 使用默认路径 logs/<user>
-NAME            = "5.14_development_1"                      # 实验名称（在日志目录下创建子目录）
+NAME            = "5.15_development_1"                      # 实验名称（在日志目录下创建子目录）
 INDEX           = None                      # 实验轮次（在日志目录下创建子目录）
 OUTPUT_ROOT     = None                      # 运行产物目录；留 None 使用默认路径
 PARALLEL_WORKERS = 1                       # 并发 worker 数（run-all 或 replicas）
@@ -641,6 +641,7 @@ def _state_metrics(state_payload: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "run_id": state_payload.get("run_id"),
         "run_status": state_payload.get("status"),
+        "stop_reason": state_payload.get("stop_reason"),
         "todo_count": len(todos),
         "todo_status_counts": todo_status_counts,
         "worker_counts": worker_counts,
@@ -648,6 +649,8 @@ def _state_metrics(state_payload: dict[str, Any] | None) -> dict[str, Any]:
             todo_status_counts.get(status, 0)
             for status in ("pending", "running")
         ),
+        "partial_todo_count": todo_status_counts.get("partial", 0),
+        "interrupted_todo_count": todo_status_counts.get("interrupted", 0),
         "round_count": len(state_payload.get("rounds") or []),
         "evidence_count": len(evidence) if isinstance(evidence, dict) else 0,
         "evidence_tool_counts": evidence_tool_counts,
@@ -656,6 +659,152 @@ def _state_metrics(state_payload: dict[str, Any] | None) -> dict[str, Any]:
         "credential_count": len(state_payload.get("credentials") or {}),
         "execution_count": len(state_payload.get("execution_log") or []),
     }
+
+
+def _failure_buckets(log_payload: dict[str, Any], result: dict[str, Any]) -> list[str]:
+    """Classify common failure modes for experiment summaries."""
+
+    buckets: set[str] = set()
+    if result.get("solved"):
+        return []
+
+    haystack_parts: list[str] = []
+    for source in (result, log_payload):
+        for key in ("status", "finish_reason", "traceback"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if value:
+                haystack_parts.append(str(value))
+        error = source.get("error") if isinstance(source, dict) else None
+        if isinstance(error, dict):
+            haystack_parts.extend(str(value) for value in error.values() if value)
+        elif error:
+            haystack_parts.append(str(error))
+
+    state_payload = log_payload.get("state") if isinstance(log_payload, dict) else None
+    if isinstance(state_payload, dict):
+        haystack_parts.extend(str(note) for note in state_payload.get("orchestration_notes") or [])
+        for todo in state_payload.get("todos") or []:
+            if not isinstance(todo, dict):
+                continue
+            haystack_parts.extend(
+                str(todo.get(key) or "")
+                for key in ("goal", "result_summary", "error")
+            )
+        for record in (state_payload.get("evidence") or {}).values():
+            if not isinstance(record, dict):
+                continue
+            haystack_parts.append(str(record.get("summary") or ""))
+        for record in state_payload.get("execution_log") or []:
+            if not isinstance(record, dict):
+                continue
+            haystack_parts.extend(
+                str(record.get(key) or "")
+                for key in ("summary", "error")
+            )
+
+    haystack = "\n".join(haystack_parts).lower()
+
+    if (
+        "missing required metadata.script_code" in haystack
+        or "no script code provided" in haystack
+        or "script execution skipped" in haystack
+    ):
+        buckets.add("script_missing_code")
+    if "script execution failed (exit" in haystack:
+        buckets.add("script_nonzero_exit")
+    if (
+        "missing required metadata.source_files" in haystack
+        or "missing required metadata.pcap_files" in haystack
+        or "missing required metadata.binary_files" in haystack
+        or "missing required metadata.archive_files" in haystack
+        or "missing required metadata.database_files" in haystack
+        or "missing required metadata.repo_paths" in haystack
+        or "no requested source files could be read" in haystack
+        or "no requested pcap files could be read" in haystack
+        or "no requested binary files could be read" in haystack
+        or "completed for 0 file(s)" in haystack
+        or "completed for 0 binary(ies)" in haystack
+    ):
+        buckets.add("tool_missing_target_files")
+    if (
+        "no requested source files could be read" in haystack
+        or "missing required metadata.source_files" in haystack
+        or "source review failed" in haystack
+    ):
+        buckets.add("source_target_unresolved")
+    if "candidate mismatch" in haystack:
+        buckets.add("candidate_mismatch")
+    if "rejected flag candidate" in haystack or "escaped_byte_candidate" in haystack:
+        buckets.add("candidate_rejected")
+    if "family" in haystack and "cooldown" in haystack:
+        buckets.add("stagnated")
+    if "max_cycles_exhausted" in haystack:
+        buckets.add("max_cycles_exhausted")
+    if result.get("llm_error") or log_payload.get("llm_error") or "llm_error" in haystack:
+        buckets.add("llm_error")
+    if (
+        "docker compose" in haystack
+        or "ports are not available" in haystack
+        or "bind: address already in use" in haystack
+        or "port is already allocated" in haystack
+        or "start_challenge_container" in haystack
+    ):
+        buckets.add("docker_start_error")
+    status_values = {
+        str(value)
+        for value in (
+            result.get("status"),
+            result.get("finish_reason"),
+            log_payload.get("status"),
+            log_payload.get("finish_reason"),
+        )
+        if value
+    }
+    if "interrupted" in status_values or "keyboardinterrupt" in haystack:
+        buckets.add("interrupted")
+    state_metrics = result.get("state_metrics")
+    if not isinstance(state_metrics, dict) or not state_metrics:
+        state_metrics = log_payload.get("state_metrics")
+    if not isinstance(state_metrics, dict) or not state_metrics:
+        state_payload = log_payload.get("state")
+        state_metrics = _state_metrics(state_payload if isinstance(state_payload, dict) else None)
+    if isinstance(state_metrics, dict) and int(state_metrics.get("partial_todo_count") or 0) > 0:
+        buckets.add("partial_no_candidate")
+    if "partial_no_candidate" in haystack or "partial: no flag candidate" in haystack:
+        buckets.add("partial_no_candidate")
+    if _is_unsolved_exhausted(log_payload, result):
+        buckets.add("unsolved_exhausted")
+
+    return sorted(buckets)
+
+
+def _is_unsolved_exhausted(log_payload: dict[str, Any], result: dict[str, Any]) -> bool:
+    if result.get("solved") or log_payload.get("solved"):
+        return False
+    status_values = {
+        str(value)
+        for value in (
+            result.get("status"),
+            result.get("finish_reason"),
+            log_payload.get("status"),
+            log_payload.get("finish_reason"),
+        )
+        if value
+    }
+    if "unsolved_exhausted" in status_values:
+        return True
+    if "completed" not in status_values:
+        return False
+    metrics = result.get("state_metrics")
+    if not isinstance(metrics, dict) or not metrics:
+        metrics = log_payload.get("state_metrics")
+    if not isinstance(metrics, dict) or not metrics:
+        state_payload = log_payload.get("state")
+        metrics = _state_metrics(state_payload if isinstance(state_payload, dict) else None)
+    if metrics.get("open_todo_count") != 0:
+        return False
+    todo_counts = metrics.get("todo_status_counts") or {}
+    return bool(todo_counts.get("completed") or metrics.get("todo_count"))
 
 
 API_BALANCE_PATTERNS = [
@@ -694,7 +843,13 @@ def run_single_challenge(
 
     if logfile.exists() and args.skip_exist:
         print(f"  [skip] {challenge.canonical_name} — log exists: {logfile}")
-        return {"challenge": challenge.canonical_name, "status": "skipped", "solved": False, "api_error": False}
+        return {
+            "challenge": challenge.canonical_name,
+            "status": "skipped",
+            "solved": False,
+            "api_error": False,
+            "llm_error": False,
+        }
 
     with _compose_challenge_run_lock(challenge):
         return _run_single_challenge_inner(args, challenge, logfile)
@@ -732,6 +887,8 @@ def _run_single_challenge_inner(
     traceback_text = None
     solved = False
     is_api_error = False
+    is_llm_error = False
+    interrupted = False
 
     try:
         configure_llm_environment()
@@ -751,6 +908,22 @@ def _run_single_challenge_inner(
             expected_flag=challenge.flag,
             llm_client=llm_client,
         )
+    except (KeyboardInterrupt, SystemExit) as exc:
+        interrupted = True
+        code = getattr(exc, "code", None)
+        message = f"Run interrupted by {type(exc).__name__}"
+        if code not in (None, ""):
+            message += f" (code={code})"
+        error_payload = {
+            "type": type(exc).__name__,
+            "message": message,
+        }
+        try:
+            traceback_text = traceback.format_exc()
+        except Exception:
+            traceback_text = message
+        if args.debug:
+            print(traceback_text)
     except Exception as exc:
         message = (
             _called_process_message(exc)
@@ -769,7 +942,8 @@ def _run_single_challenge_inner(
             traceback_text = traceback.format_exc()
         except Exception:
             traceback_text = f"{type(exc).__name__}: {exc}"
-        is_api_error = _is_api_balance_error(exc)
+        is_llm_error = isinstance(exc, LLMClientError)
+        is_api_error = is_llm_error or _is_api_balance_error(exc)
         if args.debug:
             print(traceback_text)
     finally:
@@ -823,10 +997,22 @@ def _run_single_challenge_inner(
             challenge.flag,
         )
 
-    finish_reason = "solved" if solved else (
-        artifacts.status if artifacts is not None else "failed"
-    )
     state_metrics = _state_metrics(state_payload)
+    artifact_status = artifacts.status if artifacts is not None else "failed"
+    if interrupted:
+        artifact_status = "interrupted"
+    interrupted = interrupted or artifact_status == "interrupted"
+    unsolved_exhausted = (
+        not solved
+        and artifact_status == "completed"
+        and state_metrics.get("open_todo_count") == 0
+        and bool(state_metrics.get("todo_count"))
+    )
+    finish_reason = "solved" if solved else (
+        "interrupted" if interrupted else (
+            "unsolved_exhausted" if unsolved_exhausted else artifact_status
+        )
+    )
     token_usage = _token_usage(
         (summary_payload or {}).get("token_usage") if summary_payload is not None else None
     )
@@ -840,14 +1026,16 @@ def _run_single_challenge_inner(
         "effective_max_cycles": effective_max_cycles,
         "success": solved,
         "solved": solved,
-        "status": artifacts.status if artifacts is not None else "failed",
+        "status": finish_reason,
         "finish_reason": finish_reason,
+        "interrupted": interrupted,
         "artifacts": None if artifacts is None else artifacts.model_dump(mode="json"),
         "summary": summary_payload,
         "token_usage": token_usage,
         "state_metrics": state_metrics,
         "state": state_payload,
         "error": error_payload,
+        "llm_error": is_llm_error,
         "traceback": traceback_text,
         "start_time": started_at,
         "end_time": ended_at,
@@ -870,6 +1058,8 @@ def _run_single_challenge_inner(
         "state_metrics": state_metrics,
         "error": error_payload,
         "api_error": is_api_error,
+        "llm_error": is_llm_error,
+        "interrupted": interrupted,
     }
 
 
@@ -919,78 +1109,130 @@ def run_all_challenges(args: argparse.Namespace) -> int:
     failed_count = 0
     skipped_count = 0
     batch_start = time.time()
+    batch_interrupted = False
+    current_name: str | None = None
 
     workers = max(1, int(getattr(args, "parallel_workers", 1) or 1))
-    if workers == 1:
-        for idx, name in enumerate(all_names, 1):
-            print(f"\n{'─'*72}")
-            print(f"  [{idx}/{total}] {name}")
-            print(f"{'─'*72}")
-
-            try:
-                args.challenge = name
-                challenge = CTFChallenge(dataset.get(name), dataset.basedir)
-            except Exception as exc:
-                print(f"  [error] Failed to load challenge {name}: {exc}")
-                results.append({
-                    "challenge": name, "solved": False, "status": "load_error",
-                    "error": {"type": type(exc).__name__, "message": str(exc)},
-                    "api_error": False,
-                })
-                failed_count += 1
-                continue
-
-            result = run_single_challenge(args, challenge)
-            results.append(result)
-            solved_count, failed_count, skipped_count = _update_result_counters(
-                result, solved_count, failed_count, skipped_count
-            )
-            _save_batch_progress(args, results, batch_start)
-
-            if result.get("api_error"):
-                print(f"\n{'!'*72}")
-                print(f"  API balance/quota error detected — aborting batch run.")
-                print(f"  Completed {idx}/{total} challenges before abort.")
-                print(f"{'!'*72}")
-                break
-    else:
-        print(f"  Parallel mode enabled: {workers} isolated workers")
-        print("  Compose-backed service challenges are serialized to avoid Docker port/alias conflicts.")
-        base_args = vars(args).copy()
-        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-            future_map = {
-                executor.submit(_run_named_challenge_worker, base_args, name): name
-                for name in all_names
-            }
-            for idx, future in enumerate(concurrent.futures.as_completed(future_map), 1):
-                name = future_map[future]
+    try:
+        if workers == 1:
+            for idx, name in enumerate(all_names, 1):
+                current_name = name
                 print(f"\n{'─'*72}")
                 print(f"  [{idx}/{total}] {name}")
                 print(f"{'─'*72}")
+
                 try:
-                    result = future.result()
+                    args.challenge = name
+                    challenge = CTFChallenge(dataset.get(name), dataset.basedir)
                 except Exception as exc:
-                    result = {
-                        "challenge": name,
-                        "solved": False,
-                        "status": "worker_error",
+                    print(f"  [error] Failed to load challenge {name}: {exc}")
+                    results.append({
+                        "challenge": name, "solved": False, "status": "load_error",
                         "error": {"type": type(exc).__name__, "message": str(exc)},
                         "api_error": False,
-                    }
+                        "llm_error": False,
+                    })
+                    failed_count += 1
+                    continue
+
+                result = run_single_challenge(args, challenge)
                 results.append(result)
                 solved_count, failed_count, skipped_count = _update_result_counters(
                     result, solved_count, failed_count, skipped_count
                 )
-                err = result.get("error")
-                if result.get("status") == "skipped":
-                    print(f"  [SKIPPED] {name}")
-                elif result.get("solved"):
-                    print(f"  [SOLVED] {name}")
-                elif err:
-                    print(f"  [FAILED] {name}: {err.get('type', '?')}: {err.get('message', '')[:120]}")
-                else:
-                    print(f"  [FAILED] {name}: status={result.get('status')}")
                 _save_batch_progress(args, results, batch_start)
+
+                if result.get("api_error"):
+                    print(f"\n{'!'*72}")
+                    print(f"  LLM/API error detected — aborting batch run.")
+                    print(f"  Completed {idx}/{total} challenges before abort.")
+                    print(f"{'!'*72}")
+                    break
+                if result.get("status") == "interrupted":
+                    print(f"\n{'!'*72}")
+                    print("  Run interrupted — stopping batch run after saving progress.")
+                    print(f"  Completed {idx}/{total} challenges before interrupt.")
+                    print(f"{'!'*72}")
+                    break
+        else:
+            print(f"  Parallel mode enabled: {workers} isolated workers")
+            print("  Compose-backed service challenges are serialized to avoid Docker port/alias conflicts.")
+            base_args = vars(args).copy()
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                future_map = {
+                    executor.submit(_run_named_challenge_worker, base_args, name): name
+                    for name in all_names
+                }
+                try:
+                    for idx, future in enumerate(concurrent.futures.as_completed(future_map), 1):
+                        name = future_map[future]
+                        current_name = name
+                        print(f"\n{'─'*72}")
+                        print(f"  [{idx}/{total}] {name}")
+                        print(f"{'─'*72}")
+                        try:
+                            result = future.result()
+                        except Exception as exc:
+                            result = {
+                                "challenge": name,
+                                "solved": False,
+                                "status": "worker_error",
+                                "error": {"type": type(exc).__name__, "message": str(exc)},
+                                "api_error": isinstance(exc, LLMClientError),
+                                "llm_error": isinstance(exc, LLMClientError),
+                            }
+                        results.append(result)
+                        solved_count, failed_count, skipped_count = _update_result_counters(
+                            result, solved_count, failed_count, skipped_count
+                        )
+                        err = result.get("error")
+                        if result.get("status") == "skipped":
+                            print(f"  [SKIPPED] {name}")
+                        elif result.get("solved"):
+                            print(f"  [SOLVED] {name}")
+                        elif err:
+                            print(f"  [FAILED] {name}: {err.get('type', '?')}: {err.get('message', '')[:120]}")
+                        else:
+                            print(f"  [FAILED] {name}: status={result.get('status')}")
+                        _save_batch_progress(args, results, batch_start)
+                        if result.get("status") == "interrupted":
+                            for pending in future_map:
+                                pending.cancel()
+                            print("  Run interrupted — stopping parallel batch after saving progress.")
+                            break
+                        if result.get("api_error"):
+                            for pending in future_map:
+                                pending.cancel()
+                            print("  LLM/API error detected — stopping parallel batch after saving progress.")
+                            break
+                except (KeyboardInterrupt, SystemExit):
+                    for pending in future_map:
+                        pending.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
+    except (KeyboardInterrupt, SystemExit) as exc:
+        batch_interrupted = True
+        code = getattr(exc, "code", None)
+        message = f"Batch interrupted by {type(exc).__name__}"
+        if code not in (None, ""):
+            message += f" (code={code})"
+        if current_name and all(r.get("challenge") != current_name for r in results):
+            interrupted_result = {
+                "challenge": current_name,
+                "solved": False,
+                "status": "interrupted",
+                "error": {"type": type(exc).__name__, "message": message},
+                "api_error": False,
+                "llm_error": False,
+                "interrupted": True,
+            }
+            results.append(interrupted_result)
+            solved_count, failed_count, skipped_count = _update_result_counters(
+                interrupted_result, solved_count, failed_count, skipped_count
+            )
+        print(f"\n{'!'*72}")
+        print(f"  {message} — saving batch progress.")
+        print(f"{'!'*72}")
 
     batch_end = time.time()
     summary_path = _save_batch_progress(args, results, batch_start, finished=True)
@@ -998,6 +1240,7 @@ def run_all_challenges(args: argparse.Namespace) -> int:
     solved_names = [r["challenge"] for r in results if r.get("solved")]
     failed_names = [r["challenge"] for r in results if not r.get("solved") and r.get("status") != "skipped"]
     skipped_names = [r["challenge"] for r in results if r.get("status") == "skipped"]
+    interrupted_names = [r["challenge"] for r in results if r.get("status") == "interrupted"]
 
     print(f"\n{'='*72}")
     print(f"  Batch complete: {len(results)}/{total} attempted")
@@ -1017,9 +1260,15 @@ def run_all_challenges(args: argparse.Namespace) -> int:
         print(f"\n  Skipped challenges:")
         for n in skipped_names:
             print(f"    ~ {n}")
+    if interrupted_names:
+        print(f"\n  Interrupted challenges:")
+        for n in interrupted_names:
+            print(f"    ! {n}")
     print(f"\n  Summary saved to: {summary_path}")
     print(f"{'='*72}\n")
 
+    if batch_interrupted or interrupted_names:
+        return 130
     return 0 if solved_count > 0 or failed_count == 0 else 1
 
 
@@ -1037,6 +1286,7 @@ def _save_batch_progress(
     solved_list = [r for r in results if r.get("solved")]
     failed_list = [r for r in results if not r.get("solved") and r.get("status") != "skipped"]
     skipped_list = [r for r in results if r.get("status") == "skipped"]
+    interrupted_list = [r for r in results if r.get("status") == "interrupted"]
 
     def _result_log(r: dict[str, Any]) -> dict[str, Any]:
         return _safe_read_json(r.get("logfile")) or {}
@@ -1087,6 +1337,7 @@ def _save_batch_progress(
         state_metrics = _result_state_metrics(r, log_payload)
         token_usage = _result_token_usage(r, log_payload)
         artifacts = _result_artifacts(r, log_payload)
+        failure_buckets = _failure_buckets(log_payload, r)
         return {
             "challenge": r["challenge"],
             "run_id": r.get("run_id") or summary.get("run_id") or state_metrics.get("run_id"),
@@ -1104,6 +1355,7 @@ def _save_batch_progress(
             "artifacts": artifacts,
             "logfile": r.get("logfile"),
             "error_type": r.get("error", {}).get("type") if r.get("error") else None,
+            "failure_buckets": failure_buckets,
         }
 
     details = [_challenge_entry(r) for r in results]
@@ -1128,6 +1380,14 @@ def _save_batch_progress(
         int((entry.get("state_metrics") or {}).get("open_todo_count") or 0)
         for entry in details
     ]
+    partial_todo_counts = [
+        int((entry.get("state_metrics") or {}).get("partial_todo_count") or 0)
+        for entry in details
+    ]
+    interrupted_todo_counts = [
+        int((entry.get("state_metrics") or {}).get("interrupted_todo_count") or 0)
+        for entry in details
+    ]
     worker_totals = _sum_numeric_dicts([
         entry.get("state_metrics", {}).get("worker_counts") or {}
         for entry in details
@@ -1141,9 +1401,12 @@ def _save_batch_progress(
         for entry in details
     ])
     category_counts: dict[str, int] = {}
+    failure_bucket_counts: dict[str, int] = {}
     for entry in details:
         category = str(entry.get("category") or "unknown")
         category_counts[category] = category_counts.get(category, 0) + 1
+        for bucket in entry.get("failure_buckets") or []:
+            failure_bucket_counts[str(bucket)] = failure_bucket_counts.get(str(bucket), 0) + 1
 
     attempted = len(results)
     success_rate = round(len(solved_list) / attempted, 4) if attempted else 0.0
@@ -1159,6 +1422,7 @@ def _save_batch_progress(
         "solved_count": len(solved_list),
         "failed_count": len(failed_list),
         "skipped_count": len(skipped_list),
+        "interrupted_count": len(interrupted_list),
         "success_rate": success_rate,
         "elapsed_sec": elapsed,
         "experiment_config": {
@@ -1189,6 +1453,7 @@ def _save_batch_progress(
             "solved": len(solved_list),
             "failed": len(failed_list),
             "skipped": len(skipped_list),
+            "interrupted": len(interrupted_list),
             "elapsed_sec": elapsed,
             "runtime_sec_total": round(sum(runtime_values), 3),
             "runtime_sec_mean": round(sum(runtime_values) / len(runtime_values), 3) if runtime_values else 0.0,
@@ -1199,11 +1464,15 @@ def _save_batch_progress(
             "todo_count_total": sum(todo_counts),
             "todo_count_mean": round(sum(todo_counts) / len(todo_counts), 3) if todo_counts else 0.0,
             "open_todo_count_total": sum(open_todo_counts),
+            "partial_todo_count_total": sum(partial_todo_counts),
+            "interrupted_todo_count_total": sum(interrupted_todo_counts),
             "todo_status_totals": todo_status_totals,
             "worker_totals": worker_totals,
             "evidence_tool_totals": evidence_tool_totals,
             "category_counts": category_counts,
+            "failure_bucket_counts": failure_bucket_counts,
         },
+        "failure_buckets": failure_bucket_counts,
         "token_usage": {
             "total": total_token_usage,
             "mean_per_attempt": _avg_token_usage(token_usages),
@@ -1213,6 +1482,7 @@ def _save_batch_progress(
         "solved_challenges": [r["challenge"] for r in solved_list],
         "failed_challenges": [r["challenge"] for r in failed_list],
         "skipped_challenges": [r["challenge"] for r in skipped_list],
+        "interrupted_challenges": [r["challenge"] for r in interrupted_list],
         "details": details,
     }
     write_log(summary_path, payload)
@@ -1248,6 +1518,7 @@ def _run_named_challenge_worker(args_dict: dict[str, Any], challenge_name: str) 
             "status": "load_error",
             "error": {"type": type(exc).__name__, "message": str(exc)},
             "api_error": False,
+            "llm_error": False,
         }
     return run_single_challenge(worker_args, challenge)
 
@@ -1257,6 +1528,9 @@ def run_single_challenge_replicas(args: argparse.Namespace) -> int:
     if replicas == 1:
         challenge = load_challenge(args)
         result = run_single_challenge(args, challenge)
+        if result.get("status") == "interrupted":
+            print(f"Run interrupted. Log saved to {result.get('logfile')}")
+            return 130
         if result.get("error"):
             print(f"Run failed: {result['error']['type']}: {result['error']['message']}")
             print(f"Log saved to {result.get('logfile')}")
@@ -1287,13 +1561,22 @@ def run_single_challenge_replicas(args: argparse.Namespace) -> int:
                     "solved": False,
                     "status": "worker_error",
                     "error": {"type": type(exc).__name__, "message": str(exc)},
-                    "api_error": False,
+                    "api_error": isinstance(exc, LLMClientError),
+                    "llm_error": isinstance(exc, LLMClientError),
                 }
             results.append(result)
             marker = "SOLVED" if result.get("solved") else "FAILED"
             print(f"[Replica {replica_idx}] {marker} status={result.get('status')} log={result.get('logfile')}")
+            if result.get("api_error"):
+                for pending in future_map:
+                    pending.cancel()
+                break
 
     print(json.dumps({"replicas": replicas, "results": results}, indent=2, ensure_ascii=True))
+    if any(r.get("status") == "interrupted" for r in results):
+        return 130
+    if any(r.get("api_error") for r in results):
+        return 2
     return 0 if any(r.get("solved") for r in results) else 1
 
 

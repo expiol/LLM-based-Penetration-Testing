@@ -73,6 +73,7 @@ class RunStatus(StrEnum):
     SOLVED = "solved"
     FAILED = "failed"
     STOPPED = "stopped"
+    INTERRUPTED = "interrupted"
 
 
 class Severity(StrEnum):
@@ -531,8 +532,10 @@ class TodoStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
     BLOCKED = "blocked"
+    INTERRUPTED = "interrupted"
 
 
 class TodoPhase(StrEnum):
@@ -640,6 +643,12 @@ class TodoItem(BaseModel):
         self.error = None
         self.updated_at = utc_now()
 
+    def mark_partial(self, summary: str, reason: str | None = None) -> None:
+        self.status = TodoStatus.PARTIAL
+        self.result_summary = summary
+        self.error = reason
+        self.updated_at = utc_now()
+
     def mark_failed(self, error: str, *, retryable: bool) -> None:
         self.error = error
         if retryable and self.attempts < self.max_attempts:
@@ -650,6 +659,11 @@ class TodoItem(BaseModel):
 
     def mark_blocked(self, reason: str) -> None:
         self.status = TodoStatus.BLOCKED
+        self.error = reason
+        self.updated_at = utc_now()
+
+    def mark_interrupted(self, reason: str) -> None:
+        self.status = TodoStatus.INTERRUPTED
         self.error = reason
         self.updated_at = utc_now()
 
@@ -688,6 +702,9 @@ class WorkerResult(BaseModel):
     notes: list[str] = Field(default_factory=list)
     error: str | None = None
     retryable: bool = True
+    partial: bool = False
+    result_quality: str | None = None
+    partial_reason: str | None = None
     solved: bool = False
     validated_flag: str | None = None
     generated_at: datetime = Field(default_factory=utc_now)
@@ -745,6 +762,7 @@ class RunState(BaseModel):
     orchestration_notes: list[str] = Field(default_factory=list)
     solved: bool = False
     validated_flag: str | None = None
+    stop_reason: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     last_cycle_at: datetime | None = None
@@ -789,7 +807,12 @@ class RunState(BaseModel):
             (
                 item for item in self.todos
                 if item.dedupe_key == todo.dedupe_key
-                and item.status in {TodoStatus.PENDING, TodoStatus.RUNNING, TodoStatus.COMPLETED}
+                and item.status in {
+                    TodoStatus.PENDING,
+                    TodoStatus.RUNNING,
+                    TodoStatus.COMPLETED,
+                    TodoStatus.PARTIAL,
+                }
             ),
             None,
         )
@@ -860,6 +883,14 @@ class RunState(BaseModel):
         for route in delta.routes:
             self.routes[route.route_id] = route
         for candidate in delta.flag_candidates:
+            from killchain_docker.orchestrator.policy import CandidatePolicy
+
+            decision = CandidatePolicy.decision_for_state(self, candidate.value)
+            if not decision.accepted:
+                self.orchestration_notes.append(
+                    f"Rejected flag candidate from {candidate.source or 'unknown'}: {decision.reason}"
+                )
+                continue
             existing_id = next(
                 (
                     current_id for current_id, current in self.flag_candidates.items()
@@ -886,7 +917,9 @@ class RunState(BaseModel):
         todo = self.get_todo(result.todo_id)
         if todo is None:
             raise KeyError(f"Unknown todo id: {result.todo_id}")
-        if result.success:
+        if result.partial:
+            todo.mark_partial(result.summary, result.partial_reason or result.error)
+        elif result.success:
             todo.mark_completed(result.summary)
         else:
             todo.mark_failed(result.error or result.summary, retryable=result.retryable)
@@ -923,6 +956,12 @@ class RunState(BaseModel):
         self.rounds.append(round_record)
         self.touch()
 
+    def interrupt_running_todos(self, reason: str) -> None:
+        for todo in self.todos:
+            if todo.status == TodoStatus.RUNNING:
+                todo.mark_interrupted(reason)
+        self.touch()
+
     def infer_asset_identity(self, ctx: dict[str, Any]) -> dict[str, str]:
         assets = self.assets
         if not assets:
@@ -950,29 +989,32 @@ class RunState(BaseModel):
 
     @staticmethod
     def default_todo_key(todo: TodoItem) -> str:
+        from killchain_docker.orchestrator.policy import TodoPolicy
+
         context = todo.context or {}
-        important = [
-            str(context.get(key) or "")
-            for key in (
-                "scope", "files_root", "asset_id", "base_url", "hostname",
-                "candidate_flag", "analysis_kind",
-            )
-            if context.get(key)
-        ]
-        for list_key in (
-            "source_files", "binary_files", "archive_files", "database_files",
-            "pcap_files", "repo_paths", "paths", "seed_terms",
-        ):
-            values = context.get(list_key)
-            if isinstance(values, list) and values:
-                important.append(",".join(str(item) for item in values[:8]))
-        tail = f"{todo.phase}:{':'.join(important)}" if important else f"{todo.phase}:{todo.goal[:80]}"
-        return f"todo:{tail}"
+        if context:
+            return TodoPolicy.default_key(todo)
+        return f"todo:{todo.phase}:{todo.goal[:80]}"
+
+    def active_flag_candidates(self) -> list[FlagCandidate]:
+        from killchain_docker.orchestrator.policy import CandidatePolicy
+
+        return CandidatePolicy.validation_ready_candidates(self)
+
+    def todo_family_counts(self) -> dict[str, int]:
+        from killchain_docker.orchestrator.policy import TodoPolicy
+
+        counts: dict[str, int] = {}
+        for todo in self.todos:
+            family = str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context))
+            counts[family] = counts.get(family, 0) + 1
+        return counts
 
     def summary(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "status": self.status,
+            "stop_reason": self.stop_reason,
             "solved": self.solved,
             "validated_flag": self.validated_flag,
             "todos": len(self.todos),

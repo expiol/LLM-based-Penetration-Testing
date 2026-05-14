@@ -29,10 +29,55 @@ inspected = []
 flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
 grep_pattern = r"flag\{|secret|token|password|api[_-]?key|apikey"
 
-for repo_rel in repo_paths[:max_files]:
-    repo_path = (files_root / repo_rel).resolve()
+if not repo_paths:
+    records.append({"type": "summary", "text": "Repository review failed: missing required metadata.repo_paths."})
+    records.append({"type": "output_context", "files_root": str(files_root), "inspected_repos": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
+
+def _safe_repo_targets(values):
+    out = []
+    for raw in values:
+        if len(out) >= max_files:
+            break
+        text = str(raw).strip()
+        if not text:
+            continue
+        if text.startswith(str(files_root) + "/"):
+            text = text[len(str(files_root)) + 1 :]
+        path = Path(text)
+        if path.is_absolute():
+            candidate = path.resolve()
+            try:
+                candidate.relative_to(files_root)
+            except ValueError:
+                continue
+            if candidate.exists():
+                out.append(candidate)
+            continue
+        if ".." in Path(text).parts:
+            continue
+        if any(ch in text for ch in "*?["):
+            for candidate in sorted(files_root.glob(text)):
+                if len(out) >= max_files:
+                    break
+                if candidate.exists():
+                    out.append(candidate.resolve())
+        else:
+            candidate = (files_root / text).resolve()
+            try:
+                candidate.relative_to(files_root)
+            except ValueError:
+                continue
+            if candidate.exists():
+                out.append(candidate)
+    return out
+
+for repo_path in _safe_repo_targets(repo_paths):
     if not repo_path.exists():
         continue
+    repo_rel = str(repo_path.relative_to(files_root))
     if not (repo_path / ".git").exists():
         continue
     inspected.append(str(repo_path.relative_to(files_root)))
@@ -66,6 +111,13 @@ for repo_rel in repo_paths[:max_files]:
                     flag_candidates.append(flag)
     except Exception as exc:
         records.append({"type": "note", "text": f"git grep failed for {repo_rel}: {type(exc).__name__}: {exc}"})
+
+if not inspected:
+    records.append({"type": "summary", "text": "Repository review failed: no requested repo paths could be read."})
+    records.append({"type": "output_context", "files_root": str(files_root), "repo_paths": repo_paths[:max_files], "inspected_repos": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 
 records.append({
     "type": "summary",

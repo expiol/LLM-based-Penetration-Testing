@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 
 from killchain_docker.tools.core import ToolExecutionRequest
+from killchain_docker.tools.plugins._shared import SHARED_FILE_TARGETS_SNIPPET
 
 TOOL_NAME = "binary_disassembly"
 
@@ -71,6 +72,56 @@ def _has_objdump():
 def _file_type(path):
     out, _, _ = _run(["file", "-b", str(path)], timeout=5)
     return out.strip()
+
+
+def _readelf_sections(path):
+    out, _, rc = _run(["readelf", "-S", str(path)], timeout=10)
+    if rc != 0:
+        return []
+    sections = []
+    section_re = re.compile(r"\[\s*\d+\]\s+(\S+)")
+    for line in out.splitlines():
+        m = section_re.search(line)
+        if m:
+            sections.append(m.group(1))
+    return sections[:80]
+
+
+def _strings_sample(path):
+    out, _, _ = _run(["strings", "-a", "-n", "6", str(path)], timeout=10)
+    return out[:12000]
+
+
+def _binary_traits(path, ftype, symbols):
+    sections = _readelf_sections(path)
+    string_sample = _strings_sample(path)
+    haystack = "\n".join([ftype, "\n".join(sections), string_sample]).lower()
+    go_markers = (
+        ".gopclntab", ".note.go.buildid", "go build id", "runtime.main",
+        "runtime.", "main.main", "go.itab.", "go.string.",
+    )
+    arch = "unknown"
+    lowered = ftype.lower()
+    if "intel 80386" in lowered or "80386" in lowered:
+        arch = "i386"
+    elif "x86-64" in lowered or "x86_64" in lowered:
+        arch = "x86_64"
+    elif "arm" in lowered:
+        arch = "arm"
+    elif "mips" in lowered:
+        arch = "mips"
+    stripped = (not bool(symbols)) and ("not stripped" not in lowered)
+    return {
+        "file_type": ftype,
+        "arch": arch,
+        "stripped": stripped,
+        "symbol_table_present": bool(symbols),
+        "sections": sections[:20],
+        "go_like": any(marker in haystack for marker in go_markers),
+        "go_markers_present": [
+            marker for marker in go_markers if marker in haystack
+        ][:8],
+    }
 
 
 def _symbol_table(path):
@@ -273,13 +324,55 @@ def _condense_function(body, budget=None):
     return out
 
 
+def _analysis_windows(raw_disasm, rodata):
+    # Small windows around bit/branch instructions and rodata address refs.
+    # These are meant as navigation hints for stripped binaries where the
+    # kept function is too large to include in full.
+    lines = [line.rstrip() for line in raw_disasm.splitlines() if line.strip()]
+    address_needles = []
+    for addr, _value in rodata[:24]:
+        address_needles.append("0x%x" % addr)
+        address_needles.append("0x%08x" % addr)
+    bit_ops = re.compile(r"\b(xor|shr|shl|sar|sal|rol|ror|and|test|cmp|jne|je|jmp)\b")
+    anchors = []
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if "@plt" in lowered:
+            continue
+        if bit_ops.search(lowered) or any(needle in lowered for needle in address_needles):
+            anchors.append(idx)
+    windows = []
+    seen_ranges = set()
+    for idx in anchors[:80]:
+        start = max(0, idx - 5)
+        end = min(len(lines), idx + 8)
+        key = (start, end)
+        if key in seen_ranges:
+            continue
+        seen_ranges.add(key)
+        text = "\n".join(lines[start:end])
+        if text and text not in windows:
+            windows.append(text[:1400])
+        if len(windows) >= 8:
+            break
+    return windows
+
+
 records = []
 inspected = []
 disasm_evidence = {}
+binary_traits_by_path = {}
 flag_candidates = []
 notes_list = []
 
 flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
+
+if not binary_files:
+    records.append({"type": "summary", "text": "Binary disassembly failed: missing required metadata.binary_files."})
+    records.append({"type": "output_context", "files_root": str(files_root), "inspected_binaries": [], "disassembly": {}, "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 
 if not _has_objdump():
     records.append({
@@ -298,10 +391,10 @@ if not _has_objdump():
         print(json.dumps(item, ensure_ascii=True))
     raise SystemExit(0)
 
-for relpath in binary_files[:max_files]:
-    path = files_root / relpath
-    if not path.is_file():
-        continue
+targets = _resolve_file_targets(files_root, binary_files, max_files=max_files, kind="binary")
+for target in targets:
+    relpath = target["display"]
+    path = Path(target["path"])
     inspected.append(relpath)
 
     ftype = _file_type(path)
@@ -343,6 +436,8 @@ for relpath in binary_files[:max_files]:
     rodata = _rodata(path)
     symbols = _symbol_table(path)
     xrefs = _string_xrefs(funcs, rodata)
+    traits = _binary_traits(path, ftype, symbols)
+    binary_traits_by_path[relpath] = traits
 
     # Flag tokens that live verbatim in .rodata are easy wins.
     for _addr, value in rodata:
@@ -354,6 +449,7 @@ for relpath in binary_files[:max_files]:
 
     used_chars = 0
     kept_funcs = []
+    any_truncated = False
     # Greedy budget allocation: the first kept function (by ``_entry_set``
     # priority order — main, then xref-heavy, then mid-size non-noise)
     # gets to use as much of the per-binary budget as it needs, capped at
@@ -367,13 +463,17 @@ for relpath in binary_files[:max_files]:
         remaining = MAX_DISASM_CHARS_PER_BINARY - used_chars - 60
         if remaining <= 0:
             break
-        body = _condense_function(funcs.get(name, ""), budget=remaining)
+        raw_body = funcs.get(name, "")
+        truncated = len(raw_body) > remaining
+        any_truncated = any_truncated or truncated
+        body = _condense_function(raw_body, budget=remaining)
         if not body:
             continue
         used_chars += len(body) + 60
         kept_funcs.append({
             "name": name,
             "size_lines": body.count("\n") + 1,
+            "truncated": truncated,
             "xref_strings": xrefs.get(name, [])[:6],
             "disassembly": body,
         })
@@ -390,18 +490,30 @@ for relpath in binary_files[:max_files]:
 
     disasm_evidence[relpath] = {
         "file_type": ftype,
+        "binary_traits": traits,
         "function_count_total": len(funcs),
         "function_count_kept": len(kept_funcs),
         "symbol_table_present": bool(symbols),
+        "disassembly_truncated": any_truncated,
         "functions": kept_funcs,
         "rodata": rodata_excerpt,
+        "analysis_windows": _analysis_windows(raw_disasm, rodata),
     }
     notes_list.append(
         "Disassembled " + relpath + ": total funcs=" + str(len(funcs))
         + " kept=" + str(len(kept_funcs))
         + " rodata=" + str(len(rodata_excerpt))
-        + " symbols=" + ("yes" if symbols else "stripped") + "."
+        + " symbols=" + ("yes" if symbols else "stripped")
+        + " arch=" + str(traits.get("arch"))
+        + " go_like=" + str(traits.get("go_like")).lower() + "."
     )
+
+if not inspected:
+    records.append({"type": "summary", "text": "Binary disassembly failed: no requested binary files could be read."})
+    records.append({"type": "output_context", "files_root": str(files_root), "binary_files": binary_files[:max_files], "inspected_binaries": [], "disassembly": {}, "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 
 records.append({
     "type": "summary",
@@ -447,6 +559,7 @@ records.append({
     "files_root": str(files_root),
     "inspected_binaries": inspected,
     "disassembly": disasm_evidence,
+    "binary_traits": binary_traits_by_path,
     "flag_candidates": flag_candidates[:10],
     "manual_checks": [
         "Read the kept function bodies to recover the binary's per-step algorithm.",
@@ -458,6 +571,8 @@ records.append({
 for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
+
+SCRIPT = SHARED_FILE_TARGETS_SNIPPET + SCRIPT
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

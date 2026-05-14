@@ -54,6 +54,13 @@ NEAR_MISS_FLAG_PATTERN = re.compile(
     rf"[A-Za-z0-9_]{{{FLAG_PREFIX_MIN_LEN},}}\{{[^{{}}\n]{{{FLAG_BODY_MIN_LEN},{FLAG_BODY_MAX_LEN}}}\}}"
 )
 
+# NYU-style non-bracket flags, e.g. CSAW 2013 stfu's
+# ``STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME``.
+FLAG_BARE_TOKEN_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.]{11,199}$")
+PYTHON_EXCEPTION_TOKEN_RE = re.compile(
+    r"^(?:[A-Z][A-Za-z0-9]*)+(?:Error|Exception|Warning)$"
+)
+
 #: Bracket span: a ``{...}`` substring with printable body, no nested braces.
 #: Used as a fallback when the canonical extractor finds no candidates but
 #: tool output has free-floating bracket-wrapped content (e.g. csawpad's
@@ -105,6 +112,13 @@ FLAG_BODY_FORMAT_SPEC_RE = re.compile(
     r"[A-Za-z_]\w*:[0-9]*[xXdDuifeEgGF](?:\b|(?=\})|$)|(?::[0-9]+[xXdDuifeEgGF](?:\b|(?=\})|$))",
 )
 
+# Structured diagnostic bodies that bracket-span fallback must not wrap as
+# flags, e.g. ``flag{'command': './stfu', 'error': '[Errno 2] ...'}``.
+STRUCTURED_DIAGNOSTIC_BODY_RE = re.compile(
+    r"['\"]?(?:command|error|exception|traceback|stderr|stdout|returncode|help_output)['\"]?\s*:",
+    re.IGNORECASE,
+)
+
 #: Common template-echo bodies that CSS / HTML / Mustache produce.  Any
 #: ``prefix{<noise>}`` whose body is one of these is unambiguously not a flag.
 TEMPLATE_NOISE_BODIES: frozenset[str] = frozenset({
@@ -112,6 +126,21 @@ TEMPLATE_NOISE_BODIES: frozenset[str] = frozenset({
     "name", "value", "key", "thing", "tablename", "fieldname",
     "id", "type", "class", "label", "placeholder", "input", "output",
 })
+
+FLAG_VALIDATION_SOURCE_NEEDLES: tuple[str, ...] = (
+    "re.findall", "re.search", "re.match",
+    "subprocess.", "os.system", "shell=true",
+    "{thing}", "{tablename}", "{fieldname}",
+    "{0}", "{1}", "{name}", "{flag}",
+)
+FLAG_BARE_TOKEN_NOISE_NEEDLES: tuple[str, ...] = (
+    "no_flag_found", "noflagfound",
+    "flag_not_found", "flag_not_recovered",
+    "no_flag_recovered",
+    "manual_review_required", "manual_review",
+    "todo_replace_me", "your_flag_here", "insert_flag",
+    "placeholder", "not_implemented",
+)
 
 #: Common CTF prefixes used for the bracket-span fallback (see
 #: :data:`BRACKET_SPAN_PATTERN`).  When extraction returns nothing but a
@@ -163,6 +192,8 @@ def plausible_flag(candidate: str) -> bool:
         return False
     if FLAG_BODY_FORMAT_SPEC_RE.search(body):
         return False
+    if STRUCTURED_DIAGNOSTIC_BODY_RE.search(body):
+        return False
     if body.lower().strip() in TEMPLATE_NOISE_BODIES:
         return False
     return True
@@ -182,6 +213,27 @@ def near_miss_flag(candidate: str) -> bool:
         return False
     if FLAG_BODY_FORMAT_SPEC_RE.search(body):
         return False
+    if STRUCTURED_DIAGNOSTIC_BODY_RE.search(body):
+        return False
     printable = sum(1 for c in body if 32 <= ord(c) <= 126)
     ratio = printable / len(body)
     return 0.70 <= ratio < 1.0
+
+
+def validatable_flag_candidate(candidate: str) -> bool:
+    """Return True when a candidate is worth adding to run state."""
+
+    text = (candidate or "").strip()
+    if FLAG_PREFIX_SHAPE.fullmatch(text):
+        lowered = text.lower()
+        if any(needle in lowered for needle in FLAG_VALIDATION_SOURCE_NEEDLES):
+            return False
+        return plausible_flag(text)
+    if FLAG_BARE_TOKEN_SHAPE.fullmatch(text):
+        if PYTHON_EXCEPTION_TOKEN_RE.fullmatch(text):
+            return False
+        lowered = text.lower()
+        if any(needle in lowered for needle in FLAG_BARE_TOKEN_NOISE_NEEDLES):
+            return False
+        return True
+    return False

@@ -243,7 +243,7 @@ else:
         "database_files": database_files[:20],
         "pcap_files": pcap_files[:20],
         "repo_paths": sorted(repo_paths)[:20],
-        "web_source_files": web_sources[:20],
+        "source_files": web_sources[:20],
         "script_files": script_sources[:20],
         "text_files": text_files[:20],
         "decoded_text_previews": decoded_text_previews[:10],

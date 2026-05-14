@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from killchain_docker.tools.core import ToolExecutionRequest
+from killchain_docker.tools.plugins._shared import SHARED_FILE_TARGETS_SNIPPET
 
 TOOL_NAME = "pcap_review"
 
@@ -34,10 +35,17 @@ url_re = re.compile(r"https?://[A-Za-z0-9._:/?&=%#@+-]{6,200}")
 host_re = re.compile(r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,20}\b")
 tshark_bin = shutil.which("tshark")
 
-for relpath in pcap_files[:max_files]:
-    path = files_root / relpath
-    if not path.is_file():
-        continue
+if not pcap_files:
+    records.append({"type": "summary", "text": "PCAP review failed: missing required metadata.pcap_files."})
+    records.append({"type": "output_context", "files_root": str(files_root), "inspected_pcaps": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
+
+targets = _resolve_file_targets(files_root, pcap_files, max_files=max_files, kind="pcap")
+for target in targets:
+    relpath = target["display"]
+    path = Path(target["path"])
     inspected.append(relpath)
 
     if tshark_bin:
@@ -81,6 +89,13 @@ for relpath in pcap_files[:max_files]:
         lowered = line.lower()
         if any(token in lowered for token in ("authorization:", "bearer ", "cookie:", "password=", "passwd=", "token=", "apikey", "api_key")):
             credential_hits.append(f"{relpath}:{line[:180]}")
+
+if not inspected:
+    records.append({"type": "summary", "text": "PCAP review failed: no requested pcap files could be read."})
+    records.append({"type": "output_context", "files_root": str(files_root), "pcap_files": pcap_files[:max_files], "inspected_pcaps": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 
 records.append({
     "type": "summary",
@@ -156,6 +171,8 @@ records.append({
 for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
+
+SCRIPT = SHARED_FILE_TARGETS_SNIPPET + SCRIPT
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

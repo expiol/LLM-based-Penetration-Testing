@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from killchain_docker.tools.core import ToolExecutionRequest
+from killchain_docker.tools.plugins._shared import SHARED_FILE_TARGETS_SNIPPET
 
 TOOL_NAME = "runtime_probe"
 
@@ -73,6 +74,13 @@ def available_command(candidates):
     return None
 
 
+if not source_files:
+    records.append({"type": "summary", "text": "Runtime probe failed: missing required metadata.source_files."})
+    records.append({"type": "output_context", "files_root": str(files_root), "executed_scripts": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
+
 if not files_root.exists():
     records.append({"type": "summary", "text": f"Runtime probe skipped: {files_root} does not exist."})
     records.append({"type": "note", "text": f"Challenge files root not found: {files_root}"})
@@ -81,10 +89,10 @@ else:
     if flag_format:
         notes_list.append(f"Expected flag format hint: {flag_format}")
 
-    for relpath in source_files[:max_files]:
-        path = files_root / relpath
-        if not path.is_file():
-            continue
+    targets = _resolve_file_targets(files_root, source_files, max_files=max_files, kind="source")
+    for target in targets:
+        relpath = target["display"]
+        path = Path(target["path"])
 
         suffix = path.suffix.lower()
         command_candidates = interpreter_by_suffix.get(suffix)
@@ -129,6 +137,12 @@ else:
         })
 
 records.extend({"type": "note", "text": note} for note in notes_list)
+if files_root.exists() and not executed_scripts:
+    records.append({"type": "summary", "text": "Runtime probe failed: no requested source files could be read or executed."})
+    records.append({"type": "output_context", "files_root": str(files_root), "source_files": source_files[:max_files], "executed_scripts": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 records.append({
     "type": "summary",
     "text": (
@@ -198,6 +212,8 @@ records.append({
 for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
+
+SCRIPT = SHARED_FILE_TARGETS_SNIPPET + SCRIPT
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

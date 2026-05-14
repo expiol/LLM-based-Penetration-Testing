@@ -5,19 +5,19 @@ from __future__ import annotations
 import json
 
 from killchain_docker.tools.core import ToolExecutionRequest
-from killchain_docker.tools.plugins._shared import SHARED_FLAG_DETECTION_SNIPPET
+from killchain_docker.tools.plugins._shared import (
+    SHARED_FILE_TARGETS_SNIPPET,
+    SHARED_FLAG_DETECTION_SNIPPET,
+)
 
 
 TOOL_NAME = "source_review"
 
 _SCRIPT_HEADER = r"""
-import gzip
 import json
 import re
 import sys
-import tarfile
-import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 payload = json.loads(sys.argv[1])
 files_root = Path(payload.get("files_root") or "/home/ctfplayer/ctf_files")
@@ -36,55 +36,23 @@ route_re = re.compile(r"[\"'](/[^\"'\\s]{1,120})[\"']")
 """
 
 _SCRIPT_BODY = r"""
+if not source_files:
+    records.append({"type": "summary", "text": "Source review failed: missing required metadata.source_files."})
+    records.append({"type": "output_context", "files_root": str(files_root), "inspected_sources": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 
 
-def read_source_entry(entry):
-    relpath = str(entry).strip()
-    if not relpath:
-        return None, None
-
-    direct_path = files_root / relpath
-    if direct_path.is_file():
-        try:
-            return relpath, direct_path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            return relpath, None
-
-    archive_name, sep, member_name = relpath.partition(":")
-    if not sep or not member_name:
-        return relpath, None
-
-    archive_path = files_root / archive_name
-    if not archive_path.is_file():
-        return relpath, None
-
-    normalized_member = str(PurePosixPath(member_name)).lstrip("./")
-    suffix = archive_path.suffix.lower()
-
+targets = _resolve_file_targets(files_root, source_files, max_files=max_files, kind="source")
+for target in targets:
+    relpath = target["display"]
+    path = Path(target["path"])
     try:
-        if zipfile.is_zipfile(archive_path):
-            with zipfile.ZipFile(archive_path) as zf:
-                with zf.open(normalized_member) as fh:
-                    return relpath, fh.read().decode("utf-8", errors="ignore")
-        if tarfile.is_tarfile(archive_path):
-            with tarfile.open(archive_path, "r:*") as tf:
-                extracted = tf.extractfile(normalized_member)
-                if extracted is None:
-                    return relpath, None
-                return relpath, extracted.read().decode("utf-8", errors="ignore")
-        if suffix == ".gz" and normalized_member == archive_path.stem:
-            with gzip.open(archive_path, "rb") as fh:
-                return relpath, fh.read().decode("utf-8", errors="ignore")
+        content = path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
-        return relpath, None
-
-    return relpath, None
-
-for relpath in source_files[:max_files]:
-    inspected_path, content = read_source_entry(relpath)
-    if not inspected_path or content is None:
         continue
-    inspected.append(inspected_path)
+    inspected.append(relpath)
 
     for route in route_re.findall(content):
         if route not in route_hits and any(token in route.lower() for token in ("admin", "login", "upload", "debug", "api", "flag")):
@@ -97,6 +65,13 @@ for relpath in source_files[:max_files]:
     for flag in flag_re.findall(content):
         if flag not in flag_candidates and _plausible_flag(flag):
             flag_candidates.append(flag)
+
+if not inspected:
+    records.append({"type": "summary", "text": "Source review failed: no requested source files could be read."})
+    records.append({"type": "output_context", "files_root": str(files_root), "source_files": source_files[:max_files], "inspected_sources": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 
 records.append({
     "type": "summary",
@@ -172,7 +147,7 @@ for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
 
-SCRIPT = _SCRIPT_HEADER + SHARED_FLAG_DETECTION_SNIPPET + _SCRIPT_BODY
+SCRIPT = _SCRIPT_HEADER + SHARED_FLAG_DETECTION_SNIPPET + SHARED_FILE_TARGETS_SNIPPET + _SCRIPT_BODY
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

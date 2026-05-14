@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from killchain_docker.tools.core import ToolExecutionRequest
+from killchain_docker.tools.plugins._shared import SHARED_FILE_TARGETS_SNIPPET
 
 TOOL_NAME = "binary_triage"
 
@@ -28,10 +29,17 @@ inspected = []
 
 flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
 
-for relpath in binary_files[:max_files]:
-    path = files_root / relpath
-    if not path.is_file():
-        continue
+if not binary_files:
+    records.append({"type": "summary", "text": "Binary triage failed: missing required metadata.binary_files."})
+    records.append({"type": "output_context", "files_root": str(files_root), "inspected_binaries": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
+
+targets = _resolve_file_targets(files_root, binary_files, max_files=max_files, kind="binary")
+for target in targets:
+    relpath = target["display"]
+    path = Path(target["path"])
     inspected.append(relpath)
     try:
         file_type = subprocess.run(
@@ -129,6 +137,13 @@ for relpath in binary_files[:max_files]:
         "text": f"Binary {relpath}: {file_type or 'unknown type'}",
     })
 
+if not inspected:
+    records.append({"type": "summary", "text": "Binary triage failed: no requested binary files could be read."})
+    records.append({"type": "output_context", "files_root": str(files_root), "binary_files": binary_files[:max_files], "inspected_binaries": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
+
 records.append({
     "type": "summary",
     "text": (
@@ -176,6 +191,8 @@ records.append({
 for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
+
+SCRIPT = SHARED_FILE_TARGETS_SNIPPET + SCRIPT
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

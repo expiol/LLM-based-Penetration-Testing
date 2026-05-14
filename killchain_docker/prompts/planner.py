@@ -18,6 +18,9 @@ Decision guidance:
   Return todos for exactly one phase per PlannerDecision. Do not mix upstream
   discovery/analysis with downstream exploitation or flag validation in the
   same batch.
+* Use flag_validation only to validate a concrete candidate flag already present
+  in state or todo context. Work that derives, decrypts, extracts, or recovers a
+  flag candidate is analysis unless it is running a grounded exploit.
 * Keep the todo list small and current. Prefer 1-4 concrete todos per cycle.
 * If a todo depends on facts another proposed todo would produce, return only
   the upstream todo now. Wait for RouterAgent worker results and the next

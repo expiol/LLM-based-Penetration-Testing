@@ -152,7 +152,7 @@ def _build_selftest_plane(expected_flag: str) -> ExecutionPlane:
                 "type": "output_context",
                 "files_root": files_root,
                 "binary_files": [],
-                "web_source_files": ["app.py"],
+                "source_files": ["app.py"],
                 "flag_candidates": [],
                 "file_count": 1,
             },
@@ -430,7 +430,28 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                 "stop_run": False,
             }
         if "RouterDecision" in system_prompt:
-            return {"assignments": [], "rationale": "selftest uses router fallback"}
+            snapshot = json.loads(user_prompt)
+            ready = snapshot.get("ready_todos") or []
+            assignments = []
+            for todo in ready:
+                goal = str(todo.get("goal") or "").lower()
+                context = todo.get("context") or {}
+                if todo.get("phase") == "flag_validation" or context.get("candidate_flag"):
+                    worker_name = "flag-worker"
+                elif context.get("base_url") or "web" in goal:
+                    worker_name = "web-worker"
+                elif context.get("scope") or "scope" in goal:
+                    worker_name = "recon-worker"
+                else:
+                    worker_name = "artifact-worker"
+                assignments.append(
+                    {
+                        "todo_id": todo["todo_id"],
+                        "worker_name": worker_name,
+                        "rationale": "selftest deterministic LLM route",
+                    }
+                )
+            return {"assignments": assignments, "rationale": "selftest route"}
         if "RouterRoundSummary" in system_prompt:
             return {
                 "summary": "Selftest router summary.",
@@ -439,10 +460,25 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                 "next_focus": "",
                 "used_llm": True,
             }
+        snapshot = json.loads(user_prompt)
+        todo = snapshot.get("todo") or {}
+        goal = str(todo.get("goal") or "").lower()
+        context = todo.get("context") or {}
+        catalog = snapshot.get("tool_catalog") or []
+        capabilities = {str(item.get("capability") or "") for item in catalog}
+        capability = next(iter(capabilities), "")
+        if "http.content" in capabilities and (context.get("base_url") or "web content" in goal):
+            capability = "http.content"
+        elif "http.metadata" in capabilities and (context.get("scope") or "scope" in goal):
+            capability = "http.metadata"
+        elif "artifact.triage" in capabilities:
+            capability = "artifact.triage"
+        elif "flag.harvest" in capabilities:
+            capability = "flag.harvest"
         return {
-            "capability": "http.content",
+            "capability": capability,
             "metadata": {},
-            "rationale": "selftest fallback capability",
+            "rationale": "selftest selected capability",
             "expected_signal": "selftest tool result",
         }
 

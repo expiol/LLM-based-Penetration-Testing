@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from killchain_docker.tools.core import ToolExecutionRequest
+from killchain_docker.tools.plugins._shared import SHARED_FILE_TARGETS_SNIPPET
 
 TOOL_NAME = "sqlite_review"
 
@@ -28,10 +29,17 @@ inspected = []
 
 flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
 
-for relpath in database_files[:max_files]:
-    path = files_root / relpath
-    if not path.is_file():
-        continue
+if not database_files:
+    records.append({"type": "summary", "text": "SQLite review failed: missing required metadata.database_files."})
+    records.append({"type": "output_context", "files_root": str(files_root), "inspected_databases": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
+
+targets = _resolve_file_targets(files_root, database_files, max_files=max_files, kind="database")
+for target in targets:
+    relpath = target["display"]
+    path = Path(target["path"])
     inspected.append(relpath)
     tables = []
     try:
@@ -72,6 +80,13 @@ for relpath in database_files[:max_files]:
                 records.append({"type": "note", "text": f"SQLite query failed for {relpath}:{table}: {type(exc).__name__}: {exc}"})
     finally:
         conn.close()
+
+if not inspected:
+    records.append({"type": "summary", "text": "SQLite review failed: no requested database files could be read."})
+    records.append({"type": "output_context", "files_root": str(files_root), "database_files": database_files[:max_files], "inspected_databases": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 
 records.append({
     "type": "summary",
@@ -133,6 +148,8 @@ records.append({
 for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
+
+SCRIPT = SHARED_FILE_TARGETS_SNIPPET + SCRIPT
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

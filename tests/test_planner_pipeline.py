@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
-from killchain_docker.llm import StaticLLMClient
+from killchain_docker.llm import LLMClientError, StaticLLMClient
 from killchain_docker.orchestrator.planning import (
-    BootstrapSeeder,
     LLMPlanner,
+    PlanningPipeline,
     PlannedTodo,
     PlannerDecision,
     TodoPhase,
-    TodoDeduper,
-    TodoNormalizer,
 )
-from killchain_docker.state import FlagCandidate, RunState, TodoItem
+from killchain_docker.orchestrator.policy import TodoPolicy
+from killchain_docker.state import EvidenceRecord, FlagCandidate, RunState, TodoItem
 
 
 def _state(files: list[str] | None = None, scope: list[str] | None = None) -> RunState:
@@ -32,10 +32,10 @@ def _state(files: list[str] | None = None, scope: list[str] | None = None) -> Ru
     )
 
 
-class BootstrapSeederTests(unittest.TestCase):
+class PlanningPipelineSeedTests(unittest.TestCase):
     def test_seed_artifacts_and_scope_as_high_level_todos(self) -> None:
         state = _state(["solve.py"], ["http://example.test"])
-        decision = BootstrapSeeder().plan(state)
+        decision = PlanningPipeline().plan(state)
         goals = [todo.goal for todo in decision.todos]
 
         self.assertTrue(any("Inventory" in goal for goal in goals))
@@ -44,21 +44,24 @@ class BootstrapSeederTests(unittest.TestCase):
 
     def test_seed_flag_validation_for_grounded_candidate(self) -> None:
         state = _state([])
-        candidate = FlagCandidate(value="flag{ok}", source="artifact.triage")
+        candidate = FlagCandidate(value="flag{okay}", source="artifact.triage")
         state.flag_candidates[candidate.candidate_id] = candidate
 
-        decision = BootstrapSeeder().plan(state)
+        decision = PlanningPipeline().plan(state)
 
         self.assertEqual(len(decision.todos), 1)
         self.assertEqual(decision.todos[0].phase, TodoPhase.FLAG_VALIDATION)
-        self.assertEqual(decision.todos[0].context["candidate_flag"], "flag{ok}")
+        self.assertEqual(decision.todos[0].context["candidate_flag"], "flag{okay}")
 
 
-class TodoNormalizerTests(unittest.TestCase):
+class TodoPolicyNormalizationTests(unittest.TestCase):
     def test_file_goal_gets_canonical_files_context(self) -> None:
         state = _state(["solve.py"])
-        todo = PlannedTodo(goal="Review source files for crypto weakness.")
-        TodoNormalizer().fill(todo, state)
+        todo = PlannedTodo(
+            goal="Review source files for crypto weakness.",
+            phase=TodoPhase.ANALYSIS,
+        )
+        TodoPolicy.normalize(todo, state)
 
         self.assertEqual(todo.context["files_root"], "/home/ctfplayer/ctf_files")
         self.assertEqual(todo.context["challenge_files"], ["solve.py"])
@@ -70,7 +73,7 @@ class TodoNormalizerTests(unittest.TestCase):
             goal="Perform deep analysis of the MPEG file to identify the cipher and recover the flag.",
             phase=TodoPhase.FLAG_VALIDATION,
         )
-        TodoNormalizer().fill(todo, state)
+        TodoPolicy.normalize(todo, state)
 
         self.assertEqual(todo.context["files_root"], "/home/ctfplayer/ctf_files")
         self.assertEqual(todo.context["challenge_files"], ["cipher.mpeg"])
@@ -79,23 +82,73 @@ class TodoNormalizerTests(unittest.TestCase):
     def test_candidate_flag_context_promotes_validation(self) -> None:
         todo = PlannedTodo(
             goal="Validate recovered candidate.",
-            context={"candidate_flag": "flag{ok}"},
+            context={"candidate_flag": "flag{okay}"},
         )
-        TodoNormalizer().fill(todo, _state([]))
+        TodoPolicy.normalize(todo, _state([]))
+
+        self.assertEqual(todo.phase, TodoPhase.FLAG_VALIDATION)
+
+    def test_ungrounded_flag_validation_decryption_todo_becomes_analysis(self) -> None:
+        state = _state(["stfu", "flag.stfu"])
+        todo = PlannedTodo(
+            goal=(
+                "Write and execute a Python script that implements the LFSR-based "
+                "decryption: read flag.stfu, reproduce the keystream, and print "
+                "the recovered plaintext."
+            ),
+            phase=TodoPhase.FLAG_VALIDATION,
+            context={
+                "files_root": "/home/ctfplayer/ctf_files",
+                "challenge_files": ["stfu", "flag.stfu"],
+            },
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
+
+    def test_flag_format_template_is_not_a_concrete_candidate(self) -> None:
+        state = _state(["stfu", "flag.stfu"])
+        todo = PlannedTodo(
+            goal=(
+                "Implement the LFSR decryption and print the recovered plaintext "
+                "in the expected flag{...} format."
+            ),
+            phase=TodoPhase.FLAG_VALIDATION,
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
+        self.assertNotIn("candidate_flag", todo.context)
+
+    def test_state_flag_candidate_keeps_explicit_validation_phase(self) -> None:
+        state = _state([])
+        candidate = FlagCandidate(value="flag{okay}", source="artifact.triage")
+        state.flag_candidates[candidate.candidate_id] = candidate
+        todo = PlannedTodo(
+            goal="Validate the recovered candidate flag.",
+            phase=TodoPhase.FLAG_VALIDATION,
+        )
+
+        TodoPolicy.normalize(todo, state)
 
         self.assertEqual(todo.phase, TodoPhase.FLAG_VALIDATION)
 
 
-class TodoDeduperTests(unittest.TestCase):
+class PlanningPipelineDedupTests(unittest.TestCase):
     def test_drops_duplicate_dedupe_keys(self) -> None:
         state = _state([])
         todos = [
             PlannedTodo(goal="A", dedupe_key="same"),
             PlannedTodo(goal="B", dedupe_key="same"),
         ]
-        merged = TodoDeduper().merge(todos, state)
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(summary="dedupe", todos=todos),
+        )
 
-        self.assertEqual([todo.goal for todo in merged], ["A"])
+        self.assertEqual([todo.goal for todo in decision.todos], ["A"])
 
 
 class LLMPlannerTests(unittest.TestCase):
@@ -224,14 +277,11 @@ class LLMPlannerTests(unittest.TestCase):
         )
         self.assertTrue(planner.plan(_state([])).stop_run)
 
-    def test_planner_keeps_bootstrap_todos_when_llm_fails(self) -> None:
+    def test_planner_raises_when_llm_fails(self) -> None:
         planner = LLMPlanner(StaticLLMClient([]))
 
-        decision = planner.plan(_state(["solve.py"]))
-
-        self.assertGreaterEqual(len(decision.todos), 1)
-        self.assertTrue(any("Inventory" in todo.goal for todo in decision.todos))
-        self.assertTrue(any("Planner LLM failed" in note for note in decision.notes))
+        with self.assertRaises(LLMClientError):
+            planner.plan(_state(["solve.py"]))
 
     def test_planner_keeps_mislabelled_flag_recovery_analysis_todo(self) -> None:
         state = _state(["cipher.mpeg"])
@@ -270,7 +320,7 @@ class LLMPlannerTests(unittest.TestCase):
 
     def test_planner_prioritizes_grounded_flag_validation_candidate(self) -> None:
         state = _state([])
-        candidate = FlagCandidate(value="flag{ok}", source="artifact.triage")
+        candidate = FlagCandidate(value="flag{okay}", source="artifact.triage")
         state.flag_candidates[candidate.candidate_id] = candidate
         planner = LLMPlanner(
             StaticLLMClient([
@@ -294,7 +344,163 @@ class LLMPlannerTests(unittest.TestCase):
 
         self.assertEqual(len(decision.todos), 1)
         self.assertEqual(decision.todos[0].phase, TodoPhase.FLAG_VALIDATION)
-        self.assertEqual(decision.todos[0].context["candidate_flag"], "flag{ok}")
+        self.assertEqual(decision.todos[0].context["candidate_flag"], "flag{okay}")
+
+    def test_planner_keeps_flag_format_decryption_todo_as_analysis(self) -> None:
+        def responder(_system_prompt: str, _user_prompt: str) -> dict[str, object]:
+            return {
+                "summary": "recover plaintext",
+                "todos": [
+                    {
+                        "goal": (
+                            "Write and execute a Python script that implements the LFSR "
+                            "decryption and prints the recovered flag{...} plaintext."
+                        ),
+                        "phase": "flag_validation",
+                        "priority": 80,
+                    }
+                ],
+                "notes": [],
+                "stop_run": False,
+            }
+
+        decision = LLMPlanner(StaticLLMClient(responder)).plan(_state([]))
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.ANALYSIS)
+        self.assertFalse(any("ungrounded flag_validation" in note for note in decision.notes))
+
+    def test_planner_prompt_includes_stagnation_signals_without_blocking(self) -> None:
+        captured: dict[str, object] = {}
+
+        def responder(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "summary": "try another analysis",
+                "todos": [
+                    {
+                        "goal": "Try a different LFSR analysis path.",
+                        "phase": "analysis",
+                        "priority": 70,
+                        "context": {"challenge_files": ["flag.enc"]},
+                    }
+                ],
+                "notes": [],
+                "stop_run": False,
+            }
+
+        state = _state([])
+        partial = state.queue_todo(
+            TodoItem(
+                goal="Decrypt the ciphertext and recover the flag.",
+                phase=TodoPhase.ANALYSIS,
+                dedupe_key="decrypt-once",
+            )
+        )
+        partial.mark_running("exploit-worker")
+        partial.mark_partial(
+            "Script execution ran without recovering a flag: exit code 0, 0 flag candidate(s).",
+            "script exited successfully but no flag candidate was recovered",
+        )
+        planner = LLMPlanner(StaticLLMClient(responder))
+
+        decision = planner.plan(state)
+
+        signals = captured["snapshot"]["stagnation_signals"]  # type: ignore[index]
+        self.assertEqual(signals["todo_status_counts"]["partial"], 1)  # type: ignore[index]
+        self.assertEqual(len(signals["partial_todos"]), 1)  # type: ignore[index]
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.ANALYSIS)
+
+    def test_planner_prompt_includes_recent_tool_evidence_context(self) -> None:
+        captured: dict[str, object] = {}
+
+        def responder(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "summary": "use existing evidence",
+                "todos": [],
+                "notes": [],
+                "stop_run": True,
+            }
+
+        state = _state([])
+        state.upsert_evidence(
+            EvidenceRecord(
+                task_id="todo-script",
+                capability="script.execute",
+                tool_name="script_execution",
+                mode="local_command",
+                summary="Script execution ran without recovering a flag: exit code 0, 0 flag candidate(s).",
+                extracted={
+                    "output_context": {
+                        "returncode": 0,
+                        "result_quality": "partial_no_candidate",
+                        "partial_reason": "script exited successfully but no flag candidate was recovered",
+                        "failure_kind": "no_candidate",
+                        "failure_detail": "script exited successfully but no flag candidate was recovered",
+                        "stdout": (
+                            "Raw hex of first 16 bytes: 535446556aab0223201f1e0a00008540\n"
+                            "LE uint32 at 4-7: 587377514\n"
+                            "LE uint32 at 8-11: 169746208\n"
+                            "LE uint32 at 12-15: 1082458112\n"
+                        ),
+                        "flag_candidates": [],
+                    }
+                },
+            )
+        )
+        state.upsert_evidence(
+            EvidenceRecord(
+                task_id="todo-disasm",
+                capability="binary.disassemble",
+                tool_name="binary_disassembly",
+                mode="local_command",
+                summary="Binary disassembly completed for 1 file(s): 1 function(s) kept, 0 flag candidate(s).",
+                extracted={
+                    "output_context": {
+                        "inspected_binaries": ["stfu"],
+                        "disassembly": {
+                            "stfu": {
+                                "binary_traits": {
+                                    "arch": "i386",
+                                    "stripped": True,
+                                    "go_like": False,
+                                },
+                                "function_count_total": 23,
+                                "function_count_kept": 1,
+                                "disassembly_truncated": True,
+                                "analysis_windows": [
+                                    "804884d: xor ebx,eax\n804884f: and eax,0x1\n8048852: mov DWORD PTR [ebp-0xc],eax"
+                                ],
+                                "functions": [
+                                    {
+                                        "name": ".text",
+                                        "size_lines": 181,
+                                        "truncated": True,
+                                        "xref_strings": ["Supplied tap values out of range", "STFU"],
+                                        "disassembly": "08048660 <.text>:\n 804884d: xor ebx,eax",
+                                    }
+                                ],
+                            }
+                        },
+                        "flag_candidates": [],
+                    }
+                },
+            )
+        )
+
+        LLMPlanner(StaticLLMClient(responder)).plan(state)
+
+        context = captured["snapshot"]["recent_evidence_context"]  # type: ignore[index]
+        rendered = json.dumps(context)
+        self.assertIn("535446556aab0223201f1e0a00008540", rendered)
+        self.assertIn("partial_no_candidate", rendered)
+        self.assertIn("no_candidate", rendered)
+        self.assertIn('"go_like": false', rendered)
+        self.assertIn("804884d: xor ebx,eax", rendered)
+        contract = captured["snapshot"]["planning_contract"]  # type: ignore[index]
+        self.assertIn("/tmp files", contract["evidence_context_rule"])  # type: ignore[index]
 
 
 class PlannedTodoPriorityTests(unittest.TestCase):

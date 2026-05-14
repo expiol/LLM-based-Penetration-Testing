@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from killchain_docker.llm import LLMClient, LLMClientError
+from killchain_docker.llm import LLMClient
+from killchain_docker.orchestrator.policy import CandidatePolicy
 from killchain_docker.state import (
     Asset,
     AssetKind,
@@ -18,9 +19,13 @@ from killchain_docker.state import (
 from killchain_docker.tools import ToolCapability, ToolExecutionError
 from killchain_docker.workers.base import WorkerAgent
 from killchain_docker.workers.specs import WorkerBuildContext, WorkerSpec
+from killchain_docker.workers.tool_metadata import (
+    DEFAULT_FILES_ROOT,
+    normalize_tool_metadata,
+)
 
 
-_DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
+_DEFAULT_FILES_ROOT = DEFAULT_FILES_ROOT
 
 
 def _list(value: object) -> list[object]:
@@ -42,48 +47,57 @@ def _strings(value: object) -> list[str]:
     return result
 
 
-def _flag_candidates_from_context(output_context: dict[str, object]) -> list[str]:
-    candidates: list[str] = []
-    for key in ("flag_candidates", "potential_flags", "grounded_flag_candidates"):
-        for candidate in _strings(output_context.get(key)):
-            if candidate not in candidates:
-                candidates.append(candidate)
-    return candidates[:12]
+def _tool_success(capability: ToolCapability, bundle, output_context: dict[str, object]) -> bool:
+    if bundle.result.exit_code not in (None, 0):
+        return False
+    if capability == ToolCapability.SCRIPT_EXECUTE:
+        returncode = output_context.get("returncode")
+        if returncode not in (None, ""):
+            try:
+                return int(returncode) == 0
+            except (TypeError, ValueError):
+                return False
+    return True
+
+
+def _is_flag_recovery_task(todo: TodoItem) -> bool:
+    text = " ".join(
+        [
+            todo.goal,
+            " ".join(todo.success_criteria),
+            " ".join(todo.constraints),
+        ]
+    ).lower()
+    if "flag candidate" in text or "candidate flag" in text:
+        return True
+    if any(token in text for token in ("recover", "decrypt", "decode", "find", "print", "output")):
+        if "flag" in text or "plaintext" in text or "readable ascii" in text:
+            return True
+    if "output contains" in text and ("flag{" in text or "ctf{" in text):
+        return True
+    return False
 
 
 class PersonaWorker(WorkerAgent):
     """Base class for high-level workers that choose and run tool capabilities."""
 
     allowed_capabilities: tuple[ToolCapability, ...] = ()
-    fallback_capability: ToolCapability | None = None
 
     def supports(self, todo: TodoItem) -> bool:
         del todo
         return True
 
     def _choose_capability(self, todo: TodoItem, state: RunState) -> tuple[ToolCapability, dict[str, object], str]:
-        if self.llm_client is not None and self.tool_gateway is not None:
-            try:
-                decision = self.choose_tool_use(
-                    task=todo,
-                    state=state,
-                    allowed_capabilities=list(self.allowed_capabilities),
-                )
-                return (
-                    ToolCapability(decision.capability),
-                    dict(decision.metadata),
-                    decision.rationale,
-                )
-            except (LLMClientError, ValueError):
-                pass
-        capability = self._fallback_capability(todo, state)
-        return capability, {}, "Fallback capability selected from todo context."
-
-    def _fallback_capability(self, todo: TodoItem, state: RunState) -> ToolCapability:
-        del todo, state
-        if self.fallback_capability is None:
-            raise ToolExecutionError(f"{self.name} has no fallback capability.")
-        return self.fallback_capability
+        decision = self.choose_tool_use(
+            task=todo,
+            state=state,
+            allowed_capabilities=list(self.allowed_capabilities),
+        )
+        return (
+            ToolCapability(decision.capability),
+            dict(decision.metadata),
+            decision.rationale,
+        )
 
     def _prepare_metadata(
         self,
@@ -93,32 +107,12 @@ class PersonaWorker(WorkerAgent):
         state: RunState,
         selected_metadata: dict[str, object],
     ) -> dict[str, object]:
-        metadata: dict[str, object] = {
-            **selected_metadata,
-            **todo.context,
-        }
-        if capability in {
-            ToolCapability.ARTIFACT_TRIAGE,
-            ToolCapability.ARTIFACT_ARCHIVE,
-            ToolCapability.ARTIFACT_SOURCE,
-            ToolCapability.ARTIFACT_RUNTIME,
-            ToolCapability.ARTIFACT_COMPUTATION,
-            ToolCapability.ARTIFACT_BINARY_TRIAGE,
-            ToolCapability.ARTIFACT_BINARY_DISASSEMBLE,
-            ToolCapability.ARTIFACT_BINARY_EXECUTE,
-            ToolCapability.ARTIFACT_SQLITE,
-            ToolCapability.ARTIFACT_PCAP,
-            ToolCapability.ARTIFACT_REPO,
-            ToolCapability.FLAG_HARVEST,
-            ToolCapability.SCRIPT_EXECUTE,
-        }:
-            metadata.setdefault("files_root", _DEFAULT_FILES_ROOT)
-            metadata.setdefault(
-                "challenge_files",
-                list((state.metadata.get("challenge", {}) or {}).get("files", []) or []),
-            )
-        state.infer_asset_identity(metadata)
-        return metadata
+        return normalize_tool_metadata(
+            capability,
+            todo,
+            state,
+            selected_metadata,
+        )
 
     def _result_from_bundle(
         self,
@@ -131,17 +125,25 @@ class PersonaWorker(WorkerAgent):
         bundle,
         rationale: str,
     ) -> WorkerResult:
-        flag_values = _flag_candidates_from_context(output_context)
         state_delta = bundle.state_delta
-        for value in flag_values:
-            if not any(candidate.value == value for candidate in state_delta.flag_candidates):
-                state_delta.flag_candidates.append(
-                    FlagCandidate(
-                        value=value,
-                        source=capability.value,
-                        confidence=0.7,
-                    )
-                )
+        flag_values = [candidate.value for candidate in state_delta.flag_candidates]
+        partial = False
+        partial_reason = None
+        result_quality = str(output_context.get("result_quality") or "")
+        if (
+            capability == ToolCapability.SCRIPT_EXECUTE
+            and success
+            and not flag_values
+            and _is_flag_recovery_task(todo)
+        ):
+            partial = True
+            partial_reason = (
+                str(output_context.get("partial_reason") or "").strip()
+                or "script completed for a flag-recovery task but produced no flag candidate"
+            )
+            result_quality = result_quality or "partial_no_candidate"
+            output_context["result_quality"] = result_quality
+            output_context["partial_reason"] = partial_reason
         output_context["worker_rationale"] = rationale
         output_context["capability"] = capability.value
         return WorkerResult(
@@ -157,7 +159,10 @@ class PersonaWorker(WorkerAgent):
             state_delta=state_delta,
             evidence_updates=[bundle.evidence],
             notes=list(bundle.parsed.notes),
-            retryable=not success,
+            retryable=False if partial else not success,
+            partial=partial,
+            result_quality=result_quality or None,
+            partial_reason=partial_reason,
         )
 
     def run(self, task: TodoItem, state: RunState) -> WorkerResult:
@@ -193,10 +198,11 @@ class PersonaWorker(WorkerAgent):
                 success=False,
                 summary=f"{self.name} failed to execute its selected tool: {exc}",
                 error=str(exc),
+                retryable=False,
             )
 
         output_context = dict(bundle.parsed.output_context)
-        success = bundle.result.exit_code in (None, 0)
+        success = _tool_success(capability, bundle, output_context)
         return self._result_from_bundle(
             todo=task,
             capability=capability,
@@ -219,12 +225,6 @@ class ReconWorker(PersonaWorker):
         ToolCapability.HOST_INVENTORY,
         ToolCapability.HOST_BANNER,
     )
-    fallback_capability = ToolCapability.HTTP_METADATA
-
-    def _fallback_capability(self, todo: TodoItem, state: RunState) -> ToolCapability:
-        scope = str(todo.context.get("scope") or (state.authorized_scope[0] if state.authorized_scope else ""))
-        parsed = urlparse(scope)
-        return ToolCapability.HTTP_METADATA if parsed.scheme in {"http", "https"} else ToolCapability.HOST_INVENTORY
 
     def _prepare_metadata(
         self,
@@ -291,23 +291,6 @@ class ArtifactWorker(PersonaWorker):
         ToolCapability.SCRIPT_EXECUTE,
         ToolCapability.FLAG_HARVEST,
     )
-    fallback_capability = ToolCapability.ARTIFACT_TRIAGE
-
-    def _fallback_capability(self, todo: TodoItem, state: RunState) -> ToolCapability:
-        context = todo.context
-        if context.get("source_files"):
-            return ToolCapability.ARTIFACT_SOURCE
-        if context.get("binary_files"):
-            return ToolCapability.ARTIFACT_BINARY_TRIAGE
-        if context.get("archive_files"):
-            return ToolCapability.ARTIFACT_ARCHIVE
-        if context.get("database_files"):
-            return ToolCapability.ARTIFACT_SQLITE
-        if context.get("pcap_files"):
-            return ToolCapability.ARTIFACT_PCAP
-        if context.get("repo_paths"):
-            return ToolCapability.ARTIFACT_REPO
-        return ToolCapability.ARTIFACT_TRIAGE
 
 
 class WebWorker(PersonaWorker):
@@ -324,14 +307,6 @@ class WebWorker(PersonaWorker):
         ToolCapability.HTTP_FORM_PROBE,
         ToolCapability.CREDENTIAL_LOGIN,
     )
-    fallback_capability = ToolCapability.HTTP_CONTENT
-
-    def _fallback_capability(self, todo: TodoItem, state: RunState) -> ToolCapability:
-        if todo.context.get("forms") or todo.context.get("page_url"):
-            return ToolCapability.HTTP_FORM_PROBE
-        if todo.context.get("paths"):
-            return ToolCapability.HTTP_PROBE_PATHS
-        return ToolCapability.HTTP_CONTENT
 
 
 class ExploitWorker(PersonaWorker):
@@ -346,7 +321,6 @@ class ExploitWorker(PersonaWorker):
         ToolCapability.CREDENTIAL_LOGIN,
         ToolCapability.SCRIPT_EXECUTE,
     )
-    fallback_capability = ToolCapability.VULN_SCAN
 
 
 class FlagWorker(PersonaWorker):
@@ -359,7 +333,6 @@ class FlagWorker(PersonaWorker):
         ToolCapability.FLAG_HARVEST,
         ToolCapability.SCRIPT_EXECUTE,
     )
-    fallback_capability = ToolCapability.FLAG_HARVEST
 
     def __init__(
         self,
@@ -377,9 +350,13 @@ class FlagWorker(PersonaWorker):
         self.expected_flag = expected_flag
 
     def run(self, task: TodoItem, state: RunState) -> WorkerResult:
-        candidates = _strings(task.context.get("candidate_flag"))
+        candidates = [
+            candidate
+            for candidate in _strings(task.context.get("candidate_flag"))
+            if CandidatePolicy.accepts_for_state(state, candidate)
+        ]
         if not candidates:
-            candidates = [candidate.value for candidate in state.flag_candidates.values()]
+            candidates = [candidate.value for candidate in CandidatePolicy.validation_ready_candidates(state)]
         for candidate in candidates:
             if self.expected_flag and candidate == self.expected_flag:
                 return WorkerResult(

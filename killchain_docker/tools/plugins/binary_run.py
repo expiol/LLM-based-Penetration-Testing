@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 
 from killchain_docker.tools.core import ToolExecutionRequest
+from killchain_docker.tools.plugins._shared import SHARED_FILE_TARGETS_SNIPPET
 
 TOOL_NAME = "binary_run"
 
@@ -62,6 +63,14 @@ flag_candidates = []
 # Cheap regex for ``prefix{body}`` flag tokens in any stdout or new file.
 import re as _re
 flag_re = _re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
+
+
+if not binary_files:
+    records.append({"type": "summary", "text": "Binary run failed: missing required metadata.binary_files."})
+    records.append({"type": "output_context", "files_root": str(files_root), "inspected_binaries": [], "binary_runs": {}, "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 
 
 def _hex_preview(b, limit):
@@ -129,11 +138,10 @@ def _build_invocations(binary_path, candidate_inputs):
     return inv[:max_invocations_per_binary]
 
 
-for relpath in binary_files[:max_files]:
-    bin_src = files_root / relpath
-    if not bin_src.is_file():
-        records.append({"type": "note", "text": "missing binary: " + relpath})
-        continue
+targets = _resolve_file_targets(files_root, binary_files, max_files=max_files, kind="binary")
+for target in targets:
+    relpath = target["display"]
+    bin_src = Path(target["path"])
     inspected.append(relpath)
 
     workdir = Path(tempfile.mkdtemp(prefix="binrun-"))
@@ -290,6 +298,13 @@ for relpath in binary_files[:max_files]:
         except Exception:
             pass
 
+if not inspected:
+    records.append({"type": "summary", "text": "Binary run failed: no requested binary files could be read."})
+    records.append({"type": "output_context", "files_root": str(files_root), "binary_files": binary_files[:max_files], "inspected_binaries": [], "binary_runs": {}, "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
+
 records.append({
     "type": "summary",
     "text": (
@@ -342,6 +357,8 @@ records.append({
 for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
+
+SCRIPT = SHARED_FILE_TARGETS_SNIPPET + SCRIPT
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

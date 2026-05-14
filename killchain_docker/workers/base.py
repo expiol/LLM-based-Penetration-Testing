@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from killchain_docker.evidence_context import EvidenceContextBuilder
 from killchain_docker.llm import LLMClient, LLMClientError
 from killchain_docker.reasoning import ToolUseDecision
 from killchain_docker.state import RunState, TodoItem, WorkerResult
@@ -22,6 +23,7 @@ from killchain_docker.tools import (
     ToolExecutionError,
     ToolGateway,
 )
+from killchain_docker.workers.tool_metadata import tool_metadata_contract
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -175,26 +177,39 @@ class WorkerAgent(ABC):
                 "capability": capability.value,
                 "tool_name": spec.tool_name,
                 "default_timeout_s": spec.default_timeout_s,
+                "metadata_contract": tool_metadata_contract(capability),
             }
             for capability, spec in self.tool_gateway.specs.items()
             if capability in allowed
         ]
+        evidence_context = EvidenceContextBuilder(max_records=10).build(state)
         decision = self.llm_client.generate_json(
             system_prompt=(
                 "You are a worker deciding one concrete lower-level tool call. "
                 "Choose a capability from the provided catalog and provide the "
-                "metadata arguments needed by that capability. Return only JSON "
-                "matching ToolUseDecision."
+                "metadata arguments needed by that capability. Use only the "
+                "field names listed in metadata_contract. "
+                "Use recent_evidence_context as grounded facts from previous tools. "
+                "Do not depend on /tmp files or other scratch files written by earlier todos; "
+                "if a script needs raw bytes, disassembly, or headers, read challenge files "
+                "directly or print regenerated diagnostics in the same script. "
+                "Return only JSON matching ToolUseDecision."
             ),
             user_prompt=json.dumps(
                 {
                     "worker_name": self.name,
                     "todo": task.model_dump(mode="json"),
                     "state_summary": state.summary(),
+                    "recent_evidence_context": evidence_context,
                     "recent_failures": [
                         record.model_dump(mode="json")
                         for record in state.execution_log[-12:]
                         if not record.success
+                    ],
+                    "tool_use_rules": [
+                        "Use recent_evidence_context before repeating diagnostics already present there.",
+                        "Do not read /tmp paths created by previous todos.",
+                        "For script.execute, make script_code self-contained and print the important stdout.",
                     ],
                     "tool_catalog": catalog,
                 },
@@ -204,7 +219,12 @@ class WorkerAgent(ABC):
             schema=ToolUseDecision,
             temperature=0.1,
         )
-        selected = ToolCapability(decision.capability)
+        try:
+            selected = ToolCapability(decision.capability)
+        except ValueError as exc:
+            raise LLMClientError(
+                f"LLM selected invalid tool capability {decision.capability!r}."
+            ) from exc
         if selected not in allowed:
             raise LLMClientError(
                 f"LLM selected unavailable tool capability {selected.value!r}."

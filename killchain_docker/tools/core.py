@@ -28,6 +28,7 @@ from killchain_docker.state import (
     StateDelta,
     Vulnerability,
 )
+from killchain_docker.state.constants import validatable_flag_candidate
 
 
 def utc_now() -> datetime:
@@ -62,6 +63,20 @@ def _string_list(value: Any) -> list[str]:
         if text and text not in result:
             result.append(text)
     return result
+
+
+def _flag_candidate_values(ctx: dict[str, Any], *, flag_format: object = None) -> list[str]:
+    from killchain_docker.orchestrator.policy import CandidatePolicy
+
+    values: list[str] = []
+    for key in ("flag_candidates", "potential_flags", "grounded_flag_candidates"):
+        for value in _string_list(ctx.get(key)):
+            if value in values or not validatable_flag_candidate(value):
+                continue
+            if not CandidatePolicy.decision(value, flag_format=flag_format).accepted:
+                continue
+            values.append(value)
+    return values
 
 
 def _dict_list(value: Any) -> list[dict[str, Any]]:
@@ -380,6 +395,7 @@ class ExecutionPlane:
         artifacts: list[Artifact] = []
         for key, kind in (
             ("challenge_files", "challenge_file"),
+            ("source_files", "source"),
             ("inspected_sources", "source"),
             ("inspected_files", "file"),
             ("inspected_binaries", "binary"),
@@ -480,7 +496,7 @@ class ExecutionPlane:
                 confidence=0.65,
                 evidence_refs=evidence_refs[:8],
             )
-            for value in _string_list(ctx.get("flag_candidates"))
+            for value in _flag_candidate_values(ctx, flag_format=request.metadata.get("flag_format"))
         ]
 
         vulnerabilities = [
@@ -514,6 +530,10 @@ class ExecutionPlane:
                     flag_candidate_refs=[item.value for item in flag_candidates],
                     metadata={
                         "returncode": ctx.get("returncode"),
+                        "result_quality": ctx.get("result_quality"),
+                        "partial_reason": ctx.get("partial_reason"),
+                        "failure_kind": ctx.get("failure_kind"),
+                        "failure_detail": ctx.get("failure_detail"),
                         "near_miss_candidates": ctx.get("near_miss_candidates") or [],
                     },
                 )

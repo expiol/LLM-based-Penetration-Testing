@@ -40,6 +40,8 @@ records = []
 notes_list = []
 flag_candidates = []
 near_miss_candidates = []
+bare_token_candidates = []
+bracket_span_candidates = []
 
 # Generic shape: ``prefix{body}`` with printable ASCII body of 4-200 chars.
 flag_re = re.compile(r"[A-Za-z0-9_]+\{[ -~]{4,200}\}")
@@ -139,12 +141,60 @@ def _harvest_bare_token_candidates(text, max_take=3):
     return out
 
 
+def _first_meaningful_line(text):
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if line:
+            return line[:240]
+    return ""
+
+
+def _exception_summary(text):
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        if re.match(r"^[A-Z][A-Za-z0-9_]*(?:Error|Exception):", line):
+            return line[:240]
+    return _first_meaningful_line(text)
+
+
+def _format_syntax_error(exc, filename):
+    location = f"{filename}:{exc.lineno or 0}"
+    detail = f"SyntaxError: {exc.msg} ({location})"
+    if exc.text:
+        return detail + "\n" + exc.text.rstrip()
+    return detail
+
+
+def _classify_result(returncode, stdout, stderr, flag_candidates, timed_out, syntax_preflight_failed):
+    if flag_candidates:
+        return "none", ""
+    if syntax_preflight_failed:
+        return "syntax_error", _exception_summary(stderr)
+    if timed_out:
+        return "timeout", _first_meaningful_line(stderr) or "script timed out"
+    exception_line = _exception_summary(stderr)
+    if "TypeError:" in exception_line:
+        return "runtime_type_error", exception_line
+    if returncode == 0:
+        return "no_candidate", "script exited successfully but no flag candidate was recovered"
+    return "nonzero_exit", exception_line or _first_meaningful_line(stdout) or f"script exited with code {returncode}"
+
+
 if not script_code.strip():
-    records.append({"type": "summary", "text": "Script execution skipped: no script code provided."})
-    records.append({"type": "output_context", "flag_candidates": [], "stdout": "", "stderr": "", "returncode": -1})
+    records.append({"type": "summary", "text": "Script execution failed: missing required metadata.script_code."})
+    records.append({
+        "type": "output_context",
+        "flag_candidates": [],
+        "stdout": "",
+        "stderr": "missing required metadata.script_code",
+        "returncode": -1,
+        "result_quality": "failed",
+        "failure_kind": "nonzero_exit",
+        "failure_detail": "missing required metadata.script_code",
+    })
     for item in records:
         print(json.dumps(item, ensure_ascii=True))
-    sys.exit(0)
+    sys.exit(2)
 
 suffix_map = {
     "python": ".py",
@@ -179,6 +229,8 @@ with tempfile.NamedTemporaryFile(
 stdout = ""
 stderr = ""
 returncode = -1
+timed_out = False
+syntax_preflight_failed = False
 _challenge_restore = []  # list[(path_str, original_mode_only)]
 _challenge_snapshots = []  # list[(path_str, original_mode_only, sha256, bytes|None)]
 
@@ -251,70 +303,86 @@ try:
     env["PYTHONDONTWRITEBYTECODE"] = "1"
 
     try:
-        completed = subprocess.run(
-            [*interpreter, script_path],
-            capture_output=True,
-            text=True,
-            cwd=str(files_root),
-            timeout=timeout_s,
-            check=False,
-            env=env,
-        )
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        returncode = completed.returncode
+        if script_language == "python":
+            try:
+                compile(script_code, script_path, "exec")
+            except SyntaxError as exc:
+                syntax_preflight_failed = True
+                stdout = ""
+                stderr = _format_syntax_error(exc, script_path)
+                returncode = 1
+                notes_list.append("Python syntax preflight failed; script body was not executed.")
 
-        # Prefer format-specific prefix when metadata gives us one. Otherwise fall
-        # back to the generic prefix{body} pattern.
-        for text in (stdout, stderr):
-            if format_prefix_re is not None:
-                for match in format_prefix_re.findall(text):
-                    _record_candidate(match, flag_candidates)
-            for match in flag_re.findall(text):
-                _record_candidate(match, flag_candidates)
-
-        # Bare-token mode: harvest single-token candidates from stdout tail when
-        # the challenge uses a non-prefix flag (e.g. ``STFU_THIS_CHALLENGE_...``).
-        # Only fired when no prefix-shaped candidate was found, so it stays a
-        # supplement rather than another source of validation spam.
-        if _bare_token_mode and not flag_candidates:
-            for token in _harvest_bare_token_candidates(stdout):
-                if token not in flag_candidates:
-                    flag_candidates.append(token)
-
-        # Bracket-span fallback (csawpad fix): when extraction finds no canonical
-        # ``prefix{body}`` candidate, but the script printed a free-floating
-        # ``{body}`` span (e.g. ``MY key for you is {And yes the nsa can read
-        # this to}``), wrap the body with the challenge's flag_format prefix
-        # plus a few common CTF prefixes so the equality-validator can confirm.
-        if not flag_candidates:
-            ff_prefix = None
-            if flag_format and "{" in flag_format:
-                ff_prefix = flag_format.split("{", 1)[0].strip() or None
-            span_candidates = _bracket_span_candidates(stdout, ff_prefix)
-            for cand in span_candidates:
-                if cand not in flag_candidates:
-                    flag_candidates.append(cand)
-
-        # Near-miss capture only when no real candidate was found, so we don't spam
-        # the validator with both shapes.
-        if not flag_candidates:
-            for text in (stdout, stderr):
-                for match in near_miss_re.findall(text):
-                    _record_near_miss(match)
-
-        notes_list.append(f"Script executed with {interpreter[0]}, exit code {returncode}.")
-        if flag_candidates:
-            notes_list.append(f"Recovered {len(flag_candidates)} flag candidate(s) from script output.")
-        if near_miss_candidates:
-            notes_list.append(
-                f"Detected {len(near_miss_candidates)} near-miss flag pattern(s) with non-printable characters."
+        if not syntax_preflight_failed:
+            completed = subprocess.run(
+                [*interpreter, script_path],
+                capture_output=True,
+                text=True,
+                cwd=str(files_root),
+                timeout=timeout_s,
+                check=False,
+                env=env,
             )
+            stdout = completed.stdout or ""
+            stderr = completed.stderr or ""
+            returncode = completed.returncode
+
+            # Prefer format-specific prefix when metadata gives us one. Otherwise fall
+            # back to the generic prefix{body} pattern.
+            for text in (stdout, stderr):
+                if format_prefix_re is not None:
+                    for match in format_prefix_re.findall(text):
+                        _record_candidate(match, flag_candidates)
+                for match in flag_re.findall(text):
+                    _record_candidate(match, flag_candidates)
+
+            # Bare-token mode: harvest single-token candidates from stdout tail when
+            # the challenge uses a non-prefix flag (e.g. ``STFU_THIS_CHALLENGE_...``).
+            # Only fired when no prefix-shaped candidate was found, so it stays a
+            # supplement rather than another source of validation spam.
+            if _bare_token_mode and not flag_candidates:
+                for token in _harvest_bare_token_candidates(stdout):
+                    if token not in bare_token_candidates:
+                        bare_token_candidates.append(token)
+                    if token not in flag_candidates:
+                        flag_candidates.append(token)
+
+            # Bracket-span fallback (csawpad fix): when extraction finds no canonical
+            # ``prefix{body}`` candidate, but the script printed a free-floating
+            # ``{body}`` span (e.g. ``MY key for you is {And yes the nsa can read
+            # this to}``), wrap the body with the challenge's flag_format prefix
+            # plus a few common CTF prefixes so the equality-validator can confirm.
+            if not flag_candidates:
+                ff_prefix = None
+                if flag_format and "{" in flag_format:
+                    ff_prefix = flag_format.split("{", 1)[0].strip() or None
+                span_candidates = _bracket_span_candidates(stdout, ff_prefix)
+                for cand in span_candidates:
+                    if cand not in bracket_span_candidates:
+                        bracket_span_candidates.append(cand)
+                    if cand not in flag_candidates:
+                        flag_candidates.append(cand)
+
+            # Near-miss capture only when no real candidate was found, so we don't spam
+            # the validator with both shapes.
+            if not flag_candidates:
+                for text in (stdout, stderr):
+                    for match in near_miss_re.findall(text):
+                        _record_near_miss(match)
+
+            notes_list.append(f"Script executed with {interpreter[0]}, exit code {returncode}.")
+            if flag_candidates:
+                notes_list.append(f"Recovered {len(flag_candidates)} flag candidate(s) from script output.")
+            if near_miss_candidates:
+                notes_list.append(
+                    f"Detected {len(near_miss_candidates)} near-miss flag pattern(s) with non-printable characters."
+                )
 
     except subprocess.TimeoutExpired:
         stdout = ""
         stderr = f"Script timed out after {timeout_s}s."
         returncode = -1
+        timed_out = True
         notes_list.append(stderr)
 
 except Exception as exc:
@@ -372,12 +440,26 @@ finally:
 records.extend({"type": "note", "text": note} for note in notes_list)
 
 result_severity = "high" if flag_candidates else ("medium" if returncode == 0 else "info")
+failure_kind, failure_detail = _classify_result(
+    returncode,
+    stdout,
+    stderr,
+    flag_candidates,
+    timed_out,
+    syntax_preflight_failed,
+)
 if returncode == 0 and flag_candidates:
     summary_state = "succeeded"
+    result_quality = "success_with_candidate"
+    partial_reason = ""
 elif returncode == 0:
     summary_state = "ran without recovering a flag"
+    result_quality = "partial_no_candidate"
+    partial_reason = "script exited successfully but no flag candidate was recovered"
 else:
     summary_state = f"failed (exit {returncode})"
+    result_quality = "failed"
+    partial_reason = ""
 records.append({
     "type": "summary",
     "text": (
@@ -399,9 +481,16 @@ records.append({
     "metadata": {
         "source": "script_execution",
         "returncode": returncode,
+        "result_quality": result_quality,
+        "partial_reason": partial_reason,
+        "failure_kind": failure_kind,
+        "failure_detail": failure_detail,
         "stdout_preview": stdout[:2000],
         "stderr_preview": stderr[:1000],
         "flag_candidates": flag_candidates[:10],
+        "bare_token_mode": _bare_token_mode,
+        "bare_token_candidates": bare_token_candidates[:5],
+        "bracket_span_candidates": bracket_span_candidates[:10],
         "near_miss_candidates": near_miss_candidates[:5],
     },
 })
@@ -410,9 +499,16 @@ records.append({
     "files_root": str(files_root),
     "script_language": script_language,
     "returncode": returncode,
+    "result_quality": result_quality,
+    "partial_reason": partial_reason,
+    "failure_kind": failure_kind,
+    "failure_detail": failure_detail,
     "stdout": stdout[:8000],
     "stderr": stderr[:4000],
     "flag_candidates": flag_candidates[:10],
+    "bare_token_mode": _bare_token_mode,
+    "bare_token_candidates": bare_token_candidates[:5],
+    "bracket_span_candidates": bracket_span_candidates[:10],
     "near_miss_candidates": near_miss_candidates[:5],
     "manual_checks": [
         "Review script stdout for partial flag fragments or encoded data.",

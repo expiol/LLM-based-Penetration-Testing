@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from killchain_docker.tools.core import ToolExecutionRequest
+from killchain_docker.tools.plugins._shared import SHARED_FILE_TARGETS_SNIPPET
 
 TOOL_NAME = "archive_triage"
 
@@ -80,11 +81,20 @@ def register_member(origin, member_name, sample_text=""):
     if lowered and any(token in lowered for token in ("flag", "password", "secret", "token", "api_key", "apikey")):
         interesting_members.append(f"{origin}:{normalized}")
 
-for relpath in archive_files[:max_files]:
-    path = files_root / relpath
-    if not path.is_file():
-        continue
+if not archive_files:
+    records.append({"type": "summary", "text": "Archive triage failed: missing required metadata.archive_files."})
+    records.append({"type": "output_context", "files_root": str(files_root), "inspected_archives": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
+
+targets = _resolve_file_targets(files_root, archive_files, max_files=max_files, kind="archive")
+target_paths = []
+for target in targets:
+    relpath = target["display"]
+    path = Path(target["path"])
     inspected.append(relpath)
+    target_paths.append((relpath, path))
     suffix = path.suffix.lower()
 
     try:
@@ -125,10 +135,7 @@ for relpath in archive_files[:max_files]:
         records.append({"type": "note", "text": f"Archive parse failed for {relpath}: {type(exc).__name__}: {exc}"})
 
 extracted_files = []
-for relpath in inspected:
-    path = files_root / relpath
-    if not path.is_file():
-        continue
+for relpath, path in target_paths:
     try:
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as zf:
@@ -169,6 +176,13 @@ for relpath in inspected:
 
 if extracted_files:
     records.append({"type": "note", "text": f"Extracted {len(extracted_files)} file(s) from archives to {files_root}: {extracted_files[:15]}"})
+
+if not inspected:
+    records.append({"type": "summary", "text": "Archive triage failed: no requested archive files could be read."})
+    records.append({"type": "output_context", "files_root": str(files_root), "archive_files": archive_files[:max_files], "inspected_archives": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 
 member_total = sum(len(values) for values in archive_members.values())
 records.append({
@@ -266,6 +280,8 @@ records.append({
 for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
+
+SCRIPT = SHARED_FILE_TARGETS_SNIPPET + SCRIPT
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:

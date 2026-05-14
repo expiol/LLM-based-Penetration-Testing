@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 from killchain_docker.reasoning.flag import (
     _bracket_span_candidates,
@@ -49,6 +52,18 @@ class TestPlausibleFlagFormatEcho(unittest.TestCase):
         self.assertFalse(plausible_flag("repr{byte_dump_preview}"))
         self.assertFalse(plausible_flag("ascii{garbage}"))
         self.assertFalse(plausible_flag("foo(bar{not_real}"))
+
+    def test_rejects_structured_error_bodies(self) -> None:
+        self.assertFalse(
+            plausible_flag(
+                "flag{'command': './stfu flag.stfu', 'error': \"[Errno 2] No such file or directory: 'strace'\"}"
+            )
+        )
+        self.assertFalse(
+            plausible_flag(
+                'key{"command": "./stfu", "stderr": "Could not open input file for reading"}'
+            )
+        )
 
 
 class TestValidatableFlagCandidate(unittest.TestCase):
@@ -125,6 +140,15 @@ class TestBracketSpanFallback(unittest.TestCase):
         # When canonical extraction succeeds, fallback should not fire.
         self.assertEqual(candidates, ["flag{abc123_real_one}"])
 
+    def test_structured_error_span_is_not_wrapped_as_flag(self) -> None:
+        text = (
+            "Results:\n"
+            "{'command': './stfu flag.stfu', 'error': \"[Errno 2] "
+            "No such file or directory: 'strace'\"}\n"
+        )
+        self.assertEqual(_bracket_span_candidates(text), [])
+        self.assertEqual(extract_flag_candidates(text), [])
+
 
 class TestScriptExecutionPayload(unittest.TestCase):
     def test_challenge_files_in_json_payload(self) -> None:
@@ -156,6 +180,99 @@ class TestScriptExecutionPayload(unittest.TestCase):
         argv = script_execution.build_arguments(req)
         payload = json.loads(argv[2])
         self.assertEqual(payload["challenge_files"], [])
+
+    def test_script_execution_rejects_structured_error_span_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            req = ToolExecutionRequest(
+                tool_name="script_execution",
+                parser_name="jsonl_signals",
+                timeout_s=20,
+                metadata={
+                    "files_root": tmp,
+                    "script_language": "python",
+                    "script_code": (
+                        "print('Results:')\n"
+                        "print({"
+                        "'command': './stfu flag.stfu', "
+                        "'error': \"[Errno 2] No such file or directory: 'strace'\""
+                        "})\n"
+                    ),
+                },
+            )
+            result = subprocess.run(
+                ["python3", *script_execution.build_arguments(req)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        output_context = next(record for record in records if record.get("type") == "output_context")
+        self.assertEqual(output_context["flag_candidates"], [])
+        self.assertEqual(output_context["bracket_span_candidates"], [])
+        self.assertEqual(output_context["result_quality"], "partial_no_candidate")
+        self.assertEqual(output_context["failure_kind"], "no_candidate")
+
+    def test_python_syntax_error_is_classified_without_running_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "marker.txt"
+            req = ToolExecutionRequest(
+                tool_name="script_execution",
+                parser_name="jsonl_signals",
+                timeout_s=20,
+                metadata={
+                    "files_root": tmp,
+                    "script_language": "python",
+                    "script_code": (
+                        "from pathlib import Path\n"
+                        "Path('marker.txt').write_text('ran')\n"
+                        "print('unterminated\n"
+                    ),
+                },
+            )
+            result = subprocess.run(
+                ["python3", *script_execution.build_arguments(req)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(marker.exists())
+        records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        output_context = next(record for record in records if record.get("type") == "output_context")
+        self.assertEqual(output_context["failure_kind"], "syntax_error")
+        self.assertIn("SyntaxError:", output_context["failure_detail"])
+
+    def test_python_type_error_is_classified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            req = ToolExecutionRequest(
+                tool_name="script_execution",
+                parser_name="jsonl_signals",
+                timeout_s=20,
+                metadata={
+                    "files_root": tmp,
+                    "script_language": "python",
+                    "script_code": "print(len(3))\n",
+                },
+            )
+            result = subprocess.run(
+                ["python3", *script_execution.build_arguments(req)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        output_context = next(record for record in records if record.get("type") == "output_context")
+        self.assertEqual(output_context["returncode"], 1)
+        self.assertEqual(output_context["failure_kind"], "runtime_type_error")
+        self.assertIn("TypeError:", output_context["failure_detail"])
 
 
 class TestChallengeFileSnapshotRestore(unittest.TestCase):

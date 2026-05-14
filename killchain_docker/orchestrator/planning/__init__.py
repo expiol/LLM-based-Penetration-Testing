@@ -1,8 +1,11 @@
 """High-level planner pipeline."""
 
-from killchain_docker.orchestrator.planning.bootstrap import BootstrapSeeder
-from killchain_docker.orchestrator.planning.deduper import TodoDeduper
-from killchain_docker.orchestrator.planning.normalizer import TodoNormalizer
+from killchain_docker.orchestrator.planning.pipeline import (
+    BootstrapSeeder,
+    PlanningPipeline,
+    TodoDeduper,
+    TodoNormalizer,
+)
 from killchain_docker.orchestrator.planning.planner import LLMPlanner
 from killchain_docker.orchestrator.planning.schemas import (
     PlannerAgent,
@@ -15,6 +18,7 @@ from killchain_docker.state import TodoPhase
 __all__ = [
     "BootstrapSeeder",
     "LLMPlanner",
+    "PlanningPipeline",
     "PlanStrategy",
     "PlannedTodo",
     "PlannerDecision",

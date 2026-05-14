@@ -10,8 +10,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from killchain_docker.llm import LLMClientError
 from killchain_docker.score import diagnose_logdir
-from run import _save_batch_progress
+from run import _run_single_challenge_inner, _save_batch_progress, run_single_challenge_replicas
 
 
 def _args(logdir: Path) -> argparse.Namespace:
@@ -38,7 +39,105 @@ def _args(logdir: Path) -> argparse.Namespace:
     )
 
 
+class _FakeChallenge:
+    canonical_name = "fake-interrupt"
+    name = "fake"
+    category = "crypto"
+    description = "fake"
+    flag = "flag{fake}"
+    flag_format = "flag{...}"
+    files: list[str] = []
+    server_name = ""
+    port = None
+    server_type = None
+    server_description = None
+    container = False
+    challenge_info = {"name": "fake", "category": "crypto"}
+    challenge = {"name": "fake", "category": "crypto"}
+
+    def stop_challenge_container(self) -> None:
+        return None
+
+
+class _FakeEnvironment:
+    container = None
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        return None
+
+    def setup(self) -> None:
+        return None
+
+    def teardown(self) -> None:
+        return None
+
+
 class BatchSummaryTests(unittest.TestCase):
+    def test_single_challenge_interrupt_writes_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = _args(Path(tmp))
+            args.name = None
+            logfile = Path(tmp) / "fake-interrupt.json"
+
+            with (
+                patch("run.CTFEnvironment", _FakeEnvironment),
+                patch("run.build_llm_client_from_env", side_effect=KeyboardInterrupt()),
+            ):
+                result = _run_single_challenge_inner(args, _FakeChallenge(), logfile)  # type: ignore[arg-type]
+
+            payload = json.loads(logfile.read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "interrupted")
+            self.assertTrue(result["interrupted"])
+            self.assertEqual(payload["status"], "interrupted")
+            self.assertEqual(payload["error"]["type"], "KeyboardInterrupt")
+
+    def test_single_challenge_llm_error_is_fatal_batch_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = _args(Path(tmp))
+            args.name = None
+            logfile = Path(tmp) / "fake-llm-error.json"
+
+            with (
+                patch("run.CTFEnvironment", _FakeEnvironment),
+                patch(
+                    "run.build_llm_client_from_env",
+                    side_effect=LLMClientError("preflight connection failed", transient=True),
+                ),
+            ):
+                result = _run_single_challenge_inner(args, _FakeChallenge(), logfile)  # type: ignore[arg-type]
+
+            payload = json.loads(logfile.read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "failed")
+            self.assertTrue(result["api_error"])
+            self.assertTrue(result["llm_error"])
+            self.assertEqual(payload["error"]["type"], "LLMClientError")
+            self.assertTrue(payload["llm_error"])
+
+    def test_single_replica_interrupted_result_returns_130(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = _args(Path(tmp))
+            args.run_all = False
+            args.challenge = "fake-interrupt"
+            args.replicas = 1
+
+            with (
+                patch("run.load_challenge", return_value=_FakeChallenge()),
+                patch(
+                    "run.run_single_challenge",
+                    return_value={
+                        "challenge": "fake-interrupt",
+                        "status": "interrupted",
+                        "solved": False,
+                        "error": {"type": "KeyboardInterrupt", "message": "Run interrupted"},
+                        "logfile": str(Path(tmp) / "fake-interrupt.json"),
+                    },
+                ),
+                patch("builtins.print"),
+            ):
+                rc = run_single_challenge_replicas(args)
+
+            self.assertEqual(rc, 130)
+
     def test_summary_includes_token_usage_and_paper_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = _args(Path(tmp))
@@ -175,6 +274,132 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(detail["state_metrics"]["asset_count"], 1)
             self.assertEqual(detail["state_metrics"]["execution_count"], 1)
             self.assertEqual(detail["state_metrics"]["round_count"], 1)
+
+    def test_summary_includes_failure_buckets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = _args(root)
+            log_path = root / "failed_run.json"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "solved": False,
+                        "status": "failed",
+                        "error": {
+                            "type": "CalledProcessError",
+                            "message": "docker compose up failed: bind: address already in use",
+                        },
+                        "state": {
+                            "todos": [
+                                {"status": "failed", "error": "candidate mismatch"},
+                                {"status": "failed", "error": "script.execute missing required metadata.script_code"},
+                            ],
+                            "evidence": {
+                                "e1": {"tool_name": "pcap_review", "summary": "PCAP review completed for 0 file(s): 0 URL(s)"},
+                                "e2": {"tool_name": "source_review", "summary": "Source review failed: no requested source files could be read."},
+                                "e3": {"tool_name": "script_execution", "summary": "Script execution failed (exit 2): exit code 2, 0 flag candidate(s)."},
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = {
+                "challenge": "failed-example",
+                "solved": False,
+                "status": "failed",
+                "runtime_sec": 3,
+                "logfile": str(log_path),
+            }
+
+            with patch("run._load_llm_experiment_config", return_value={"available": False}):
+                path = _save_batch_progress(args, [result], time.time() - 5, finished=True)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["failure_buckets"]["script_missing_code"], 1)
+            self.assertEqual(payload["failure_buckets"]["script_nonzero_exit"], 1)
+            self.assertEqual(payload["failure_buckets"]["tool_missing_target_files"], 1)
+            self.assertEqual(payload["failure_buckets"]["source_target_unresolved"], 1)
+            self.assertEqual(payload["failure_buckets"]["candidate_mismatch"], 1)
+            self.assertEqual(payload["failure_buckets"]["docker_start_error"], 1)
+            self.assertIn("script_missing_code", payload["details"][0]["failure_buckets"])
+
+    def test_summary_buckets_unsolved_exhausted_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = _args(root)
+            log_path = root / "completed_unsolved.json"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "solved": False,
+                        "status": "completed",
+                        "finish_reason": "completed",
+                        "state": {
+                            "todos": [{"status": "completed", "assigned_worker": "artifact-worker"}],
+                            "rounds": [{"cycle": 1}],
+                            "evidence": {},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = {
+                "challenge": "unsolved-example",
+                "solved": False,
+                "status": "completed",
+                "runtime_sec": 3,
+                "logfile": str(log_path),
+            }
+
+            with patch("run._load_llm_experiment_config", return_value={"available": False}):
+                path = _save_batch_progress(args, [result], time.time() - 5, finished=True)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["failure_buckets"]["unsolved_exhausted"], 1)
+
+    def test_summary_counts_partial_and_interrupted_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = _args(root)
+            log_path = root / "interrupted_run.json"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "solved": False,
+                        "status": "interrupted",
+                        "finish_reason": "interrupted",
+                        "state": {
+                            "status": "interrupted",
+                            "todos": [
+                                {"status": "partial", "assigned_worker": "exploit-worker"},
+                                {"status": "interrupted", "assigned_worker": "exploit-worker"},
+                            ],
+                            "rounds": [{"cycle": 1}],
+                            "evidence": {},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = {
+                "challenge": "interrupted-example",
+                "solved": False,
+                "status": "interrupted",
+                "runtime_sec": 3,
+                "logfile": str(log_path),
+            }
+
+            with patch("run._load_llm_experiment_config", return_value={"available": False}):
+                path = _save_batch_progress(args, [result], time.time() - 5, finished=True)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["interrupted_count"], 1)
+            self.assertEqual(payload["paper_metrics"]["interrupted"], 1)
+            self.assertEqual(payload["paper_metrics"]["partial_todo_count_total"], 1)
+            self.assertEqual(payload["paper_metrics"]["interrupted_todo_count_total"], 1)
+            self.assertEqual(payload["failure_buckets"]["interrupted"], 1)
+            self.assertEqual(payload["failure_buckets"]["partial_no_candidate"], 1)
 
     def test_logdir_diagnostics_bucket_failure_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

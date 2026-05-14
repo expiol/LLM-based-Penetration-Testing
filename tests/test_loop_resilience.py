@@ -86,6 +86,16 @@ class _UnknownWorkerRouter:
         )
 
 
+class _NoAssignmentRouter:
+    def route(self, state: RunState, *, worker_catalog, max_assignments: int) -> RouterDecision:
+        del state, worker_catalog, max_assignments
+        return RouterDecision(rationale="intentionally empty")
+
+    def summarize_round(self, state: RunState, *, results: list[WorkerResult]) -> RouterRoundSummary:
+        del state, results
+        return RouterRoundSummary(summary="empty")
+
+
 class _RaisingWorker(WorkerAgent):
     name = "raising-worker"
     supported_todo_kinds = ("todo",)
@@ -109,6 +119,15 @@ class _SuccessWorker(WorkerAgent):
         )
 
 
+class _InterruptWorker(WorkerAgent):
+    name = "interrupt-worker"
+    supported_todo_kinds = ("todo",)
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del task, state
+        raise KeyboardInterrupt()
+
+
 def _state() -> RunState:
     return RunState(
         objective="resilience smoke",
@@ -118,7 +137,7 @@ def _state() -> RunState:
 
 
 class OrchestratorLoopTests(unittest.TestCase):
-    def test_worker_llm_error_does_not_abort_next_cycle(self) -> None:
+    def test_worker_llm_error_aborts_run(self) -> None:
         events: list[str] = []
         planner = _ScriptedPlanner([
             PlannerDecision(
@@ -142,23 +161,26 @@ class OrchestratorLoopTests(unittest.TestCase):
                 ],
             ),
         ])
+        state = _state()
         orchestrator = Orchestrator(
-            state=_state(),
+            state=state,
             workers=[_RaisingWorker(), _SuccessWorker()],
             planner=planner,
             router=_ContextRouter(),
             emit=events.append,
         )
 
-        final_state = orchestrator.run(max_cycles=4)
+        with self.assertRaises(LLMClientError):
+            orchestrator.run(max_cycles=4)
 
-        failing = next(todo for todo in final_state.todos if todo.dedupe_key == "raise-once")
-        passing = next(todo for todo in final_state.todos if todo.dedupe_key == "succeed-once")
+        failing = next(todo for todo in state.todos if todo.dedupe_key == "raise-once")
         self.assertEqual(failing.status, TodoStatus.FAILED)
-        self.assertEqual(passing.status, TodoStatus.COMPLETED)
-        self.assertIn(final_state.status, {RunStatus.COMPLETED, RunStatus.FAILED})
-        self.assertEqual(len(final_state.rounds), 2)
-        self.assertTrue(any("FAILED" in event for event in events))
+        self.assertEqual(state.status, RunStatus.FAILED)
+        self.assertEqual(state.stop_reason, "llm_error")
+        self.assertFalse(state.has_open_todos())
+        self.assertFalse(any(todo.dedupe_key == "succeed-once" for todo in state.todos))
+        self.assertEqual(len(state.rounds), 0)
+        self.assertTrue(any("LLM error" in event for event in events))
 
     def test_blocked_assignment_makes_run_failed_not_completed(self) -> None:
         planner = _ScriptedPlanner([
@@ -180,6 +202,55 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertEqual(final_state.status, RunStatus.FAILED)
         self.assertEqual(final_state.todos[0].status, TodoStatus.BLOCKED)
         self.assertIn("Assignment blocked", final_state.rounds[0].summary.summary)
+
+    def test_keyboard_interrupt_marks_running_todo_interrupted(self) -> None:
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Interrupt once",
+                        context={"worker_name": "interrupt-worker"},
+                        dedupe_key="interrupt-once",
+                    )
+                ],
+            )
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_InterruptWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+
+        final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(final_state.status, RunStatus.INTERRUPTED)
+        self.assertEqual(final_state.todos[0].status, TodoStatus.INTERRUPTED)
+        self.assertFalse(final_state.has_open_todos())
+
+    def test_max_cycles_exhaustion_blocks_open_todos(self) -> None:
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[PlannedTodo(goal="Leave this pending", dedupe_key="pending-on-exhaustion")],
+            )
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_SuccessWorker()],
+            planner=planner,
+            router=_NoAssignmentRouter(),  # type: ignore[arg-type]
+            emit=lambda _: None,
+        )
+
+        final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(final_state.status, RunStatus.FAILED)
+        self.assertEqual(final_state.stop_reason, "max_cycles_exhausted")
+        self.assertFalse(final_state.has_open_todos())
+        self.assertEqual(final_state.todos[0].status, TodoStatus.BLOCKED)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from killchain_docker.llm import LLMClient, LLMClientError
+from killchain_docker.orchestrator.policy import CandidatePolicy
 from killchain_docker.state import (
     RouterDecision,
     RouterRoundSummary,
@@ -38,6 +39,9 @@ class RouterAgent:
         ready = self._ready_todos_for_focus_phase(state, max_assignments=max_assignments)
         if not ready:
             return RouterDecision(rationale="No ready todos.")
+        deterministic = self._deterministic_decision(state, ready, worker_catalog, max_assignments)
+        if deterministic.assignments:
+            return deterministic
         focus_phase = ready[0].phase
         snapshot = {
             "objective": state.objective,
@@ -65,7 +69,7 @@ class RouterAgent:
             schema=RouterDecision,
             temperature=0.1,
         )
-        return self._validated_decision(decision, ready, worker_catalog, max_assignments)
+        return self._validated_decision(decision, state, ready, worker_catalog, max_assignments)
 
     def summarize_round(
         self,
@@ -121,37 +125,39 @@ class RouterAgent:
     def _validated_decision(
         self,
         decision: RouterDecision,
+        state: RunState,
         ready: list[TodoItem],
         worker_catalog: list[dict[str, object]],
         max_assignments: int,
     ) -> RouterDecision:
-        ready_ids = {todo.todo_id for todo in ready}
+        ready_by_id = {todo.todo_id: todo for todo in ready}
         worker_names = {str(worker.get("name") or "") for worker in worker_catalog}
         assignments: list[WorkerAssignment] = []
         seen: set[str] = set()
         for assignment in decision.assignments:
-            if assignment.todo_id not in ready_ids or assignment.todo_id in seen:
+            if assignment.todo_id not in ready_by_id or assignment.todo_id in seen:
                 continue
-            if assignment.worker_name not in worker_names:
+            todo = ready_by_id[assignment.todo_id]
+            policy_worker = self._policy_worker_name(todo, state, worker_names)
+            worker_name = policy_worker or assignment.worker_name
+            if worker_name not in worker_names:
                 continue
-            assignments.append(assignment)
+            rationale = assignment.rationale
+            if policy_worker and assignment.worker_name != policy_worker:
+                rationale = "Deterministic policy route enforced over LLM route."
+            assignments.append(
+                WorkerAssignment(
+                    todo_id=assignment.todo_id,
+                    worker_name=worker_name,
+                    rationale=rationale,
+                )
+            )
             seen.add(assignment.todo_id)
             if len(assignments) >= max(1, max_assignments):
                 break
         if assignments:
             return RouterDecision(assignments=assignments, rationale=decision.rationale)
-        fallback = ready[0]
-        worker_name = self._fallback_worker_name(fallback, worker_catalog)
-        return RouterDecision(
-            assignments=[
-                WorkerAssignment(
-                    todo_id=fallback.todo_id,
-                    worker_name=worker_name,
-                    rationale="Fallback assignment after router returned no valid assignments.",
-                )
-            ],
-            rationale=decision.rationale or "Fallback assignment used.",
-        )
+        raise LLMClientError("Router LLM returned no valid policy-allowed assignments.")
 
     @staticmethod
     def _ready_todos_for_focus_phase(state: RunState, *, max_assignments: int) -> list[TodoItem]:
@@ -161,25 +167,57 @@ class RouterAgent:
         focus_phase = min((todo.phase for todo in ready), key=todo_phase_rank)
         return [todo for todo in ready if todo.phase == focus_phase][: max(1, max_assignments)]
 
+    @classmethod
+    def _deterministic_decision(
+        cls,
+        state: RunState,
+        ready: list[TodoItem],
+        worker_catalog: list[dict[str, object]],
+        max_assignments: int,
+    ) -> RouterDecision:
+        names = {str(worker.get("name") or "") for worker in worker_catalog}
+        assignments: list[WorkerAssignment] = []
+        for todo in ready[: max(1, max_assignments)]:
+            worker_name = cls._policy_worker_name(todo, state, names)
+            if not worker_name:
+                return RouterDecision(rationale="No deterministic policy route.")
+            assignments.append(
+                WorkerAssignment(
+                    todo_id=todo.todo_id,
+                    worker_name=worker_name,
+                    rationale="Deterministic policy route.",
+                )
+            )
+        return RouterDecision(
+            assignments=assignments,
+            rationale="Deterministic policy route.",
+        )
+
     @staticmethod
-    def _fallback_worker_name(todo: TodoItem, worker_catalog: list[dict[str, object]]) -> str:
+    def _policy_worker_name(todo: TodoItem, state: RunState, names: set[str]) -> str:
         goal = todo.goal.lower()
         context = todo.context
-        preferred = "artifact-worker"
-        if todo.phase == TodoPhase.FLAG_VALIDATION or _has_flag_candidate_context(context):
+        candidate = CandidatePolicy.first_candidate_from_context(state, context, todo.goal)
+        preferred = ""
+        if todo.phase == TodoPhase.FLAG_VALIDATION or candidate:
             preferred = "flag-worker"
-        elif "scope" in context or "recon" in goal:
+        elif context.get("scope") or (("recon" in goal or "scope" in goal) and not _has_file_context(context)):
             preferred = "recon-worker"
+        elif (
+            any(context.get(key) for key in ("base_url", "paths", "page_url", "forms"))
+            or "http" in goal
+            or "web" in goal
+        ):
+            preferred = "web-worker"
+        elif todo.phase == TodoPhase.EXPLOIT and context.get("script_code"):
+            preferred = "exploit-worker"
+        elif todo.phase == TodoPhase.EXPLOIT:
+            preferred = "exploit-worker"
         elif todo.phase == TodoPhase.ANALYSIS or _has_file_context(context):
             preferred = "artifact-worker"
-        elif "base_url" in context or "path" in goal or "web" in goal or "http" in goal:
-            preferred = "web-worker"
-        elif "exploit" in goal or "vuln" in goal or "credential" in goal:
-            preferred = "exploit-worker"
-        names = {str(worker.get("name") or "") for worker in worker_catalog}
         if preferred in names:
             return preferred
-        return next(iter(names), "")
+        return ""
 
     @staticmethod
     def _serialize_todo(todo: TodoItem) -> dict[str, object]:
@@ -202,20 +240,6 @@ class RouterAgent:
             text = str(item)
             trimmed[key] = text[:1000] if len(text) > 1000 else item
         return trimmed
-
-
-def _has_flag_candidate_context(context: dict[str, object]) -> bool:
-    return any(
-        context.get(key)
-        for key in (
-            "candidate_flag",
-            "candidate_flags",
-            "flag_candidate",
-            "flag_candidates",
-            "flag_candidate_id",
-            "flag_candidate_ids",
-        )
-    )
 
 
 def _has_file_context(context: dict[str, object]) -> bool:

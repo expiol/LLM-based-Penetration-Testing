@@ -185,6 +185,7 @@ def build_summary(state: RunState, token_ledger: TokenLedger | None = None) -> d
     summary: dict[str, Any] = {
         "run_id": state.run_id,
         "status": state.status,
+        "stop_reason": state.stop_reason,
         "solved": state.solved,
         "validated_flag": state.validated_flag,
         "objective": state.objective,

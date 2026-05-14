@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 
 from killchain_docker.tools.core import ToolExecutionRequest
-from killchain_docker.tools.plugins._shared import SHARED_FLAG_DETECTION_SNIPPET
+from killchain_docker.tools.plugins._shared import (
+    SHARED_FILE_TARGETS_SNIPPET,
+    SHARED_FLAG_DETECTION_SNIPPET,
+)
 
 
 TOOL_NAME = "computation_analysis"
@@ -219,6 +222,13 @@ def attempt_linear_bitstring_inverse(func, target_bits):
     return None
 
 
+if not source_files:
+    records.append({"type": "summary", "text": "Computation analysis failed: missing required metadata.source_files."})
+    records.append({"type": "output_context", "files_root": str(files_root), "inspected_sources": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
+
 if not files_root.exists():
     records.append({"type": "summary", "text": f"Computation analysis skipped: {files_root} does not exist."})
     records.append({"type": "note", "text": f"Challenge files root not found: {files_root}"})
@@ -227,10 +237,10 @@ else:
     if flag_format:
         notes_list.append(f"Expected flag format hint: {flag_format}")
 
-    for relpath in source_files[:max_files]:
-        path = files_root / relpath
-        if not path.is_file():
-            continue
+    targets = _resolve_file_targets(files_root, source_files, max_files=max_files, kind="source")
+    for target in targets:
+        relpath = target["display"]
+        path = Path(target["path"])
         if path.suffix.lower() != ".py":
             continue
 
@@ -332,6 +342,12 @@ else:
                 break
 
 records.extend({"type": "note", "text": note} for note in notes_list)
+if files_root.exists() and not inspected:
+    records.append({"type": "summary", "text": "Computation analysis failed: no requested source files could be read."})
+    records.append({"type": "output_context", "files_root": str(files_root), "source_files": source_files[:max_files], "inspected_sources": [], "flag_candidates": []})
+    for item in records:
+        print(json.dumps(item, ensure_ascii=True))
+    sys.exit(2)
 records.append({
     "type": "summary",
     "text": (
@@ -403,7 +419,7 @@ for item in records:
     print(json.dumps(item, ensure_ascii=True))
 """
 
-SCRIPT = _SCRIPT_HEADER + SHARED_FLAG_DETECTION_SNIPPET + _SCRIPT_BODY
+SCRIPT = _SCRIPT_HEADER + SHARED_FLAG_DETECTION_SNIPPET + SHARED_FILE_TARGETS_SNIPPET + _SCRIPT_BODY
 
 
 def build_arguments(request: ToolExecutionRequest) -> list[str]:
