@@ -188,7 +188,7 @@ class TodoPolicy:
 
         if cls._is_compound_disassembly_and_exploit(todo.goal):
             todo.phase = TodoPhase.ANALYSIS
-            context["family"] = "binary-disassembly"
+            context["family"] = "binary-analysis"
             context.setdefault("capability_hint", "binary.disassemble")
             todo.goal = (
                 "Extract precise binary algorithm evidence needed for the next "
@@ -251,16 +251,12 @@ class TodoPolicy:
     @staticmethod
     def _derive_family_from_goal(goal: str) -> str:
         text = goal.lower()
-        if "lfsr" in text and any(token in text for token in ("decrypt", "keystream", "xor")):
-            return "lfsr-decrypt"
-        if "lfsr" in text:
-            return "lfsr-analysis"
         if "disassembl" in text or "objdump" in text or "machine code" in text:
-            return "binary-disassembly"
+            return "binary-analysis"
         if "run" in text and "binary" in text:
             return "binary-run"
-        if "decrypt" in text or "keystream" in text or "known-plaintext" in text:
-            return "decrypt-keystream"
+        if any(token in text for token in ("decrypt", "keystream", "known-plaintext", "lfsr", "cipher", "xor")):
+            return "crypto-decrypt"
         if "flag" in text and any(token in text for token in ("recover", "validate", "candidate")):
             return "flag-recovery"
         if any(token in text for token in ("inventory", "classify", "triage")):
@@ -303,19 +299,32 @@ class TodoPolicy:
 class ProgressPolicy:
     """Detect stalled todo families and suppress repeated failed strategies."""
 
-    FAILURE_COOLDOWN_THRESHOLD = 4
+    FAILURE_COOLDOWN_THRESHOLD = 3
+    MAX_FAMILY_ATTEMPTS = 6
 
     @classmethod
     def allows(cls, todo: "PlannedTodo", state: "RunState") -> tuple[bool, str]:
         family = str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context))
         if family in {"artifact-inventory", "flag-recovery", "recon"}:
             return True, ""
+        total = cls._total_family_count(state, family)
+        if total >= cls.MAX_FAMILY_ATTEMPTS:
+            return False, f"family {family!r} hit hard cap ({total} total attempts)"
         failed = cls._failed_or_partial_count(state, family)
         if failed < cls.FAILURE_COOLDOWN_THRESHOLD:
             return True, ""
         if cls._has_new_novelty(todo, state, family):
             return True, ""
         return False, f"family {family!r} is in cooldown after {failed} failed/partial attempt(s)"
+
+    @classmethod
+    def _total_family_count(cls, state: "RunState", family: str) -> int:
+        count = 0
+        for todo in state.todos:
+            current = str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context))
+            if current == family:
+                count += 1
+        return count
 
     @classmethod
     def stagnation_snapshot(cls, state: "RunState") -> dict[str, Any]:
@@ -393,7 +402,7 @@ class ProgressPolicy:
             if not prior_tokens:
                 continue
             overlap = len(new_tokens & prior_tokens) / max(1, len(new_tokens | prior_tokens))
-            if overlap >= 0.7:
+            if overlap >= 0.5:
                 return False
         return True
 

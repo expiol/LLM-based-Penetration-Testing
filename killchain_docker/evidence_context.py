@@ -83,15 +83,6 @@ class EvidenceContextBuilder:
         return [evidence for _score, _index, evidence in sorted(selected, key=lambda item: item[1])]
 
     def _score_record(self, tool_name: str, summary: str, ctx: dict[str, object]) -> float:
-        text = "\n".join(
-            value for value in (
-                summary,
-                _string(ctx.get("stdout")),
-                _string(ctx.get("stderr")),
-                _string(ctx.get("failure_detail")),
-            )
-            if value
-        ).lower()
         score = 0.0
         if tool_name == "script_execution":
             score += 2.0
@@ -99,12 +90,16 @@ class EvidenceContextBuilder:
                 score += 3.0
             if ctx.get("failure_kind") not in (None, "", "none"):
                 score += 4.0
-            if any(token in text for token in ("raw hex", "first 16", "first 32", "first 64", "xxd", "hexdump")):
+            stdout = _string(ctx.get("stdout"))
+            # Structural signals: hex data present
+            if any(token in stdout.lower() for token in ("0x", "\\x", "hexdump", "xxd")) or _has_hex_block(stdout):
                 score += 6.0
-            if any(token in text for token in ("uint32", "seed", "tap", "skip", "magic", "stfu")):
-                score += 6.0
-            if any(token in text for token in ("xor", "shr", "shl", "sar", "lfsr", "objdump", "disassembly")):
+            # Structural signals: disassembly or binary analysis present
+            if any(token in stdout.lower() for token in ("disassembly", "objdump", "instruction")):
                 score += 7.0
+            # Structural signals: numeric/algorithmic data present
+            if any(token in stdout.lower() for token in ("uint", "int32", "byte", "bit")):
+                score += 5.0
         elif tool_name == "binary_disassembly":
             score += 9.0
             disassembly = ctx.get("disassembly")
@@ -240,11 +235,13 @@ class EvidenceContextBuilder:
     def _key_lines(self, text: str) -> list[str]:
         if not text:
             return []
+        # Generic pattern categories: hex data, errors, numeric/crypto terms
         needles = (
-            "hex", "xxd", "byte", "uint", "magic", "stfu", "size",
-            "seed", "tap", "skip", "cipher", "plain", "lfsr",
-            "xor", "shr", "shl", "sar", "rol", "ror", "error",
-            "exception", "warning", "too many", "timeout",
+            "hex", "xxd", "byte", "uint", "int32", "0x",
+            "cipher", "plain", "encrypt", "decrypt", "key",
+            "xor", "shr", "shl", "sar", "rol", "ror",
+            "error", "exception", "warning", "too many", "timeout",
+            "flag", "secret", "token",
         )
         lines: list[str] = []
         for raw_line in text.splitlines():
@@ -304,3 +301,13 @@ def _trim_list(value: object, *, limit: int, width: int) -> list[object]:
         else:
             out.append(item)
     return out
+
+
+import re as _re
+
+_HEX_BLOCK_RE = _re.compile(r"(?:[0-9a-fA-F]{2}[\s:]){4,}")
+
+
+def _has_hex_block(text: str) -> bool:
+    """Return True if text contains a hex dump-like block."""
+    return bool(_HEX_BLOCK_RE.search(text[:2000]))

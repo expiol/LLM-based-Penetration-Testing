@@ -7,7 +7,7 @@ import json
 from killchain_docker.evidence_context import EvidenceContextBuilder
 from killchain_docker.knowledge import KnowledgeAugmenter
 from killchain_docker.llm import LLMClient, LLMClientError
-from killchain_docker.orchestrator.policy import ProgressPolicy, RagPolicy
+from killchain_docker.orchestrator.policy import ProgressPolicy, RagPolicy, TodoPolicy
 from killchain_docker.orchestrator.planning.schemas import PlannerDecision
 from killchain_docker.prompts import get_planner_system_prompt, get_prompts
 from killchain_docker.state import RunState, TodoStatus
@@ -193,7 +193,7 @@ class PlanStrategy:
         for todo in state.todos:
             status = str(todo.status)
             todo_status_counts[status] = todo_status_counts.get(status, 0) + 1
-            family = self._todo_family(todo.goal)
+            family = TodoPolicy.family_for(todo.goal, todo.context)
             family_counts[family] = family_counts.get(family, 0) + 1
             family_examples.setdefault(family, [])
             if len(family_examples[family]) < 3:
@@ -209,10 +209,14 @@ class PlanStrategy:
             if count > 1 and family != "other"
         ][:6]
 
-        return {
+        policy_snapshot = ProgressPolicy.stagnation_snapshot(state)
+        cooldown_families = policy_snapshot.get("cooldown_families", [])
+
+        signals: dict[str, object] = {
             "flag_candidates_seen": len(state.flag_candidates),
             "rounds_without_flag_candidate": len(state.rounds) if not state.flag_candidates else 0,
-            "progress_policy": ProgressPolicy.stagnation_snapshot(state),
+            "progress_policy": policy_snapshot,
+            "family_attempt_counts": dict(family_counts),
             "recent_script_no_candidate_count": len(recent_no_candidate_scripts),
             "recent_script_no_candidate_results": recent_no_candidate_scripts[-6:],
             "todo_status_counts": todo_status_counts,
@@ -252,19 +256,14 @@ class PlanStrategy:
             ),
         }
 
-    @staticmethod
-    def _todo_family(goal: str) -> str:
-        text = goal.lower()
-        if "lfsr" in text:
-            return "lfsr-analysis"
-        if "disassembl" in text or "objdump" in text or "machine code" in text:
-            return "binary-disassembly"
-        if "decrypt" in text or "keystream" in text or "known-plaintext" in text:
-            return "decrypt-keystream"
-        if "flag" in text and any(token in text for token in ("recover", "validate", "candidate")):
-            return "flag-recovery"
-        if "run" in text and "binary" in text:
-            return "binary-run"
-        if "inventory" in text or "classify" in text:
-            return "artifact-inventory"
-        return "other"
+        if cooldown_families:
+            top = cooldown_families[0]
+            count = family_counts.get(top, 0)
+            signals["escalation_required"] = (
+                f"Family {top!r} is in cooldown after {count} attempts. "
+                "You MUST propose a fundamentally different approach "
+                "(different algorithm, different tool, different attack vector). "
+                "Do NOT rephrase the same strategy."
+            )
+
+        return signals

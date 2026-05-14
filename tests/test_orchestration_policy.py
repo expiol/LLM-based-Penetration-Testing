@@ -74,7 +74,7 @@ class TodoProgressPolicyTests(unittest.TestCase):
         TodoPolicy.normalize(todo, state)
 
         self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
-        self.assertEqual(todo.context["family"], "binary-disassembly")
+        self.assertEqual(todo.context["family"], "binary-analysis")
         self.assertEqual(todo.context["capability_hint"], "binary.disassemble")
 
     def test_failed_family_enters_cooldown_without_novelty(self) -> None:
