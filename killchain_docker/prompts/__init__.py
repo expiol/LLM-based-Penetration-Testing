@@ -1,26 +1,23 @@
-"""Prompt registry exposed as a single import surface.
+"""Prompt registry exposed as a single import surface."""
 
-Each CTF category (web, crypto, rev, pwn, forensics, misc) lives in its own
-module under :mod:`prompts.categories`. Planner and category bundles are split
-into separate modules so each piece can be edited independently.
+from __future__ import annotations
 
-Public API:
+# Importing categories registers each bundle into the global registry.
+from killchain_docker.prompts import categories  # noqa: F401
+from killchain_docker.prompts.planner import build_planner_system_prompt
+from killchain_docker.prompts.types import CategoryPrompts, lookup
 
-- :func:`get_prompts` — return the :class:`CategoryPrompts` bundle for a category
-- :func:`get_objective_hint` — render a category-specific objective sentence
-- :func:`get_planner_system_prompt` — build the planner system prompt
-"""
 
-from killchain_docker.prompts.api import (
-    get_objective_hint,
-    get_planner_system_prompt,
-    get_prompts,
-)
-from killchain_docker.prompts.types import CategoryPrompts
+def get_prompts(category: str | None) -> CategoryPrompts:
+    return lookup(category)
+
+
+def get_planner_system_prompt(category: str | None) -> str:
+    return build_planner_system_prompt(category)
+
 
 __all__ = [
     "CategoryPrompts",
-    "get_objective_hint",
     "get_planner_system_prompt",
     "get_prompts",
 ]

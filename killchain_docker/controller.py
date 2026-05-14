@@ -71,7 +71,14 @@ class RunPersister:
         token_ledger: TokenLedger | None,
     ) -> None:
         _write_json(self.state_path, state.model_dump(mode="json"))
-        _write_json(self.summary_path, build_summary(state, token_ledger))
+        summary = state.summary()
+        summary["objective"] = state.objective
+        summary["authorized_scope"] = state.authorized_scope
+        summary["worker_notes"] = len(state.notes)
+        summary["orchestration_notes"] = len(state.orchestration_notes)
+        if token_ledger is not None:
+            summary["token_usage"] = token_ledger.to_dict()
+        _write_json(self.summary_path, summary)
         _write_json(
             self.evidence_path,
             {
@@ -177,40 +184,6 @@ def build_runtime(
         checkpoint_callback=checkpoint_callback,
     )
     return state, orchestrator, llm_client
-
-
-def build_summary(state: RunState, token_ledger: TokenLedger | None = None) -> dict[str, Any]:
-    """Create a compact JSON summary for one run."""
-
-    summary: dict[str, Any] = {
-        "run_id": state.run_id,
-        "status": state.status,
-        "stop_reason": state.stop_reason,
-        "solved": state.solved,
-        "validated_flag": state.validated_flag,
-        "objective": state.objective,
-        "authorized_scope": state.authorized_scope,
-        "todos": len(state.todos),
-        "rounds": len(state.rounds),
-        "assets": len(state.assets),
-        "findings": len(state.findings),
-        "credentials": len(state.credentials),
-        "artifacts": len(state.artifacts),
-        "endpoints": len(state.endpoints),
-        "routes": len(state.routes),
-        "flag_candidates": len(state.flag_candidates),
-        "hypotheses": len(state.hypotheses),
-        "vulnerabilities": len(state.vulnerabilities),
-        "exploit_attempts": len(state.exploit_attempts),
-        "sessions": len(state.sessions),
-        "evidence": len(state.evidence),
-        "executions": len(state.execution_log),
-        "worker_notes": len(state.notes),
-        "orchestration_notes": len(state.orchestration_notes),
-    }
-    if token_ledger is not None:
-        summary["token_usage"] = token_ledger.to_dict()
-    return summary
 
 
 def run_assessment(

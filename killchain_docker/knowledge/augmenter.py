@@ -54,54 +54,6 @@ _STATE_RAG_KEY = "rag"
 
 
 @dataclass(frozen=True)
-class RagHit:
-    """Typed writeup hit used by planner prompt injection."""
-
-    challenge_id: str
-    name: str
-    category: str
-    year: str
-    event: str
-    description: str
-    files: list[str]
-    solution_sketch: str
-    score: float
-
-    @classmethod
-    def from_retrieval(cls, hit: RetrievalHit) -> "RagHit":
-        return cls(
-            challenge_id=hit.challenge_id,
-            name=hit.name,
-            category=hit.category,
-            year=hit.year,
-            event=hit.event,
-            description=hit.description,
-            files=list(hit.files),
-            solution_sketch=hit.solution_sketch,
-            score=float(hit.score),
-        )
-
-    def to_prompt_dict(
-        self,
-        *,
-        max_solution_chars: int,
-        max_description_chars: int,
-        max_files: int,
-    ) -> dict[str, Any]:
-        return {
-            "challenge_id": self.challenge_id,
-            "name": self.name,
-            "category": self.category,
-            "year": self.year,
-            "event": self.event,
-            "description": self.description[:max_description_chars],
-            "files": self.files[:max_files],
-            "solution_sketch": self.solution_sketch[:max_solution_chars],
-            "score": round(float(self.score), 4),
-        }
-
-
-@dataclass(frozen=True)
 class RagContext:
     """One retrieval snapshot for the current run."""
 
@@ -109,7 +61,7 @@ class RagContext:
     top_score: float = 0.0
     top_challenge_id: str | None = None
     exact_self_hit: bool = False
-    hits: list[RagHit] | None = None
+    hits: list[RetrievalHit] | None = None
 
     @property
     def high_confidence(self) -> bool:
@@ -125,11 +77,7 @@ class RagContext:
         max_files: int,
     ) -> list[dict[str, Any]]:
         return [
-            hit.to_prompt_dict(
-                max_solution_chars=max_solution_chars,
-                max_description_chars=max_description_chars,
-                max_files=max_files,
-            )
+            hit.to_prompt_dict(max_solution_chars, max_description_chars, max_files)
             for hit in list(self.hits or [])
         ]
 
@@ -216,7 +164,7 @@ class KnowledgeAugmenter:
         except Exception:
             return RagContext(enabled=True, hits=[])
 
-        hits = [RagHit.from_retrieval(hit) for hit in raw_hits]
+        hits = raw_hits
         self._cache_run_result(state, raw_hits)
         canonical_id = str(
             (state.metadata.get("challenge", {}) or {}).get("canonical_name") or ""

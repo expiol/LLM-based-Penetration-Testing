@@ -19,10 +19,10 @@ from killchain_docker.state.constants import (  # noqa: F401
     CSS_BODY_RE,
     FLAG_PATTERN,
     NEAR_MISS_FLAG_PATTERN,
-    SOURCE_EXTENSIONS,
     near_miss_flag,
     plausible_flag,
 )
+from killchain_docker.state.file_classification import SOURCE_EXTS as SOURCE_EXTENSIONS  # noqa: F401
 
 #: The shared flag-detection block embedded verbatim in plugin SCRIPT strings.
 #: Plugins that need flag/near-miss detection inside their subprocess script

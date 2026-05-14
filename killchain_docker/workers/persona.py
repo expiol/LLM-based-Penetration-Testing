@@ -17,28 +17,10 @@ from killchain_docker.state import (
     WorkerResult,
 )
 from killchain_docker.tools import ToolCapability, ToolExecutionError
+from killchain_docker.tools.core import _strings
 from killchain_docker.workers.base import WorkerAgent
 from killchain_docker.workers.specs import WorkerBuildContext, WorkerSpec
 from killchain_docker.workers.tool_metadata import normalize_tool_metadata
-
-
-def _list(value: object) -> list[object]:
-    if value in (None, "", [], {}, ()):
-        return []
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
-        return list(value)
-    return [value]
-
-
-def _strings(value: object) -> list[str]:
-    result: list[str] = []
-    for item in _list(value):
-        text = str(item).strip()
-        if text and text not in result:
-            result.append(text)
-    return result
 
 
 def _tool_success(capability: ToolCapability, bundle, output_context: dict[str, object]) -> bool:
@@ -396,16 +378,6 @@ class FlagWorker(PersonaWorker):
         return super().run(task, state)
 
 
-def _standard_factory(worker_cls: type[PersonaWorker]):
-    def factory(context: WorkerBuildContext) -> PersonaWorker:
-        return worker_cls(
-            llm_client=context.llm_client,
-            execution_plane=context.execution_plane,
-        )
-
-    return factory
-
-
 def _flag_factory(context: WorkerBuildContext) -> FlagWorker:
     return FlagWorker(
         llm_client=context.llm_client,
@@ -414,18 +386,10 @@ def _flag_factory(context: WorkerBuildContext) -> FlagWorker:
     )
 
 
-PERSONA_WORKERS: tuple[type[PersonaWorker], ...] = (
-    ReconWorker,
-    ArtifactWorker,
-    WebWorker,
-    ExploitWorker,
-    FlagWorker,
-)
-
 WORKER_SPECS: tuple[WorkerSpec, ...] = (
-    WorkerSpec("ReconWorker", "persona", _standard_factory(ReconWorker), ReconWorker.routing_summary),
-    WorkerSpec("ArtifactWorker", "persona", _standard_factory(ArtifactWorker), ArtifactWorker.routing_summary),
-    WorkerSpec("WebWorker", "persona", _standard_factory(WebWorker), WebWorker.routing_summary),
-    WorkerSpec("ExploitWorker", "persona", _standard_factory(ExploitWorker), ExploitWorker.routing_summary),
+    WorkerSpec("ReconWorker", "persona", lambda ctx: ReconWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), ReconWorker.routing_summary),
+    WorkerSpec("ArtifactWorker", "persona", lambda ctx: ArtifactWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), ArtifactWorker.routing_summary),
+    WorkerSpec("WebWorker", "persona", lambda ctx: WebWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), WebWorker.routing_summary),
+    WorkerSpec("ExploitWorker", "persona", lambda ctx: ExploitWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), ExploitWorker.routing_summary),
     WorkerSpec("FlagWorker", "persona", _flag_factory, FlagWorker.routing_summary),
 )

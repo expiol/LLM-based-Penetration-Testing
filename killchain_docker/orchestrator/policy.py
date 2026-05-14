@@ -17,6 +17,7 @@ from killchain_docker.state import FlagCandidate, TodoItem, TodoPhase, TodoStatu
 from killchain_docker.state.constants import (
     FLAG_BARE_TOKEN_SHAPE,
     FLAG_PREFIX_SHAPE,
+    normalize_tokens,
     validatable_flag_candidate,
 )
 
@@ -28,22 +29,6 @@ if TYPE_CHECKING:  # pragma: no cover
 DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
 
 
-_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
-_STOPWORDS = frozenset({
-    "a", "an", "the", "and", "or", "of", "in", "on", "to", "for", "with",
-    "from", "by", "into", "over", "under", "is", "are", "was", "were", "be",
-    "as", "at", "this", "that", "these", "those", "it", "its", "we", "you",
-    "they", "any", "all", "each", "some", "use", "using", "via",
-})
-
-
-def _normalize_tokens(text: str) -> set[str]:
-    """Return a set of meaningful tokens (lower-case, deduped, stop-filtered)."""
-
-    if not text:
-        return set()
-    tokens = {tok for tok in _TOKEN_SPLIT_RE.split(text.lower()) if tok and len(tok) > 2}
-    return tokens - _STOPWORDS
 _ESCAPED_BYTE_RE = re.compile(r"\\x[0-9a-fA-F]{2}|\\[0abfnrtv]")
 _PREFIX_FROM_FORMAT_RE = re.compile(r"^([A-Za-z0-9_]+)(?:\\?\{|\{)")
 
@@ -307,10 +292,9 @@ class ProgressPolicy:
         family = str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context))
         if family in {"artifact-inventory", "flag-recovery", "recon"}:
             return True, ""
-        total = cls._total_family_count(state, family)
+        total, failed = cls._family_counts(state, family)
         if total >= cls.MAX_FAMILY_ATTEMPTS:
             return False, f"family {family!r} hit hard cap ({total} total attempts)"
-        failed = cls._failed_or_partial_count(state, family)
         if failed < cls.FAILURE_COOLDOWN_THRESHOLD:
             return True, ""
         if cls._has_new_novelty(todo, state, family):
@@ -318,13 +302,16 @@ class ProgressPolicy:
         return False, f"family {family!r} is in cooldown after {failed} failed/partial attempt(s)"
 
     @classmethod
-    def _total_family_count(cls, state: "RunState", family: str) -> int:
-        count = 0
+    def _family_counts(cls, state: "RunState", family: str) -> tuple[int, int]:
+        total = 0
+        failed = 0
         for todo in state.todos:
             current = str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context))
             if current == family:
-                count += 1
-        return count
+                total += 1
+                if todo.status in {TodoStatus.FAILED, TodoStatus.PARTIAL, TodoStatus.BLOCKED}:
+                    failed += 1
+        return total, failed
 
     @classmethod
     def stagnation_snapshot(cls, state: "RunState") -> dict[str, Any]:
@@ -344,17 +331,6 @@ class ProgressPolicy:
                 if count >= cls.FAILURE_COOLDOWN_THRESHOLD
             ),
         }
-
-    @classmethod
-    def _failed_or_partial_count(cls, state: "RunState", family: str) -> int:
-        count = 0
-        for todo in state.todos:
-            current = str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context))
-            if current != family:
-                continue
-            if todo.status in {TodoStatus.FAILED, TodoStatus.PARTIAL, TodoStatus.BLOCKED}:
-                count += 1
-        return count
 
     @staticmethod
     def _has_new_novelty(todo: "PlannedTodo", state: "RunState", family: str) -> bool:
@@ -391,14 +367,14 @@ class ProgressPolicy:
         # (low Jaccard token overlap), treat it as a fresh approach.  This
         # keeps the cooldown gate from stonewalling planners that rephrase
         # rather than tag novelty explicitly.
-        new_tokens = _normalize_tokens(todo.goal)
+        new_tokens = normalize_tokens(todo.goal)
         if not new_tokens:
             return False
         for item in state.todos:
             current = str(item.context.get("family") or TodoPolicy.family_for(item.goal, item.context))
             if current != family:
                 continue
-            prior_tokens = _normalize_tokens(item.goal)
+            prior_tokens = normalize_tokens(item.goal)
             if not prior_tokens:
                 continue
             overlap = len(new_tokens & prior_tokens) / max(1, len(new_tokens | prior_tokens))

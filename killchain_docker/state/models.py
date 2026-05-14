@@ -15,44 +15,48 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _make_id(prefix: str) -> str:
+    return f"{prefix}-{uuid4().hex[:10]}"
+
+
 def _run_id() -> str:
-    return f"run-{uuid4().hex[:10]}"
+    return _make_id("run")
 
 
 def _evidence_id() -> str:
-    return f"evidence-{uuid4().hex[:10]}"
+    return _make_id("evidence")
 
 
 def _artifact_id() -> str:
-    return f"artifact-{uuid4().hex[:10]}"
+    return _make_id("artifact")
 
 
 def _endpoint_id() -> str:
-    return f"endpoint-{uuid4().hex[:10]}"
+    return _make_id("endpoint")
 
 
 def _route_id() -> str:
-    return f"route-{uuid4().hex[:10]}"
+    return _make_id("route")
 
 
 def _flag_candidate_id() -> str:
-    return f"flag-candidate-{uuid4().hex[:10]}"
+    return _make_id("flag-candidate")
 
 
 def _hypothesis_id() -> str:
-    return f"hypothesis-{uuid4().hex[:10]}"
+    return _make_id("hypothesis")
 
 
 def _vulnerability_id() -> str:
-    return f"vuln-{uuid4().hex[:10]}"
+    return _make_id("vuln")
 
 
 def _exploit_attempt_id() -> str:
-    return f"exploit-attempt-{uuid4().hex[:10]}"
+    return _make_id("exploit-attempt")
 
 
 def _session_id() -> str:
-    return f"session-{uuid4().hex[:10]}"
+    return _make_id("session")
 
 
 def _severity_rank(value: "Severity") -> int:
@@ -517,15 +521,15 @@ TYPED_FACT_DICT_LIMIT = 800
 
 
 def _todo_id() -> str:
-    return f"todo-{uuid4().hex[:10]}"
+    return _make_id("todo")
 
 
 def _assignment_id() -> str:
-    return f"assignment-{uuid4().hex[:10]}"
+    return _make_id("assignment")
 
 
 def _round_id() -> str:
-    return f"round-{uuid4().hex[:10]}"
+    return _make_id("round")
 
 
 class TodoStatus(StrEnum):

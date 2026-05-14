@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
+import re
+
 from killchain_docker.state import EvidenceRecord, RunState
+
+
+_HEX_BLOCK_RE = re.compile(r"(?:[0-9a-fA-F]{2}[\s:]){4,}")
+
+
+def _has_hex_block(text: str) -> bool:
+    """Return True if text contains a hex dump-like block."""
+    return bool(_HEX_BLOCK_RE.search(text[:2000]))
 
 
 class EvidenceContextBuilder:
@@ -301,13 +311,3 @@ def _trim_list(value: object, *, limit: int, width: int) -> list[object]:
         else:
             out.append(item)
     return out
-
-
-import re as _re
-
-_HEX_BLOCK_RE = _re.compile(r"(?:[0-9a-fA-F]{2}[\s:]){4,}")
-
-
-def _has_hex_block(text: str) -> bool:
-    """Return True if text contains a hex dump-like block."""
-    return bool(_HEX_BLOCK_RE.search(text[:2000]))

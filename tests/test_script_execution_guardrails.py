@@ -11,9 +11,8 @@ from pathlib import Path
 from killchain_docker.reasoning.flag import (
     _bracket_span_candidates,
     extract_flag_candidates,
-    is_validatable_flag_candidate,
 )
-from killchain_docker.state.constants import plausible_flag
+from killchain_docker.state.constants import plausible_flag, validatable_flag_candidate as is_validatable_flag_candidate
 from killchain_docker.tools.core import ToolExecutionRequest
 from killchain_docker.tools.plugins import script_execution
 

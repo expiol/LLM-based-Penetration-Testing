@@ -5,10 +5,6 @@ from __future__ import annotations
 import unittest
 
 from killchain_docker.reasoning.coercion import coerce_llm_bool
-from killchain_docker.reasoning.schemas import (
-    EvidenceReviewGuidance,
-    ScriptCodeGuidance,
-)
 
 
 class TestCoerceLlmBool(unittest.TestCase):
@@ -24,26 +20,12 @@ class TestCoerceLlmBool(unittest.TestCase):
         self.assertIs(coerce_llm_bool("true"), True)
         self.assertIs(coerce_llm_bool("no"), False)
 
-    def test_evidence_promote_bool_fields(self) -> None:
-        g = EvidenceReviewGuidance.model_validate(
-            {
-                "summary": "x",
-                "promote_runtime_probe": [],
-                "promote_computation_analysis": [1],
-            }
-        )
-        self.assertFalse(g.promote_runtime_probe)
-        self.assertTrue(g.promote_computation_analysis)
+    def test_bool_passthrough(self) -> None:
+        self.assertIs(coerce_llm_bool(True), True)
+        self.assertIs(coerce_llm_bool(False), False)
 
-    def test_script_should_retry_bool_field(self) -> None:
-        g = ScriptCodeGuidance.model_validate(
-            {
-                "summary": "s",
-                "script_code": "print('ok')\n",
-                "should_retry_on_failure": [],
-            }
-        )
-        self.assertFalse(g.should_retry_on_failure)
+    def test_none_is_false(self) -> None:
+        self.assertIs(coerce_llm_bool(None), False)
 
 
 if __name__ == "__main__":

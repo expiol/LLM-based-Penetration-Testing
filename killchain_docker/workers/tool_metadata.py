@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
 from urllib.parse import urlparse
 
 from killchain_docker.state import RunState, TodoItem
 from killchain_docker.tools import ToolCapability, ToolExecutionError
-
-
-DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
+from killchain_docker.tools.core import _first_string, _strings
+from killchain_docker.orchestrator.policy import DEFAULT_FILES_ROOT
 
 _FILE_CONTRACTS: dict[ToolCapability, str] = {
     ToolCapability.ARTIFACT_SOURCE: "source_files",
@@ -276,31 +274,6 @@ def _collect_file_targets(
 
 def _challenge_files(state: RunState) -> list[str]:
     return _strings((state.metadata.get("challenge", {}) or {}).get("files"))
-
-
-def _strings(value: object) -> list[str]:
-    if value in (None, "", [], {}, ()):
-        return []
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, dict):
-        return []
-    result: list[str] = []
-    try:
-        iterator = iter(value)  # type: ignore[arg-type]
-    except TypeError:
-        text = str(value).strip()
-        return [text] if text else []
-    for item in iterator:
-        text = str(item).strip()
-        if text and text not in result:
-            result.append(text)
-    return result
-
-
-def _first_string(value: object) -> str:
-    values = _strings(value)
-    return values[0] if values else ""
 
 
 def _dedupe(values: Iterable[str]) -> list[str]:

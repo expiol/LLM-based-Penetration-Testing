@@ -153,12 +153,26 @@ COMMON_FLAG_PREFIXES: tuple[str, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# Source-file extension sets
+# Token normalization helpers (used by policy and stagnation detection)
 # ---------------------------------------------------------------------------
-# Re-exported from file_classification.SOURCE_EXTS so older imports keep working
-# during the refactor.
 
-from killchain_docker.state.file_classification import SOURCE_EXTS as SOURCE_EXTENSIONS  # noqa: E402, F401
+import re as _re_tok
+
+_TOKEN_SPLIT_RE = _re_tok.compile(r"[^a-z0-9]+")
+_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "of", "in", "on", "to", "for", "with",
+    "from", "by", "into", "over", "under", "is", "are", "was", "were", "be",
+    "as", "at", "this", "that", "these", "those", "it", "its", "we", "you",
+    "they", "any", "all", "each", "some", "use", "using", "via",
+})
+
+
+def normalize_tokens(text: str) -> set[str]:
+    """Return a set of meaningful tokens (lower-case, deduped, stop-filtered)."""
+    if not text:
+        return set()
+    tokens = {tok for tok in _TOKEN_SPLIT_RE.split(text.lower()) if tok and len(tok) > 2}
+    return tokens - _STOPWORDS
 
 
 # ---------------------------------------------------------------------------

@@ -45,7 +45,7 @@ def _truncate(value: str, limit: int = 4000) -> str:
     return f"{value[:limit]}...[truncated]"
 
 
-def _string_list(value: Any) -> list[str]:
+def _strings(value: Any) -> list[str]:
     if value in (None, "", [], {}, ()):
         return []
     if isinstance(value, str):
@@ -70,7 +70,7 @@ def _flag_candidate_values(ctx: dict[str, Any], *, flag_format: object = None) -
 
     values: list[str] = []
     for key in ("flag_candidates", "potential_flags", "grounded_flag_candidates"):
-        for value in _string_list(ctx.get(key)):
+        for value in _strings(ctx.get(key)):
             if value in values or not validatable_flag_candidate(value):
                 continue
             if not CandidatePolicy.decision(value, flag_format=flag_format).accepted:
@@ -88,7 +88,7 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
 
 
 def _first_string(value: Any) -> str | None:
-    values = _string_list(value)
+    values = _strings(value)
     return values[0] if values else None
 
 
@@ -409,7 +409,7 @@ class ExecutionPlane:
             ("inspected_repos", "repository"),
             ("repo_paths", "repository"),
         ):
-            for path in _string_list(ctx.get(key)):
+            for path in _strings(ctx.get(key)):
                 artifacts.append(
                     Artifact(
                         path=path,
@@ -459,7 +459,7 @@ class ExecutionPlane:
             )
 
         routes: list[Route] = []
-        for url in _string_list(ctx.get("interesting_paths")):
+        for url in _strings(ctx.get("interesting_paths")):
             route_url = _normalize_route_url(url, ctx, request)
             if route_url:
                 routes.append(
@@ -506,7 +506,7 @@ class ExecutionPlane:
                 description=issue,
                 metadata={"source": source_name, "tool": tool_name},
             )
-            for issue in _string_list(ctx.get("security_issues"))
+            for issue in _strings(ctx.get("security_issues"))
         ]
 
         sessions = [
@@ -516,7 +516,7 @@ class ExecutionPlane:
                 secret_ref=credential_id,
                 metadata={"source": source_name, "tool": tool_name},
             )
-            for credential_id in _string_list(ctx.get("successful_credential_ids"))
+            for credential_id in _strings(ctx.get("successful_credential_ids"))
         ]
 
         exploit_attempts: list[ExploitAttempt] = []

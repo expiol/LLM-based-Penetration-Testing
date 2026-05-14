@@ -209,8 +209,6 @@ class RouterAgent:
             or "web" in goal
         ):
             preferred = "web-worker"
-        elif todo.phase == TodoPhase.EXPLOIT and context.get("script_code"):
-            preferred = "exploit-worker"
         elif todo.phase == TodoPhase.EXPLOIT:
             preferred = "exploit-worker"
         elif todo.phase == TodoPhase.ANALYSIS or _has_file_context(context):

@@ -1,19 +1,4 @@
-"""RAG over the NYU CTF development split.
-
-Indexes per-challenge metadata + writeups (the README ``## Solution`` block)
-into a dense embedding store so the planner can retrieve top-k
-similar past challenges and inject their solution sketches into prompts as
-in-context hints.
-
-Public surface:
-
-* :class:`KnowledgeRetriever` — dense cosine retriever over the corpus.
-* :class:`RetrievalHit` — one ranked entry returned to a caller.
-* :func:`get_retriever` — module-level singleton honoring env-var config.
-* :class:`KnowledgeAugmenter` — high-level facade that turns a
-  :class:`RunState` into prompt-ready writeup hints; this is what
-  planner / dispatch consume.
-"""
+"""RAG over the NYU CTF development split."""
 
 from __future__ import annotations
 
@@ -21,7 +6,6 @@ from killchain_docker.knowledge.augmenter import (
     MAX_HITS,
     KnowledgeAugmenter,
     RagContext,
-    RagHit,
 )
 from killchain_docker.knowledge.retriever import (
     KnowledgeRetriever,
@@ -35,7 +19,6 @@ __all__ = [
     "KnowledgeAugmenter",
     "KnowledgeRetriever",
     "RagContext",
-    "RagHit",
     "RetrievalHit",
     "get_retriever",
     "reset_retriever_cache",

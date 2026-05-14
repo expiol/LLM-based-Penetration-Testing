@@ -14,17 +14,10 @@ from killchain_docker.state.constants import (
     FLAG_BODY_MAX_LEN,
     FLAG_BODY_MIN_LEN,
     plausible_flag,
-    validatable_flag_candidate,
 )
 
 _BASE64_BLOB_PATTERN = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
 _HEX_BLOB_PATTERN = re.compile(r"(?:0x)?([0-9a-fA-F]{20,})")
-
-
-def is_validatable_flag_candidate(candidate: str) -> bool:
-    """Compatibility wrapper for the canonical state-layer validator."""
-
-    return validatable_flag_candidate(candidate)
 
 
 def _try_decode_blob(blob: str) -> list[str]:
@@ -213,7 +206,6 @@ def extract_flag_candidates(
 
 __all__ = [
     "extract_flag_candidates",
-    "is_validatable_flag_candidate",
     "_bracket_span_candidates",
     "FLAG_BODY_MAX_LEN",
     "FLAG_BODY_MIN_LEN",

@@ -16,7 +16,6 @@ from killchain_docker.tools.capabilities import (
     ToolCapability,
     ToolGateway,
     ToolSpec,
-    capability_source,
 )
 from killchain_docker.tools.parsers import json_payload_parser, jsonl_signal_parser
 from killchain_docker.tools.registry import build_execution_plane
@@ -35,7 +34,6 @@ __all__ = [
     "ToolCapability",
     "ToolGateway",
     "ToolSpec",
-    "capability_source",
     "build_execution_plane",
     "json_payload_parser",
     "jsonl_signal_parser",

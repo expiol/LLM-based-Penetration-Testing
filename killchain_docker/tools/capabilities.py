@@ -44,12 +44,6 @@ class ToolCapability(StrEnum):
     ARTIFACT_REPO = "artifact.repo"
 
 
-def capability_source(capability: ToolCapability | str) -> str:
-    """Stable provenance string for worker-produced follow-up tasks."""
-
-    return ToolCapability(capability).value
-
-
 @dataclass(frozen=True)
 class ToolSpec:
     """Concrete plugin binding for one capability."""

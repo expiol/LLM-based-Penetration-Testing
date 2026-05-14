@@ -464,7 +464,7 @@ def estimate_max_cycles(challenge: CTFChallenge, authorized_scope: list[str], ba
 
 
 def derive_objective(challenge: CTFChallenge, authorized_scope: list[str]) -> str:
-    from killchain_docker.prompts import get_objective_hint
+    from killchain_docker.prompts import get_prompts
 
     category = str(challenge.category or "").lower()
     lines = [
@@ -481,11 +481,15 @@ def derive_objective(challenge: CTFChallenge, authorized_scope: list[str]) -> st
             "Challenge files are available inside the agent container under /home/ctfplayer/ctf_files."
         )
 
-    lines.append(get_objective_hint(
-        category,
-        has_files=bool(challenge.files),
-        has_scope=bool(authorized_scope),
-    ))
+    prompts = get_prompts(category)
+    parts = [prompts.objective_hint]
+    if challenge.files and not authorized_scope:
+        parts.append(
+            "Challenge files are available inside the agent container under "
+            "/home/ctfplayer/ctf_files. Inspect them first and derive concrete "
+            "flag candidates from the local artifacts."
+        )
+    lines.append(" ".join(parts))
     return "\n".join(lines)
 
 

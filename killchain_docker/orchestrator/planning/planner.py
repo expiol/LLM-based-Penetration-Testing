@@ -17,14 +17,10 @@ class LLMPlanner(PlannerAgent):
         self,
         llm_client: LLMClient,
         *,
-        bootstrap: object | None = None,
         strategy: PlanStrategy | None = None,
-        normalizer: object | None = None,
-        deduper: object | None = None,
         pipeline: PlanningPipeline | None = None,
         augmenter: KnowledgeAugmenter | None = None,
     ) -> None:
-        del bootstrap, normalizer, deduper
         if llm_client is None:
             raise LLMClientError("LLMPlanner requires an LLM client.")
         self.pipeline = pipeline or PlanningPipeline()
