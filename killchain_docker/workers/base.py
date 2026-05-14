@@ -1,9 +1,7 @@
 """Base abstraction for orchestrator-managed workers.
 
-This module owns the :class:`WorkerAgent` abstract base class and the
-:class:`ReasoningOnlyWorker` marker. Helpers for flag extraction, network
-context, and string normalization live in :mod:`killchain_docker.workers._helpers`.
-Task constructors live in :mod:`killchain_docker.state.task_factory`.
+This module owns the :class:`WorkerAgent` abstract base class for the
+persona-worker runtime.
 """
 
 from __future__ import annotations
@@ -34,10 +32,10 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 class WorkerAgent(ABC):
-    """Abstract worker that can handle one or more task types."""
+    """Abstract persona worker that can handle high-level todos."""
 
     name: str
-    supported_task_types: tuple[str, ...]
+    supported_todo_kinds: tuple[str, ...]
     routing_summary: str = ""
     preferred_challenge_categories: tuple[str, ...] = ()
     required_context_keys: tuple[str, ...] = ()
@@ -65,8 +63,8 @@ class WorkerAgent(ABC):
         if not self.supports(todo):
             return False, "todo not supported"
 
-        context = getattr(todo, "context", getattr(todo, "input_context", {}))
-        metadata = getattr(todo, "metadata", {})
+        context = todo.context
+        metadata: dict[str, Any] = {}
         excluded = {
             str(value)
             for value in (
@@ -98,7 +96,7 @@ class WorkerAgent(ABC):
         default_summary = (self.__doc__ or "").strip().splitlines()
         return {
             "worker_name": self.name,
-            "supported_task_types": list(self.supported_task_types),
+            "supported_todo_kinds": list(self.supported_todo_kinds),
             "routing_summary": self.routing_summary or (default_summary[0] if default_summary else self.name),
             "preferred_challenge_categories": list(self.preferred_challenge_categories),
             "required_context_keys": list(self.required_context_keys),
@@ -193,11 +191,6 @@ class WorkerAgent(ABC):
                     "worker_name": self.name,
                     "todo": task.model_dump(mode="json"),
                     "state_summary": state.summary(),
-                    "run_memory": (
-                        state.run_memory.model_dump(mode="json")
-                        if hasattr(state, "run_memory")
-                        else {}
-                    ),
                     "recent_failures": [
                         record.model_dump(mode="json")
                         for record in state.execution_log[-12:]
@@ -223,26 +216,6 @@ class WorkerAgent(ABC):
         """Execute a todo against the current shared state."""
 
 
-# ===========================================================================
-# ReasoningOnlyWorker — LLM-only stage worker (no capability dispatch)
-# ===========================================================================
-
-
-class ReasoningOnlyWorker(WorkerAgent):
-    """Worker that produces a :class:`WorkerReport` from LLM reasoning alone.
-
-    For tasks that have no concrete tool capability to call (such as
-    ``exploit.hypothesis`` or ``flag.validate``), the subclass implements a
-    single ``_reason(task, state)`` method that returns a guidance object plus
-    the report fields it should drive.
-    """
-
-    @abstractmethod
-    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
-        """Subclasses still implement run; this base just documents intent."""
-
-
 __all__ = [
-    "ReasoningOnlyWorker",
     "WorkerAgent",
 ]

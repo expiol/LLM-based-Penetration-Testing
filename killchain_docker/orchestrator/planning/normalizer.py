@@ -8,7 +8,7 @@ from killchain_docker.state import RunState
 _DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
 
 
-class TaskNormalizer:
+class TodoNormalizer:
     """Normalize high-level todo context against challenge metadata and assets."""
 
     def fill(self, todo: PlannedTodo, state: RunState) -> None:
@@ -32,4 +32,3 @@ class TaskNormalizer:
 
         if any(token in goal_l for token in ("web", "http", "route", "form", "exploit", "vulnerability")):
             state.infer_asset_identity(context)
-

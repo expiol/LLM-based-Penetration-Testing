@@ -7,7 +7,7 @@ from collections.abc import Iterable
 
 from killchain_docker.llm import LLMClientError
 from killchain_docker.orchestrator.loop import Orchestrator
-from killchain_docker.orchestrator.planning import PlannedTodo, PlannerDecision, TaskPlanner
+from killchain_docker.orchestrator.planning import PlannerAgent, PlannedTodo, PlannerDecision
 from killchain_docker.state import (
     RouterDecision,
     RouterRoundSummary,
@@ -21,7 +21,7 @@ from killchain_docker.state import (
 from killchain_docker.workers.base import WorkerAgent
 
 
-class _ScriptedPlanner(TaskPlanner):
+class _ScriptedPlanner(PlannerAgent):
     def __init__(self, scripts: Iterable[PlannerDecision]) -> None:
         self._scripts = list(scripts)
         self._cursor = 0
@@ -61,9 +61,34 @@ class _ContextRouter:
         )
 
 
+class _UnknownWorkerRouter:
+    def route(self, state: RunState, *, worker_catalog, max_assignments: int) -> RouterDecision:
+        del worker_catalog, max_assignments
+        ready = state.ready_todos(limit=1)
+        if not ready:
+            return RouterDecision(rationale="empty")
+        return RouterDecision(
+            assignments=[
+                WorkerAssignment(
+                    todo_id=ready[0].todo_id,
+                    worker_name="missing-worker",
+                    rationale="test unknown worker",
+                )
+            ],
+            rationale="test unknown worker",
+        )
+
+    def summarize_round(self, state: RunState, *, results: list[WorkerResult]) -> RouterRoundSummary:
+        del state
+        return RouterRoundSummary(
+            summary="; ".join(result.summary for result in results),
+            direct_results=[result.summary for result in results],
+        )
+
+
 class _RaisingWorker(WorkerAgent):
     name = "raising-worker"
-    supported_task_types = ("todo",)
+    supported_todo_kinds = ("todo",)
 
     def run(self, task: TodoItem, state: RunState) -> WorkerResult:
         del task, state
@@ -72,7 +97,7 @@ class _RaisingWorker(WorkerAgent):
 
 class _SuccessWorker(WorkerAgent):
     name = "success-worker"
-    supported_task_types = ("todo",)
+    supported_todo_kinds = ("todo",)
 
     def run(self, task: TodoItem, state: RunState) -> WorkerResult:
         del state
@@ -135,7 +160,27 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertEqual(len(final_state.rounds), 2)
         self.assertTrue(any("FAILED" in event for event in events))
 
+    def test_blocked_assignment_makes_run_failed_not_completed(self) -> None:
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[PlannedTodo(goal="Route to missing worker", dedupe_key="missing-worker")],
+            )
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_SuccessWorker()],
+            planner=planner,
+            router=_UnknownWorkerRouter(),  # type: ignore[arg-type]
+            emit=lambda _: None,
+        )
+
+        final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(final_state.status, RunStatus.FAILED)
+        self.assertEqual(final_state.todos[0].status, TodoStatus.BLOCKED)
+        self.assertIn("Assignment blocked", final_state.rounds[0].summary.summary)
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -6,7 +6,7 @@ import traceback
 from collections.abc import Callable, Iterable
 
 from killchain_docker.llm import LLMClientError
-from killchain_docker.orchestrator.planning import BootstrapSeeder, TaskPlanner
+from killchain_docker.orchestrator.planning import BootstrapSeeder, PlannerAgent
 from killchain_docker.orchestrator.router import RouterAgent
 from killchain_docker.state import (
     RouterDecision,
@@ -32,7 +32,7 @@ class Orchestrator:
         state: RunState,
         workers: Iterable[WorkerAgent],
         *,
-        planner: TaskPlanner | None = None,
+        planner: PlannerAgent | None = None,
         router: RouterAgent | None = None,
         emit: Callable[[str], None] = print,
         checkpoint_callback: Callable[[RunState], None] | None = None,
@@ -58,6 +58,7 @@ class Orchestrator:
         return [
             {
                 "name": worker.name,
+                "supported_todo_kinds": list(worker.supported_todo_kinds),
                 "routing_summary": worker.routing_summary,
                 "required_context_keys": list(worker.required_context_keys),
                 "preferred_challenge_categories": list(worker.preferred_challenge_categories),
@@ -247,6 +248,16 @@ class Orchestrator:
                 worker, reason = self.select_worker(todo, assignment.worker_name)
                 if worker is None:
                     todo.mark_blocked(reason)
+                    results.append(
+                        WorkerResult(
+                            todo_id=todo.todo_id,
+                            worker_name=assignment.worker_name,
+                            success=False,
+                            summary=f"Assignment blocked: {reason}",
+                            error=reason,
+                            retryable=False,
+                        )
+                    )
                     self.emit(f"[cycle {cycle}] blocked {todo.todo_id}: {reason}")
                     continue
                 executed_assignments.append(assignment)
@@ -280,7 +291,7 @@ class Orchestrator:
             pass
         elif self.state.has_open_todos():
             self.state.status = RunStatus.STOPPED
-        elif any(todo.status == TodoStatus.FAILED for todo in self.state.todos):
+        elif any(todo.status in {TodoStatus.FAILED, TodoStatus.BLOCKED} for todo in self.state.todos):
             self.state.status = RunStatus.FAILED
         else:
             self.state.status = RunStatus.COMPLETED

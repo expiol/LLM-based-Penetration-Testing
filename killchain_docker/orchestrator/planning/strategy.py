@@ -113,33 +113,17 @@ class PlanStrategy:
         return str(state.metadata.get("challenge", {}).get("category") or "misc").lower()
 
     def _serialize_todos(self, state: RunState) -> list[dict[str, object]]:
-        todos = list(getattr(state, "todos", []) or [])
-        if todos:
-            return [
-                {
-                    "todo_id": todo.todo_id,
-                    "goal": todo.goal,
-                    "status": todo.status,
-                    "priority": todo.priority,
-                    "context": todo.context,
-                    "result_summary": todo.result_summary[:300],
-                    "error": todo.error,
-                }
-                for todo in todos[-self._MAX_TODOS:]
-            ]
-        task_chain = getattr(state, "task_chain", None)
-        tasks = list(getattr(task_chain, "tasks", []) or [])
         return [
             {
-                "todo_id": task.task_id,
-                "goal": task.title,
-                "status": task.status,
-                "priority": task.priority,
-                "context": task.input_context,
-                "result_summary": str(task.output_context)[:300],
-                "error": task.last_error,
+                "todo_id": todo.todo_id,
+                "goal": todo.goal,
+                "status": todo.status,
+                "priority": todo.priority,
+                "context": todo.context,
+                "result_summary": todo.result_summary[:300],
+                "error": todo.error,
             }
-            for task in tasks[-self._MAX_TODOS:]
+            for todo in state.todos[-self._MAX_TODOS:]
         ]
 
     def _serialize_round_summaries(self, state: RunState) -> list[dict[str, object]]:
@@ -150,8 +134,4 @@ class PlanStrategy:
 
     @staticmethod
     def _open_todo_count(state: RunState) -> int:
-        todos = list(getattr(state, "todos", []) or [])
-        if todos:
-            return sum(1 for todo in todos if todo.status in {TodoStatus.PENDING, TodoStatus.RUNNING})
-        task_chain = getattr(state, "task_chain", None)
-        return len(list(getattr(task_chain, "ready_tasks", lambda: [])()))
+        return sum(1 for todo in state.todos if todo.status in {TodoStatus.PENDING, TodoStatus.RUNNING})

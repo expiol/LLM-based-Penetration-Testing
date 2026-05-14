@@ -27,7 +27,7 @@ from killchain_docker.knowledge.embedder import (
 from killchain_docker.knowledge.retriever import KnowledgeRetriever
 from killchain_docker.llm import StaticLLMClient
 from killchain_docker.orchestrator.planning.strategy import PlanStrategy
-from killchain_docker.state import GlobalState
+from killchain_docker.state import RunState
 
 
 def _entry(
@@ -316,7 +316,7 @@ class _AugmenterFixture:
     """Small mixin that builds a stub-embedder retriever + augmenter."""
 
     @classmethod
-    def build(cls, tmp: Path) -> tuple[KnowledgeRetriever, KnowledgeAugmenter, GlobalState]:
+    def build(cls, tmp: Path) -> tuple[KnowledgeRetriever, KnowledgeAugmenter, RunState]:
         entries = [
             _entry(
                 "2013f-cry-stfu",
@@ -342,7 +342,7 @@ class _AugmenterFixture:
             embedder=StubEmbedder(),
             cache_dir=tmp,
         )
-        state = GlobalState(
+        state = RunState(
             objective="LFSR-based file encryption stored in a Secure Test File Unit.",
             authorized_scope=[],
             metadata={

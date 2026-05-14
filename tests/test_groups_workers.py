@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+from killchain_docker.state import RunState, TodoItem
 from killchain_docker.tools import ToolCapability
 from killchain_docker.workers import all_worker_classes
 from killchain_docker.workers.persona import (
@@ -35,7 +36,21 @@ class PersonaWorkerTests(unittest.TestCase):
             ["recon-worker", "artifact-worker", "web-worker", "exploit-worker", "flag-worker"],
         )
 
+    def test_tool_selected_metadata_cannot_override_todo_context(self) -> None:
+        worker = WebWorker()
+        metadata = worker._prepare_metadata(
+            capability=ToolCapability.HTTP_CONTENT,
+            todo=TodoItem(
+                goal="Review known page",
+                context={"base_url": "http://safe.test", "paths": ["/admin"]},
+            ),
+            state=RunState(objective="Solve.", authorized_scope=["http://safe.test"]),
+            selected_metadata={"base_url": "http://outside.test", "paths": ["/evil"]},
+        )
+
+        self.assertEqual(metadata["base_url"], "http://safe.test")
+        self.assertEqual(metadata["paths"], ["/admin"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

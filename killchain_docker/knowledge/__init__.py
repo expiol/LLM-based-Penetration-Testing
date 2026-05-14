@@ -11,7 +11,7 @@ Public surface:
 * :class:`RetrievalHit` — one ranked entry returned to a caller.
 * :func:`get_retriever` — module-level singleton honoring env-var config.
 * :class:`KnowledgeAugmenter` — high-level facade that turns a
-  :class:`GlobalState` into prompt-ready writeup hints; this is what
+  :class:`RunState` into prompt-ready writeup hints; this is what
   planner / dispatch consume.
 """
 

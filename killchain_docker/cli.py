@@ -83,6 +83,7 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
                 output_root=args.output_root,
                 max_cycles=base.max_cycles,
                 quiet=args.quiet,
+                metadata=dict(base.metadata),
             )
         return RunConfig(
             objective="Map and review authorized web surface",
@@ -106,6 +107,7 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         output_root=args.output_root if args.output_root is not None else (base.output_root if base is not None else "runs"),
         max_cycles=args.max_cycles if args.max_cycles is not None else (base.max_cycles if base is not None else 6),
         quiet=args.quiet or (base.quiet if base is not None else False),
+        metadata=dict(base.metadata) if base is not None else {},
     )
 
 

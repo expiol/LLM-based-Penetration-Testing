@@ -10,8 +10,8 @@ from killchain_docker.orchestrator.planning import (
     LLMPlanner,
     PlannedTodo,
     PlannerDecision,
-    TaskDeduper,
-    TaskNormalizer,
+    TodoDeduper,
+    TodoNormalizer,
 )
 from killchain_docker.state import RunState
 
@@ -46,7 +46,7 @@ class TodoNormalizerTests(unittest.TestCase):
     def test_file_goal_gets_canonical_files_context(self) -> None:
         state = _state(["solve.py"])
         todo = PlannedTodo(goal="Review source files for crypto weakness.")
-        TaskNormalizer().fill(todo, state)
+        TodoNormalizer().fill(todo, state)
 
         self.assertEqual(todo.context["files_root"], "/home/ctfplayer/ctf_files")
         self.assertEqual(todo.context["challenge_files"], ["solve.py"])
@@ -59,7 +59,7 @@ class TodoDeduperTests(unittest.TestCase):
             PlannedTodo(goal="A", dedupe_key="same"),
             PlannedTodo(goal="B", dedupe_key="same"),
         ]
-        merged = TaskDeduper().merge(todos, state)
+        merged = TodoDeduper().merge(todos, state)
 
         self.assertEqual([todo.goal for todo in merged], ["A"])
 
@@ -102,6 +102,15 @@ class LLMPlannerTests(unittest.TestCase):
         )
         self.assertTrue(planner.plan(_state([])).stop_run)
 
+    def test_planner_keeps_bootstrap_todos_when_llm_fails(self) -> None:
+        planner = LLMPlanner(StaticLLMClient([]))
+
+        decision = planner.plan(_state(["solve.py"]))
+
+        self.assertGreaterEqual(len(decision.todos), 1)
+        self.assertTrue(any("Inventory" in todo.goal for todo in decision.todos))
+        self.assertTrue(any("Planner LLM failed" in note for note in decision.notes))
+
 
 class PlannedTodoPriorityTests(unittest.TestCase):
     def test_string_priority_is_coerced(self) -> None:
@@ -111,4 +120,3 @@ class PlannedTodoPriorityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

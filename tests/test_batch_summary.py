@@ -65,10 +65,10 @@ class BatchSummaryTests(unittest.TestCase):
                     "total_tokens": 130,
                 },
                 "state_metrics": {
-                    "task_count": 4,
-                    "open_task_count": 0,
-                    "task_status_counts": {"completed": 4},
-                    "task_type_counts": {"artifact.source_review": 1},
+                    "todo_count": 4,
+                    "open_todo_count": 0,
+                    "todo_status_counts": {"completed": 4},
+                    "worker_counts": {"artifact-worker": 1},
                     "evidence_tool_counts": {"script_execution": 1},
                 },
             }
@@ -84,8 +84,8 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(payload["token_usage"]["total"]["total_tokens"], 130)
             self.assertEqual(payload["token_usage"]["mean_per_attempt"]["prompt_tokens"], 100.0)
             self.assertEqual(payload["paper_metrics"]["success_rate"], 1.0)
-            self.assertEqual(payload["paper_metrics"]["task_count_total"], 4)
-            self.assertEqual(payload["paper_metrics"]["task_type_totals"]["artifact.source_review"], 1)
+            self.assertEqual(payload["paper_metrics"]["todo_count_total"], 4)
+            self.assertEqual(payload["paper_metrics"]["worker_totals"]["artifact-worker"], 1)
             self.assertEqual(payload["paper_metrics"]["evidence_tool_totals"]["script_execution"], 1)
             self.assertEqual(payload["paper_metrics"]["category_counts"]["crypto"], 1)
             self.assertEqual(payload["experiment_config"]["max_cycles_arg"], 20)
@@ -129,19 +129,17 @@ class BatchSummaryTests(unittest.TestCase):
                             "assets": {"asset-1": {}},
                             "findings": {},
                             "credentials": {},
-                            "execution_log": [{"task_id": "task-1"}],
-                            "task_chain": {
-                                "tasks": [
-                                    {"status": "completed", "task_type": "recon.scan"},
-                                    {"status": "pending", "task_type": "web.form_probe"},
-                                    {"status": "failed", "task_type": "flag.validate"},
-                                ]
-                            },
+                            "execution_log": [{"task_id": "todo-1"}],
+                            "todos": [
+                                {"status": "completed", "assigned_worker": "recon-worker"},
+                                {"status": "pending", "assigned_worker": "web-worker"},
+                                {"status": "failed", "assigned_worker": "flag-worker"},
+                            ],
+                            "rounds": [{"cycle": 1}],
                             "evidence": {
                                 "e1": {"tool_name": "http_probe"},
                                 "e2": {"tool_name": "http_form_probe"},
                             },
-                            "task_type_memory": {"artifact.source_review": [{"attempt": 1}]},
                         },
                     }
                 ),
@@ -165,9 +163,9 @@ class BatchSummaryTests(unittest.TestCase):
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(payload["token_usage"]["total"]["total_tokens"], 255)
             self.assertEqual(payload["paper_metrics"]["token_usage_mean_failed"]["llm_calls"], 3.0)
-            self.assertEqual(payload["paper_metrics"]["open_task_count_total"], 1)
-            self.assertEqual(payload["paper_metrics"]["task_status_totals"]["pending"], 1)
-            self.assertEqual(payload["paper_metrics"]["task_type_totals"]["web.form_probe"], 1)
+            self.assertEqual(payload["paper_metrics"]["open_todo_count_total"], 1)
+            self.assertEqual(payload["paper_metrics"]["todo_status_totals"]["pending"], 1)
+            self.assertEqual(payload["paper_metrics"]["worker_totals"]["web-worker"], 1)
             self.assertEqual(payload["paper_metrics"]["evidence_tool_totals"]["http_form_probe"], 1)
             detail = payload["details"][0]
             self.assertEqual(detail["run_id"], "run-from-log")
@@ -176,7 +174,7 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(detail["max_cycles"], 16)
             self.assertEqual(detail["state_metrics"]["asset_count"], 1)
             self.assertEqual(detail["state_metrics"]["execution_count"], 1)
-            self.assertEqual(detail["state_metrics"]["task_type_memory_counts"]["artifact.source_review"], 1)
+            self.assertEqual(detail["state_metrics"]["round_count"], 1)
 
     def test_logdir_diagnostics_bucket_failure_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,15 +191,15 @@ class BatchSummaryTests(unittest.TestCase):
                             "category": "web",
                         },
                         "state_metrics": {
-                            "task_type_counts": {
-                                "artifact.source_review": 18,
-                                "flag.validate": 5,
-                                "web.path_probe": 50,
+                            "worker_counts": {
+                                "artifact-worker": 18,
+                                "flag-worker": 5,
+                                "web-worker": 50,
                             },
                             "evidence_tool_counts": {"script_execution": 18},
-                            "open_task_count": 4,
+                            "open_todo_count": 4,
                         },
-                        "state": {"task_type_memory": {}},
+                        "state": {"rounds": []},
                     }
                 ),
                 encoding="utf-8",

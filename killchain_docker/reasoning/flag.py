@@ -10,6 +10,7 @@ import re
 from killchain_docker.state.constants import (
     BRACKET_SPAN_PATTERN,
     COMMON_FLAG_PREFIXES,
+    FLAG_PREFIX_SHAPE,
     FLAG_PATTERN,
     FLAG_BODY_MAX_LEN,
     FLAG_BODY_MIN_LEN,
@@ -18,6 +19,47 @@ from killchain_docker.state.constants import (
 
 _BASE64_BLOB_PATTERN = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
 _HEX_BLOB_PATTERN = re.compile(r"(?:0x)?([0-9a-fA-F]{20,})")
+_FLAG_BARE_TOKEN_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.]{11,199}$")
+_FLAG_PYTHON_EXCEPTION_RE = re.compile(
+    r"^(?:[A-Z][A-Za-z0-9]*)+(?:Error|Exception|Warning)$"
+)
+_FLAG_VALIDATION_SOURCE_NEEDLES: tuple[str, ...] = (
+    "re.findall", "re.search", "re.match",
+    "subprocess.", "os.system", "shell=true",
+    "{thing}", "{tablename}", "{fieldname}",
+    "{0}", "{1}", "{name}", "{flag}",
+)
+_FLAG_BARE_TOKEN_NOISE_NEEDLES: tuple[str, ...] = (
+    "no_flag_found", "noflagfound",
+    "flag_not_found", "flag_not_recovered",
+    "no_flag_recovered",
+    "manual_review_required", "manual_review",
+    "todo_replace_me", "your_flag_here", "insert_flag",
+    "placeholder", "not_implemented",
+)
+
+
+def is_validatable_flag_candidate(candidate: str) -> bool:
+    """Return True when a candidate is worth final flag validation.
+
+    Accepts canonical ``prefix{body}`` flags and NYU-style bare-token flags.
+    Rejects source-code echoes, Python exception names, and common placeholder
+    strings before they can consume a validation todo.
+    """
+    text = (candidate or "").strip()
+    if FLAG_PREFIX_SHAPE.fullmatch(text):
+        lowered = text.lower()
+        if any(needle in lowered for needle in _FLAG_VALIDATION_SOURCE_NEEDLES):
+            return False
+        return plausible_flag(text)
+    if _FLAG_BARE_TOKEN_SHAPE.fullmatch(text):
+        if _FLAG_PYTHON_EXCEPTION_RE.fullmatch(text):
+            return False
+        lowered = text.lower()
+        if any(needle in lowered for needle in _FLAG_BARE_TOKEN_NOISE_NEEDLES):
+            return False
+        return True
+    return False
 
 
 def _try_decode_blob(blob: str) -> list[str]:
@@ -206,6 +248,7 @@ def extract_flag_candidates(
 
 __all__ = [
     "extract_flag_candidates",
+    "is_validatable_flag_candidate",
     "_bracket_span_candidates",
     "FLAG_BODY_MAX_LEN",
     "FLAG_BODY_MIN_LEN",

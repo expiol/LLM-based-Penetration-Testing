@@ -1,58 +1,39 @@
-"""Planner signal and run-memory state contract tests."""
+"""Worker-to-planner contract tests for the persona runtime."""
 
 from __future__ import annotations
 
 import unittest
 
-from killchain_docker.workers._helpers.planner_signals import planner_signals_for_tasks
-from killchain_docker.state import GlobalState, Task, WorkerReport
+from killchain_docker.state import RunState, TodoItem, WorkerResult
 
 
-class PlannerSignalContractTests(unittest.TestCase):
-    def test_worker_report_planner_signals_do_not_queue_items(self) -> None:
-        state = GlobalState(objective="Solve.", authorized_scope=[])
-        task = state.queue_task(Task(
-            title="Review",
-            description="review",
-            task_type="artifact.source_review",
-            input_context={"files_root": "/tmp", "source_files": ["a.py"]},
-        ))
-        suggested = Task(
-            title="Validate",
-            description="validate",
-            task_type="flag.validate",
-            input_context={"candidate_flag": "flag{ok}"},
-        )
-        report = WorkerReport(
-            task_id=task.task_id,
-            worker_name="source-review-agent",
+class WorkerSuggestionContractTests(unittest.TestCase):
+    def test_worker_suggested_todos_do_not_queue_items_directly(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(TodoItem(goal="Review files"))
+        suggested = TodoItem(goal="Validate candidate", context={"candidate_flag": "flag{ok}"})
+        result = WorkerResult(
+            todo_id=todo.todo_id,
+            worker_name="artifact-worker",
             success=True,
             summary="found a candidate",
-            planner_signals=planner_signals_for_tasks(
-                source_task=task,
-                worker_name="source-review-agent",
-                tasks=[suggested],
-            ),
+            suggested_todos=[suggested],
         )
 
-        state.apply_worker_report(report)
+        state.apply_worker_result(result)
 
-        self.assertEqual(len(state.task_chain.tasks), 1)
-        self.assertEqual(len(state.planner_signals), 1)
-        self.assertEqual(
-            state.planner_signals[0].suggested_task_type,
-            "flag.validate",
-        )
+        self.assertEqual(len(state.todos), 1)
+        self.assertEqual(state.todos[0].status, "completed")
 
-    def test_run_memory_defaults_are_bounded_fields(self) -> None:
-        state = GlobalState(objective="Solve.", authorized_scope=[])
+    def test_run_state_summary_has_bounded_runtime_fields(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        summary = state.summary()
 
-        self.assertEqual(state.run_memory.long_term_summary, "")
-        self.assertEqual(state.run_memory.confirmed_facts, [])
-        self.assertEqual(state.run_memory.open_questions, [])
-        self.assertEqual(state.run_memory.dead_ends, [])
-        self.assertEqual(state.run_memory.current_focus, "")
+        self.assertEqual(summary["todos"], 0)
+        self.assertEqual(summary["rounds"], 0)
+        self.assertEqual(summary["executions"], 0)
 
 
 if __name__ == "__main__":
     unittest.main()
+

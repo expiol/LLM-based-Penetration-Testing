@@ -6,10 +6,10 @@ from killchain_docker.orchestrator.planning import (
     LLMPlanner,
     PlanStrategy,
     PlannedTodo,
+    PlannerAgent,
     PlannerDecision,
-    TaskDeduper,
-    TaskNormalizer,
-    TaskPlanner,
+    TodoDeduper,
+    TodoNormalizer,
 )
 from killchain_docker.orchestrator.router import RouterAgent
 
@@ -19,10 +19,9 @@ __all__ = [
     "Orchestrator",
     "PlanStrategy",
     "PlannedTodo",
+    "PlannerAgent",
     "PlannerDecision",
     "RouterAgent",
-    "TaskDeduper",
-    "TaskNormalizer",
-    "TaskPlanner",
+    "TodoDeduper",
+    "TodoNormalizer",
 ]
-

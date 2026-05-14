@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from killchain_docker.orchestrator.planning.schemas import (
+    PlannerAgent,
     PlannedTodo,
     PlannerDecision,
-    TaskPlanner,
 )
 from killchain_docker.state import RunState
 
 
-class BootstrapSeeder(TaskPlanner):
+class BootstrapSeeder(PlannerAgent):
     """Inject mandatory seed todos for challenge files and authorized scope."""
 
     def plan(self, state: RunState) -> PlannerDecision:
@@ -65,4 +65,3 @@ class BootstrapSeeder(TaskPlanner):
             todos=todos,
             notes=notes,
         )
-

@@ -62,14 +62,9 @@ class PlannerDecision(BaseModel):
     stop_run: bool = False
 
 
-class TaskPlanner(ABC):
+class PlannerAgent(ABC):
     """Planner that proposes high-level todos from the latest run state."""
 
     @abstractmethod
     def plan(self, state: RunState) -> PlannerDecision:
         """Return high-level todos to merge into the queue."""
-
-
-# Transitional aliases for code that still imports the old names during the refactor.
-PlannedTask = PlannedTodo
-

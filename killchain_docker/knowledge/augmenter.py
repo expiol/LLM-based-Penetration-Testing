@@ -1,6 +1,6 @@
 """High-level RAG facade.
 
-This module owns the only piece of glue that turns a :class:`GlobalState`
+This module owns the only piece of glue that turns a :class:`RunState`
 into planner-ready writeup hints: build a query from challenge metadata,
 run :class:`KnowledgeRetriever`, and shape the hits into compact dicts for
 the planner prompt.
@@ -35,7 +35,7 @@ from killchain_docker.knowledge.retriever import (
     get_retriever,
     strict_event_exclusion_enabled,
 )
-from killchain_docker.state import GlobalState
+from killchain_docker.state import RunState
 
 
 PLANNER_SOLUTION_CHARS = 1500
@@ -181,7 +181,7 @@ class KnowledgeAugmenter:
     # Primary entry points
     # ------------------------------------------------------------------
 
-    def for_planner(self, state: GlobalState) -> list[dict[str, Any]]:
+    def for_planner(self, state: RunState) -> list[dict[str, Any]]:
         """Render hits with the planner-side per-field budget."""
         return self.context_for(state).prompt_hits(
             max_solution_chars=PLANNER_SOLUTION_CHARS,
@@ -189,7 +189,7 @@ class KnowledgeAugmenter:
             max_files=PLANNER_FILES,
         )
 
-    def context_for(self, state: GlobalState) -> RagContext:
+    def context_for(self, state: RunState) -> RagContext:
         """Return typed retrieval context for the run.
 
         This is the single RAG integration point. The planner renders
@@ -235,13 +235,13 @@ class KnowledgeAugmenter:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _infer_category(state: GlobalState) -> str:
+    def _infer_category(state: RunState) -> str:
         return str(
             state.metadata.get("challenge", {}).get("category") or "misc"
         ).lower()
 
     @staticmethod
-    def _build_query(state: GlobalState, category: str) -> str:
+    def _build_query(state: RunState, category: str) -> str:
         """Compose the dense retrieval query.
 
         We weight the most distinctive fields first (name + category) so
@@ -269,7 +269,7 @@ class KnowledgeAugmenter:
 
     @staticmethod
     def _exclusion_keys(
-        state: GlobalState,
+        state: RunState,
     ) -> tuple[list[str], list[tuple[str, str]]]:
         """Honor the strict-exclude env var.
 
@@ -300,7 +300,7 @@ class KnowledgeAugmenter:
 
     @staticmethod
     def _cache_run_result(
-        state: GlobalState,
+        state: RunState,
         hits: list[RetrievalHit],
     ) -> None:
         """Store top score + top-1 challenge id on ``state.metadata['rag']``.

@@ -48,7 +48,7 @@ LOGDIR          = None                      # 日志目录；留 None 使用默�
 NAME            = "5.14_development_1"                      # 实验名称（在日志目录下创建子目录）
 INDEX           = None                      # 实验轮次（在日志目录下创建子目录）
 OUTPUT_ROOT     = None                      # 运行产物目录；留 None 使用默认路径
-PARALLEL_WORKERS = 5                       # 并发 worker 数（run-all 或 replicas）
+PARALLEL_WORKERS = 1                       # 并发 worker 数（run-all 或 replicas）
 REPLICAS        = 1                        # 单挑战重复运行次数（>1 时并发隔离运行；先压成 1，确认效果稳定再加）
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -618,16 +618,16 @@ def _state_metrics(state_payload: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(state_payload, dict):
         return {}
 
-    tasks = list((state_payload.get("task_chain") or {}).get("tasks") or [])
-    task_status_counts: dict[str, int] = {}
-    task_type_counts: dict[str, int] = {}
-    for task in tasks:
-        if not isinstance(task, dict):
+    todos = list(state_payload.get("todos") or [])
+    todo_status_counts: dict[str, int] = {}
+    worker_counts: dict[str, int] = {}
+    for todo in todos:
+        if not isinstance(todo, dict):
             continue
-        status = str(task.get("status") or "unknown")
-        task_type = str(task.get("task_type") or "unknown")
-        task_status_counts[status] = task_status_counts.get(status, 0) + 1
-        task_type_counts[task_type] = task_type_counts.get(task_type, 0) + 1
+        status = str(todo.get("status") or "unknown")
+        worker_name = str(todo.get("assigned_worker") or "unassigned")
+        todo_status_counts[status] = todo_status_counts.get(status, 0) + 1
+        worker_counts[worker_name] = worker_counts.get(worker_name, 0) + 1
 
     evidence = state_payload.get("evidence") or {}
     evidence_tool_counts: dict[str, int] = {}
@@ -638,29 +638,23 @@ def _state_metrics(state_payload: dict[str, Any] | None) -> dict[str, Any]:
             tool_name = str(record.get("tool_name") or "unknown")
             evidence_tool_counts[tool_name] = evidence_tool_counts.get(tool_name, 0) + 1
 
-    task_memory = state_payload.get("task_type_memory") or {}
-    task_memory_counts = {
-        str(key): len(value) if isinstance(value, list) else 0
-        for key, value in task_memory.items()
-    } if isinstance(task_memory, dict) else {}
-
     return {
         "run_id": state_payload.get("run_id"),
         "run_status": state_payload.get("status"),
-        "task_count": len(tasks),
-        "task_status_counts": task_status_counts,
-        "task_type_counts": task_type_counts,
-        "open_task_count": sum(
-            task_status_counts.get(status, 0)
+        "todo_count": len(todos),
+        "todo_status_counts": todo_status_counts,
+        "worker_counts": worker_counts,
+        "open_todo_count": sum(
+            todo_status_counts.get(status, 0)
             for status in ("pending", "running")
         ),
+        "round_count": len(state_payload.get("rounds") or []),
         "evidence_count": len(evidence) if isinstance(evidence, dict) else 0,
         "evidence_tool_counts": evidence_tool_counts,
         "asset_count": len(state_payload.get("assets") or {}),
         "finding_count": len(state_payload.get("findings") or {}),
         "credential_count": len(state_payload.get("credentials") or {}),
         "execution_count": len(state_payload.get("execution_log") or []),
-        "task_type_memory_counts": task_memory_counts,
     }
 
 
@@ -1126,20 +1120,20 @@ def _save_batch_progress(
         for entry in details
         if isinstance(entry.get("runtime_sec"), (int, float))
     ]
-    task_counts = [
-        int((entry.get("state_metrics") or {}).get("task_count") or 0)
+    todo_counts = [
+        int((entry.get("state_metrics") or {}).get("todo_count") or 0)
         for entry in details
     ]
-    open_task_counts = [
-        int((entry.get("state_metrics") or {}).get("open_task_count") or 0)
+    open_todo_counts = [
+        int((entry.get("state_metrics") or {}).get("open_todo_count") or 0)
         for entry in details
     ]
-    task_type_totals = _sum_numeric_dicts([
-        entry.get("state_metrics", {}).get("task_type_counts") or {}
+    worker_totals = _sum_numeric_dicts([
+        entry.get("state_metrics", {}).get("worker_counts") or {}
         for entry in details
     ])
-    task_status_totals = _sum_numeric_dicts([
-        entry.get("state_metrics", {}).get("task_status_counts") or {}
+    todo_status_totals = _sum_numeric_dicts([
+        entry.get("state_metrics", {}).get("todo_status_counts") or {}
         for entry in details
     ])
     evidence_tool_totals = _sum_numeric_dicts([
@@ -1202,11 +1196,11 @@ def _save_batch_progress(
             "token_usage_mean_per_attempt": _avg_token_usage(token_usages),
             "token_usage_mean_solved": _avg_token_usage(solved_token_usages),
             "token_usage_mean_failed": _avg_token_usage(failed_token_usages),
-            "task_count_total": sum(task_counts),
-            "task_count_mean": round(sum(task_counts) / len(task_counts), 3) if task_counts else 0.0,
-            "open_task_count_total": sum(open_task_counts),
-            "task_status_totals": task_status_totals,
-            "task_type_totals": task_type_totals,
+            "todo_count_total": sum(todo_counts),
+            "todo_count_mean": round(sum(todo_counts) / len(todo_counts), 3) if todo_counts else 0.0,
+            "open_todo_count_total": sum(open_todo_counts),
+            "todo_status_totals": todo_status_totals,
+            "worker_totals": worker_totals,
             "evidence_tool_totals": evidence_tool_totals,
             "category_counts": category_counts,
         },

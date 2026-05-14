@@ -94,8 +94,8 @@ class PersonaWorker(WorkerAgent):
         selected_metadata: dict[str, object],
     ) -> dict[str, object]:
         metadata: dict[str, object] = {
-            **todo.context,
             **selected_metadata,
+            **todo.context,
         }
         if capability in {
             ToolCapability.ARTIFACT_TRIAGE,
@@ -212,7 +212,7 @@ class ReconWorker(PersonaWorker):
     """Persona worker for scope mapping and service discovery."""
 
     name = "recon-worker"
-    supported_task_types = ("todo",)
+    supported_todo_kinds = ("todo",)
     routing_summary = "Maps authorized scope into assets and collects first-pass host or HTTP metadata."
     allowed_capabilities = (
         ToolCapability.HTTP_METADATA,
@@ -273,7 +273,7 @@ class ArtifactWorker(PersonaWorker):
     """Persona worker for local challenge-file analysis."""
 
     name = "artifact-worker"
-    supported_task_types = ("todo",)
+    supported_todo_kinds = ("todo",)
     routing_summary = "Inspects bundled files, source, binaries, archives, repositories, databases, and packet captures."
     preferred_challenge_categories = ("crypto", "rev", "forensics", "misc", "pwn", "web")
     allowed_capabilities = (
@@ -314,7 +314,7 @@ class WebWorker(PersonaWorker):
     """Persona worker for HTTP content, paths, and forms."""
 
     name = "web-worker"
-    supported_task_types = ("todo",)
+    supported_todo_kinds = ("todo",)
     routing_summary = "Reviews HTTP content, probes routes, and interacts with discovered forms inside authorized scope."
     preferred_challenge_categories = ("web",)
     allowed_capabilities = (
@@ -338,7 +338,7 @@ class ExploitWorker(PersonaWorker):
     """Persona worker for vulnerability probes and exploit experiments."""
 
     name = "exploit-worker"
-    supported_task_types = ("todo",)
+    supported_todo_kinds = ("todo",)
     routing_summary = "Runs bounded exploit, credential, vulnerability, and script experiments from accumulated evidence."
     allowed_capabilities = (
         ToolCapability.VULN_SCAN,
@@ -353,7 +353,7 @@ class FlagWorker(PersonaWorker):
     """Persona worker for final flag hunting and validation."""
 
     name = "flag-worker"
-    supported_task_types = ("todo",)
+    supported_todo_kinds = ("todo",)
     routing_summary = "Harvests and validates concrete flag candidates."
     allowed_capabilities = (
         ToolCapability.FLAG_HARVEST,
@@ -387,6 +387,16 @@ class FlagWorker(PersonaWorker):
                     worker_name=self.name,
                     success=True,
                     summary=f"Validated flag candidate {candidate}.",
+                    state_delta=StateDelta(
+                        flag_candidates=[
+                            FlagCandidate(
+                                value=candidate,
+                                source="flag-validation",
+                                confidence=1.0,
+                                validated=True,
+                            )
+                        ]
+                    ),
                     solved=True,
                     validated_flag=candidate,
                     notes=[f"{self.name} validated the final flag."],
@@ -397,6 +407,18 @@ class FlagWorker(PersonaWorker):
                 worker_name=self.name,
                 success=False,
                 summary="Flag candidates were tested but did not match the expected flag.",
+                state_delta=StateDelta(
+                    flag_candidates=[
+                        FlagCandidate(
+                            value=candidate,
+                            source="flag-validation",
+                            confidence=0.1,
+                            validated=False,
+                            rejected_reason="candidate mismatch",
+                        )
+                        for candidate in candidates[:12]
+                    ]
+                ),
                 error="candidate mismatch",
                 retryable=False,
             )

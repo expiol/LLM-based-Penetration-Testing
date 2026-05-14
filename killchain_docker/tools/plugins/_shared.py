@@ -122,7 +122,7 @@ def _near_miss_flag(m):
 _LOCAL_CONTEXT_WINDOW = 200
 
 def _bracket_span_candidates(text, flag_format_prefix=None, max_take=12):
-    # Inline subprocess analogue of workers._helpers.flag._bracket_span_candidates.
+    # Inline subprocess analogue of reasoning.flag._bracket_span_candidates.
     # Used as a fallback when the canonical extractor finds nothing but the
     # tool output contains free-floating ``{body}`` spans, e.g.
     # ``MY key for you is {And yes the nsa can read this to}``.

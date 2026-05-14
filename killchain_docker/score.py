@@ -77,15 +77,15 @@ def diagnose_logdir(logdir: Path) -> dict[str, Any]:
         canonical = challenge.get("canonical_name") or path.stem
         category = challenge.get("category") or ""
         solved = bool(payload.get("solved") or state.get("solved"))
-        task_counts = metrics.get("task_type_counts") or {}
-        status_counts = metrics.get("task_status_counts") or {}
+        worker_counts = metrics.get("worker_counts") or {}
+        status_counts = metrics.get("todo_status_counts") or {}
         token_usage = payload.get("token_usage") or payload.get("summary", {}).get("token_usage") or {}
         total_tokens = int(token_usage.get("total_tokens") or token_usage.get("total") or 0)
         execution_log = state.get("execution_log") or []
         memory_text = json.dumps(
             {
-                "memory": state.get("task_type_memory") or {},
                 "events": execution_log[-30:],
+                "rounds": (state.get("rounds") or [])[-10:],
             },
             ensure_ascii=False,
         )[:500000]
@@ -94,26 +94,23 @@ def diagnose_logdir(logdir: Path) -> dict[str, Any]:
         if solved:
             buckets.append("solved")
         else:
-            web_tasks = sum(
-                int(task_counts.get(name, 0))
-                for name in ("web.path_probe", "web.content_review", "web.form_probe", "exploit.hypothesis")
-            )
+            web_work = int(worker_counts.get("web-worker", 0)) + int(worker_counts.get("exploit-worker", 0))
             script_tool_runs = int(
                 (metrics.get("evidence_tool_counts") or {}).get("script_execution", 0)
             )
-            validations = int(task_counts.get("flag.validate", 0))
+            validations = int(worker_counts.get("flag-worker", 0))
             if payload.get("error"):
                 buckets.append("environment_or_startup_error")
             if script_tool_runs >= 15:
                 buckets.append("script_tool_spin")
             if validations > 0:
                 buckets.append("candidate_validation_loop")
-            if category == "web" and (web_tasks >= 40 or total_tokens >= 650000):
+            if category == "web" and (web_work >= 40 or total_tokens >= 650000):
                 buckets.append("web_probe_fanout")
             if re.search(r"\btimeout\b|timed out|time limit", memory_text, re.I):
                 buckets.append("timeout_loop")
-            if int(metrics.get("open_task_count") or status_counts.get("pending") or 0):
-                buckets.append("stopped_with_open_tasks")
+            if int(metrics.get("open_todo_count") or status_counts.get("pending") or 0):
+                buckets.append("stopped_with_open_todos")
             if re.search(r"0 sources inspected|0 script\(s\) executed|none (appeared )?relevant", memory_text, re.I):
                 buckets.append("worker_contract_false_negative")
             if "truncated" in memory_text.lower() and any(
@@ -133,8 +130,8 @@ def diagnose_logdir(logdir: Path) -> dict[str, Any]:
                 "status": payload.get("status"),
                 "finish_reason": payload.get("finish_reason"),
                 "total_tokens": total_tokens,
-                "task_type_counts": task_counts,
-                "open_task_count": metrics.get("open_task_count", 0),
+                "worker_counts": worker_counts,
+                "open_todo_count": metrics.get("open_todo_count", 0),
                 "buckets": buckets,
             }
         )

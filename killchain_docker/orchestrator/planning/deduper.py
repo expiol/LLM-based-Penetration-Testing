@@ -6,7 +6,7 @@ from killchain_docker.orchestrator.planning.schemas import PlannedTodo
 from killchain_docker.state import RunState
 
 
-class TaskDeduper:
+class TodoDeduper:
     """Assign stable dedupe keys and drop same-batch duplicates."""
 
     def merge(

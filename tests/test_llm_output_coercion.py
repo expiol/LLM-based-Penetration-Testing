@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from killchain_docker.workers._helpers.coercion import coerce_llm_bool
+from killchain_docker.reasoning.coercion import coerce_llm_bool
 from killchain_docker.reasoning.schemas import (
     EvidenceReviewGuidance,
     ScriptCodeGuidance,
