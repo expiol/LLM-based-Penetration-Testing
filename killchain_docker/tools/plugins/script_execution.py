@@ -36,6 +36,12 @@ flag_format = str(payload.get("flag_format") or "")
 script_language = str(payload.get("script_language") or "python")
 challenge_files = payload.get("challenge_files") or []
 
+# Sibling directory holding writable, byte-identical copies of every
+# ``challenge_files`` entry. Scripts can mutate these freely (e.g. patch the
+# header, decrypt in place) without tripping the read-only protections we put
+# on the originals or hitting `shutil.copy2` mode-bit pitfalls.
+writable_root = files_root / "_rw"
+
 records = []
 notes_list = []
 flag_candidates = []
@@ -233,8 +239,51 @@ timed_out = False
 syntax_preflight_failed = False
 _challenge_restore = []  # list[(path_str, original_mode_only)]
 _challenge_snapshots = []  # list[(path_str, original_mode_only, sha256, bytes|None)]
+_writable_copies = []  # list[(path_str,)] — temp files we created in writable_root
 
 try:
+    # Best-effort: clean any leftover writable directory from a prior run, then
+    # recreate it as a fresh empty workspace before this script executes.
+    try:
+        if writable_root.exists():
+            for child in writable_root.iterdir():
+                try:
+                    if child.is_dir() and not child.is_symlink():
+                        for sub in child.rglob("*"):
+                            try:
+                                sub.chmod(0o600)
+                            except OSError:
+                                pass
+                            try:
+                                sub.unlink()
+                            except OSError:
+                                pass
+                        try:
+                            child.rmdir()
+                        except OSError:
+                            pass
+                    else:
+                        try:
+                            child.chmod(0o600)
+                        except OSError:
+                            pass
+                        try:
+                            child.unlink()
+                        except OSError:
+                            pass
+                except OSError:
+                    pass
+        writable_root.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(writable_root, 0o755)
+        except OSError:
+            pass
+    except OSError as exc:
+        notes_list.append(
+            f"writable_files_root setup failed: {exc.__class__.__name__}: {exc}; "
+            "scripts will only see read-only originals."
+        )
+
     for raw in challenge_files:
         name = str(raw).strip()
         if not name or "/" in name or "\\" in name or ".." in name:
@@ -285,12 +334,31 @@ try:
             continue
         _challenge_snapshots.append((str(cpath), mode_only, digest, snapshot_bytes))
 
+        exec_any = bool(st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+
+        # Materialize a writable copy under writable_root so scripts can mutate
+        # the bytes (patch headers, decrypt in place) without hitting the
+        # read-only chmod we apply below.  We deliberately do not use
+        # ``shutil.copy2`` because its mode preservation is what creates the
+        # PermissionError-on-write footgun in the first place.
+        if writable_root.is_dir() and snapshot_bytes is not None:
+            wpath = writable_root / name
+            try:
+                with open(wpath, "wb") as wf:
+                    wf.write(snapshot_bytes)
+                os.chmod(wpath, 0o755 if exec_any else 0o644)
+            except OSError as exc:
+                notes_list.append(
+                    f"writable copy failed for {name}: {exc.__class__.__name__}: {exc}."
+                )
+            else:
+                _writable_copies.append(str(wpath))
+
         # First line of defence: chmod read-only.  When the container user
         # owns the file this DOES prevent the binary's fopen("flag.stfu","wb")
         # call from succeeding.  When chmod fails (root-owned mount, fs that
         # doesn't honour mode, etc.) we emit a visible note so the failure
         # isn't silent — the snapshot+restore below is the real backstop.
-        exec_any = st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         try:
             os.chmod(cpath, 0o555 if exec_any else 0o444)
         except OSError as exc:
@@ -301,6 +369,18 @@ try:
 
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # Expose the read-only originals path and the writable copy directory to
+    # the script. Scripts that want to mutate bytes should open files under
+    # CTF_WRITABLE_FILES_ROOT instead of CTF_FILES_ROOT.
+    env["CTF_FILES_ROOT"] = str(files_root)
+    if writable_root.is_dir():
+        env["CTF_WRITABLE_FILES_ROOT"] = str(writable_root)
+        if _writable_copies:
+            notes_list.append(
+                "Writable copies prepared at "
+                f"{writable_root} ({len(_writable_copies)} file(s)); "
+                "use CTF_WRITABLE_FILES_ROOT for in-place mutation."
+            )
 
     try:
         if script_language == "python":
@@ -437,6 +517,19 @@ finally:
     except OSError:
         pass
 
+    # Clean up writable copies. Keep this best-effort: if the script left
+    # subdirectories behind we don't bother with full recursive deletion here
+    # because the next run wipes writable_root before populating it again.
+    for wpath in _writable_copies:
+        try:
+            os.chmod(wpath, 0o600)
+        except OSError:
+            pass
+        try:
+            os.unlink(wpath)
+        except OSError:
+            pass
+
 records.extend({"type": "note", "text": note} for note in notes_list)
 
 result_severity = "high" if flag_candidates else ("medium" if returncode == 0 else "info")
@@ -524,13 +617,28 @@ for item in records:
 SCRIPT = _SCRIPT_HEADER + SHARED_FLAG_DETECTION_SNIPPET + _SCRIPT_BODY
 
 
+# Reserve a small budget so the inner script terminates before the outer wrapper
+# is killed by the execution plane.  This lets the inner Python actually surface
+# its captured stdout/stderr / failure_detail back to the agent loop.
+_OUTER_BUDGET_BUFFER_S = 10
+_INNER_MIN_TIMEOUT_S = 20
+
+
 def build_arguments(request: ToolExecutionRequest) -> list[str]:
     raw_cf = request.metadata.get("challenge_files") or []
     challenge_files = [str(x).strip() for x in raw_cf if str(x).strip()]
+    # Inner subprocess timeout: prefer caller-provided metadata override, otherwise
+    # derive it from the outer execution-plane budget minus a safety buffer so
+    # the inner timeout fires first and produces structured output.
+    metadata_timeout = request.metadata.get("timeout_s")
+    if metadata_timeout is not None:
+        inner_timeout = int(metadata_timeout)
+    else:
+        inner_timeout = max(int(request.timeout_s) - _OUTER_BUDGET_BUFFER_S, _INNER_MIN_TIMEOUT_S)
     payload = {
         "script_code": request.metadata.get("script_code", ""),
         "files_root": request.metadata.get("files_root", "/home/ctfplayer/ctf_files"),
-        "timeout_s": request.metadata.get("timeout_s", 30),
+        "timeout_s": inner_timeout,
         "flag_format": request.metadata.get("flag_format"),
         "script_language": request.metadata.get("script_language", "python"),
         "challenge_files": challenge_files,

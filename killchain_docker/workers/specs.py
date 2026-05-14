@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from killchain_docker.workers.base import WorkerAgent
@@ -35,27 +35,3 @@ class WorkerSpec:
 
     def build(self, context: WorkerBuildContext) -> WorkerAgent:
         return self.factory(context)
-
-
-def worker_spec(group: str, worker_cls: type[WorkerAgent]) -> WorkerSpec:
-    """Create a standard capability-backed or LLM-backed worker spec."""
-
-    def factory(context: WorkerBuildContext) -> WorkerAgent:
-        return worker_cls(
-            llm_client=context.llm_client,
-            execution_plane=context.execution_plane,
-        )
-
-    return WorkerSpec(
-        key=worker_cls.__name__,
-        group=group,
-        factory=factory,
-        description=(worker_cls.__doc__ or "").strip().splitlines()[0] if worker_cls.__doc__ else "",
-    )
-
-
-def worker_specs(
-    group: str,
-    worker_classes: Iterable[type[WorkerAgent]],
-) -> tuple[WorkerSpec, ...]:
-    return tuple(worker_spec(group, worker_cls) for worker_cls in worker_classes)

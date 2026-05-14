@@ -102,13 +102,17 @@ class PlanStrategy:
             ],
             "stagnation_signals": self._stagnation_signals(state),
         }
-        related_writeups = (
-            []
-            if RagPolicy.suppress_related_writeups(state)
-            else (self.augmenter.for_planner(state) if self.augmenter else [])
-        )
+        RagPolicy.annotate(state)
+        related_writeups = self.augmenter.for_planner(state) if self.augmenter else []
         if related_writeups:
             snapshot["related_writeups"] = related_writeups
+            rag_meta = state.metadata.get("rag")
+            if isinstance(rag_meta, dict) and rag_meta.get("policy") == "possibly_misleading":
+                snapshot["related_writeups_warning"] = (
+                    "Prior attempts informed by these writeups have stalled in "
+                    f"{rag_meta.get('stalled_families', [])}. Treat the writeups as "
+                    "hints, not ground truth; consider alternative ciphers/algorithms."
+                )
         snapshot["planning_contract"] = {
             "output": "Return PlannerDecision with todos, not worker names or tool names.",
             "todo_granularity": "Each todo is a high-level objective with context and success criteria.",

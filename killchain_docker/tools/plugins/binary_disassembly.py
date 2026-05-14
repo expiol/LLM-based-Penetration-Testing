@@ -45,12 +45,14 @@ files_root = Path(payload.get("files_root") or "/home/ctfplayer/ctf_files")
 binary_files = payload.get("binary_files") or []
 max_files = int(payload.get("max_files", 4))
 
-# Per-binary budgets (chars) that bound prompt growth.  Keep small enough
-# that even 4 binaries together stay under ~12 KB.
-MAX_RODATA_CHARS = 1800
+# Per-binary budgets (chars) that bound prompt growth.  Sized so a typical
+# stripped i386 CTF binary (~10-20KB code) fits without truncating the
+# crypto/decryption loop in the middle.  Even 4 binaries together stay
+# under ~80 KB which is comfortably below the prompt budget.
+MAX_RODATA_CHARS = 2400
 MAX_FUNCTIONS_PER_BINARY = 12
-MAX_FUNC_BODY_CHARS = 900
-MAX_DISASM_CHARS_PER_BINARY = 5200
+MAX_FUNC_BODY_CHARS = 1800
+MAX_DISASM_CHARS_PER_BINARY = 18000
 
 
 def _run(args, timeout=20):
@@ -262,8 +264,11 @@ def _entry_set(symbols, funcs, xrefs):
     #   1. ``main`` if present (the goal in non-stripped binaries).
     #   2. Functions with ``.rodata`` xrefs (these are usually where the
     #      algorithm lives — they print error messages / load magic).
-    #   3. Mid-size, non-noise functions.
-    #   4. ``_start`` as a last resort (entry into libc bootstrap chain).
+    #   3. Largest non-noise function (stripped binaries: the user code is
+    #      typically merged into one ``.text`` block, much bigger than PLT
+    #      stubs and libc init wrappers).
+    #   4. Mid-size, non-noise functions to fill remaining slots.
+    #   5. ``_start`` as a last resort (entry into libc bootstrap chain).
     keep = []
     keep_set = set()
 
@@ -281,6 +286,18 @@ def _entry_set(symbols, funcs, xrefs):
     for name, count in xref_ranked:
         if count == 0:
             break
+        _add(name)
+        if len(keep) >= MAX_FUNCTIONS_PER_BINARY:
+            return keep
+    # Largest non-noise body next — for stripped binaries with no rodata xrefs
+    # detected (e.g. when the rodata addresses don't appear verbatim in the
+    # disassembly because the binary uses GOT-based addressing), this reliably
+    # finds the user-code block.
+    size_ranked = sorted(
+        ((name, len(body)) for name, body in funcs.items() if not _is_noise_func(name)),
+        key=lambda kv: -kv[1],
+    )
+    for name, _size in size_ranked[:3]:
         _add(name)
         if len(keep) >= MAX_FUNCTIONS_PER_BINARY:
             return keep
@@ -302,9 +319,12 @@ def _entry_set(symbols, funcs, xrefs):
 
 
 def _condense_function(body, budget=None):
-    # Drop blanks / section markers, trim to per-function budget.  Keep both
-    # head and tail when the body is large: parsers and output/decrypt loops
-    # commonly live near the end of main/.text.
+    # Drop blanks / section markers, then trim to budget.  When the body
+    # exceeds the budget, keep three slices (head, middle, tail) instead of
+    # only head+tail.  The middle slice is critical for stripped binaries
+    # where ``main`` and the algorithmic loop both live inside a single big
+    # ``.text`` block; a head+tail-only strategy reliably loses the crypto
+    # core in the middle.
     lines = []
     for raw in body.splitlines():
         stripped = raw.strip()
@@ -316,12 +336,23 @@ def _condense_function(body, budget=None):
     out = "\n".join(lines)
     if budget is None:
         budget = MAX_FUNC_BODY_CHARS
-    if len(out) > budget:
-        marker = "\n    ; ... [truncated middle] ...\n"
-        tail_budget = max(300, int(budget * 0.42))
-        head_budget = max(200, budget - tail_budget - len(marker))
-        out = out[:head_budget] + marker + out[-tail_budget:]
-    return out
+    if len(out) <= budget:
+        return out
+    marker = "\n    ; ... [truncated] ...\n"
+    overhead = len(marker) * 2
+    available = max(300, budget - overhead)
+    head_budget = available // 3
+    tail_budget = available // 3
+    middle_budget = available - head_budget - tail_budget
+    middle_start = max(head_budget, (len(out) - middle_budget) // 2)
+    middle_end = middle_start + middle_budget
+    return (
+        out[:head_budget]
+        + marker
+        + out[middle_start:middle_end]
+        + marker
+        + out[-tail_budget:]
+    )
 
 
 def _analysis_windows(raw_disasm, rodata):

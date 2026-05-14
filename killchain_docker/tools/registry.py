@@ -32,6 +32,3 @@ def build_execution_plane(
             )
         )
     return plane
-
-
-build_safe_execution_plane = build_execution_plane

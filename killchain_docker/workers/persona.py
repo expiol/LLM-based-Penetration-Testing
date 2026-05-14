@@ -19,13 +19,7 @@ from killchain_docker.state import (
 from killchain_docker.tools import ToolCapability, ToolExecutionError
 from killchain_docker.workers.base import WorkerAgent
 from killchain_docker.workers.specs import WorkerBuildContext, WorkerSpec
-from killchain_docker.workers.tool_metadata import (
-    DEFAULT_FILES_ROOT,
-    normalize_tool_metadata,
-)
-
-
-_DEFAULT_FILES_ROOT = DEFAULT_FILES_ROOT
+from killchain_docker.workers.tool_metadata import normalize_tool_metadata
 
 
 def _list(value: object) -> list[object]:

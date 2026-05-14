@@ -8,9 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import json
-from typing import Any, TypeVar
-
-from pydantic import BaseModel
+from typing import Any
 
 from killchain_docker.evidence_context import EvidenceContextBuilder
 from killchain_docker.llm import LLMClient, LLMClientError
@@ -24,8 +22,6 @@ from killchain_docker.tools import (
     ToolGateway,
 )
 from killchain_docker.workers.tool_metadata import tool_metadata_contract
-
-ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 # ===========================================================================
@@ -66,13 +62,8 @@ class WorkerAgent(ABC):
             return False, "todo not supported"
 
         context = todo.context
-        metadata: dict[str, Any] = {}
         excluded = {
-            str(value)
-            for value in (
-                list(metadata.get("exclude_workers") or [])
-                + list(context.get("exclude_workers") or [])
-            )
+            str(value) for value in (context.get("exclude_workers") or [])
         }
         if self.name in excluded:
             return False, "worker explicitly excluded by task metadata"
@@ -82,53 +73,6 @@ class WorkerAgent(ABC):
             if value in (None, "", [], {}, ()):
                 return False, f"missing required context key: {key}"
         return True, None
-
-    def routing_score(self, todo: TodoItem, state: RunState) -> int:
-        """Minimal deterministic score exposed as context for LLM routing."""
-
-        score = 50
-        category = str(state.metadata.get("challenge", {}).get("category") or "").lower()
-        if category and category in self.preferred_challenge_categories:
-            score += 25
-        return score
-
-    def routing_profile(self, todo: TodoItem, state: RunState) -> dict[str, Any]:
-        """Return structured metadata for LLM-assisted worker routing."""
-
-        default_summary = (self.__doc__ or "").strip().splitlines()
-        return {
-            "worker_name": self.name,
-            "supported_todo_kinds": list(self.supported_todo_kinds),
-            "routing_summary": self.routing_summary or (default_summary[0] if default_summary else self.name),
-            "preferred_challenge_categories": list(self.preferred_challenge_categories),
-            "required_context_keys": list(self.required_context_keys),
-            "heuristic_score": self.routing_score(todo, state),
-        }
-
-    def generate_structured_output(
-        self,
-        *,
-        system_prompt: str,
-        user_prompt: str,
-        schema: type[ModelT],
-        temperature: float = 0.2,
-    ) -> ModelT:
-        """Call llm_client.generate_json and return the validated result.
-
-        Raises LLMClientError if the LLM client is not configured or the call fails.
-        """
-
-        if self.llm_client is None:
-            raise LLMClientError(
-                f"{type(self).__name__} requires an LLM client but none was provided."
-            )
-
-        return self.llm_client.generate_json(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            schema=schema,
-            temperature=temperature,
-        )
 
     def run_capability(
         self,
@@ -210,6 +154,9 @@ class WorkerAgent(ABC):
                         "Use recent_evidence_context before repeating diagnostics already present there.",
                         "Do not read /tmp paths created by previous todos.",
                         "For script.execute, make script_code self-contained and print the important stdout.",
+                        "For script.execute, prefer os.environ['CTF_WRITABLE_FILES_ROOT'] for any file you intend "
+                        "to mutate in place; CTF_FILES_ROOT holds the read-only originals. "
+                        "Do not use shutil.copy2 on the originals (it preserves the read-only mode).",
                     ],
                     "tool_catalog": catalog,
                 },

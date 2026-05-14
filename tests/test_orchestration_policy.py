@@ -79,7 +79,7 @@ class TodoProgressPolicyTests(unittest.TestCase):
 
     def test_failed_family_enters_cooldown_without_novelty(self) -> None:
         state = _state()
-        for idx in range(2):
+        for idx in range(ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD):
             item = state.queue_todo(
                 TodoItem(
                     goal=f"Try LFSR decrypt variant {idx}",
@@ -92,7 +92,7 @@ class TodoProgressPolicyTests(unittest.TestCase):
             item.mark_partial("Script execution ran without recovering a flag.", "no candidate")
 
         todo = PlannedTodo(
-            goal="Try another LFSR decrypt variant.",
+            goal="Try LFSR decrypt variant N+1",
             phase=TodoPhase.ANALYSIS,
             context={"family": "lfsr-decrypt"},
         )
@@ -104,7 +104,7 @@ class TodoProgressPolicyTests(unittest.TestCase):
 
     def test_failed_family_allows_new_novelty_key(self) -> None:
         state = _state()
-        for idx in range(2):
+        for idx in range(ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD):
             item = state.queue_todo(
                 TodoItem(
                     goal=f"Try LFSR decrypt variant {idx}",
@@ -120,6 +120,30 @@ class TodoProgressPolicyTests(unittest.TestCase):
             goal="Retry LFSR decrypt using newly extracted loop evidence.",
             phase=TodoPhase.ANALYSIS,
             context={"family": "lfsr-decrypt", "novelty_key": "main-loop-offset"},
+        )
+
+        allowed, _reason = ProgressPolicy.allows(todo, state)
+
+        self.assertTrue(allowed)
+
+    def test_failed_family_allows_materially_different_goal(self) -> None:
+        state = _state()
+        for idx in range(ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD):
+            item = state.queue_todo(
+                TodoItem(
+                    goal=f"Try LFSR decrypt variant {idx} with skip cap",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "lfsr-decrypt"},
+                    dedupe_key=f"lfsr-{idx}",
+                )
+            )
+            item.mark_running("exploit-worker")
+            item.mark_partial("Script execution ran without recovering a flag.", "no candidate")
+
+        todo = PlannedTodo(
+            goal="Pivot away from LFSR: try AES counter-mode keystream from header bytes.",
+            phase=TodoPhase.ANALYSIS,
+            context={"family": "lfsr-decrypt"},
         )
 
         allowed, _reason = ProgressPolicy.allows(todo, state)

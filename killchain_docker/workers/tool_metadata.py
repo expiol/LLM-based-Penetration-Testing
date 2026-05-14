@@ -61,7 +61,14 @@ def tool_metadata_contract(capability: ToolCapability | str) -> dict[str, object
             "notes": (
                 "Put self-contained executable source in script_code. "
                 "Do not rely on /tmp files written by earlier todos; read challenge files "
-                "or regenerate diagnostics inside this script and print useful stdout."
+                "or regenerate diagnostics inside this script and print useful stdout. "
+                "Two env vars are exported when challenge_files are listed: "
+                "CTF_FILES_ROOT (read-only originals; protected by chmod) and "
+                "CTF_WRITABLE_FILES_ROOT (pre-populated mutable copies of every "
+                "challenge_files entry). Open files under CTF_WRITABLE_FILES_ROOT "
+                "for any in-place mutation. Do NOT use shutil.copy2 on the "
+                "originals; copy2 preserves the read-only mode bits and the "
+                "subsequent open(..., 'wb') will raise PermissionError."
             ),
         }
     if cap in _FILE_CONTRACTS:

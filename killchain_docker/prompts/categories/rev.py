@@ -25,11 +25,6 @@ register(CategoryPrompts(
         "4) Writing and executing an inverse function, "
         "5) Running the binary with instrumented input to capture output."
     ),
-    worker_system_prefix=(
-        "You are analyzing evidence from a reverse engineering CTF challenge. "
-        "Focus on understanding transformation pipelines, identifying checker "
-        "functions, extracting constants, and constructing inverse operations. "
-    ),
     analysis_strategy=(
         "For reversing challenges: identify the main transform chain (XOR with key, "
         "byte shuffles, custom S-boxes, RC4, TEA, etc.). Extract all hardcoded "
@@ -49,12 +44,5 @@ register(CategoryPrompts(
         "XOR encoded data with extracted keys",
         "Try running the binary with various inputs and observe output patterns",
         "Use ltrace/strace to trace library calls for crypto functions",
-    ],
-    script_technique_examples=[
-        "# XOR decrypt: key=[0x3f,0x42,...]; flag=bytes(c^k for c,k in zip(enc,key))",
-        "# Inverse transform: for i in range(len(data)-1,-1,-1): data[i] ^= data[i-1]",
-        "# String extraction: subprocess.run(['strings', binary], capture_output=True)",
-        "# Brute-force checker: for c in range(32,127): if check(chr(c)): flag+=chr(c)",
-        "# Z3 constraints: from z3 import *; s=Solver(); s.add(constraints); s.check()",
     ],
 ))

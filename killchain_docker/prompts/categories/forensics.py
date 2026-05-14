@@ -25,12 +25,6 @@ register(CategoryPrompts(
         "4) Disk/memory image mounting and deleted file recovery, "
         "5) Git history analysis for leaked secrets in previous commits."
     ),
-    worker_system_prefix=(
-        "You are analyzing evidence from a forensics CTF challenge. "
-        "Focus on extracting hidden data from file artifacts, analyzing network "
-        "traffic patterns, recovering deleted or embedded content, and identifying "
-        "steganographic techniques. "
-    ),
     analysis_strategy=(
         "For forensics challenges: use file/binwalk to identify file types and "
         "embedded data. For PCAPs: extract HTTP objects, DNS queries, FTP transfers, "
@@ -52,13 +46,5 @@ register(CategoryPrompts(
         "Filter PCAP for HTTP POST bodies and DNS TXT records",
         "Search git history: git log --all -p | grep -i flag",
         "Mount disk images and search for recently modified files",
-    ],
-    script_technique_examples=[
-        "# PCAP: import pyshark; cap=FileCapture('f.pcap'); [p['DNS'].qry_name for p in cap if 'DNS' in p]",
-        "# Binwalk: subprocess.run(['binwalk','-e','file.bin'],cwd=files_root)",
-        "# Steghide: subprocess.run(['steghide','extract','-sf','img.jpg','-p','','-f'])",
-        "# Git history: subprocess.run(['git','log','--all','-p','--'],capture_output=True,cwd=repo)",
-        "# Base64 chain: import base64; data=open('f','rb').read(); while True: data=base64.b64decode(data)",
-        "# Image LSB: from PIL import Image; bits=''.join(str(px&1) for px in img.getdata())",
     ],
 ))

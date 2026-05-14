@@ -13,11 +13,9 @@ class CategoryPrompts:
     objective_hint: str
     planner_system: str
     planner_focus: str
-    worker_system_prefix: str
     analysis_strategy: str
     exploit_strategy: str
     flag_recovery_hints: list[str] = field(default_factory=list)
-    script_technique_examples: list[str] = field(default_factory=list)
 
 
 _REGISTRY: dict[str, CategoryPrompts] = {}

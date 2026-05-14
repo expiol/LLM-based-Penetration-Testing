@@ -25,11 +25,6 @@ register(CategoryPrompts(
         "4) Pattern recognition and creative problem-solving, "
         "5) Flag hunting across all discovered artifacts."
     ),
-    worker_system_prefix=(
-        "You are analyzing evidence from a miscellaneous CTF challenge. "
-        "Be creative and consider unconventional approaches. Look for encoding "
-        "chains, esoteric languages, hidden messages, and programming puzzles. "
-    ),
     analysis_strategy=(
         "For misc challenges: try multiple angles. Check for multi-layer encoding "
         "(base64 → hex → ROT13). Look for esoteric language code (brainfuck, "
@@ -47,12 +42,5 @@ register(CategoryPrompts(
         "Run scripts with different inputs/arguments",
         "Look for patterns suggesting esoteric languages",
         "Check file for appended or hidden data sections",
-    ],
-    script_technique_examples=[
-        "# Decode chain: import base64,codecs; d=base64.b64decode(data); d=bytes.fromhex(d.decode()); d=codecs.decode(d,'rot13')",
-        "# Jail escape: __import__('os').system('cat flag*')",
-        "# Brute-force: from itertools import product; [try_password(''.join(p)) for p in product(charset,repeat=n)]",
-        "# Esoteric: subprocess.run(['bf','program.bf'],capture_output=True)  # brainfuck interpreter",
-        "# Pattern solve: data=open('data.txt').readlines(); # parse + compute + print flag",
     ],
 ))

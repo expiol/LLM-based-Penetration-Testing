@@ -26,6 +26,24 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
+
+
+_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "of", "in", "on", "to", "for", "with",
+    "from", "by", "into", "over", "under", "is", "are", "was", "were", "be",
+    "as", "at", "this", "that", "these", "those", "it", "its", "we", "you",
+    "they", "any", "all", "each", "some", "use", "using", "via",
+})
+
+
+def _normalize_tokens(text: str) -> set[str]:
+    """Return a set of meaningful tokens (lower-case, deduped, stop-filtered)."""
+
+    if not text:
+        return set()
+    tokens = {tok for tok in _TOKEN_SPLIT_RE.split(text.lower()) if tok and len(tok) > 2}
+    return tokens - _STOPWORDS
 _ESCAPED_BYTE_RE = re.compile(r"\\x[0-9a-fA-F]{2}|\\[0abfnrtv]")
 _PREFIX_FROM_FORMAT_RE = re.compile(r"^([A-Za-z0-9_]+)(?:\\?\{|\{)")
 
@@ -152,7 +170,7 @@ class TodoPolicy:
         goal_l = todo.goal.lower()
 
         family = cls.family_for(todo.goal, context)
-        context.setdefault("family", family)
+        context["family"] = family
 
         if challenge_files and cls._goal_needs_files(goal_l):
             context.setdefault("files_root", DEFAULT_FILES_ROOT)
@@ -223,8 +241,15 @@ class TodoPolicy:
     def family_for(goal: str, context: dict[str, Any] | None = None) -> str:
         context = context or {}
         explicit = str(context.get("family") or "").strip()
-        if explicit:
+        if explicit and explicit != "other":
             return explicit
+        derived = TodoPolicy._derive_family_from_goal(goal)
+        if derived != "other":
+            return derived
+        return explicit or "other"
+
+    @staticmethod
+    def _derive_family_from_goal(goal: str) -> str:
         text = goal.lower()
         if "lfsr" in text and any(token in text for token in ("decrypt", "keystream", "xor")):
             return "lfsr-decrypt"
@@ -238,7 +263,12 @@ class TodoPolicy:
             return "decrypt-keystream"
         if "flag" in text and any(token in text for token in ("recover", "validate", "candidate")):
             return "flag-recovery"
-        if "inventory" in text or "classify" in text:
+        if any(token in text for token in ("inventory", "classify", "triage")):
+            return "artifact-inventory"
+        if (
+            any(token in text for token in ("list", "enumerate", "inspect", "identify"))
+            and any(token in text for token in ("file", "files", "artifact", "artifacts", "directory"))
+        ):
             return "artifact-inventory"
         if "scope" in text or "recon" in text:
             return "recon"
@@ -273,7 +303,7 @@ class TodoPolicy:
 class ProgressPolicy:
     """Detect stalled todo families and suppress repeated failed strategies."""
 
-    FAILURE_COOLDOWN_THRESHOLD = 2
+    FAILURE_COOLDOWN_THRESHOLD = 4
 
     @classmethod
     def allows(cls, todo: "PlannedTodo", state: "RunState") -> tuple[bool, str]:
@@ -333,33 +363,67 @@ class ProgressPolicy:
             for item in (todo.context.get("evidence_ids") or [])
             if str(item).strip()
         }
-        if not evidence_ids:
+        if evidence_ids:
+            previous_ids: set[str] = set()
+            for item in state.todos:
+                current = str(item.context.get("family") or TodoPolicy.family_for(item.goal, item.context))
+                if current != family:
+                    continue
+                previous_ids.update(
+                    str(eid).strip()
+                    for eid in (item.context.get("evidence_ids") or [])
+                    if str(eid).strip()
+                )
+            if not evidence_ids.issubset(previous_ids):
+                return True
+
+        # Fallback novelty: when the planner has not annotated novelty_key but
+        # the goal text differs materially from prior attempts in the family
+        # (low Jaccard token overlap), treat it as a fresh approach.  This
+        # keeps the cooldown gate from stonewalling planners that rephrase
+        # rather than tag novelty explicitly.
+        new_tokens = _normalize_tokens(todo.goal)
+        if not new_tokens:
             return False
-        previous_ids: set[str] = set()
         for item in state.todos:
             current = str(item.context.get("family") or TodoPolicy.family_for(item.goal, item.context))
             if current != family:
                 continue
-            previous_ids.update(
-                str(eid).strip()
-                for eid in (item.context.get("evidence_ids") or [])
-                if str(eid).strip()
-            )
-        return not evidence_ids.issubset(previous_ids)
+            prior_tokens = _normalize_tokens(item.goal)
+            if not prior_tokens:
+                continue
+            overlap = len(new_tokens & prior_tokens) / max(1, len(new_tokens | prior_tokens))
+            if overlap >= 0.7:
+                return False
+        return True
 
 
 class RagPolicy:
-    """Decide whether retrieved writeups should continue to guide planning."""
+    """Annotate retrieved writeups when they appear to mislead planning.
+
+    Earlier versions of this policy fully hid the writeups once a related
+    family failed twice.  In practice that punished the planner: the writeup
+    is the planner's only outside knowledge for crypto/forensics challenges,
+    and removing it caused the run to stall with empty proposals.  The
+    revised policy never suppresses; it only tags the writeup as
+    ``possibly_misleading`` so the planner prompt can react accordingly.
+    """
 
     @staticmethod
-    def suppress_related_writeups(state: "RunState") -> bool:
-        rag = state.metadata.get("rag")
-        if isinstance(rag, dict) and rag.get("policy") == "contradicted":
-            return True
+    def annotate(state: "RunState") -> None:
+        rag = state.metadata.setdefault("rag", {})
+        if not isinstance(rag, dict):
+            return
         snapshot = ProgressPolicy.stagnation_snapshot(state)
         failed = snapshot.get("failed_or_partial_family_counts", {})
-        if isinstance(failed, dict) and int(failed.get("lfsr-decrypt") or 0) >= 2:
-            if isinstance(rag, dict):
-                rag["policy"] = "contradicted"
-            return True
-        return False
+        stalled_families = sorted(
+            family for family, count in (failed or {}).items()
+            if isinstance(count, int) and count >= ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD
+        )
+        if stalled_families:
+            rag["policy"] = "possibly_misleading"
+            rag["stalled_families"] = stalled_families
+        else:
+            rag.pop("stalled_families", None)
+            if rag.get("policy") == "possibly_misleading":
+                rag.pop("policy", None)

@@ -25,11 +25,6 @@ register(CategoryPrompts(
         "4) Exploit development with pwntools, "
         "5) Flag capture from shell or direct memory read."
     ),
-    worker_system_prefix=(
-        "You are analyzing evidence from a binary exploitation (pwn) CTF challenge. "
-        "Focus on identifying memory corruption vectors, protection mechanisms, "
-        "and viable exploitation paths (ROP, ret2libc, shellcode, format strings). "
-    ),
     analysis_strategy=(
         "For pwn challenges: check binary protections with checksec (NX, PIE, canary, "
         "RELRO). Identify vulnerable functions: gets(), scanf(), sprintf(), strcpy(). "
@@ -50,12 +45,5 @@ register(CategoryPrompts(
         "Look for win() or system('/bin/sh') gadgets",
         "Leak libc addresses via format string or GOT",
         "Use pwntools for scripted exploitation",
-    ],
-    script_technique_examples=[
-        "# Basic overflow: from pwn import *; p=remote(host,port); p.sendline(b'A'*offset+p64(win_addr))",
-        "# Format string leak: p.sendline(b'%p.'*20); leaked=p.recvline()",
-        "# ROP: from pwn import *; rop=ROP(elf); rop.call('system',[next(elf.search(b'/bin/sh'))])",
-        "# ret2libc: libc_base=leaked_addr-libc.symbols['puts']; system=libc_base+libc.symbols['system']",
-        "# Simple interaction: p=remote(h,port); p.sendlineafter(b'> ',b'target_address')",
     ],
 ))

@@ -35,4 +35,10 @@ Knowledge-base augmentation (related_writeups):
   ``flag.validate`` against the live target, so guessed flags will fail.
   Use the sketch to pick the right *task type* and a tight task *title*;
   worker tools must derive the actual flag from local artifacts.
+* If the user prompt also contains ``related_writeups_warning``, prior
+  attempts that followed the writeup's hint stalled.  Treat the writeup as
+  a *possibly misleading* hint: keep its high-level family in mind but
+  consider alternative ciphers/algorithms or different parameter parses
+  (e.g. endianness, alternative tap polynomials) before repeating the same
+  approach.
 """ % {"high": HIGH_CONFIDENCE_SCORE, "weak": WEAK_EVIDENCE_SCORE}

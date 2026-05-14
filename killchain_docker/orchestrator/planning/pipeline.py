@@ -132,12 +132,21 @@ class PlanningPipeline(PlannerAgent):
     def _has_todo_key(state: RunState, dedupe_key: str) -> bool:
         return any(todo.dedupe_key == dedupe_key for todo in state.todos)
 
+    # Atomic recon families: at most one open/done todo of this family per
+    # files_root.  Re-running them adds no signal beyond the first execution.
+    _ATOMIC_RECON_FAMILIES = frozenset({"artifact-inventory", "recon"})
+
     def _dedupe(
         self,
         todos: list[PlannedTodo],
         state: RunState,
     ) -> tuple[list[PlannedTodo], list[str]]:
         seen = {todo.dedupe_key for todo in state.todos if todo.dedupe_key}
+        atomic_seen: set[tuple[str, str]] = set()
+        for todo in state.todos:
+            family = str(todo.context.get("family") or "")
+            if family in self._ATOMIC_RECON_FAMILIES:
+                atomic_seen.add((family, str(todo.context.get("files_root") or "")))
         out: list[PlannedTodo] = []
         dropped = 0
         for todo in todos:
@@ -146,6 +155,13 @@ class PlanningPipeline(PlannerAgent):
             if todo.dedupe_key in seen:
                 dropped += 1
                 continue
+            family = str(todo.context.get("family") or "")
+            if family in self._ATOMIC_RECON_FAMILIES:
+                atomic_key = (family, str(todo.context.get("files_root") or ""))
+                if atomic_key in atomic_seen:
+                    dropped += 1
+                    continue
+                atomic_seen.add(atomic_key)
             seen.add(todo.dedupe_key)
             out.append(todo)
         notes = [f"Planning pipeline dropped {dropped} duplicate todo(s)."] if dropped else []
@@ -248,31 +264,3 @@ class PlanningPipeline(PlannerAgent):
         if todo.phase == TodoPhase.FLAG_VALIDATION:
             return CandidatePolicy.first_candidate_from_context(state, context, todo.goal) is not None
         return True
-
-
-class TodoNormalizer:
-    """Compatibility facade backed by :class:`TodoPolicy`."""
-
-    def fill(self, todo: PlannedTodo, state: RunState) -> None:
-        TodoPolicy.normalize(todo, state)
-
-
-class TodoDeduper:
-    """Compatibility facade backed by the pipeline dedupe rule."""
-
-    def merge(
-        self,
-        proposed: list[PlannedTodo],
-        state: RunState,
-        existing_keys: set[str] | None = None,
-    ) -> list[PlannedTodo]:
-        pipeline = PlanningPipeline()
-        for todo in proposed:
-            TodoPolicy.normalize(todo, state)
-        merged, _notes = pipeline._dedupe(proposed, state)
-        if existing_keys:
-            merged = [todo for todo in merged if todo.dedupe_key not in existing_keys]
-        return merged
-
-
-BootstrapSeeder = PlanningPipeline

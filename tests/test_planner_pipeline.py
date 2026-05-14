@@ -135,6 +135,19 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
 
         self.assertEqual(todo.phase, TodoPhase.FLAG_VALIDATION)
 
+    def test_family_for_recognizes_list_files_as_artifact_inventory(self) -> None:
+        family = TodoPolicy.family_for(
+            "List and inspect challenge files in /home/ctfplayer/ctf_files to identify available artifacts."
+        )
+        self.assertEqual(family, "artifact-inventory")
+
+    def test_family_for_overrides_explicit_other(self) -> None:
+        family = TodoPolicy.family_for(
+            "List and inspect challenge files in /home/ctfplayer/ctf_files to identify available artifacts.",
+            context={"family": "other"},
+        )
+        self.assertEqual(family, "artifact-inventory")
+
 
 class PlanningPipelineDedupTests(unittest.TestCase):
     def test_drops_duplicate_dedupe_keys(self) -> None:
@@ -150,6 +163,34 @@ class PlanningPipelineDedupTests(unittest.TestCase):
 
         self.assertEqual([todo.goal for todo in decision.todos], ["A"])
 
+    def test_collapses_two_artifact_inventory_todos_with_different_keys(self) -> None:
+        # Bootstrap seeds an artifact-inventory todo and the LLM also proposes
+        # a paraphrased "list and inspect challenge files" recon todo.  Both
+        # describe the same atomic recon family on the same files_root, so
+        # the second should be dropped even though their dedupe_key strings
+        # differ.
+        state = _state(["stfu", "flag.stfu"])
+        llm_todo = PlannedTodo(
+            goal="List and inspect challenge files in /home/ctfplayer/ctf_files to identify available artifacts.",
+            phase=TodoPhase.RECON,
+            context={
+                "files_root": "/home/ctfplayer/ctf_files",
+                "challenge_files": ["stfu", "flag.stfu"],
+            },
+        )
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(summary="dup", todos=[llm_todo]),
+        )
+
+        inventory_todos = [
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-inventory"
+        ]
+        self.assertEqual(len(inventory_todos), 1)
+        self.assertTrue(any("dropped" in note for note in decision.notes))
+
 
 class LLMPlannerTests(unittest.TestCase):
     def test_planner_combines_bootstrap_and_llm_todos(self) -> None:
@@ -157,14 +198,14 @@ class LLMPlannerTests(unittest.TestCase):
         planner = LLMPlanner(
             StaticLLMClient([
                 {
-                    "summary": "enumerate artifacts",
+                    "summary": "review source",
                     "todos": [
                         {
-                            "goal": "Enumerate bundled challenge artifacts.",
+                            "goal": "Review the bundled solve.py source for crypto weakness.",
                             "phase": "recon",
                             "priority": "high",
                             "context": {"seed_terms": ["solve.py"]},
-                            "success_criteria": ["Confirm available artifact names."],
+                            "success_criteria": ["Read solve.py end to end."],
                             "constraints": ["Use local files only."],
                         }
                     ],
@@ -176,10 +217,10 @@ class LLMPlannerTests(unittest.TestCase):
 
         decision = planner.plan(state)
 
-        self.assertEqual(decision.summary, "enumerate artifacts")
+        self.assertEqual(decision.summary, "review source")
         self.assertGreaterEqual(len(decision.todos), 2)
         self.assertEqual({todo.phase for todo in decision.todos}, {TodoPhase.RECON})
-        llm_todo = next(todo for todo in decision.todos if "artifacts" in todo.goal)
+        llm_todo = next(todo for todo in decision.todos if "solve.py" in todo.goal)
         self.assertEqual(llm_todo.priority, 75)
         self.assertEqual(llm_todo.context["files_root"], "/home/ctfplayer/ctf_files")
 

@@ -26,11 +26,6 @@ register(CategoryPrompts(
         "4) Writing and executing a decryption/script, "
         "5) Known-plaintext attacks if partial plaintext is available."
     ),
-    worker_system_prefix=(
-        "You are analyzing evidence from a cryptography CTF challenge. "
-        "Focus on identifying the cryptographic algorithm, extracting parameters, "
-        "and finding mathematical or implementation weaknesses to exploit. "
-    ),
     analysis_strategy=(
         "For crypto challenges: identify which algorithm is used (RSA, AES, DES, "
         "XOR, custom). Extract all parameters: public keys, moduli, exponents, "
@@ -51,12 +46,5 @@ register(CategoryPrompts(
         "Check if ECB mode leaks block patterns",
         "Try small exponent attacks for RSA",
         "Use z3 or sage for constraint-based solving",
-    ],
-    script_technique_examples=[
-        "# AES decrypt: from Crypto.Cipher import AES; AES.new(key,AES.MODE_CBC,iv).decrypt(ct)",
-        "# RSA: from gmpy2 import invert; d=invert(e,(p-1)*(q-1)); m=pow(c,d,n); print(m.to_bytes())",
-        "# XOR key recovery: key=bytes(c^p for c,p in zip(ciphertext, b'flag{'))",
-        "# Hash brute: from itertools import product; [hashlib.md5(x).hexdigest() for x in candidates]",
-        "# Factordb: requests.get(f'http://factordb.com/api?query={n}').json()",
     ],
 ))

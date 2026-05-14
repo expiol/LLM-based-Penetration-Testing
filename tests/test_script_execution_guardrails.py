@@ -320,5 +320,68 @@ class TestChallengeFileSnapshotRestore(unittest.TestCase):
             self.assertEqual(cfile.read_bytes(), original)
 
 
+class TestWritableFilesRoot(unittest.TestCase):
+    """User scripts must be able to mutate a copy without touching the original."""
+
+    def _run(self, *, files_root, script_code, challenge_files):
+        import subprocess as _sp
+        payload = {
+            "script_code": script_code,
+            "files_root": str(files_root),
+            "timeout_s": 10,
+            "flag_format": "",
+            "script_language": "python",
+            "challenge_files": list(challenge_files),
+        }
+        return _sp.run(
+            ["python3", "-c", script_execution.SCRIPT, json.dumps(payload)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+    def test_writable_copy_is_mutable_and_original_is_protected(self) -> None:
+        import tempfile
+        from pathlib import Path as _P
+
+        original = b"ORIGINAL_CONTENT_X" * 4
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfile = _P(tmpdir) / "flag.bin"
+            cfile.write_bytes(original)
+            script_code = (
+                "import os\n"
+                "rdir = os.environ['CTF_FILES_ROOT']\n"
+                "wdir = os.environ['CTF_WRITABLE_FILES_ROOT']\n"
+                "with open(os.path.join(rdir, 'flag.bin'), 'rb') as f: ro = f.read()\n"
+                "assert ro == open(os.path.join(wdir, 'flag.bin'), 'rb').read()\n"
+                "with open(os.path.join(wdir, 'flag.bin'), 'r+b') as f:\n"
+                "    f.seek(0)\n"
+                "    f.write(b'PATCHED-')\n"
+                "with open(os.path.join(wdir, 'flag.bin'), 'rb') as f:\n"
+                "    print('WCOPY:', f.read(8).decode())\n"
+                "try:\n"
+                "    with open(os.path.join(rdir, 'flag.bin'), 'wb') as f: f.write(b'X')\n"
+                "    print('ORIG_WRITE: ok')\n"
+                "except PermissionError:\n"
+                "    print('ORIG_WRITE: blocked')\n"
+            )
+
+            result = self._run(
+                files_root=tmpdir,
+                script_code=script_code,
+                challenge_files=["flag.bin"],
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        output_context = next(r for r in records if r.get("type") == "output_context")
+        self.assertIn("WCOPY: PATCHED-", output_context.get("stdout", ""))
+        self.assertIn("ORIG_WRITE: blocked", output_context.get("stdout", ""))
+
+        notes = [r for r in records if r.get("type") == "note"]
+        joined_notes = " | ".join(n.get("text", "") for n in notes)
+        self.assertIn("Writable copies prepared", joined_notes)
+
+
 if __name__ == "__main__":
     unittest.main()

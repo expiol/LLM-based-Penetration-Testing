@@ -19,7 +19,7 @@ from killchain_docker.tools.capabilities import (
     capability_source,
 )
 from killchain_docker.tools.parsers import json_payload_parser, jsonl_signal_parser
-from killchain_docker.tools.registry import build_execution_plane, build_safe_execution_plane
+from killchain_docker.tools.registry import build_execution_plane
 
 __all__ = [
     "AllowlistedCommandPlugin",
@@ -37,7 +37,6 @@ __all__ = [
     "ToolSpec",
     "capability_source",
     "build_execution_plane",
-    "build_safe_execution_plane",
     "json_payload_parser",
     "jsonl_signal_parser",
 ]
