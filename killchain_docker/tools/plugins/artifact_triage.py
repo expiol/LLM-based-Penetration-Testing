@@ -33,6 +33,7 @@ database_files = []
 pcap_files = []
 repo_paths = set()
 text_files = []
+decoded_text_previews = []
 source_suffixes = {
     ".c", ".cc", ".cpp", ".cxx", ".cs", ".go", ".h", ".hpp", ".htm", ".html",
     ".java", ".js", ".jsx", ".kt", ".php", ".py", ".rb", ".rs", ".sh", ".sql",
@@ -47,6 +48,22 @@ text_suffixes = {
 }
 
 flag_re = re.compile(r"[A-Za-z0-9_]+\{[^{}\n]{4,200}\}")
+
+def _decode_binary_text(text):
+    compact = re.sub(r"\s+", "", text or "")
+    if len(compact) < 32 or len(compact) % 8 != 0:
+        return ""
+    if not re.fullmatch(r"[01]+", compact):
+        return ""
+    try:
+        data = bytes(int(compact[index:index + 8], 2) for index in range(0, len(compact), 8))
+    except ValueError:
+        return ""
+    decoded = data.decode("utf-8", errors="ignore")
+    printable = sum(1 for char in decoded if char.isprintable() or char in "\r\n\t")
+    if decoded and printable / max(len(decoded), 1) >= 0.85:
+        return decoded
+    return ""
 """
 
 _SCRIPT_BODY = r"""
@@ -127,6 +144,26 @@ else:
                     "type": file_type,
                 })
 
+            decoded_sample = _decode_binary_text(sample)
+            if decoded_sample:
+                decoded_text_previews.append({
+                    "path": relpath,
+                    "preview": decoded_sample[:400],
+                })
+                for flag in flag_re.findall(decoded_sample):
+                    if not _plausible_flag(flag):
+                        continue
+                    if flag not in flag_candidates:
+                        flag_candidates.append(flag)
+                lowered_decoded = decoded_sample.lower()
+                if any(token in lowered_decoded for token in ("flag", "password", "secret", "token", "api_key", "todo")):
+                    interesting_files.append({
+                        "path": relpath,
+                        "size": size,
+                        "type": file_type,
+                        "decoded_as": "binary_text",
+                    })
+
     records.append({
         "type": "summary",
         "text": (
@@ -194,6 +231,8 @@ else:
         records.append({"type": "note", "text": f"Repository paths discovered: {sorted(repo_paths)[:10]}"})
     if script_sources:
         records.append({"type": "note", "text": f"Script-like source files discovered: {script_sources[:10]}"})
+    if decoded_text_previews:
+        records.append({"type": "note", "text": f"Decoded binary-text previews: {decoded_text_previews[:5]}"})
 
     records.append({
         "type": "output_context",
@@ -207,6 +246,7 @@ else:
         "web_source_files": web_sources[:20],
         "script_files": script_sources[:20],
         "text_files": text_files[:20],
+        "decoded_text_previews": decoded_text_previews[:10],
         "interesting_files": interesting_files[:20],
         "flag_candidates": flag_candidates[:10],
         "manual_checks": [

@@ -14,7 +14,7 @@ from killchain_docker.orchestrator.planning import (
     TodoDeduper,
     TodoNormalizer,
 )
-from killchain_docker.state import RunState, TodoItem
+from killchain_docker.state import FlagCandidate, RunState, TodoItem
 
 
 def _state(files: list[str] | None = None, scope: list[str] | None = None) -> RunState:
@@ -42,6 +42,17 @@ class BootstrapSeederTests(unittest.TestCase):
         self.assertTrue(any("Map authorized scope" in goal for goal in goals))
         self.assertTrue(all(not hasattr(todo, "task_type") for todo in decision.todos))
 
+    def test_seed_flag_validation_for_grounded_candidate(self) -> None:
+        state = _state([])
+        candidate = FlagCandidate(value="flag{ok}", source="artifact.triage")
+        state.flag_candidates[candidate.candidate_id] = candidate
+
+        decision = BootstrapSeeder().plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.FLAG_VALIDATION)
+        self.assertEqual(decision.todos[0].context["candidate_flag"], "flag{ok}")
+
 
 class TodoNormalizerTests(unittest.TestCase):
     def test_file_goal_gets_canonical_files_context(self) -> None:
@@ -52,6 +63,27 @@ class TodoNormalizerTests(unittest.TestCase):
         self.assertEqual(todo.context["files_root"], "/home/ctfplayer/ctf_files")
         self.assertEqual(todo.context["challenge_files"], ["solve.py"])
         self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
+
+    def test_flag_recovery_file_analysis_stays_analysis(self) -> None:
+        state = _state(["cipher.mpeg"])
+        todo = PlannedTodo(
+            goal="Perform deep analysis of the MPEG file to identify the cipher and recover the flag.",
+            phase=TodoPhase.FLAG_VALIDATION,
+        )
+        TodoNormalizer().fill(todo, state)
+
+        self.assertEqual(todo.context["files_root"], "/home/ctfplayer/ctf_files")
+        self.assertEqual(todo.context["challenge_files"], ["cipher.mpeg"])
+        self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
+
+    def test_candidate_flag_context_promotes_validation(self) -> None:
+        todo = PlannedTodo(
+            goal="Validate recovered candidate.",
+            context={"candidate_flag": "flag{ok}"},
+        )
+        TodoNormalizer().fill(todo, _state([]))
+
+        self.assertEqual(todo.phase, TodoPhase.FLAG_VALIDATION)
 
 
 class TodoDeduperTests(unittest.TestCase):
@@ -200,6 +232,69 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertGreaterEqual(len(decision.todos), 1)
         self.assertTrue(any("Inventory" in todo.goal for todo in decision.todos))
         self.assertTrue(any("Planner LLM failed" in note for note in decision.notes))
+
+    def test_planner_keeps_mislabelled_flag_recovery_analysis_todo(self) -> None:
+        state = _state(["cipher.mpeg"])
+        bootstrap = state.queue_todo(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        )
+        bootstrap.mark_completed("one MPEG-like text artifact found")
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "analyze MPEG",
+                    "todos": [
+                        {
+                            "goal": "Perform deep analysis of the MPEG file to identify the cipher and recover the flag.",
+                            "phase": "flag_validation",
+                            "priority": 90,
+                            "context": {"challenge_files": ["cipher.mpeg"]},
+                            "success_criteria": ["Produce a decrypted plaintext or concrete flag candidate."],
+                            "constraints": ["Use local files only."],
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.ANALYSIS)
+
+    def test_planner_prioritizes_grounded_flag_validation_candidate(self) -> None:
+        state = _state([])
+        candidate = FlagCandidate(value="flag{ok}", source="artifact.triage")
+        state.flag_candidates[candidate.candidate_id] = candidate
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "more analysis",
+                    "todos": [
+                        {
+                            "goal": "Review another artifact before flag recovery.",
+                            "phase": "analysis",
+                            "priority": 80,
+                            "context": {},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.FLAG_VALIDATION)
+        self.assertEqual(decision.todos[0].context["candidate_flag"], "flag{ok}")
 
 
 class PlannedTodoPriorityTests(unittest.TestCase):

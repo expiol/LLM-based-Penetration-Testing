@@ -25,8 +25,11 @@ _EXPLOIT_SIGNALS = (
     "session use",
 )
 _FLAG_VALIDATION_SIGNALS = (
-    "validate", "validation", "verify", "check", "submit", "confirm",
-    "candidate flag", "flag candidate", "recover flag", "flag recovery",
+    "validate", "validation", "verify", "submit", "confirm",
+)
+_FLAG_CANDIDATE_SIGNALS = (
+    "candidate_flag", "flag_candidate", "candidate flag", "flag candidate",
+    "flag{",
 )
 
 
@@ -64,9 +67,15 @@ class TodoNormalizer:
         context: dict[str, Any],
         explicit_phase: TodoPhase | str | None,
     ) -> TodoPhase:
-        """Keep explicit phases unless the todo text clearly implies a later stage."""
+        """Keep explicit phases unless the todo text clearly corrects them."""
         current = normalize_todo_phase(explicit_phase)
         inferred = cls.infer_phase(goal, context)
+        if (
+            current == TodoPhase.FLAG_VALIDATION
+            and inferred != TodoPhase.FLAG_VALIDATION
+            and not cls._has_concrete_flag_candidate(goal, context)
+        ):
+            return inferred
         if todo_phase_rank(inferred) > todo_phase_rank(current):
             return inferred
         return current
@@ -75,19 +84,36 @@ class TodoNormalizer:
     def infer_phase(goal: str, context: dict[str, Any] | None = None) -> TodoPhase:
         context = context or {}
         text = _phase_text(goal, context)
-        if context.get("candidate_flag") or context.get("flag_candidate_id"):
+        if TodoNormalizer._has_concrete_flag_candidate(goal, context):
             return TodoPhase.FLAG_VALIDATION
         if any(signal in text for signal in _EXPLOIT_SIGNALS):
             return TodoPhase.EXPLOIT
-        if "flag" in text and any(signal in text for signal in _FLAG_VALIDATION_SIGNALS):
-            return TodoPhase.FLAG_VALIDATION
         if context.get("credential_id") or context.get("session_id"):
             return TodoPhase.EXPLOIT
         if any(signal in text for signal in _ANALYSIS_SIGNALS):
             return TodoPhase.ANALYSIS
+        if "flag" in text and any(signal in text for signal in _FLAG_VALIDATION_SIGNALS):
+            return TodoPhase.FLAG_VALIDATION
         if any(signal in text for signal in _RECON_SIGNALS):
             return TodoPhase.RECON
         return TodoPhase.RECON
+
+    @staticmethod
+    def _has_concrete_flag_candidate(goal: str, context: dict[str, Any]) -> bool:
+        if any(
+            context.get(key)
+            for key in (
+                "candidate_flag",
+                "candidate_flags",
+                "flag_candidate",
+                "flag_candidates",
+                "flag_candidate_id",
+                "flag_candidate_ids",
+            )
+        ):
+            return True
+        text = _phase_text(goal, context)
+        return any(signal in text for signal in _FLAG_CANDIDATE_SIGNALS)
 
 
 def _phase_text(goal: str, context: dict[str, Any]) -> str:

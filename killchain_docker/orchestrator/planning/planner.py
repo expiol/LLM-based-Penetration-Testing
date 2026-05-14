@@ -119,6 +119,13 @@ class LLMPlanner(PlannerAgent):
         ]
         if open_phases:
             return min(open_phases, key=todo_phase_rank)
+        if todos and state.flag_candidates:
+            if any(
+                todo.phase == TodoPhase.FLAG_VALIDATION
+                and LLMPlanner._has_phase_grounding(todo, state)
+                for todo in todos
+            ):
+                return TodoPhase.FLAG_VALIDATION
         if todos:
             return min((todo.phase for todo in todos), key=todo_phase_rank)
         return None

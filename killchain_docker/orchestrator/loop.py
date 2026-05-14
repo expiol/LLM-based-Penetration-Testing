@@ -14,6 +14,7 @@ from killchain_docker.state import (
     RunState,
     RunStatus,
     TodoItem,
+    TodoPhase,
     TodoStatus,
     WorkerResult,
 )
@@ -124,10 +125,12 @@ class Orchestrator:
         goal = todo.goal.lower()
         context = todo.context
         preferred = "artifact-worker"
-        if "candidate_flag" in context or "flag" in goal:
+        if todo.phase == TodoPhase.FLAG_VALIDATION or _has_flag_candidate_context(context):
             preferred = "flag-worker"
         elif "scope" in context or "recon" in goal:
             preferred = "recon-worker"
+        elif todo.phase == TodoPhase.ANALYSIS or _has_file_context(context):
+            preferred = "artifact-worker"
         elif "base_url" in context or "path" in goal or "web" in goal or "http" in goal:
             preferred = "web-worker"
         elif "exploit" in goal or "vuln" in goal or "credential" in goal:
@@ -296,3 +299,34 @@ class Orchestrator:
         else:
             self.state.status = RunStatus.COMPLETED
         return self.state
+
+
+def _has_flag_candidate_context(context: dict[str, object]) -> bool:
+    return any(
+        context.get(key)
+        for key in (
+            "candidate_flag",
+            "candidate_flags",
+            "flag_candidate",
+            "flag_candidates",
+            "flag_candidate_id",
+            "flag_candidate_ids",
+        )
+    )
+
+
+def _has_file_context(context: dict[str, object]) -> bool:
+    return any(
+        context.get(key)
+        for key in (
+            "files_root",
+            "challenge_files",
+            "source_files",
+            "binary_files",
+            "archive_files",
+            "database_files",
+            "pcap_files",
+            "repo_paths",
+            "text_files",
+        )
+    )

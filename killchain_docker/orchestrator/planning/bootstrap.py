@@ -38,6 +38,29 @@ class BootstrapSeeder(PlannerAgent):
                 )
             )
 
+        for candidate in list(state.flag_candidates.values())[:8]:
+            if candidate.validated is False:
+                continue
+            dedupe_key = f"bootstrap:flag-validation:{candidate.value}"
+            if any(todo.dedupe_key == dedupe_key for todo in state.todos):
+                continue
+            todos.append(
+                PlannedTodo(
+                    goal="Validate recovered flag candidate.",
+                    phase=TodoPhase.FLAG_VALIDATION,
+                    priority=100,
+                    context={
+                        "candidate_flag": candidate.value,
+                        "flag_candidate_id": candidate.candidate_id,
+                    },
+                    success_criteria=[
+                        "Confirm whether the candidate is the challenge flag.",
+                    ],
+                    constraints=["Validate only grounded candidates already present in state."],
+                    dedupe_key=dedupe_key,
+                )
+            )
+
         for index, scope in enumerate(state.authorized_scope, start=1):
             dedupe_key = f"bootstrap:scope:{scope}"
             if any(todo.dedupe_key == dedupe_key for todo in state.todos):
