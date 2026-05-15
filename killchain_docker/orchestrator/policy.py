@@ -337,7 +337,7 @@ class ProgressPolicy:
         for todo in reversed(family_todos):
             if todo.status in {TodoStatus.FAILED, TodoStatus.PARTIAL, TodoStatus.BLOCKED}:
                 consecutive += 1
-            elif todo.status == TodoStatus.DONE:
+            elif todo.status == TodoStatus.COMPLETED:
                 break
             else:
                 # PENDING or IN_PROGRESS — skip, don't break the streak

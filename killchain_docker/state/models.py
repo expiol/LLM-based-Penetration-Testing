@@ -712,6 +712,7 @@ class WorkerResult(BaseModel):
     solved: bool = False
     validated_flag: str | None = None
     generated_at: datetime = Field(default_factory=utc_now)
+    memory_updates: dict[str, str] = Field(default_factory=dict)
 
 
 class RouterRoundSummary(BaseModel):
@@ -762,6 +763,7 @@ class RunState(BaseModel):
     evidence: dict[str, EvidenceRecord] = Field(default_factory=dict)
     network_edges: list[NetworkEdge] = Field(default_factory=list)
     execution_log: list[ExecutionRecord] = Field(default_factory=list)
+    working_memory: dict[str, str] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
     orchestration_notes: list[str] = Field(default_factory=list)
     solved: bool = False
@@ -938,6 +940,14 @@ class RunState(BaseModel):
             self.upsert_evidence(evidence)
         self.network_edges.extend(result.network_updates)
         self.apply_state_delta(result.state_delta)
+
+        if result.memory_updates:
+            self.working_memory.update(result.memory_updates)
+            # Cap working memory at 20 entries
+            if len(self.working_memory) > 20:
+                excess = len(self.working_memory) - 20
+                for key in list(self.working_memory.keys())[:excess]:
+                    del self.working_memory[key]
 
         if result.solved:
             self.solved = True

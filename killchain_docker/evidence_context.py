@@ -16,22 +16,42 @@ def _has_hex_block(text: str) -> bool:
 
 
 class EvidenceContextBuilder:
-    """Build a small, chronological evidence view from recent tool output."""
+    """Build a small, chronological evidence view from recent tool output.
+
+    Uses progressive summarization: full detail for recent records, compressed
+    for older ones. Category-aware window sizing for crypto/rev/forensics.
+    """
 
     def __init__(
         self,
         *,
-        max_records: int = 16,
+        max_records: int = 20,
         max_text_preview: int = 1800,
         max_key_lines: int = 24,
+        category: str = "misc",
     ) -> None:
-        self.max_records = max_records
-        self.max_text_preview = max_text_preview
+        if category in ("crypto", "rev", "forensics"):
+            self.max_records = 24
+            self.max_text_preview = 2400
+        else:
+            self.max_records = max_records
+            self.max_text_preview = max_text_preview
         self.max_key_lines = max_key_lines
 
     def build(self, state: RunState) -> list[dict[str, object]]:
         out: list[dict[str, object]] = []
-        for evidence in self._select_records(state):
+        selected = self._select_records(state)
+        total_selected = len(selected)
+        for rank, evidence in enumerate(selected):
+            # Progressive detail: last 3 full, next 5 medium, rest compressed
+            tier_offset = total_selected - 1 - rank
+            if tier_offset < 3:
+                tier = "full"
+            elif tier_offset < 8:
+                tier = "medium"
+            else:
+                tier = "compressed"
+
             extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
             ctx = extracted.get("output_context")
             if not isinstance(ctx, dict):
@@ -48,11 +68,11 @@ class EvidenceContextBuilder:
                 item["notes"] = _trim_list(extracted.get("notes"), limit=4, width=240)
 
             if evidence.tool_name == "script_execution":
-                item.update(self._script_context(ctx))
+                item.update(self._script_context(ctx, tier=tier))
             elif evidence.tool_name == "binary_disassembly":
-                item.update(self._binary_disassembly_context(ctx))
+                item.update(self._binary_disassembly_context(ctx, tier=tier))
             elif evidence.tool_name == "binary_run":
-                item.update(self._binary_run_context(ctx))
+                item.update(self._binary_run_context(ctx, tier=tier))
             else:
                 item.update(self._generic_context(ctx))
 
@@ -127,9 +147,10 @@ class EvidenceContextBuilder:
             score += 10.0
         return score
 
-    def _script_context(self, ctx: dict[str, object]) -> dict[str, object]:
+    def _script_context(self, ctx: dict[str, object], *, tier: str = "full") -> dict[str, object]:
         stdout = _string(ctx.get("stdout"))
         stderr = _string(ctx.get("stderr"))
+        preview_width = {"full": 3000, "medium": 1800, "compressed": 600}[tier]
         result: dict[str, object] = {
             "returncode": ctx.get("returncode"),
             "result_quality": ctx.get("result_quality"),
@@ -139,22 +160,23 @@ class EvidenceContextBuilder:
             "flag_candidates": _trim_list(ctx.get("flag_candidates"), limit=8, width=240),
             "near_miss_candidates": _trim_list(ctx.get("near_miss_candidates"), limit=8, width=240),
             "stdout_key_lines": self._key_lines(stdout),
-            "stdout_preview": self._trim_text(stdout),
+            "stdout_preview": self._trim_text(stdout, width=preview_width),
         }
         if stderr:
             result["stderr_key_lines"] = self._key_lines(stderr)
-            result["stderr_preview"] = self._trim_text(stderr, width=900)
+            result["stderr_preview"] = self._trim_text(stderr, width=min(preview_width, 900))
         for key in ("bare_token_candidates", "bracket_span_candidates"):
             values = _trim_list(ctx.get(key), limit=8, width=240)
             if values:
                 result[key] = values
         return _compact(result)
 
-    def _binary_disassembly_context(self, ctx: dict[str, object]) -> dict[str, object]:
+    def _binary_disassembly_context(self, ctx: dict[str, object], *, tier: str = "full") -> dict[str, object]:
         disassembly = ctx.get("disassembly")
         if not isinstance(disassembly, dict):
             return self._generic_context(ctx)
 
+        preview_width = {"full": 1200, "medium": 900, "compressed": 400}[tier]
         binaries: dict[str, object] = {}
         for binary_name, raw_info in list(disassembly.items())[:4]:
             if not isinstance(raw_info, dict):
@@ -166,7 +188,7 @@ class EvidenceContextBuilder:
                 "disassembly_truncated": raw_info.get("disassembly_truncated"),
                 "rodata": _trim_list(raw_info.get("rodata"), limit=8, width=220),
                 "analysis_window_previews": [
-                    self._trim_text(str(window), width=900)
+                    self._trim_text(str(window), width=preview_width)
                     for window in _as_list(raw_info.get("analysis_windows"))[:3]
                 ],
                 "function_previews": self._function_previews(raw_info.get("functions")),
@@ -179,11 +201,12 @@ class EvidenceContextBuilder:
             "flag_candidates": _trim_list(ctx.get("flag_candidates"), limit=8, width=240),
         })
 
-    def _binary_run_context(self, ctx: dict[str, object]) -> dict[str, object]:
+    def _binary_run_context(self, ctx: dict[str, object], *, tier: str = "full") -> dict[str, object]:
         runs = ctx.get("binary_runs")
         if not isinstance(runs, dict):
             return self._generic_context(ctx)
 
+        preview_width = {"full": 900, "medium": 600, "compressed": 300}[tier]
         compact_runs: dict[str, object] = {}
         for binary_name, raw_info in list(runs.items())[:4]:
             if not isinstance(raw_info, dict):
@@ -195,8 +218,8 @@ class EvidenceContextBuilder:
                 invocations.append({
                     "argv": _trim_list(invocation.get("argv"), limit=8, width=160),
                     "returncode": invocation.get("returncode"),
-                    "stdout_preview": self._trim_text(_string(invocation.get("stdout")), width=600),
-                    "stderr_preview": self._trim_text(_string(invocation.get("stderr")), width=600),
+                    "stdout_preview": self._trim_text(_string(invocation.get("stdout")), width=preview_width),
+                    "stderr_preview": self._trim_text(_string(invocation.get("stderr")), width=preview_width),
                 })
             compact_runs[str(binary_name)] = {"invocations": invocations}
         return _compact({

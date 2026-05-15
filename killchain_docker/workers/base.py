@@ -99,11 +99,37 @@ class WorkerAgent(ABC):
         state: RunState,
         prior_steps: list[dict[str, Any]],
     ) -> bool:
-        """Ask the LLM whether to run another tool in the inner loop."""
+        """Ask the LLM whether to run another tool in the inner loop.
+
+        Implements a Reflexion pattern: when the last step was a failed script,
+        the prompt explicitly instructs the LLM to analyze the error and fix it.
+        """
         if self.llm_client is None:
             return False
-        decision = self.llm_client.generate_json(
-            system_prompt=(
+
+        last_step = prior_steps[-1] if prior_steps else {}
+        last_failed_script = (
+            last_step.get("capability") == "script.execute"
+            and last_step.get("returncode") not in (None, 0)
+        )
+        last_partial_script = (
+            last_step.get("capability") == "script.execute"
+            and last_step.get("returncode") == 0
+            and not last_step.get("flag_candidates")
+        )
+
+        if last_failed_script or last_partial_script:
+            system_prompt = (
+                "You are a worker deciding whether to retry after a script failure. "
+                "The last script either crashed or ran without producing a flag candidate. "
+                "Return continue_loop=true and provide error_analysis (what went wrong) "
+                "and fix_strategy (how to fix it in the next attempt). "
+                "Return continue_loop=false ONLY if the error is unrecoverable "
+                "(e.g. missing challenge file, fundamentally wrong approach). "
+                "Return only JSON matching ContinueDecision."
+            )
+        else:
+            system_prompt = (
                 "You are a worker deciding whether to run one more tool or return results. "
                 "Return continue_loop=true only if the last tool produced partial evidence "
                 "that a follow-up tool would concretely advance (e.g. disassembly found the "
@@ -111,12 +137,16 @@ class WorkerAgent(ABC):
                 "Return continue_loop=false if a flag was found, the task is complete, "
                 "or another tool would not add new information. "
                 "Return only JSON matching ContinueDecision."
-            ),
+            )
+
+        decision = self.llm_client.generate_json(
+            system_prompt=system_prompt,
             user_prompt=json.dumps(
                 {
                     "worker_name": self.name,
                     "todo_goal": task.goal,
                     "prior_steps": prior_steps,
+                    "working_memory": state.working_memory if hasattr(state, "working_memory") else {},
                 },
                 ensure_ascii=True,
                 indent=2,
@@ -162,6 +192,46 @@ class WorkerAgent(ABC):
             if capability in allowed
         ]
         evidence_context = EvidenceContextBuilder(max_records=10).build(state)
+
+        # Build Reflexion context from prior steps if last step failed
+        reflexion_context = None
+        if prior_steps:
+            last = prior_steps[-1]
+            if (
+                last.get("capability") == "script.execute"
+                and (last.get("returncode") not in (None, 0) or not last.get("flag_candidates"))
+            ):
+                reflexion_context = {
+                    "instruction": (
+                        "The previous script attempt failed or produced no flag. "
+                        "Analyze the error below and write a CORRECTED script. "
+                        "Do NOT repeat the same approach without fixing the issue."
+                    ),
+                    "last_stderr": str(last.get("stderr_preview", ""))[:2000],
+                    "last_stdout": str(last.get("stdout_preview", ""))[:2000],
+                    "failure_kind": last.get("failure_kind"),
+                    "failure_detail": last.get("failure_detail"),
+                }
+
+        user_payload = {
+            "worker_name": self.name,
+            "todo": task.model_dump(mode="json"),
+            "state_summary": state.summary(),
+            "working_memory": state.working_memory if hasattr(state, "working_memory") else {},
+            "recent_evidence_context": evidence_context,
+            "prior_steps": prior_steps or [],
+            "recent_failures": [
+                record.model_dump(mode="json")
+                for record in state.execution_log[-12:]
+                if not record.success
+            ],
+            "allowed_capabilities": allowed_values,
+            "tool_use_rules": self._tool_use_rules(allowed),
+            "tool_catalog": catalog,
+        }
+        if reflexion_context:
+            user_payload["reflexion_context"] = reflexion_context
+
         decision = self.llm_client.generate_json(
             system_prompt=(
                 "You are a worker deciding one concrete lower-level tool call. "
@@ -173,27 +243,18 @@ class WorkerAgent(ABC):
                 "Use recent_evidence_context as grounded facts from previous tools. "
                 "If prior_steps is non-empty, use those results to inform your choice — "
                 "do not repeat a tool that already produced its evidence. "
+                "If reflexion_context is present, you MUST fix the identified error "
+                "in your next script — do not repeat the same broken approach. "
                 "Do not depend on /tmp files or other scratch files written by earlier todos; "
                 "read challenge files directly or regenerate needed diagnostics in the "
                 "same tool call. "
+                "Use working_memory as established facts from prior analysis. "
+                "You may set memory_updates to store key discoveries (algorithm names, "
+                "keys, constants) for future reference. "
                 "Return only JSON matching ToolUseDecision."
             ),
             user_prompt=json.dumps(
-                {
-                    "worker_name": self.name,
-                    "todo": task.model_dump(mode="json"),
-                    "state_summary": state.summary(),
-                    "recent_evidence_context": evidence_context,
-                    "prior_steps": prior_steps or [],
-                    "recent_failures": [
-                        record.model_dump(mode="json")
-                        for record in state.execution_log[-12:]
-                        if not record.success
-                    ],
-                    "allowed_capabilities": allowed_values,
-                    "tool_use_rules": self._tool_use_rules(allowed),
-                    "tool_catalog": catalog,
-                },
+                user_payload,
                 ensure_ascii=True,
                 indent=2,
             ),

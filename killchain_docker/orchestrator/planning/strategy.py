@@ -37,8 +37,19 @@ class PlanStrategy:
             system_prompt=self._system_prompt(state),
             user_prompt=self._user_prompt(state),
             schema=PlannerDecision,
-            temperature=0.2,
+            temperature=self._compute_temperature(state),
         )
+
+    @staticmethod
+    def _compute_temperature(state: RunState) -> float:
+        snapshot = ProgressPolicy.stagnation_snapshot(state)
+        cooldown_count = len(snapshot.get("cooldown_families", []))
+        rounds_without_flag = len(state.rounds) if not state.flag_candidates else 0
+        if cooldown_count >= 2 or rounds_without_flag >= 8:
+            return 0.6
+        if cooldown_count >= 1 or rounds_without_flag >= 5:
+            return 0.4
+        return 0.2
 
     def _system_prompt(self, state: RunState) -> str:
         return get_planner_system_prompt(self._category(state))
@@ -102,8 +113,12 @@ class PlanStrategy:
             ],
             "stagnation_signals": self._stagnation_signals(state),
             "near_miss_evidence": self._near_miss_evidence(state),
+            "working_memory": state.working_memory if state.working_memory else {},
         }
         RagPolicy.annotate(state)
+        pivot_summaries = self._pivot_summaries(state)
+        if pivot_summaries:
+            snapshot["pivot_required"] = pivot_summaries
         related_writeups = self.augmenter.for_planner(state) if self.augmenter else []
         if related_writeups:
             snapshot["related_writeups"] = related_writeups
@@ -285,3 +300,35 @@ class PlanStrategy:
             )
 
         return signals
+
+    @staticmethod
+    def _pivot_summaries(state: RunState) -> list[dict[str, object]]:
+        """For bankrupt families, produce structured what-we-tried summaries."""
+        seen_families: set[str] = set()
+        summaries: list[dict[str, object]] = []
+        for todo in state.todos:
+            family = str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context))
+            if family in seen_families:
+                continue
+            consecutive = ProgressPolicy._consecutive_failures_without_evidence(state, family)
+            if consecutive < ProgressPolicy.CONSECUTIVE_FAILURE_CAP:
+                continue
+            seen_families.add(family)
+            family_todos = [
+                t for t in state.todos
+                if str(t.context.get("family") or TodoPolicy.family_for(t.goal, t.context)) == family
+            ]
+            summaries.append({
+                "family": family,
+                "total_attempts": len(family_todos),
+                "approaches_tried": [
+                    {"goal": t.goal[:200], "error": (t.error or "")[:200], "status": str(t.status)}
+                    for t in family_todos[-5:]
+                ],
+                "pivot_instruction": (
+                    f"Family '{family}' is bankrupt after {consecutive} consecutive failures. "
+                    "You MUST try a fundamentally different approach: different algorithm, "
+                    "different tool, different attack surface. Do NOT rephrase previous attempts."
+                ),
+            })
+        return summaries

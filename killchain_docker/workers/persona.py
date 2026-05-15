@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from killchain_docker.llm import LLMClient
 from killchain_docker.orchestrator.policy import CandidatePolicy
+from killchain_docker.reasoning.flag import encoding_cascade
 from killchain_docker.state import (
     Asset,
     AssetKind,
@@ -69,7 +70,7 @@ class PersonaWorker(WorkerAgent):
         todo: TodoItem,
         state: RunState,
         prior_steps: list[dict[str, object]] | None = None,
-    ) -> tuple[ToolCapability, dict[str, object], str, str | None]:
+    ) -> tuple[ToolCapability, dict[str, object], str, str | None, dict[str, str]]:
         decision = self.choose_tool_use(
             task=todo,
             state=state,
@@ -81,6 +82,7 @@ class PersonaWorker(WorkerAgent):
             dict(decision.metadata),
             decision.rationale,
             decision.hypothesis,
+            dict(decision.memory_updates) if decision.memory_updates else {},
         )
 
     def _prepare_metadata(
@@ -149,7 +151,7 @@ class PersonaWorker(WorkerAgent):
             partial_reason=partial_reason,
         )
 
-    _MAX_INNER_STEPS = 3
+    _MAX_INNER_STEPS = 7
 
     def run(self, task: TodoItem, state: RunState) -> WorkerResult:
         if self.tool_gateway is None:
@@ -167,14 +169,17 @@ class PersonaWorker(WorkerAgent):
         last_capability = None
         last_rationale = ""
         accumulated_hypotheses: list[Hypothesis] = []
+        accumulated_memory: dict[str, str] = {}
 
         for step in range(self._MAX_INNER_STEPS):
             try:
-                capability, selected_metadata, rationale, hypothesis_text = self._choose_capability(
+                capability, selected_metadata, rationale, hypothesis_text, mem_updates = self._choose_capability(
                     task, state, prior_steps=prior_steps if prior_steps else None
                 )
                 if hypothesis_text:
                     accumulated_hypotheses.append(Hypothesis(title=hypothesis_text))
+                if mem_updates:
+                    accumulated_memory.update(mem_updates)
                 metadata = self._prepare_metadata(
                     capability=capability,
                     todo=task,
@@ -211,8 +216,11 @@ class PersonaWorker(WorkerAgent):
                 "summary": bundle.parsed.summary,
                 "flag_candidates": output_context.get("flag_candidates", []),
                 "near_miss_candidates": output_context.get("near_miss_candidates", []),
-                "stdout_preview": str(output_context.get("stdout", ""))[:600],
+                "stdout_preview": str(output_context.get("stdout", ""))[:2000],
+                "stderr_preview": str(output_context.get("stderr", ""))[:1500],
                 "returncode": output_context.get("returncode"),
+                "failure_kind": output_context.get("failure_kind"),
+                "failure_detail": output_context.get("failure_detail"),
             })
 
             # Stop early if flag found
@@ -230,6 +238,23 @@ class PersonaWorker(WorkerAgent):
         success = _tool_success(last_capability, last_bundle, output_context)
         if len(prior_steps) > 1:
             output_context["react_steps"] = len(prior_steps)
+
+        # Encoding cascade: when near-miss detected but no flag found, try
+        # common encoding transformations and add results as flag candidates.
+        cascade_candidates: list[FlagCandidate] = []
+        if not last_bundle.state_delta.flag_candidates:
+            near_misses = output_context.get("near_miss_candidates") or []
+            for nm in near_misses[:3]:
+                for transformed in encoding_cascade(str(nm)):
+                    if CandidatePolicy.accepts_for_state(state, transformed):
+                        cascade_candidates.append(
+                            FlagCandidate(
+                                value=transformed,
+                                source="encoding_cascade",
+                                confidence=0.2,
+                            )
+                        )
+
         result = self._result_from_bundle(
             todo=task,
             capability=last_capability,
@@ -239,6 +264,14 @@ class PersonaWorker(WorkerAgent):
             bundle=last_bundle,
             rationale=last_rationale,
         )
+        if cascade_candidates:
+            existing = list(result.state_delta.flag_candidates) if result.state_delta else []
+            result.state_delta = StateDelta(
+                **{
+                    **result.state_delta.model_dump(),
+                    "flag_candidates": existing + cascade_candidates,
+                }
+            )
         if accumulated_hypotheses:
             existing = list(result.state_delta.hypotheses) if result.state_delta else []
             result.state_delta = StateDelta(
@@ -247,6 +280,8 @@ class PersonaWorker(WorkerAgent):
                     "hypotheses": existing + accumulated_hypotheses,
                 }
             )
+        if accumulated_memory:
+            result.memory_updates = accumulated_memory
         return result
 
 

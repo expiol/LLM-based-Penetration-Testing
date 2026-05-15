@@ -30,11 +30,15 @@ RUN curl -LO https://github.com/skylot/jadx/releases/download/v1.4.7/jadx-1.4.7.
     unzip -d /usr/local jadx-1.4.7.zip && \
     rm -f jadx-1.4.7.zip
 
-RUN python3 -m pip install --upgrade pip && python3 -m pip install pwntools gmpy2 angr chepy pycryptodome z3-solver sympy ROPgadget
+RUN python3 -m pip install --upgrade pip && python3 -m pip install pwntools gmpy2 angr chepy pycryptodome z3-solver sympy ROPgadget uncompyle6 decompyle3
 
 RUN apt-get update && apt-get install -y \
     ltrace strace upx-ucl binwalk exiftool steghide foremost \
+    tshark fcrackzip john openssl \
     && rm -rf /var/lib/apt/lists/*
+
+# Radare2 Ghidra decompiler plugin
+RUN r2pm -ci r2ghidra || true
 
 RUN ln -s -f /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-trust.so /usr/lib/x86_64-linux-gnu/nss/libnssckbi.so
 RUN ln -s -f /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-trust.so /usr/lib/firefox/libnssckbi.so || true

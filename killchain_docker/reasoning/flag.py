@@ -204,8 +204,87 @@ def extract_flag_candidates(
     return candidates
 
 
+def encoding_cascade(near_miss: str) -> list[str]:
+    """Try common encoding transformations on a near-miss flag candidate.
+
+    When a near-miss is detected (correct prefix{body} shape but garbled bytes),
+    this function attempts common fixes: strip non-printable, XOR 0xFF, reverse,
+    base64/hex decode the body, rot13, strip null bytes.
+    """
+    if "{" not in near_miss or not near_miss.endswith("}"):
+        return []
+    prefix, _, body_brace = near_miss.partition("{")
+    body = body_brace[:-1]
+    if not body or not prefix:
+        return []
+
+    candidates: list[str] = []
+
+    def _try(transformed_body: str) -> None:
+        candidate = f"{prefix}{{{transformed_body}}}"
+        if candidate not in candidates and candidate != near_miss and plausible_flag(candidate):
+            candidates.append(candidate)
+
+    # Strip non-printable characters
+    printable_body = "".join(c for c in body if 32 <= ord(c) <= 126)
+    if printable_body != body:
+        _try(printable_body)
+
+    # Strip null bytes
+    no_null = body.replace("\x00", "")
+    if no_null != body:
+        _try(no_null)
+
+    # XOR each byte with 0xFF
+    try:
+        xored = "".join(chr(ord(c) ^ 0xFF) for c in body)
+        _try(xored)
+    except (ValueError, OverflowError):
+        pass
+
+    # Reverse byte order
+    _try(body[::-1])
+
+    # ROT13
+    try:
+        rot13_body = codecs.decode(body, "rot_13")
+        _try(rot13_body)
+    except Exception:
+        pass
+
+    # Try interpreting body as hex and decoding
+    hex_clean = body.replace(" ", "").replace("-", "")
+    if re.fullmatch(r"[0-9a-fA-F]+", hex_clean) and len(hex_clean) % 2 == 0:
+        try:
+            decoded = binascii.unhexlify(hex_clean).decode("utf-8", errors="ignore")
+            _try(decoded)
+        except Exception:
+            pass
+
+    # Try base64 decoding the body
+    if re.fullmatch(r"[A-Za-z0-9+/=]+", body):
+        for variant in (body, body + "=", body + "=="):
+            try:
+                decoded = base64.b64decode(variant, validate=True).decode("utf-8", errors="ignore")
+                _try(decoded)
+            except Exception:
+                pass
+
+    # Latin-1 interpretation (for bytes > 127 that got mangled as UTF-8)
+    try:
+        raw_bytes = body.encode("latin-1")
+        utf8_body = raw_bytes.decode("utf-8", errors="ignore")
+        if utf8_body != body:
+            _try(utf8_body)
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        pass
+
+    return candidates
+
+
 __all__ = [
     "extract_flag_candidates",
+    "encoding_cascade",
     "_bracket_span_candidates",
     "FLAG_BODY_MAX_LEN",
     "FLAG_BODY_MIN_LEN",

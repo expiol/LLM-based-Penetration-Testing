@@ -25,7 +25,7 @@ from killchain_docker.tools.plugins import (
     script_execution,
     source_review,
 )
-from killchain_docker.workers.persona import ExploitWorker, WebWorker
+from killchain_docker.workers.persona import ExploitWorker, ReconWorker, WebWorker
 from killchain_docker.workers.tool_metadata import normalize_tool_metadata
 
 
@@ -92,13 +92,13 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
             captured["system_prompt"] = system_prompt
             captured["user_prompt"] = user_prompt
             return {
-                "capability": "http.content",
+                "capability": "http.metadata",
                 "metadata": {"base_url": "http://safe.test"},
                 "rationale": "read known page",
-                "expected_signal": "http body",
+                "expected_signal": "http headers",
             }
 
-        worker = WebWorker(
+        worker = ReconWorker(
             llm_client=StaticLLMClient(responder),
             execution_plane=ExecutionPlane(),
         )
@@ -109,10 +109,10 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
                 context={"base_url": "http://safe.test"},
             ),
             state=RunState(objective="solve", authorized_scope=["http://safe.test"]),
-            allowed_capabilities=list(WebWorker.allowed_capabilities),
+            allowed_capabilities=list(ReconWorker.allowed_capabilities),
         )
 
-        self.assertEqual(decision.capability, "http.content")
+        self.assertEqual(decision.capability, "http.metadata")
         snapshot = json.loads(captured["user_prompt"])
         self.assertNotIn("script.execute", captured["system_prompt"])
         self.assertNotIn("script.execute", json.dumps(snapshot))
@@ -154,7 +154,7 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin()
         plane.register_plugin(plugin)
-        worker = WebWorker(
+        worker = ReconWorker(
             llm_client=StaticLLMClient([
                 {
                     "capability": "script.execute",
@@ -176,7 +176,7 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertFalse(result.retryable)
-        self.assertIn("web-worker selected unavailable tool capability 'script.execute'", result.error or "")
+        self.assertIn("recon-worker selected unavailable tool capability 'script.execute'", result.error or "")
         self.assertIn("allowed capabilities:", result.error or "")
         self.assertIsNone(plugin.last_request)
 
