@@ -342,6 +342,7 @@ class WebWorker(PersonaWorker):
         ToolCapability.HTTP_PROBE_PATHS,
         ToolCapability.HTTP_FORM_PROBE,
         ToolCapability.CREDENTIAL_LOGIN,
+        ToolCapability.SCRIPT_EXECUTE,
     )
 
 

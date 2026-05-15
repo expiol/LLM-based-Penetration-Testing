@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from killchain_docker.llm import LLMClientError, StaticLLMClient
+from killchain_docker.llm import StaticLLMClient
 from killchain_docker.orchestrator.router import RouterAgent
 from killchain_docker.state import RunState, TodoItem, TodoPhase, WorkerResult
 
@@ -88,7 +88,8 @@ class RouterAgentTests(unittest.TestCase):
         self.assertNotIn(exploit.todo_id, [todo["todo_id"] for todo in captured["ready_todos"]])
         self.assertEqual(decision.assignments[0].todo_id, recon.todo_id)
 
-    def test_deterministic_file_analysis_route_ignores_llm_override(self) -> None:
+    def test_llm_route_respected_for_analysis_tasks(self) -> None:
+        """LLM routing decisions are trusted — no deterministic override."""
         state = RunState(objective="Solve.", authorized_scope=[])
         todo = state.queue_todo(
             TodoItem(
@@ -103,11 +104,11 @@ class RouterAgentTests(unittest.TestCase):
                     "assignments": [
                         {
                             "todo_id": todo.todo_id,
-                            "worker_name": "flag-worker",
-                            "rationale": "bad override",
+                            "worker_name": "artifact-worker",
+                            "rationale": "file analysis",
                         }
                     ],
-                    "rationale": "bad override",
+                    "rationale": "LLM route",
                 }
             ])
         )
@@ -122,9 +123,9 @@ class RouterAgentTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.assignments[0].worker_name, "artifact-worker")
-        self.assertEqual(decision.rationale, "Deterministic policy route.")
 
-    def test_llm_route_cannot_override_policy_route(self) -> None:
+    def test_llm_route_passes_through_without_override(self) -> None:
+        """LLM routing is trusted — no policy override of worker assignments."""
         state = RunState(objective="Solve.", authorized_scope=[])
         scoped = state.queue_todo(TodoItem(goal="Map scope", phase=TodoPhase.RECON, priority=90))
         generic = state.queue_todo(TodoItem(goal="Review notes", phase=TodoPhase.RECON, priority=80))
@@ -135,15 +136,15 @@ class RouterAgentTests(unittest.TestCase):
                         {
                             "todo_id": scoped.todo_id,
                             "worker_name": "artifact-worker",
-                            "rationale": "bad route",
+                            "rationale": "LLM chose artifact",
                         },
                         {
                             "todo_id": generic.todo_id,
                             "worker_name": "artifact-worker",
-                            "rationale": "generic route",
+                            "rationale": "LLM chose artifact",
                         },
                     ],
-                    "rationale": "mixed route",
+                    "rationale": "LLM route",
                 }
             ])
         )
@@ -159,11 +160,11 @@ class RouterAgentTests(unittest.TestCase):
 
         self.assertEqual(
             [(item.todo_id, item.worker_name) for item in decision.assignments],
-            [(scoped.todo_id, "recon-worker"), (generic.todo_id, "artifact-worker")],
+            [(scoped.todo_id, "artifact-worker"), (generic.todo_id, "artifact-worker")],
         )
-        self.assertIn("policy route", decision.assignments[0].rationale.lower())
 
-    def test_invalid_llm_route_raises_without_local_route(self) -> None:
+    def test_empty_llm_route_returns_no_valid_assignments(self) -> None:
+        """When LLM returns no assignments, router returns empty decision (no raise)."""
         state = RunState(objective="Solve.", authorized_scope=[])
         state.queue_todo(TodoItem(goal="Review notes", phase=TodoPhase.RECON))
         router = RouterAgent(
@@ -175,15 +176,16 @@ class RouterAgentTests(unittest.TestCase):
             ])
         )
 
-        with self.assertRaises(LLMClientError):
-            router.route(
-                state,
-                worker_catalog=[
-                    {"name": "recon-worker"},
-                    {"name": "artifact-worker"},
-                ],
-                max_assignments=5,
-            )
+        decision = router.route(
+            state,
+            worker_catalog=[
+                {"name": "recon-worker"},
+                {"name": "artifact-worker"},
+            ],
+            max_assignments=5,
+        )
+        self.assertEqual(decision.assignments, [])
+        self.assertIn("No valid", decision.rationale)
 
     def test_deterministic_flag_validation_route(self) -> None:
         state = RunState(objective="Solve.", authorized_scope=[])
@@ -204,7 +206,8 @@ class RouterAgentTests(unittest.TestCase):
 
         self.assertEqual([(item.todo_id, item.worker_name) for item in decision.assignments], [(todo.todo_id, "flag-worker")])
 
-    def test_deterministic_route_uses_state_flag_format_for_bare_token_candidate(self) -> None:
+    def test_flag_validation_phase_structurally_routes_to_flag_worker(self) -> None:
+        """FLAG_VALIDATION phase todos are structurally routed to flag-worker without LLM."""
         state = RunState(
             objective="Solve.",
             authorized_scope=[],
@@ -213,7 +216,7 @@ class RouterAgentTests(unittest.TestCase):
         todo = state.queue_todo(
             TodoItem(
                 goal="Validate recovered token.",
-                phase=TodoPhase.ANALYSIS,
+                phase=TodoPhase.FLAG_VALIDATION,
                 context={"candidate_flag": "STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME"},
             )
         )

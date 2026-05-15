@@ -286,6 +286,7 @@ class ProgressPolicy:
 
     FAILURE_COOLDOWN_THRESHOLD = 3
     MAX_FAMILY_ATTEMPTS = 10  # raised from 6; iterative families are exempt below
+    CONSECUTIVE_FAILURE_CAP = 5  # Hard pivot after 5 consecutive failures without new evidence
 
     # Families that are inherently iterative — apply cooldown but no hard cap.
     _UNCAPPED_FAMILIES = frozenset({"artifact-inventory", "flag-recovery", "recon", "crypto-decrypt", "binary-analysis"})
@@ -295,10 +296,14 @@ class ProgressPolicy:
         family = str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context))
         total, failed = cls._family_counts(state, family)
         if family in cls._UNCAPPED_FAMILIES:
-            # No hard cap; only cooldown applies.
+            # Check consecutive failures without progress
+            consecutive = cls._consecutive_failures_without_evidence(state, family)
+            if consecutive >= cls.CONSECUTIVE_FAILURE_CAP:
+                return False, f"family {family!r} bankrupt: {consecutive} consecutive failures without new evidence"
+            # Cooldown with tighter Jaccard after many failures
             if failed < cls.FAILURE_COOLDOWN_THRESHOLD:
                 return True, ""
-            if cls._has_new_novelty(todo, state, family):
+            if cls._has_new_novelty(todo, state, family, jaccard_threshold=0.3 if failed >= 5 else 0.5):
                 return True, ""
             return False, f"family {family!r} is in cooldown after {failed} failed/partial attempt(s)"
         if total >= cls.MAX_FAMILY_ATTEMPTS:
@@ -322,6 +327,24 @@ class ProgressPolicy:
         return total, failed
 
     @classmethod
+    def _consecutive_failures_without_evidence(cls, state: "RunState", family: str) -> int:
+        """Count consecutive failed/partial todos in a family from the tail, stopping at any success."""
+        family_todos = [
+            todo for todo in state.todos
+            if str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context)) == family
+        ]
+        consecutive = 0
+        for todo in reversed(family_todos):
+            if todo.status in {TodoStatus.FAILED, TodoStatus.PARTIAL, TodoStatus.BLOCKED}:
+                consecutive += 1
+            elif todo.status == TodoStatus.DONE:
+                break
+            else:
+                # PENDING or IN_PROGRESS — skip, don't break the streak
+                continue
+        return consecutive
+
+    @classmethod
     def stagnation_snapshot(cls, state: "RunState") -> dict[str, Any]:
         counts = Counter()
         failed_counts = Counter()
@@ -341,7 +364,7 @@ class ProgressPolicy:
         }
 
     @staticmethod
-    def _has_new_novelty(todo: "PlannedTodo", state: "RunState", family: str) -> bool:
+    def _has_new_novelty(todo: "PlannedTodo", state: "RunState", family: str, jaccard_threshold: float = 0.5) -> bool:
         novelty = str(todo.context.get("novelty_key") or "").strip()
         if novelty:
             previous = {
@@ -386,7 +409,7 @@ class ProgressPolicy:
             if not prior_tokens:
                 continue
             overlap = len(new_tokens & prior_tokens) / max(1, len(new_tokens | prior_tokens))
-            if overlap >= 0.5:
+            if overlap >= jaccard_threshold:
                 return False
         return True
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 from killchain_docker.llm import LLMClient, LLMClientError
-from killchain_docker.orchestrator.policy import CandidatePolicy
 from killchain_docker.state import (
     RouterDecision,
     RouterRoundSummary,
@@ -16,6 +15,28 @@ from killchain_docker.state import (
     WorkerResult,
     todo_phase_rank,
 )
+
+_ROUTER_SYSTEM_PROMPT = """\
+You are RouterAgent in a planner-router-worker CTF workflow.
+Assign each ready todo to the single best persona worker from the catalog.
+
+Worker domain guide:
+- recon-worker: First-pass scope mapping only (HTTP headers, TCP banners, host inventory).
+- artifact-worker: Static file analysis (source review, binary triage, disassembly, pcap, \
+archives) AND script execution for offline computation.
+- web-worker: HTTP interactions (content fetch, path probing, form submission, login) \
+and multi-step web exploits requiring scripting.
+- exploit-worker: Script execution against live targets, binary execution, credential \
+harvesting, vulnerability probes.
+- flag-worker: Final flag validation only.
+
+IMPORTANT: Choose the worker whose CAPABILITIES match the task requirements. \
+A web-themed task that requires script execution should go to exploit-worker or \
+web-worker (both have SCRIPT_EXECUTE), not recon-worker. \
+A task analyzing local files should go to artifact-worker even if the challenge is web-themed.
+
+Do not invent worker names. Return only JSON matching RouterDecision.
+"""
 
 
 class RouterAgent:
@@ -39,9 +60,35 @@ class RouterAgent:
         ready = self._ready_todos_for_focus_phase(state, max_assignments=max_assignments)
         if not ready:
             return RouterDecision(rationale="No ready todos.")
-        deterministic = self._deterministic_decision(state, ready, worker_catalog, max_assignments)
-        if deterministic.assignments:
-            return deterministic
+
+        # Structural invariant: flag_validation always goes to flag-worker
+        flag_todos = [t for t in ready if t.phase == TodoPhase.FLAG_VALIDATION]
+        non_flag_todos = [t for t in ready if t.phase != TodoPhase.FLAG_VALIDATION]
+
+        assignments: list[WorkerAssignment] = []
+        if flag_todos and "flag-worker" in {str(w.get("name") or "") for w in worker_catalog}:
+            for todo in flag_todos:
+                assignments.append(WorkerAssignment(
+                    todo_id=todo.todo_id,
+                    worker_name="flag-worker",
+                    rationale="Structural: flag_validation phase.",
+                ))
+
+        if non_flag_todos:
+            llm_decision = self._llm_route(state, non_flag_todos, worker_catalog)
+            validated = self._validated_decision(llm_decision, state, non_flag_todos, worker_catalog)
+            assignments.extend(validated)
+
+        if not assignments:
+            return RouterDecision(rationale="No valid assignments.")
+        return RouterDecision(assignments=assignments[:max(1, max_assignments)])
+
+    def _llm_route(
+        self,
+        state: RunState,
+        ready: list[TodoItem],
+        worker_catalog: list[dict[str, object]],
+    ) -> RouterDecision:
         focus_phase = ready[0].phase
         snapshot = {
             "objective": state.objective,
@@ -58,18 +105,89 @@ class RouterAgent:
                 "Return RouterDecision.assignments with todo_id and worker_name only."
             ),
         }
-        decision = self.llm_client.generate_json(
-            system_prompt=(
-                "You are RouterAgent in a planner-router-worker CTF workflow. "
-                "Assign ready high-level todos to the best persona worker from "
-                "the provided worker_catalog. Do not invent worker names. "
-                "Return only JSON matching RouterDecision."
-            ),
+        return self.llm_client.generate_json(
+            system_prompt=_ROUTER_SYSTEM_PROMPT,
             user_prompt=json.dumps(snapshot, ensure_ascii=True, indent=2),
             schema=RouterDecision,
             temperature=0.1,
         )
-        return self._validated_decision(decision, state, ready, worker_catalog, max_assignments)
+
+    def _validated_decision(
+        self,
+        decision: RouterDecision,
+        state: RunState,
+        ready: list[TodoItem],
+        worker_catalog: list[dict[str, object]],
+    ) -> list[WorkerAssignment]:
+        ready_ids = {t.todo_id for t in ready}
+        worker_names = {str(w.get("name") or "") for w in worker_catalog}
+        valid: list[WorkerAssignment] = []
+        invalid_reasons: list[str] = []
+        seen: set[str] = set()
+
+        for a in decision.assignments:
+            if a.todo_id not in ready_ids or a.todo_id in seen:
+                continue
+            if a.worker_name not in worker_names:
+                invalid_reasons.append(f"{a.worker_name} not in catalog")
+                continue
+            seen.add(a.todo_id)
+            valid.append(a)
+
+        if valid:
+            return valid
+
+        # Retry once with feedback
+        if invalid_reasons:
+            return self._retry_route(state, ready, worker_catalog, invalid_reasons)
+        return []
+
+    def _retry_route(
+        self,
+        state: RunState,
+        ready: list[TodoItem],
+        worker_catalog: list[dict[str, object]],
+        errors: list[str],
+    ) -> list[WorkerAssignment]:
+        worker_names = {str(w.get("name") or "") for w in worker_catalog}
+        focus_phase = ready[0].phase
+        snapshot = {
+            "objective": state.objective,
+            "summary": state.summary(),
+            "focus_phase": focus_phase,
+            "ready_todos": [self._serialize_todo(todo) for todo in ready],
+            "worker_catalog": worker_catalog,
+            "recent_round_summaries": [
+                round_record.summary.model_dump(mode="json")
+                for round_record in state.rounds[-8:]
+            ],
+            "contract": (
+                "Choose one persona worker for each selected todo. "
+                "Return RouterDecision.assignments with todo_id and worker_name only."
+            ),
+            "previous_errors": (
+                f"Previous attempt failed: {'; '.join(errors)}. "
+                f"Valid workers: {sorted(worker_names)}. Try again."
+            ),
+        }
+        retry_decision = self.llm_client.generate_json(
+            system_prompt=_ROUTER_SYSTEM_PROMPT,
+            user_prompt=json.dumps(snapshot, ensure_ascii=True, indent=2),
+            schema=RouterDecision,
+            temperature=0.2,
+        )
+        # Validate retry — no further retries
+        ready_ids = {t.todo_id for t in ready}
+        valid: list[WorkerAssignment] = []
+        seen: set[str] = set()
+        for a in retry_decision.assignments:
+            if a.todo_id not in ready_ids or a.todo_id in seen:
+                continue
+            if a.worker_name not in worker_names:
+                continue
+            seen.add(a.todo_id)
+            valid.append(a)
+        return valid
 
     def summarize_round(
         self,
@@ -122,43 +240,6 @@ class RouterAgent:
         summary.used_llm = True
         return summary
 
-    def _validated_decision(
-        self,
-        decision: RouterDecision,
-        state: RunState,
-        ready: list[TodoItem],
-        worker_catalog: list[dict[str, object]],
-        max_assignments: int,
-    ) -> RouterDecision:
-        ready_by_id = {todo.todo_id: todo for todo in ready}
-        worker_names = {str(worker.get("name") or "") for worker in worker_catalog}
-        assignments: list[WorkerAssignment] = []
-        seen: set[str] = set()
-        for assignment in decision.assignments:
-            if assignment.todo_id not in ready_by_id or assignment.todo_id in seen:
-                continue
-            todo = ready_by_id[assignment.todo_id]
-            policy_worker = self._policy_worker_name(todo, state, worker_names)
-            worker_name = policy_worker or assignment.worker_name
-            if worker_name not in worker_names:
-                continue
-            rationale = assignment.rationale
-            if policy_worker and assignment.worker_name != policy_worker:
-                rationale = "Deterministic policy route enforced over LLM route."
-            assignments.append(
-                WorkerAssignment(
-                    todo_id=assignment.todo_id,
-                    worker_name=worker_name,
-                    rationale=rationale,
-                )
-            )
-            seen.add(assignment.todo_id)
-            if len(assignments) >= max(1, max_assignments):
-                break
-        if assignments:
-            return RouterDecision(assignments=assignments, rationale=decision.rationale)
-        raise LLMClientError("Router LLM returned no valid policy-allowed assignments.")
-
     @staticmethod
     def _ready_todos_for_focus_phase(state: RunState, *, max_assignments: int) -> list[TodoItem]:
         ready = state.ready_todos(limit=None)
@@ -166,56 +247,6 @@ class RouterAgent:
             return []
         focus_phase = min((todo.phase for todo in ready), key=todo_phase_rank)
         return [todo for todo in ready if todo.phase == focus_phase][: max(1, max_assignments)]
-
-    @classmethod
-    def _deterministic_decision(
-        cls,
-        state: RunState,
-        ready: list[TodoItem],
-        worker_catalog: list[dict[str, object]],
-        max_assignments: int,
-    ) -> RouterDecision:
-        names = {str(worker.get("name") or "") for worker in worker_catalog}
-        assignments: list[WorkerAssignment] = []
-        for todo in ready[: max(1, max_assignments)]:
-            worker_name = cls._policy_worker_name(todo, state, names)
-            if not worker_name:
-                return RouterDecision(rationale="No deterministic policy route.")
-            assignments.append(
-                WorkerAssignment(
-                    todo_id=todo.todo_id,
-                    worker_name=worker_name,
-                    rationale="Deterministic policy route.",
-                )
-            )
-        return RouterDecision(
-            assignments=assignments,
-            rationale="Deterministic policy route.",
-        )
-
-    @staticmethod
-    def _policy_worker_name(todo: TodoItem, state: RunState, names: set[str]) -> str:
-        goal = todo.goal.lower()
-        context = todo.context
-        candidate = CandidatePolicy.first_candidate_from_context(state, context, todo.goal)
-        preferred = ""
-        if todo.phase == TodoPhase.FLAG_VALIDATION or candidate:
-            preferred = "flag-worker"
-        elif context.get("scope") or (("recon" in goal or "scope" in goal) and not _has_file_context(context)):
-            preferred = "recon-worker"
-        elif (
-            any(context.get(key) for key in ("base_url", "paths", "page_url", "forms"))
-            or "http" in goal
-            or "web" in goal
-        ):
-            preferred = "web-worker"
-        elif todo.phase == TodoPhase.EXPLOIT:
-            preferred = "exploit-worker"
-        elif todo.phase == TodoPhase.ANALYSIS or _has_file_context(context):
-            preferred = "artifact-worker"
-        if preferred in names:
-            return preferred
-        return ""
 
     @staticmethod
     def _serialize_todo(todo: TodoItem) -> dict[str, object]:
@@ -238,20 +269,3 @@ class RouterAgent:
             text = str(item)
             trimmed[key] = text[:1000] if len(text) > 1000 else item
         return trimmed
-
-
-def _has_file_context(context: dict[str, object]) -> bool:
-    return any(
-        context.get(key)
-        for key in (
-            "files_root",
-            "challenge_files",
-            "source_files",
-            "binary_files",
-            "archive_files",
-            "database_files",
-            "pcap_files",
-            "repo_paths",
-            "text_files",
-        )
-    )
