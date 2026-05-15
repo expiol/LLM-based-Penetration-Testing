@@ -8,11 +8,15 @@ from killchain_docker.prompts.types import lookup
 _FAILURE_ESCAPE_GUIDE = """\
 Failure escape patterns — when you see these signals, change strategy immediately:
 
-* result_quality=partial_no_candidate 3+ times for the same family:
+* result_quality=partial_no_candidate 3+ times for the same family (WITHOUT near-miss):
   The algorithm implementation is wrong. Disassemble again with a different focus,
   or try a completely different cipher family.
-* near_miss_evidence is non-empty: The algorithm is correct but output encoding is wrong.
-  Try: bytes.fromhex(), base64.b64decode(), latin-1 decode, XOR with 0xFF, struct.unpack.
+* near_miss_evidence is non-empty (partial correct output, correct prefix, or >30%
+  printable): The algorithm is CLOSE. Do NOT propose a new algorithm variant or cipher
+  family. Instead propose ONE debugging todo: "Print intermediate state step-by-step,
+  identify the exact byte/bit where output diverges from expected, and fix that single
+  bug." If the output looks correct but has encoding issues, try struct.unpack with
+  different byte orders, or strip non-printable bytes.
 * binary_traits.go_like=true: Use strings + grep for flag patterns first;
   Go binaries have symbol names that objdump can surface without decompilation.
 * timeout 3+ times: The script has an infinite loop or wrong input size.

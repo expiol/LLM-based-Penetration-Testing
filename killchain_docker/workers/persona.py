@@ -122,12 +122,17 @@ class PersonaWorker(WorkerAgent):
             and not flag_values
             and _is_flag_recovery_task(todo)
         ):
-            partial = True
-            partial_reason = (
-                str(output_context.get("partial_reason") or "").strip()
-                or "script completed for a flag-recovery task but produced no flag candidate"
-            )
-            result_quality = result_quality or "partial_no_candidate"
+            has_near_miss = bool(output_context.get("near_miss_candidates"))
+            if not has_near_miss:
+                partial = True
+                partial_reason = (
+                    str(output_context.get("partial_reason") or "").strip()
+                    or "script completed for a flag-recovery task but produced no flag candidate"
+                )
+                result_quality = result_quality or "partial_no_candidate"
+            else:
+                # Near-miss = real progress; don't penalize as partial
+                result_quality = result_quality or "near_miss"
             output_context["result_quality"] = result_quality
             output_context["partial_reason"] = partial_reason
         output_context["worker_rationale"] = rationale
@@ -421,6 +426,40 @@ class FlagWorker(PersonaWorker):
         )
         self.expected_flag = expected_flag
 
+    # ------------------------------------------------------------------
+    # Fuzzy flag matching: handles wrapper mismatches (flag{X} vs X vs key{X})
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _unwrap(s: str) -> str:
+        """Strip outer prefix{...} wrapper, return inner text."""
+        import re
+        m = re.match(r"[A-Za-z0-9_]+\{(.+)\}\s*$", s, re.DOTALL)
+        return m.group(1) if m else s
+
+    @staticmethod
+    def _extract_prefix(s: str) -> str | None:
+        import re
+        m = re.match(r"([A-Za-z0-9_]+)\{", s)
+        return m.group(1) if m else None
+
+    def _flag_matches(self, candidate: str, expected: str) -> bool:
+        c, e = candidate.strip(), expected.strip()
+        if c == e:
+            return True
+        c_inner, e_inner = self._unwrap(c), self._unwrap(e)
+        # Inner text matches (wrapper difference)
+        if c_inner == e_inner:
+            return True
+        # Candidate is bare inner text, wrap with expected's prefix
+        if prefix := self._extract_prefix(e):
+            if f"{prefix}{{{c}}}" == e:
+                return True
+        # Case-insensitive on inner text
+        if c_inner.lower() == e_inner.lower():
+            return True
+        return False
+
     def run(self, task: TodoItem, state: RunState) -> WorkerResult:
         candidates = [
             candidate
@@ -430,7 +469,7 @@ class FlagWorker(PersonaWorker):
         if not candidates:
             candidates = [candidate.value for candidate in CandidatePolicy.validation_ready_candidates(state)]
         for candidate in candidates:
-            if self.expected_flag and candidate == self.expected_flag:
+            if self.expected_flag and self._flag_matches(candidate, self.expected_flag):
                 return WorkerResult(
                     todo_id=task.todo_id,
                     worker_name=self.name,
@@ -447,7 +486,7 @@ class FlagWorker(PersonaWorker):
                         ]
                     ),
                     solved=True,
-                    validated_flag=candidate,
+                    validated_flag=self.expected_flag,
                     notes=[f"{self.name} validated the final flag."],
                 )
         if candidates and self.expected_flag:

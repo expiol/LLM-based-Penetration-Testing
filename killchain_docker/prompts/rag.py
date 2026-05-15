@@ -31,8 +31,8 @@ Knowledge-base augmentation (related_writeups):
   and prefer general exploration tasks first.
 * Do NOT propose a flag value from a hit's solution sketch.  Even when the
   retriever surfaces the exact challenge being solved (which can occur
-  because self-exclusion is OFF by default), the orchestrator still runs
-  ``flag.validate`` against the live target, so guessed flags will fail.
+  because self-exclusion is OFF by default), the orchestrator validates
+  flags against the live target, so guessed flags will fail.
   Use the sketch to pick the right *task type* and a tight task *title*;
   worker tools must derive the actual flag from local artifacts.
 * If the user prompt also contains ``related_writeups_warning``, prior
