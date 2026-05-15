@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from killchain_docker.llm import StaticLLMClient
+from killchain_docker.llm import LLMClientError, StaticLLMClient
 from killchain_docker.state import EvidenceRecord, RunState, TodoItem, TodoStatus
 from killchain_docker.tools import (
     ExecutionMode,
@@ -73,7 +73,7 @@ def _script_worker(plane: ExecutionPlane) -> ExploitWorker:
         llm_client=StaticLLMClient([
             {
                 "capability": "script.execute",
-                "metadata": {},
+                "metadata": {"script_code": "print('test')"},
                 "rationale": "test-selected script execution",
                 "expected_signal": "script output",
             },
@@ -145,7 +145,8 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         self.assertEqual(decision.capability, "script.execute")
         snapshot = json.loads(captured["user_prompt"])
         rendered = json.dumps(snapshot)
-        self.assertNotIn("script.execute", captured["system_prompt"])
+        self.assertIn("script.execute", captured["system_prompt"])
+        self.assertIn("script_code", captured["system_prompt"])
         self.assertIn("script.execute", snapshot["allowed_capabilities"])
         self.assertIn("For script.execute", rendered)
 
@@ -154,15 +155,14 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin()
         plane.register_plugin(plugin)
+        bad_response = {
+            "capability": "script.execute",
+            "metadata": {"script_code": "print('should not run')"},
+            "rationale": "bad capability",
+            "expected_signal": "stdout",
+        }
         worker = ReconWorker(
-            llm_client=StaticLLMClient([
-                {
-                    "capability": "script.execute",
-                    "metadata": {"script_code": "print('should not run')"},
-                    "rationale": "bad capability",
-                    "expected_signal": "stdout",
-                }
-            ]),
+            llm_client=StaticLLMClient([bad_response, bad_response, bad_response]),
             execution_plane=plane,
         )
 
@@ -278,14 +278,24 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin()
         plane.register_plugin(plugin)
-        worker = _script_worker(plane)
+        # Use a static client that returns script.execute without script_code
+        # The Pydantic validator on ToolUseDecision now rejects this at schema level
+        worker = ExploitWorker(
+            llm_client=StaticLLMClient([
+                {
+                    "capability": "script.execute",
+                    "metadata": {},
+                    "rationale": "test-selected script execution",
+                    "expected_signal": "script output",
+                },
+            ]),
+            execution_plane=plane,
+        )
         state = RunState(objective="solve")
         todo = TodoItem(goal="exploit without target", phase="exploit")
 
-        result = worker.run(todo, state)
-
-        self.assertFalse(result.success)
-        self.assertIn("script.execute missing required metadata.script_code", result.error or "")
+        with self.assertRaises(LLMClientError):
+            worker.run(todo, state)
         self.assertIsNone(plugin.last_request)
 
     def test_script_nonzero_returncode_fails_worker_result(self) -> None:

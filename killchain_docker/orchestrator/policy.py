@@ -294,6 +294,14 @@ class ProgressPolicy:
     @classmethod
     def allows(cls, todo: "PlannedTodo", state: "RunState") -> tuple[bool, str]:
         family = str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context))
+
+        # Hard block: forced pivot bans specific families
+        forced_pivot = state.metadata.get("forced_pivot")
+        if isinstance(forced_pivot, dict):
+            banned = forced_pivot.get("banned_families") or []
+            if family in banned:
+                return False, f"family {family!r} is BANNED by forced pivot #{forced_pivot.get('pivot_number', '?')}"
+
         total, failed = cls._family_counts(state, family)
         if family in cls._UNCAPPED_FAMILIES:
             # Check consecutive failures without progress
@@ -328,7 +336,7 @@ class ProgressPolicy:
 
     @classmethod
     def _consecutive_failures_without_evidence(cls, state: "RunState", family: str) -> int:
-        """Count consecutive failed/partial todos in a family from the tail, stopping at any success."""
+        """Count consecutive failed/partial todos in a family from the tail, stopping at any success with real progress."""
         family_todos = [
             todo for todo in state.todos
             if str(todo.context.get("family") or TodoPolicy.family_for(todo.goal, todo.context)) == family
@@ -338,7 +346,11 @@ class ProgressPolicy:
             if todo.status in {TodoStatus.FAILED, TodoStatus.PARTIAL, TodoStatus.BLOCKED}:
                 consecutive += 1
             elif todo.status == TodoStatus.COMPLETED:
-                break
+                # Only break if this completion actually produced meaningful progress
+                if todo.result_summary and "0 flag candidate" in todo.result_summary.lower():
+                    consecutive += 1  # Useless completion — count as failure
+                else:
+                    break
             else:
                 # PENDING or IN_PROGRESS — skip, don't break the streak
                 continue

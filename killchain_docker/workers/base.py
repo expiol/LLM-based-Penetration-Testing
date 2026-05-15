@@ -191,7 +191,15 @@ class WorkerAgent(ABC):
             for capability, spec in self.tool_gateway.specs.items()
             if capability in allowed
         ]
-        evidence_context = EvidenceContextBuilder(max_records=10).build(state)
+        # Trim evidence when script generation is likely to preserve output budget
+        likely_script = any(
+            kw in task.goal.lower()
+            for kw in ("script", "decrypt", "brute", "write", "compute", "solve")
+        )
+        max_evidence = 5 if likely_script else 10
+        evidence_context = EvidenceContextBuilder(max_records=max_evidence).build(
+            state, allowed_capabilities=allowed
+        )
 
         # Build Reflexion context from prior steps if last step failed
         reflexion_context = None
@@ -214,32 +222,42 @@ class WorkerAgent(ABC):
                 }
 
         user_payload = {
-            "worker_name": self.name,
-            "todo": task.model_dump(mode="json"),
-            "state_summary": state.summary(),
-            "working_memory": state.working_memory if hasattr(state, "working_memory") else {},
-            "recent_evidence_context": evidence_context,
-            "prior_steps": prior_steps or [],
-            "recent_failures": [
-                record.model_dump(mode="json")
-                for record in state.execution_log[-12:]
-                if not record.success
-            ],
+            # ACTION-CRITICAL: tool catalog first for attention proximity
+            "tool_catalog": catalog,
             "allowed_capabilities": allowed_values,
             "tool_use_rules": self._tool_use_rules(allowed),
-            "tool_catalog": catalog,
+            # TASK CONTEXT
+            "worker_name": self.name,
+            "todo": task.model_dump(mode="json"),
+            "working_memory": state.working_memory if hasattr(state, "working_memory") else {},
+            # EVIDENCE
+            "recent_evidence_context": evidence_context,
+            "prior_steps": prior_steps or [],
+            # BACKGROUND (least critical)
+            "state_summary": state.summary(),
+            "recent_failures": [
+                record.model_dump(mode="json")
+                for record in state.execution_log[-6:]
+                if not record.success
+            ],
         }
         if reflexion_context:
             user_payload["reflexion_context"] = reflexion_context
 
+        allowed_str = ", ".join(f"'{v}'" for v in allowed_values)
+        script_reminder = (
+            "CRITICAL: For script.execute, 'script_code' is MANDATORY and must contain "
+            "the COMPLETE executable source code as a string — not a description of what "
+            "to write, but the actual runnable Python/bash code. "
+        ) if ToolCapability.SCRIPT_EXECUTE in allowed else ""
         decision = self.llm_client.generate_json(
             system_prompt=(
-                "You are a worker deciding one concrete lower-level tool call. "
-                "Choose a capability from the provided tool_catalog and provide the "
-                "metadata arguments needed by that capability. Use only the "
-                "field names listed in metadata_contract. "
-                "The tool_catalog is the complete allowed set; never choose a "
-                "capability that is not listed there. "
+                f"You are {self.name}. Your ONLY available capabilities are: [{allowed_str}]. "
+                "You MUST choose exactly one capability from this list. Any other capability "
+                "will be REJECTED — do not select capabilities you saw in evidence from other workers. "
+                "Provide the metadata arguments needed by that capability using only the "
+                "field names listed in its metadata_contract. "
+                f"{script_reminder}"
                 "Use recent_evidence_context as grounded facts from previous tools. "
                 "If prior_steps is non-empty, use those results to inform your choice — "
                 "do not repeat a tool that already produced its evidence. "

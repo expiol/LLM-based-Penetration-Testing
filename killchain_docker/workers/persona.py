@@ -157,6 +157,7 @@ class PersonaWorker(WorkerAgent):
         )
 
     _MAX_INNER_STEPS = 7
+    _MAX_METADATA_RETRIES = 2
 
     def run(self, task: TodoItem, state: RunState) -> WorkerResult:
         if self.tool_gateway is None:
@@ -177,37 +178,60 @@ class PersonaWorker(WorkerAgent):
         accumulated_memory: dict[str, str] = {}
 
         for step in range(self._MAX_INNER_STEPS):
-            try:
-                capability, selected_metadata, rationale, hypothesis_text, mem_updates = self._choose_capability(
-                    task, state, prior_steps=prior_steps if prior_steps else None
-                )
-                if hypothesis_text:
-                    accumulated_hypotheses.append(Hypothesis(title=hypothesis_text))
-                if mem_updates:
-                    accumulated_memory.update(mem_updates)
-                metadata = self._prepare_metadata(
-                    capability=capability,
-                    todo=task,
-                    state=state,
-                    selected_metadata=selected_metadata,
-                )
-                timeout_raw = metadata.pop("timeout_s", None)
-                timeout_s = int(timeout_raw) if timeout_raw not in (None, "") else None
-                bundle = self.run_capability(
-                    task=task,
-                    capability=capability,
-                    metadata=metadata,
-                    timeout_s=timeout_s,
-                )
-            except (ToolExecutionError, ValueError) as exc:
-                return WorkerResult(
-                    todo_id=task.todo_id,
-                    worker_name=self.name,
-                    success=False,
-                    summary=f"{self.name} failed to execute its selected tool: {exc}",
-                    error=str(exc),
-                    retryable=False,
-                )
+            # Retry loop for metadata/capability validation errors
+            metadata_retries = 0
+            bundle = None
+            capability = None
+            rationale = ""
+            while True:
+                try:
+                    capability, selected_metadata, rationale, hypothesis_text, mem_updates = self._choose_capability(
+                        task, state, prior_steps=prior_steps if prior_steps else None
+                    )
+                    if hypothesis_text:
+                        accumulated_hypotheses.append(Hypothesis(title=hypothesis_text))
+                    if mem_updates:
+                        accumulated_memory.update(mem_updates)
+                    metadata = self._prepare_metadata(
+                        capability=capability,
+                        todo=task,
+                        state=state,
+                        selected_metadata=selected_metadata,
+                    )
+                    timeout_raw = metadata.pop("timeout_s", None)
+                    timeout_s = int(timeout_raw) if timeout_raw not in (None, "") else None
+                    bundle = self.run_capability(
+                        task=task,
+                        capability=capability,
+                        metadata=metadata,
+                        timeout_s=timeout_s,
+                    )
+                    break  # Success — exit retry loop
+                except (ToolExecutionError, ValueError) as exc:
+                    metadata_retries += 1
+                    if metadata_retries > self._MAX_METADATA_RETRIES:
+                        return WorkerResult(
+                            todo_id=task.todo_id,
+                            worker_name=self.name,
+                            success=False,
+                            summary=f"{self.name} failed to execute its selected tool: {exc}",
+                            error=str(exc),
+                            retryable=False,
+                        )
+                    # Inject error as a prior step so the LLM sees it on retry
+                    cap_str = capability.value if capability and hasattr(capability, "value") else str(capability or "unknown")
+                    prior_steps.append({
+                        "step": step,
+                        "capability": cap_str,
+                        "rationale": rationale,
+                        "summary": f"VALIDATION ERROR: {exc}",
+                        "flag_candidates": [],
+                        "stdout_preview": "",
+                        "stderr_preview": str(exc),
+                        "returncode": -1,
+                        "failure_kind": "metadata_validation",
+                        "failure_detail": str(exc),
+                    })
 
             last_bundle = bundle
             last_capability = capability

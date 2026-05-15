@@ -284,8 +284,10 @@ class PlanStrategy:
             ],
             "repeated_todo_families": repeated_families,
             "guidance": (
-                "These are advisory signals only. They do not block planning; use them to decide "
-                "whether to stop, change strategy, or avoid semantically repeated attempts."
+                "These signals are PRESCRIPTIVE. If escalation_required or forced_pivot is present, "
+                "you MUST comply: either set stop_run=true or propose a fundamentally different "
+                "attack vector that does NOT belong to any banned family. "
+                "Rephrasing the same strategy will be rejected by the pipeline."
             ),
         }
 
@@ -298,6 +300,11 @@ class PlanStrategy:
                 "(different algorithm, different tool, different attack vector). "
                 "Do NOT rephrase the same strategy."
             )
+
+        # Surface forced pivot directive from orchestrator
+        forced_pivot = state.metadata.get("forced_pivot")
+        if isinstance(forced_pivot, dict):
+            signals["forced_pivot"] = forced_pivot
 
         return signals
 

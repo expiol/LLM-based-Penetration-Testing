@@ -38,9 +38,9 @@ class EvidenceContextBuilder:
             self.max_text_preview = max_text_preview
         self.max_key_lines = max_key_lines
 
-    def build(self, state: RunState) -> list[dict[str, object]]:
+    def build(self, state: RunState, allowed_capabilities: set | None = None) -> list[dict[str, object]]:
         out: list[dict[str, object]] = []
-        selected = self._select_records(state)
+        selected = self._select_records(state, allowed_capabilities=allowed_capabilities)
         total_selected = len(selected)
         for rank, evidence in enumerate(selected):
             # Progressive detail: last 3 full, next 5 medium, rest compressed
@@ -80,11 +80,18 @@ class EvidenceContextBuilder:
                 out.append(item)
         return out
 
-    def _select_records(self, state: RunState) -> list[EvidenceRecord]:
+    def _select_records(self, state: RunState, allowed_capabilities: set | None = None) -> list[EvidenceRecord]:
         scored: list[tuple[float, int, EvidenceRecord]] = []
         records = list(state.evidence.values())
         total = max(1, len(records))
         for index, evidence in enumerate(records):
+            # Filter out evidence from capabilities this worker can't use
+            if allowed_capabilities and evidence.capability:
+                if evidence.capability not in {
+                    cap.value if hasattr(cap, "value") else str(cap)
+                    for cap in allowed_capabilities
+                }:
+                    continue
             extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
             ctx = extracted.get("output_context")
             if not isinstance(ctx, dict):

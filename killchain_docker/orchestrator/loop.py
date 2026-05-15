@@ -25,6 +25,7 @@ class Orchestrator:
     """Run the planner-router-worker loop for one assessment."""
 
     MAX_CONSECUTIVE_EMPTY_ROUNDS = 2
+    FORCED_PIVOT_THRESHOLD = 5  # Rounds without flag progress triggers pivot
 
     def __init__(
         self,
@@ -47,6 +48,8 @@ class Orchestrator:
         self.emit = emit
         self.checkpoint_callback = checkpoint_callback
         self._consecutive_empty_rounds = 0
+        self._rounds_without_progress = 0
+        self._pivot_count = 0
 
     def _checkpoint(self) -> None:
         if self.checkpoint_callback is None:
@@ -128,6 +131,58 @@ class Orchestrator:
 
     def _summarize_round(self, results: list[WorkerResult]):
         return self.router.summarize_round(self.state, results=results)
+
+    def _inject_forced_pivot(self, cycle: int) -> None:
+        """Inject a forced pivot directive into state metadata.
+
+        Instead of hard-stopping, this bans stalled families and forces the
+        planner to try a fundamentally different attack vector.
+        """
+        from killchain_docker.orchestrator.policy import ProgressPolicy, TodoPolicy
+
+        self._pivot_count += 1
+        self._rounds_without_progress = 0  # Reset counter after pivot
+
+        # Identify families to ban
+        snapshot = ProgressPolicy.stagnation_snapshot(self.state)
+        failed_counts = snapshot.get("failed_or_partial_family_counts", {})
+        banned_families = sorted(
+            family for family, count in failed_counts.items()
+            if count >= ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD
+        )
+
+        # Also ban the most-attempted family even if below threshold
+        family_counts = snapshot.get("family_counts", {})
+        if family_counts:
+            top_family = max(family_counts, key=lambda f: family_counts[f])
+            if top_family not in banned_families and family_counts[top_family] >= 3:
+                banned_families.append(top_family)
+
+        pivot_directive = {
+            "pivot_number": self._pivot_count,
+            "triggered_at_cycle": cycle,
+            "banned_families": banned_families,
+            "instruction": (
+                f"FORCED PIVOT #{self._pivot_count}: The run has spent "
+                f"{self.FORCED_PIVOT_THRESHOLD} consecutive rounds without producing "
+                f"a valid flag candidate. The following approach families are NOW BANNED "
+                f"and must NOT be re-attempted: {banned_families}. "
+                "You MUST propose a fundamentally different attack vector: "
+                "different algorithm, different tool, different attack surface, "
+                "or different interpretation of the challenge. "
+                "If no alternative exists, set stop_run=true."
+            ),
+        }
+        self.state.metadata["forced_pivot"] = pivot_directive
+        self.state.orchestration_notes.append(
+            f"cycle {cycle}: forced pivot #{self._pivot_count} — "
+            f"banned families: {banned_families}"
+        )
+        self.emit(
+            f"[cycle {cycle}] FORCED PIVOT #{self._pivot_count}: "
+            f"banning families {banned_families}"
+        )
+        self.state.touch()
 
     def _mark_llm_error(self, cycle: int, source: str, exc: LLMClientError) -> None:
         reason = f"llm_error:{source}:{type(exc).__name__}: {exc}"
@@ -232,6 +287,21 @@ class Orchestrator:
                     )
                 )
                 self.emit(f"[cycle {cycle}] router summary: {round_summary.summary[:240]}")
+
+                # Forced Pivot: track rounds without flag progress
+                round_had_flag_progress = any(
+                    r.success and r.state_delta and r.state_delta.flag_candidates
+                    for r in results
+                )
+                if round_had_flag_progress:
+                    self._rounds_without_progress = 0
+                    self.state.metadata.pop("forced_pivot", None)
+                else:
+                    self._rounds_without_progress += 1
+
+                if self._rounds_without_progress >= self.FORCED_PIVOT_THRESHOLD:
+                    self._inject_forced_pivot(cycle)
+
                 self._checkpoint()
                 if self.state.solved:
                     max_cycles_exhausted = False

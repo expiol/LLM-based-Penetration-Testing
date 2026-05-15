@@ -23,6 +23,9 @@ Failure escape patterns — when you see these signals, change strategy immediat
   Reduce input, add timeout guards, or use a completely different approach.
 * same family in cooldown (escalation_required signal present): You MUST change the
   attack vector — different algorithm, different tool, different input. Do NOT rephrase.
+* forced_pivot present in stagnation_signals: The orchestrator has BANNED specific
+  families. You MUST NOT propose todos in any banned family. Propose a completely
+  different approach or set stop_run=true. Banned-family todos will be rejected.
 """
 
 
