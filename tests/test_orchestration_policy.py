@@ -31,7 +31,7 @@ class CandidatePolicyTests(unittest.TestCase):
         self.assertEqual(state.flag_candidates, {})
         self.assertTrue(any("escaped_byte_candidate" in note for note in state.orchestration_notes))
 
-    def test_bare_token_challenge_only_accepts_bare_tokens(self) -> None:
+    def test_unknown_format_accepts_both_bare_and_prefix_candidates(self) -> None:
         state = _state("")
         state.apply_state_delta(
             StateDelta(
@@ -42,9 +42,10 @@ class CandidatePolicyTests(unittest.TestCase):
             )
         )
 
+        # Empty flag_format means "unknown" — accepts both bare tokens and prefix candidates
         self.assertEqual(
             [candidate.value for candidate in state.flag_candidates.values()],
-            ["STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME"],
+            ["flag{wrong_for_this_challenge}", "STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME"],
         )
 
     def test_prefix_challenge_rejects_wrong_prefix(self) -> None:

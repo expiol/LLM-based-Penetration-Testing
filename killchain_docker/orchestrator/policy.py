@@ -60,13 +60,8 @@ class CandidatePolicy:
             return CandidateDecision(False, "invalid_candidate_shape")
 
         expected_prefix = cls._expected_prefix(flag_format)
-        bare_mode = cls._bare_token_mode(flag_format)
-        unknown_mode = flag_format is None
-
-        if bare_mode:
-            if FLAG_BARE_TOKEN_SHAPE.fullmatch(text):
-                return CandidateDecision(True)
-            return CandidateDecision(False, "prefix_candidate_for_bare_token_challenge")
+        # Unknown mode: flag_format is None or empty — accept any valid shape
+        unknown_mode = not str(flag_format or "").strip()
 
         if FLAG_BARE_TOKEN_SHAPE.fullmatch(text) and not FLAG_PREFIX_SHAPE.fullmatch(text):
             if unknown_mode:
@@ -114,10 +109,6 @@ class CandidatePolicy:
             if cls.accepts_for_state(state, candidate):
                 return candidate
         return None
-
-    @staticmethod
-    def _bare_token_mode(flag_format: object) -> bool:
-        return flag_format is not None and str(flag_format).strip() == ""
 
     @staticmethod
     def _expected_prefix(flag_format: object) -> str | None:

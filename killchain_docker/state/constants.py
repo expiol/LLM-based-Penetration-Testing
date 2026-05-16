@@ -121,12 +121,22 @@ STRUCTURED_DIAGNOSTIC_BODY_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Code-statement body pattern — rejects bodies that contain statement
+#: terminators, function calls, or language operators that never appear in
+#: real CTF flags (e.g. ``key{ return (bool) \Cookie::get(...); }``).
+CODE_STATEMENT_BODY_RE = re.compile(
+    r";|\breturn\b|\bfunction\b|=>|->|::",
+)
+
 #: Common template-echo bodies that CSS / HTML / Mustache produce.  Any
 #: ``prefix{<noise>}`` whose body is one of these is unambiguously not a flag.
 TEMPLATE_NOISE_BODIES: frozenset[str] = frozenset({
     "pagination", "link", "links", "count", "title", "description",
     "name", "value", "key", "thing", "tablename", "fieldname",
     "id", "type", "class", "label", "placeholder", "input", "output",
+    "filepath", "filename", "path", "file", "content", "data",
+    "text", "string", "result", "flag", "secret", "token", "hash",
+    "variable", "param", "argument", "option", "config", "setting",
 })
 
 FLAG_VALIDATION_SOURCE_NEEDLES: tuple[str, ...] = (
@@ -209,6 +219,8 @@ def plausible_flag(candidate: str) -> bool:
     if FLAG_BODY_FORMAT_SPEC_RE.search(body):
         return False
     if STRUCTURED_DIAGNOSTIC_BODY_RE.search(body):
+        return False
+    if CODE_STATEMENT_BODY_RE.search(body):
         return False
     if body.lower().strip() in TEMPLATE_NOISE_BODIES:
         return False

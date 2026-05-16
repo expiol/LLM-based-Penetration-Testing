@@ -40,7 +40,7 @@ LOGDIR          = None
 NAME            = "5.16_development_1"
 INDEX           = None
 OUTPUT_ROOT     = None
-PARALLEL_WORKERS = 3
+PARALLEL_WORKERS = 5
 REPLICAS        = 1
 
 SCRIPT_DIR = Path(__file__).parent.resolve()

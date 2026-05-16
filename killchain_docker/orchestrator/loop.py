@@ -24,7 +24,7 @@ from killchain_docker.workers.base import WorkerAgent
 class Orchestrator:
     """Run the planner-router-worker loop for one assessment."""
 
-    MAX_CONSECUTIVE_EMPTY_ROUNDS = 2
+    MAX_CONSECUTIVE_EMPTY_ROUNDS = 4
     FORCED_PIVOT_THRESHOLD = 5  # Rounds without flag progress triggers pivot
 
     def __init__(

@@ -172,11 +172,17 @@ class PlanningPipeline(PlannerAgent):
         todos: list[PlannedTodo],
         state: RunState,
     ) -> tuple[list[PlannedTodo], list[str]]:
-        seen = {todo.dedupe_key for todo in state.todos if todo.dedupe_key}
+        # Only block against pending/running todos and successfully completed ones.
+        # Partial todos should not block re-attempts with the same key.
+        seen = {
+            todo.dedupe_key
+            for todo in state.todos
+            if todo.dedupe_key and todo.status != TodoStatus.PARTIAL
+        }
         atomic_seen: set[tuple[str, str]] = set()
         for todo in state.todos:
             family = str(todo.context.get("family") or "")
-            if family in self._ATOMIC_RECON_FAMILIES:
+            if family in self._ATOMIC_RECON_FAMILIES and todo.phase == TodoPhase.RECON:
                 atomic_seen.add((family, str(todo.context.get("files_root") or "")))
         out: list[PlannedTodo] = []
         dropped = 0
@@ -187,7 +193,7 @@ class PlanningPipeline(PlannerAgent):
                 dropped += 1
                 continue
             family = str(todo.context.get("family") or "")
-            if family in self._ATOMIC_RECON_FAMILIES:
+            if family in self._ATOMIC_RECON_FAMILIES and todo.phase == TodoPhase.RECON:
                 atomic_key = (family, str(todo.context.get("files_root") or ""))
                 if atomic_key in atomic_seen:
                     dropped += 1
@@ -258,7 +264,10 @@ class PlanningPipeline(PlannerAgent):
             return min(open_phases, key=todo_phase_rank)
         if todos and CandidatePolicy.validation_ready_candidates(state):
             if any(todo.phase == TodoPhase.FLAG_VALIDATION for todo in todos):
-                return TodoPhase.FLAG_VALIDATION
+                # Only force FLAG_VALIDATION if the family is not in cooldown
+                _, failed = ProgressPolicy._family_counts(state, "flag-validation")
+                if failed < ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD:
+                    return TodoPhase.FLAG_VALIDATION
         if todos:
             return min((todo.phase for todo in todos), key=todo_phase_rank)
         return None
