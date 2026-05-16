@@ -6,9 +6,9 @@ from collections.abc import Iterable
 from urllib.parse import urlparse
 
 from killchain_docker.state import RunState, TodoItem
+from killchain_docker.state.constants import DEFAULT_FILES_ROOT
 from killchain_docker.tools import ToolCapability, ToolExecutionError
 from killchain_docker.tools.core import _first_string, _strings
-from killchain_docker.orchestrator.policy import DEFAULT_FILES_ROOT
 
 _FILE_CONTRACTS: dict[ToolCapability, str] = {
     ToolCapability.ARTIFACT_SOURCE: "source_files",

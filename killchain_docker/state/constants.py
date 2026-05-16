@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import re
 
+DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
+
 # ---------------------------------------------------------------------------
 # Flag-detection regex patterns
 # ---------------------------------------------------------------------------

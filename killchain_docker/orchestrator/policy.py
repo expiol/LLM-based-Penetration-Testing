@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from killchain_docker.state import FlagCandidate, TodoItem, TodoPhase, TodoStatus
 from killchain_docker.state.constants import (
+    DEFAULT_FILES_ROOT,
     FLAG_BARE_TOKEN_SHAPE,
     FLAG_PREFIX_SHAPE,
     normalize_tokens,
@@ -24,9 +25,6 @@ from killchain_docker.state.constants import (
 if TYPE_CHECKING:  # pragma: no cover
     from killchain_docker.orchestrator.planning.schemas import PlannedTodo
     from killchain_docker.state import RunState
-
-
-DEFAULT_FILES_ROOT = "/home/ctfplayer/ctf_files"
 
 
 _ESCAPED_BYTE_RE = re.compile(r"\\x[0-9a-fA-F]{2}|\\[0abfnrtv]")

@@ -33,7 +33,6 @@ dependencies = [
   "pyte",
   "tiktoken",
   "nyuctf",
-  "google-generativeai",
   "together",
   "fastembed",
   "numpy",

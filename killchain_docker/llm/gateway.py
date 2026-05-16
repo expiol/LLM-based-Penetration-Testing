@@ -265,7 +265,26 @@ class GatewayLLMClient:
                 return model
         return self.default_model
 
+    def _is_schema_validation_error(self, exc: Exception) -> bool:
+        if isinstance(exc, ValidationError):
+            return True
+        message = str(exc).lower()
+        validation_markers = (
+            "validation error for",
+            "pydantic.dev",
+            "response validation",
+            "failed validation",
+            "json decode",
+            "invalid json",
+        )
+        if any(marker in message for marker in validation_markers):
+            return True
+        name = type(exc).__name__.lower()
+        return "validation" in name or "jsondecode" in name
+
     def _is_transient(self, exc: Exception) -> bool:
+        if self._is_schema_validation_error(exc):
+            return False
         message = str(exc).lower()
         markers = (
             "rate limit", "429", "timeout", "timed out", "temporarily",

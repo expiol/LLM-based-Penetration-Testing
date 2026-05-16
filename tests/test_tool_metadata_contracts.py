@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from killchain_docker.llm import LLMClientError, StaticLLMClient
+from killchain_docker.llm import StaticLLMClient
 from killchain_docker.state import EvidenceRecord, RunState, TodoItem, TodoStatus
 from killchain_docker.tools import (
     ExecutionMode,
@@ -273,29 +273,62 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
                         {},
                     )
 
-    def test_missing_required_metadata_fails_before_plugin_call(self) -> None:
+    def test_missing_script_code_retries_and_uses_corrected_metadata(self) -> None:
         plane = ExecutionPlane()
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin()
         plane.register_plugin(plugin)
-        # Use a static client that returns script.execute without script_code
-        # The Pydantic validator on ToolUseDecision now rejects this at schema level
         worker = ExploitWorker(
             llm_client=StaticLLMClient([
                 {
                     "capability": "script.execute",
                     "metadata": {},
-                    "rationale": "test-selected script execution",
+                    "rationale": "describe a script but omit source",
                     "expected_signal": "script output",
                 },
+                {
+                    "capability": "script.execute",
+                    "metadata": {"script_code": "print('fixed')"},
+                    "rationale": "retry with executable source",
+                    "expected_signal": "script output",
+                },
+                {"continue_loop": False, "reason": "single step sufficient"},
             ]),
             execution_plane=plane,
         )
         state = RunState(objective="solve")
-        todo = TodoItem(goal="exploit without target", phase="exploit")
+        todo = TodoItem(goal="run a diagnostic script", phase="exploit")
 
-        with self.assertRaises(LLMClientError):
-            worker.run(todo, state)
+        result = worker.run(todo, state)
+
+        self.assertTrue(result.success)
+        self.assertIsNotNone(plugin.last_request)
+        self.assertEqual(plugin.last_request.metadata["script_code"], "print('fixed')")
+        self.assertEqual(result.output_context.get("react_steps"), 2)
+
+    def test_repeated_missing_script_code_fails_without_llm_error(self) -> None:
+        plane = ExecutionPlane()
+        plane.register_parser("jsonl_signals", jsonl_signal_parser)
+        plugin = _RecordingScriptPlugin()
+        plane.register_plugin(plugin)
+        bad_response = {
+            "capability": "script.execute",
+            "metadata": {},
+            "rationale": "describe a script but omit source",
+            "expected_signal": "script output",
+        }
+        worker = ExploitWorker(
+            llm_client=StaticLLMClient([bad_response, bad_response, bad_response]),
+            execution_plane=plane,
+        )
+        state = RunState(objective="solve")
+        todo = TodoItem(goal="run a diagnostic script", phase="exploit")
+
+        result = worker.run(todo, state)
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.retryable)
+        self.assertIn("missing required metadata.script_code", result.error or "")
         self.assertIsNone(plugin.last_request)
 
     def test_script_nonzero_returncode_fails_worker_result(self) -> None:
