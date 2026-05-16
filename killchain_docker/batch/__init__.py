@@ -15,6 +15,7 @@ from killchain_docker.batch.docker import (
 )
 from killchain_docker.batch.runner import (
     run_single_challenge,
+    run_single_challenge_replicas,
     run_all_challenges,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "load_dataset",
     "run_all_challenges",
     "run_single_challenge",
+    "run_single_challenge_replicas",
     "start_challenge_with_retry",
 ]

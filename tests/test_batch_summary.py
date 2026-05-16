@@ -11,8 +11,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from killchain_docker.llm import LLMClientError
+from killchain_docker.batch.runner import (
+    _run_single_challenge_inner,
+    _save_batch_progress,
+    run_single_challenge_replicas,
+)
 from killchain_docker.score import diagnose_logdir
-from run import _run_single_challenge_inner, _save_batch_progress, run_single_challenge_replicas
 
 
 def _args(logdir: Path) -> argparse.Namespace:
@@ -80,8 +84,8 @@ class BatchSummaryTests(unittest.TestCase):
             logfile = Path(tmp) / "fake-interrupt.json"
 
             with (
-                patch("run.CTFEnvironment", _FakeEnvironment),
-                patch("run.build_llm_client_from_env", side_effect=KeyboardInterrupt()),
+                patch("killchain_docker.batch.runner.CTFEnvironment", _FakeEnvironment),
+                patch("killchain_docker.batch.runner.build_llm_client_from_env", side_effect=KeyboardInterrupt()),
             ):
                 result = _run_single_challenge_inner(args, _FakeChallenge(), logfile)  # type: ignore[arg-type]
 
@@ -98,9 +102,9 @@ class BatchSummaryTests(unittest.TestCase):
             logfile = Path(tmp) / "fake-llm-error.json"
 
             with (
-                patch("run.CTFEnvironment", _FakeEnvironment),
+                patch("killchain_docker.batch.runner.CTFEnvironment", _FakeEnvironment),
                 patch(
-                    "run.build_llm_client_from_env",
+                    "killchain_docker.batch.runner.build_llm_client_from_env",
                     side_effect=LLMClientError("preflight connection failed", transient=True),
                 ),
             ):
@@ -121,9 +125,9 @@ class BatchSummaryTests(unittest.TestCase):
             args.replicas = 1
 
             with (
-                patch("run.load_challenge", return_value=_FakeChallenge()),
+                patch("killchain_docker.batch.runner.load_challenge", return_value=_FakeChallenge()),
                 patch(
-                    "run.run_single_challenge",
+                    "killchain_docker.batch.runner.run_single_challenge",
                     return_value={
                         "challenge": "fake-interrupt",
                         "status": "interrupted",
@@ -173,7 +177,7 @@ class BatchSummaryTests(unittest.TestCase):
             }
 
             with patch(
-                "run._load_llm_experiment_config",
+                "killchain_docker.batch.runner._load_llm_experiment_config",
                 return_value={"available": True, "default_model": "test-model"},
             ):
                 path = _save_batch_progress(args, [result], time.time() - 10, finished=True)
@@ -254,7 +258,7 @@ class BatchSummaryTests(unittest.TestCase):
             }
 
             with patch(
-                "run._load_llm_experiment_config",
+                "killchain_docker.batch.runner._load_llm_experiment_config",
                 return_value={"available": False},
             ):
                 path = _save_batch_progress(args, [result], time.time() - 60, finished=True)
@@ -312,7 +316,7 @@ class BatchSummaryTests(unittest.TestCase):
                 "logfile": str(log_path),
             }
 
-            with patch("run._load_llm_experiment_config", return_value={"available": False}):
+            with patch("killchain_docker.batch.runner._load_llm_experiment_config", return_value={"available": False}):
                 path = _save_batch_progress(args, [result], time.time() - 5, finished=True)
 
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -352,7 +356,7 @@ class BatchSummaryTests(unittest.TestCase):
                 "logfile": str(log_path),
             }
 
-            with patch("run._load_llm_experiment_config", return_value={"available": False}):
+            with patch("killchain_docker.batch.runner._load_llm_experiment_config", return_value={"available": False}):
                 path = _save_batch_progress(args, [result], time.time() - 5, finished=True)
 
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -390,7 +394,7 @@ class BatchSummaryTests(unittest.TestCase):
                 "logfile": str(log_path),
             }
 
-            with patch("run._load_llm_experiment_config", return_value={"available": False}):
+            with patch("killchain_docker.batch.runner._load_llm_experiment_config", return_value={"available": False}):
                 path = _save_batch_progress(args, [result], time.time() - 5, finished=True)
 
             payload = json.loads(path.read_text(encoding="utf-8"))

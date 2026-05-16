@@ -4,9 +4,21 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import json
 import sys
 from pathlib import Path
+
+# Backwards-compatible re-exports; implementation lives in killchain_docker.batch.
+from killchain_docker.batch import (
+    load_challenge,
+    run_all_challenges,
+    run_single_challenge,
+    run_single_challenge_replicas,
+)
+from killchain_docker.batch.runner import (
+    _load_llm_experiment_config,
+    _run_single_challenge_inner,
+    _save_batch_progress,
+)
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                    运行参数配置                                              ║
@@ -87,12 +99,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    from killchain_docker.batch import (
-        load_challenge,
-        run_all_challenges,
-        run_single_challenge,
-    )
-
     if len(sys.argv) > 1:
         args = build_parser().parse_args()
     else:
@@ -108,17 +114,8 @@ def main() -> int:
         print("Error: --challenge is required (or use --run-all)")
         return 2
 
-    challenge = load_challenge(args)
-    result = run_single_challenge(args, challenge)
-    if result.get("status") == "interrupted":
-        return 130
-    if result.get("error"):
-        print(f"Run failed: {result['error'].get('type')}: {result['error'].get('message', '')[:200]}")
-        return 1
-    print(json.dumps(result, indent=2, ensure_ascii=True))
-    return 0
+    return run_single_challenge_replicas(args)
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
