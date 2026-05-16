@@ -22,13 +22,13 @@ from killchain_docker.state import (
     ExploitAttempt,
     Finding,
     FlagCandidate,
+    Hypothesis,
     NetworkEdge,
     Route,
     Session,
     StateDelta,
     Vulnerability,
 )
-from killchain_docker.state.constants import validatable_flag_candidate
 
 
 def utc_now() -> datetime:
@@ -65,87 +65,9 @@ def _strings(value: Any) -> list[str]:
     return result
 
 
-def _flag_candidate_values(ctx: dict[str, Any], *, flag_format: object = None) -> list[str]:
-    from killchain_docker.orchestrator.policy import CandidatePolicy
-
-    values: list[str] = []
-    for key in ("flag_candidates", "potential_flags", "grounded_flag_candidates"):
-        for value in _strings(ctx.get(key)):
-            if value in values or not validatable_flag_candidate(value):
-                continue
-            if not CandidatePolicy.decision(value, flag_format=flag_format).accepted:
-                continue
-            values.append(value)
-    return values
-
-
-def _dict_list(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, dict):
-        return [value]
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
 def _first_string(value: Any) -> str | None:
     values = _strings(value)
     return values[0] if values else None
-
-
-def _optional_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _looks_like_url(value: str) -> bool:
-    parsed = parse.urlparse(value)
-    return parsed.scheme in {"http", "https", "tcp"} and bool(parsed.netloc)
-
-
-def _normalize_route_url(
-    value: Any,
-    ctx: dict[str, Any],
-    request: ToolExecutionRequest,
-) -> str | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if _looks_like_url(text):
-        return text
-    if not text.startswith("/"):
-        return None
-    base = (
-        _first_string(ctx.get("base_url"))
-        or _first_string(ctx.get("observed_base_url"))
-        or _first_string(request.metadata.get("base_url"))
-    )
-    if not base or not _looks_like_url(base):
-        return text
-    return parse.urljoin(base.rstrip("/") + "/", text.lstrip("/"))
-
-
-def _iter_binary_run_files(binary_runs: Any) -> list[dict[str, Any]]:
-    if not isinstance(binary_runs, dict):
-        return []
-    result: list[dict[str, Any]] = []
-    for binary_name, body in binary_runs.items():
-        if not isinstance(body, dict):
-            continue
-        for invocation in body.get("invocations") or []:
-            if not isinstance(invocation, dict):
-                continue
-            for key, change_type in (("new_files", "created"), ("changed_files", "modified")):
-                for item in invocation.get(key) or []:
-                    if isinstance(item, dict):
-                        result.append({
-                            **item,
-                            "binary": binary_name,
-                            "invocation": invocation.get("label"),
-                            "change_type": change_type,
-                        })
-    return result
 
 
 class ToolExecutionError(RuntimeError):
@@ -190,15 +112,55 @@ class ToolExecutionResult(BaseModel):
 
 
 class ParsedToolOutput(BaseModel):
-    """Structured state deltas extracted from raw tool output."""
+    """Transport-level JSON/JSONL decode result for a plugin output builder."""
 
     summary: str
     output_context: dict[str, Any] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
-    asset_updates: list[Asset] = Field(default_factory=list)
-    finding_updates: list[Finding] = Field(default_factory=list)
-    credential_updates: list[Credential] = Field(default_factory=list)
-    network_updates: list[NetworkEdge] = Field(default_factory=list)
+    records: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ToolOutputStatus(StrEnum):
+    SUCCESS = "success"
+    FAILURE = "failure"
+    TIMEOUT = "timeout"
+
+
+class ToolOutput(BaseModel):
+    """Unified output contract produced by one concrete plugin."""
+
+    status: ToolOutputStatus = ToolOutputStatus.SUCCESS
+    summary: str = ""
+    output_text: str = ""
+    notes: list[str] = Field(default_factory=list)
+    raw_log: str = ""
+    output_context: dict[str, Any] = Field(default_factory=dict)
+
+    assets: list[Asset] = Field(default_factory=list)
+    artifacts: list[Artifact] = Field(default_factory=list)
+    endpoints: list[Endpoint] = Field(default_factory=list)
+    routes: list[Route] = Field(default_factory=list)
+    flag_candidates: list[FlagCandidate] = Field(default_factory=list)
+    hypotheses: list[Hypothesis] = Field(default_factory=list)
+    vulnerabilities: list[Vulnerability] = Field(default_factory=list)
+    exploit_attempts: list[ExploitAttempt] = Field(default_factory=list)
+    sessions: list[Session] = Field(default_factory=list)
+    credentials: list[Credential] = Field(default_factory=list)
+    findings: list[Finding] = Field(default_factory=list)
+    network_edges: list[NetworkEdge] = Field(default_factory=list)
+
+    def to_state_delta(self) -> StateDelta:
+        """Convert state-delta fields into the state merge model."""
+        return StateDelta(
+            artifacts=self.artifacts,
+            endpoints=self.endpoints,
+            routes=self.routes,
+            flag_candidates=self.flag_candidates,
+            hypotheses=self.hypotheses,
+            vulnerabilities=self.vulnerabilities,
+            exploit_attempts=self.exploit_attempts,
+            sessions=self.sessions,
+        )
 
 
 class ToolExecutionBundle(BaseModel):
@@ -207,6 +169,7 @@ class ToolExecutionBundle(BaseModel):
     request: ToolExecutionRequest
     result: ToolExecutionResult
     parsed: ParsedToolOutput
+    tool_output: ToolOutput
     evidence: EvidenceRecord
     state_delta: StateDelta = Field(default_factory=StateDelta)
 
@@ -339,9 +302,15 @@ class ExecutionPlane:
     def __init__(self) -> None:
         self.plugins: dict[str, ToolPlugin] = {}
         self.parsers: dict[str, ParserFn] = {}
+        # Per-plugin builders own structured output and typed signal emission.
+        self._tool_output_builders: dict[str, Any] = {}
 
     def register_plugin(self, plugin: ToolPlugin) -> None:
         self.plugins[plugin.name] = plugin
+
+    def register_tool_output_builder(self, tool_name: str, builder: Any) -> None:
+        """Register the build_tool_output function for a specific plugin."""
+        self._tool_output_builders[tool_name] = builder
 
     def register_parser(self, name: str, parser: ParserFn) -> None:
         self.parsers[name] = parser
@@ -368,185 +337,34 @@ class ExecutionPlane:
                     f"{request.tool_name} failed after {attempt} attempt(s): {exc}"
                 ) from exc
 
-        parsed = parser(request, result)
-        state_delta = self._build_state_delta(request, parsed)
-        evidence = self._build_evidence(task_id, request, result, parsed)
+        raw_parsed = parser(request, result)
+        custom_builder = self._tool_output_builders.get(request.tool_name)
+        if custom_builder is None:
+            raise ToolExecutionError(
+                f"Tool plugin {request.tool_name!r} has no build_tool_output registered."
+            )
+
+        candidate_output = custom_builder(request, result, raw_parsed)
+        tool_output = (
+            candidate_output
+            if isinstance(candidate_output, ToolOutput)
+            else ToolOutput.model_validate(candidate_output)
+        )
+        parsed = ParsedToolOutput(
+            summary=tool_output.summary,
+            output_context=tool_output.output_context,
+            notes=tool_output.notes,
+            records=raw_parsed.records,
+        )
+        state_delta = tool_output.to_state_delta()
+        evidence = self._build_evidence(task_id, request, result, tool_output)
         return ToolExecutionBundle(
             request=request,
             result=result,
             parsed=parsed,
+            tool_output=tool_output,
             evidence=evidence,
             state_delta=state_delta,
-        )
-
-    def _build_state_delta(
-        self,
-        request: ToolExecutionRequest,
-        parsed: ParsedToolOutput,
-    ) -> StateDelta:
-        """Lift common plugin output fields into typed state facts."""
-
-        ctx = parsed.output_context or {}
-        tool_name = request.tool_name
-        source_name = request.capability or tool_name
-        asset_ref = _first_string(request.metadata.get("asset_id"))
-        evidence_refs: list[str] = []
-
-        artifacts: list[Artifact] = []
-        for key, kind in (
-            ("challenge_files", "challenge_file"),
-            ("source_files", "source"),
-            ("inspected_sources", "source"),
-            ("inspected_files", "file"),
-            ("inspected_binaries", "binary"),
-            ("binary_files", "binary"),
-            ("inspected_archives", "archive"),
-            ("archive_files", "archive"),
-            ("inspected_pcaps", "pcap"),
-            ("pcap_files", "pcap"),
-            ("inspected_databases", "database"),
-            ("database_files", "database"),
-            ("inspected_repos", "repository"),
-            ("repo_paths", "repository"),
-        ):
-            for path in _strings(ctx.get(key)):
-                artifacts.append(
-                    Artifact(
-                        path=path,
-                        kind=kind,
-                        source=source_name,
-                        metadata={"field": key},
-                    )
-                )
-                evidence_refs.append(path)
-
-        for item in _iter_binary_run_files(ctx.get("binary_runs")):
-            path = str(item.get("name") or "").strip()
-            if not path:
-                continue
-            artifacts.append(
-                Artifact(
-                    path=path,
-                    kind=str(item.get("kind") or "generated_file"),
-                    source=source_name,
-                    size=_optional_int(item.get("size")),
-                    preview=str(item.get("preview") or "")[:1000] or None,
-                    metadata={
-                        "binary": item.get("binary"),
-                        "invocation": item.get("invocation"),
-                        "change_type": item.get("change_type", "created"),
-                    },
-                )
-            )
-
-        endpoints: list[Endpoint] = []
-        for url_key in ("observed_base_url", "base_url", "page_url", "target_url"):
-            url = _first_string(ctx.get(url_key))
-            if not url or not _looks_like_url(url):
-                continue
-            parsed_url = parse.urlparse(url)
-            endpoints.append(
-                Endpoint(
-                    asset_ref=asset_ref,
-                    url=url,
-                    hostname=parsed_url.hostname,
-                    port=parsed_url.port,
-                    protocol=parsed_url.scheme or None,
-                    status_code=_optional_int(ctx.get("http_status")),
-                    title=_first_string(ctx.get("title")),
-                    metadata={"field": url_key, "capability": source_name, "tool": tool_name},
-                )
-            )
-
-        routes: list[Route] = []
-        for url in _strings(ctx.get("interesting_paths")):
-            route_url = _normalize_route_url(url, ctx, request)
-            if route_url:
-                routes.append(
-                    Route(
-                        asset_ref=asset_ref,
-                        url=route_url,
-                        path=parse.urlparse(route_url).path or route_url,
-                        source=source_name,
-                    )
-                )
-        for item in _dict_list(ctx.get("path_results")):
-            route_url = _normalize_route_url(item.get("url") or item.get("path"), ctx, request)
-            if not route_url:
-                continue
-            routes.append(
-                Route(
-                    asset_ref=asset_ref,
-                    url=route_url,
-                    path=parse.urlparse(route_url).path or route_url,
-                    status_code=_optional_int(item.get("status") or item.get("status_code")),
-                    source=source_name,
-                    metadata={
-                        key: item[key]
-                        for key in ("title", "content_type", "redirect")
-                        if key in item
-                    },
-                )
-            )
-
-        flag_candidates = [
-            FlagCandidate(
-                value=value,
-                source=source_name,
-                confidence=0.65,
-                evidence_refs=evidence_refs[:8],
-            )
-            for value in _flag_candidate_values(ctx, flag_format=request.metadata.get("flag_format"))
-        ]
-
-        vulnerabilities = [
-            Vulnerability(
-                title=issue[:160],
-                asset_ref=asset_ref,
-                description=issue,
-                metadata={"source": source_name, "tool": tool_name},
-            )
-            for issue in _strings(ctx.get("security_issues"))
-        ]
-
-        sessions = [
-            Session(
-                asset_ref=asset_ref,
-                session_type="credential",
-                secret_ref=credential_id,
-                metadata={"source": source_name, "tool": tool_name},
-            )
-            for credential_id in _strings(ctx.get("successful_credential_ids"))
-        ]
-
-        exploit_attempts: list[ExploitAttempt] = []
-        capability = source_name
-        if capability in {"script.execute", "exploit.probe", "credential.login"}:
-            exploit_attempts.append(
-                ExploitAttempt(
-                    technique=capability,
-                    success=bool(flag_candidates or sessions),
-                    summary=parsed.summary,
-                    flag_candidate_refs=[item.value for item in flag_candidates],
-                    metadata={
-                        "returncode": ctx.get("returncode"),
-                        "result_quality": ctx.get("result_quality"),
-                        "partial_reason": ctx.get("partial_reason"),
-                        "failure_kind": ctx.get("failure_kind"),
-                        "failure_detail": ctx.get("failure_detail"),
-                        "near_miss_candidates": ctx.get("near_miss_candidates") or [],
-                    },
-                )
-            )
-
-        return StateDelta(
-            artifacts=artifacts,
-            endpoints=endpoints,
-            routes=routes,
-            flag_candidates=flag_candidates,
-            vulnerabilities=vulnerabilities,
-            exploit_attempts=exploit_attempts,
-            sessions=sessions,
         )
 
     def _build_evidence(
@@ -554,14 +372,14 @@ class ExecutionPlane:
         task_id: str,
         request: ToolExecutionRequest,
         result: ToolExecutionResult,
-        parsed: ParsedToolOutput,
+        tool_output: ToolOutput,
     ) -> EvidenceRecord:
         return EvidenceRecord(
             task_id=task_id,
             capability=request.capability,
             tool_name=request.tool_name,
             mode=result.mode.value,
-            summary=parsed.summary,
+            summary=tool_output.summary,
             parser_name=request.parser_name,
             request=request.model_dump(mode="json"),
             result={
@@ -573,10 +391,18 @@ class ExecutionPlane:
                 "response_json": result.response_json or {},
             },
             extracted={
-                "notes": parsed.notes,
-                "output_context": parsed.output_context,
-                "assets": [asset.asset_id for asset in parsed.asset_updates],
-                "findings": [finding.finding_id for finding in parsed.finding_updates],
-                "credentials": [credential.credential_id for credential in parsed.credential_updates],
+                "notes": tool_output.notes,
+                "output_context": tool_output.output_context,
+                "assets": [asset.asset_id for asset in tool_output.assets],
+                "artifacts": [artifact.path for artifact in tool_output.artifacts],
+                "endpoints": [endpoint.url or endpoint.hostname for endpoint in tool_output.endpoints],
+                "routes": [route.url for route in tool_output.routes],
+                "flag_candidates": [candidate.value for candidate in tool_output.flag_candidates],
+                "findings": [finding.finding_id for finding in tool_output.findings],
+                "credentials": [credential.credential_id for credential in tool_output.credentials],
+                "network_edges": [
+                    f"{edge.source}->{edge.target}:{edge.relationship}"
+                    for edge in tool_output.network_edges
+                ],
             },
         )

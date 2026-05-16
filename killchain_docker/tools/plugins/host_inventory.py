@@ -236,3 +236,7 @@ def build_arguments(request: ToolExecutionRequest) -> list[str]:
     if not payload["hostname"] and not payload["asset_id"]:
         raise ToolExecutionError("local_host_inventory requires metadata.hostname or metadata.asset_id")
     return ["-c", SCRIPT, json.dumps(payload)]
+
+def build_tool_output(request, result, parsed):
+    from killchain_docker.tools.output_builder import base_output
+    return base_output(request, result, parsed)

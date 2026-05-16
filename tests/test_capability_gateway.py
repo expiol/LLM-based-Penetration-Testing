@@ -12,6 +12,7 @@ from killchain_docker.tools import (
     ToolGateway,
     jsonl_signal_parser,
 )
+from killchain_docker.tools.plugins import http_path_probe, script_execution
 
 
 class _StaticPlugin:
@@ -61,6 +62,7 @@ class CapabilityGatewayTests(unittest.TestCase):
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _StaticPlugin()
         plane.register_plugin(plugin)
+        plane.register_tool_output_builder(plugin.name, http_path_probe.build_tool_output)
 
         bundle = ToolGateway(plane).run(
             task_id="task-1",
@@ -100,6 +102,7 @@ class CapabilityGatewayTests(unittest.TestCase):
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _ScriptPlugin()
         plane.register_plugin(plugin)
+        plane.register_tool_output_builder(plugin.name, script_execution.build_tool_output)
 
         bundle = ToolGateway(plane).run(
             task_id="task-2",

@@ -18,6 +18,11 @@ from killchain_docker.tools.capabilities import (
     ToolSpec,
 )
 from killchain_docker.tools.parsers import json_payload_parser, jsonl_signal_parser
+from killchain_docker.tools.protocols import (
+    ToolOutput,
+    ToolOutputStatus,
+    ToolPluginModule,
+)
 from killchain_docker.tools.registry import build_execution_plane
 
 __all__ = [
@@ -27,12 +32,15 @@ __all__ = [
     "ExecutionPlane",
     "LoopbackRestPlugin",
     "ParsedToolOutput",
+    "ToolCapability",
     "ToolExecutionBundle",
     "ToolExecutionError",
     "ToolExecutionRequest",
     "ToolExecutionResult",
-    "ToolCapability",
     "ToolGateway",
+    "ToolOutput",
+    "ToolOutputStatus",
+    "ToolPluginModule",
     "ToolSpec",
     "build_execution_plane",
     "json_payload_parser",

@@ -422,3 +422,19 @@ def build_arguments(request: ToolExecutionRequest) -> list[str]:
     if not payload["base_url"]:
         raise ToolExecutionError("credential_login_probe requires metadata.base_url")
     return ["-c", SCRIPT, json.dumps(payload)]
+
+def build_tool_output(request, result, parsed):
+    from killchain_docker.tools.output_builder import (
+        base_output, extract_flag_candidates, extract_endpoints, extract_routes,
+        extract_sessions, extract_exploit_attempts,
+    )
+    ctx = parsed.output_context or {}
+    source = request.capability or request.tool_name
+    asset_ref = request.metadata.get("asset_id")
+    output = base_output(request, result, parsed)
+    output.flag_candidates = extract_flag_candidates(ctx, source=source, flag_format=request.metadata.get("flag_format"))
+    output.endpoints = extract_endpoints(ctx, request, source=source, asset_ref=asset_ref)
+    output.routes = extract_routes(ctx, request, source=source, asset_ref=asset_ref)
+    output.sessions = extract_sessions(ctx, source=source, tool_name=request.tool_name, asset_ref=asset_ref)
+    output.exploit_attempts = extract_exploit_attempts(parsed, source=source, flag_candidates=output.flag_candidates, sessions=output.sessions)
+    return output

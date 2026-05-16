@@ -22,6 +22,7 @@ from killchain_docker.tools import (
     build_execution_plane,
     jsonl_signal_parser,
 )
+from killchain_docker.tools.plugins import ALL_COMMAND_TOOLS
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -84,6 +85,17 @@ def _required_plugin_names() -> set[str]:
 def _build_selftest_plane(expected_flag: str) -> ExecutionPlane:
     plane = ExecutionPlane()
     plane.register_parser("jsonl_signals", jsonl_signal_parser)
+    output_builders = {
+        module.TOOL_NAME: module.build_tool_output
+        for module in ALL_COMMAND_TOOLS
+    }
+
+    def register_simulated(
+        name: str,
+        emit_records: Callable[[ToolExecutionRequest], list[dict[str, Any]]],
+    ) -> None:
+        plane.register_plugin(SimulatedJsonlPlugin(name=name, emit_records=emit_records))
+        plane.register_tool_output_builder(name, output_builders[name])
 
     def emit_http_metadata(request: ToolExecutionRequest) -> list[dict[str, Any]]:
         asset_id = str(request.metadata.get("asset_id") or "seed-asset")
@@ -316,46 +328,20 @@ def _build_selftest_plane(expected_flag: str) -> ExecutionPlane:
             {"type": "output_context", "scan_method": "selftest", "vuln_count": 0},
         ]
 
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="local_http_metadata", emit_records=emit_http_metadata)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="local_http_content", emit_records=emit_http_content)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="artifact_triage", emit_records=emit_artifact_triage)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="archive_triage", emit_records=emit_archive_triage)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="source_review", emit_records=emit_source_review)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="binary_triage", emit_records=emit_binary_triage)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="sqlite_review", emit_records=emit_sqlite_review)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="pcap_review", emit_records=emit_pcap_review)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="repo_review", emit_records=emit_repo_review)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="local_host_inventory", emit_records=emit_host_inventory)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="tcp_banner_probe", emit_records=emit_tcp_banner)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="http_path_probe", emit_records=emit_http_path_probe)
-    )
-    plane.register_plugin(
-        SimulatedJsonlPlugin(name="http_form_probe", emit_records=emit_http_form_probe)
-    )
-    plane.register_plugin(SimulatedJsonlPlugin(name="vuln_scan", emit_records=emit_vuln_scan))
+    register_simulated("local_http_metadata", emit_http_metadata)
+    register_simulated("local_http_content", emit_http_content)
+    register_simulated("artifact_triage", emit_artifact_triage)
+    register_simulated("archive_triage", emit_archive_triage)
+    register_simulated("source_review", emit_source_review)
+    register_simulated("binary_triage", emit_binary_triage)
+    register_simulated("sqlite_review", emit_sqlite_review)
+    register_simulated("pcap_review", emit_pcap_review)
+    register_simulated("repo_review", emit_repo_review)
+    register_simulated("local_host_inventory", emit_host_inventory)
+    register_simulated("tcp_banner_probe", emit_tcp_banner)
+    register_simulated("http_path_probe", emit_http_path_probe)
+    register_simulated("http_form_probe", emit_http_form_probe)
+    register_simulated("vuln_scan", emit_vuln_scan)
     return plane
 
 
@@ -460,6 +446,8 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                 "next_focus": "",
                 "used_llm": True,
             }
+        if "ContinueDecision" in system_prompt:
+            return {"continue_loop": False, "reason": "selftest uses one tool call per worker run"}
         snapshot = json.loads(user_prompt)
         todo = snapshot.get("todo") or {}
         goal = str(todo.get("goal") or "").lower()

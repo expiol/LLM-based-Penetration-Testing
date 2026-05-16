@@ -371,3 +371,12 @@ def build_arguments(request: ToolExecutionRequest) -> list[str]:
         "max_invocations_per_binary": request.metadata.get("max_invocations_per_binary", 6),
     }
     return ["-c", SCRIPT, json.dumps(payload)]
+
+def build_tool_output(request, result, parsed):
+    from killchain_docker.tools.output_builder import base_output, extract_flag_candidates, extract_artifacts, extract_binary_run_artifacts
+    ctx = parsed.output_context or {}
+    source = request.capability or request.tool_name
+    output = base_output(request, result, parsed)
+    output.flag_candidates = extract_flag_candidates(ctx, source=source, flag_format=request.metadata.get("flag_format"))
+    output.artifacts = extract_artifacts(ctx, source=source, keys={"inspected_binaries": "binary"}) + extract_binary_run_artifacts(ctx, source=source)
+    return output

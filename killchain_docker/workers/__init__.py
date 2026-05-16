@@ -7,12 +7,13 @@ from killchain_docker.workers.persona import (
     ArtifactWorker,
     ExploitWorker,
     FlagWorker,
-    PersonaWorker,
     ReconWorker,
     WebWorker,
     WORKER_SPECS,
 )
+from killchain_docker.workers.protocols import Persona, PersonaSpec, ALL_PERSONAS
 from killchain_docker.workers.specs import WorkerBuildContext, WorkerSpec
+from killchain_docker.workers.worker import Worker
 
 BUILTIN_WORKER_SPECS: tuple[WorkerSpec, ...] = WORKER_SPECS
 
@@ -33,12 +34,17 @@ def worker_catalog() -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "ALL_PERSONAS",
     "ArtifactWorker",
     "BUILTIN_WORKER_SPECS",
     "ExploitWorker",
     "FlagWorker",
+    "Persona",
+    "PersonaSpec",
     "ReconWorker",
     "WebWorker",
+    "Worker",
+    "WorkerAgent",
     "WorkerBuildContext",
     "WorkerSpec",
     "all_worker_classes",

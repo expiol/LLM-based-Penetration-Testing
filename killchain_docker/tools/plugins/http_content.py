@@ -245,3 +245,13 @@ def build_arguments(request: ToolExecutionRequest) -> list[str]:
     if not payload["base_url"]:
         raise ToolExecutionError("local_http_content requires metadata.base_url")
     return ["-c", SCRIPT, json.dumps(payload)]
+
+def build_tool_output(request, result, parsed):
+    from killchain_docker.tools.output_builder import base_output, extract_flag_candidates, extract_endpoints
+    ctx = parsed.output_context or {}
+    source = request.capability or request.tool_name
+    asset_ref = request.metadata.get("asset_id")
+    output = base_output(request, result, parsed)
+    output.flag_candidates = extract_flag_candidates(ctx, source=source, flag_format=request.metadata.get("flag_format"))
+    output.endpoints = extract_endpoints(ctx, request, source=source, asset_ref=asset_ref)
+    return output

@@ -644,3 +644,12 @@ def build_arguments(request: ToolExecutionRequest) -> list[str]:
         "challenge_files": challenge_files,
     }
     return ["-c", SCRIPT, json.dumps(payload)]
+
+def build_tool_output(request, result, parsed):
+    from killchain_docker.tools.output_builder import base_output, extract_flag_candidates, extract_exploit_attempts
+    ctx = parsed.output_context or {}
+    source = request.capability or request.tool_name
+    output = base_output(request, result, parsed)
+    output.flag_candidates = extract_flag_candidates(ctx, source=source, flag_format=request.metadata.get("flag_format"))
+    output.exploit_attempts = extract_exploit_attempts(parsed, source=source, flag_candidates=output.flag_candidates)
+    return output

@@ -229,3 +229,7 @@ def build_arguments(request: ToolExecutionRequest) -> list[str]:
     if not payload["target"]:
         raise ToolExecutionError("vuln_scan requires metadata.target")
     return ["-c", SCRIPT, json.dumps(payload)]
+
+def build_tool_output(request, result, parsed):
+    from killchain_docker.tools.output_builder import base_output
+    return base_output(request, result, parsed)

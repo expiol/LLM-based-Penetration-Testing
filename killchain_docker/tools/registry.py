@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import sys
 
-from killchain_docker.tools.core import AllowlistedCommandPlugin, ExecutionPlane
+from killchain_docker.tools.core import AllowlistedCommandPlugin, ExecutionPlane, ToolExecutionError
 from killchain_docker.tools.parsers import json_payload_parser, jsonl_signal_parser
 from killchain_docker.tools.plugins import ALL_COMMAND_TOOLS
+from killchain_docker.tools.protocols import get_tool_output_builder
 
 
 def build_execution_plane(
@@ -31,4 +32,8 @@ def build_execution_plane(
                 argv_prefix=command_prefix,
             )
         )
+        builder = get_tool_output_builder(tool_module)
+        if builder is None:
+            raise ToolExecutionError(f"{tool_module.TOOL_NAME} is missing build_tool_output().")
+        plane.register_tool_output_builder(tool_module.TOOL_NAME, builder)
     return plane

@@ -68,6 +68,11 @@ class _RecordingScriptPlugin:
         )
 
 
+def _register_script_plugin(plane: ExecutionPlane, plugin: _RecordingScriptPlugin) -> None:
+    plane.register_plugin(plugin)
+    plane.register_tool_output_builder(plugin.name, script_execution.build_tool_output)
+
+
 def _script_worker(plane: ExecutionPlane) -> ExploitWorker:
     return ExploitWorker(
         llm_client=StaticLLMClient([
@@ -154,7 +159,7 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         plane = ExecutionPlane()
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin()
-        plane.register_plugin(plugin)
+        _register_script_plugin(plane, plugin)
         bad_response = {
             "capability": "script.execute",
             "metadata": {"script_code": "print('should not run')"},
@@ -277,7 +282,7 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         plane = ExecutionPlane()
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin()
-        plane.register_plugin(plugin)
+        _register_script_plugin(plane, plugin)
         worker = ExploitWorker(
             llm_client=StaticLLMClient([
                 {
@@ -310,7 +315,7 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         plane = ExecutionPlane()
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin()
-        plane.register_plugin(plugin)
+        _register_script_plugin(plane, plugin)
         bad_response = {
             "capability": "script.execute",
             "metadata": {},
@@ -335,7 +340,7 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         plane = ExecutionPlane()
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin(returncode=2)
-        plane.register_plugin(plugin)
+        _register_script_plugin(plane, plugin)
         worker = _script_worker(plane)
         state = RunState(objective="solve")
         todo = TodoItem(goal="run failing script", phase="exploit", context={"script_code": "raise SystemExit(2)"})
@@ -350,7 +355,7 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         plane = ExecutionPlane()
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin(returncode=0)
-        plane.register_plugin(plugin)
+        _register_script_plugin(plane, plugin)
         worker = _script_worker(plane)
         state = RunState(objective="solve")
         todo = state.queue_todo(
@@ -372,7 +377,7 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         plane = ExecutionPlane()
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin(returncode=0)
-        plane.register_plugin(plugin)
+        _register_script_plugin(plane, plugin)
         worker = _script_worker(plane)
         state = RunState(objective="solve")
         todo = state.queue_todo(
@@ -395,7 +400,7 @@ class ToolMetadataNormalizationTests(unittest.TestCase):
         plane = ExecutionPlane()
         plane.register_parser("jsonl_signals", jsonl_signal_parser)
         plugin = _RecordingScriptPlugin(returncode=0, flag_candidates=[bogus])
-        plane.register_plugin(plugin)
+        _register_script_plugin(plane, plugin)
         worker = _script_worker(plane)
         state = RunState(objective="solve")
         todo = state.queue_todo(

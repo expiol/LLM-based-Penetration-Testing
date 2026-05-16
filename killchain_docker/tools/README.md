@@ -17,8 +17,11 @@ Each file under `plugins/` should expose:
 - `TOOL_NAME`
 - `SCRIPT` (an inline Python program executed inside the agent container, when the plugin uses `AllowlistedCommandPlugin`)
 - `build_arguments(request)` returning the argv suffix passed to the executable
+- `build_tool_output(request, result, parsed)` returning `ToolOutput`
 
-This keeps registration uniform and makes each tool independently testable.
+Each plugin owns its own output shaping, typed signal extraction, and
+`output_context` structure. The execution plane requires `build_tool_output()`
+and does not infer state updates from plugin-specific fields.
 
 ## Current Plugins
 

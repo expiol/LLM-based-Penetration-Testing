@@ -1,540 +1,67 @@
-"""High-level persona workers for the planner-router runtime."""
+"""High-level persona workers for the planner-router runtime.
+
+This module now delegates to the unified Worker class with PersonaSpec injection.
+The legacy class names are preserved as thin aliases for backward compatibility.
+"""
 
 from __future__ import annotations
 
-from urllib.parse import urlparse
-
 from killchain_docker.llm import LLMClient
-from killchain_docker.orchestrator.policy import CandidatePolicy
-from killchain_docker.reasoning.flag import encoding_cascade
-from killchain_docker.state import (
-    Asset,
-    AssetKind,
-    FlagCandidate,
-    Hypothesis,
-    RunState,
-    Service,
-    StateDelta,
-    TodoItem,
-    WorkerResult,
+from killchain_docker.workers.protocols import (
+    ARTIFACT_PERSONA,
+    EXPLOIT_PERSONA,
+    FLAG_PERSONA,
+    RECON_PERSONA,
+    WEB_PERSONA,
 )
-from killchain_docker.tools import ToolCapability, ToolExecutionError
-from killchain_docker.tools.core import _strings
-from killchain_docker.workers.base import WorkerAgent
 from killchain_docker.workers.specs import WorkerBuildContext, WorkerSpec
-from killchain_docker.workers.tool_metadata import normalize_tool_metadata
+from killchain_docker.workers.worker import Worker
 
 
-def _tool_success(capability: ToolCapability, bundle, output_context: dict[str, object]) -> bool:
-    if bundle.result.exit_code not in (None, 0):
-        return False
-    if capability == ToolCapability.SCRIPT_EXECUTE:
-        returncode = output_context.get("returncode")
-        if returncode not in (None, ""):
-            try:
-                return int(returncode) == 0
-            except (TypeError, ValueError):
-                return False
-    return True
+# Backward-compatible class aliases
+class ReconWorker(Worker):
+    name = RECON_PERSONA.name
+    routing_summary = RECON_PERSONA.routing_summary
+    allowed_capabilities = RECON_PERSONA.allowed_capabilities
+
+    def __init__(self, *, llm_client=None, execution_plane=None, tool_gateway=None):
+        super().__init__(persona=RECON_PERSONA, llm_client=llm_client, execution_plane=execution_plane, tool_gateway=tool_gateway)
 
 
-def _is_flag_recovery_task(todo: TodoItem) -> bool:
-    text = " ".join(
-        [
-            todo.goal,
-            " ".join(todo.success_criteria),
-            " ".join(todo.constraints),
-        ]
-    ).lower()
-    if "flag candidate" in text or "candidate flag" in text:
-        return True
-    if any(token in text for token in ("recover", "decrypt", "decode", "find", "print", "output")):
-        if "flag" in text or "plaintext" in text or "readable ascii" in text:
-            return True
-    if "output contains" in text and ("flag{" in text or "ctf{" in text):
-        return True
-    return False
+class ArtifactWorker(Worker):
+    name = ARTIFACT_PERSONA.name
+    routing_summary = ARTIFACT_PERSONA.routing_summary
+    allowed_capabilities = ARTIFACT_PERSONA.allowed_capabilities
+
+    def __init__(self, *, llm_client=None, execution_plane=None, tool_gateway=None):
+        super().__init__(persona=ARTIFACT_PERSONA, llm_client=llm_client, execution_plane=execution_plane, tool_gateway=tool_gateway)
 
 
-class PersonaWorker(WorkerAgent):
-    """Base class for high-level workers that choose and run tool capabilities."""
+class WebWorker(Worker):
+    name = WEB_PERSONA.name
+    routing_summary = WEB_PERSONA.routing_summary
+    allowed_capabilities = WEB_PERSONA.allowed_capabilities
 
-    allowed_capabilities: tuple[ToolCapability, ...] = ()
-
-    def supports(self, todo: TodoItem) -> bool:
-        del todo
-        return True
-
-    def _choose_capability(
-        self,
-        todo: TodoItem,
-        state: RunState,
-        prior_steps: list[dict[str, object]] | None = None,
-    ) -> tuple[ToolCapability, dict[str, object], str, str | None, dict[str, str]]:
-        decision = self.choose_tool_use(
-            task=todo,
-            state=state,
-            allowed_capabilities=list(self.allowed_capabilities),
-            prior_steps=prior_steps,
-        )
-        return (
-            ToolCapability(decision.capability),
-            dict(decision.metadata),
-            decision.rationale,
-            decision.hypothesis,
-            dict(decision.memory_updates) if decision.memory_updates else {},
-        )
-
-    def _prepare_metadata(
-        self,
-        *,
-        capability: ToolCapability,
-        todo: TodoItem,
-        state: RunState,
-        selected_metadata: dict[str, object],
-    ) -> dict[str, object]:
-        return normalize_tool_metadata(
-            capability,
-            todo,
-            state,
-            selected_metadata,
-        )
-
-    def _result_from_bundle(
-        self,
-        *,
-        todo: TodoItem,
-        capability: ToolCapability,
-        output_context: dict[str, object],
-        summary: str,
-        success: bool,
-        bundle,
-        rationale: str,
-    ) -> WorkerResult:
-        state_delta = bundle.state_delta
-        flag_values = [candidate.value for candidate in state_delta.flag_candidates]
-        partial = False
-        partial_reason = None
-        result_quality = str(output_context.get("result_quality") or "")
-        if (
-            capability == ToolCapability.SCRIPT_EXECUTE
-            and success
-            and not flag_values
-            and _is_flag_recovery_task(todo)
-        ):
-            has_near_miss = bool(output_context.get("near_miss_candidates"))
-            if not has_near_miss:
-                partial = True
-                partial_reason = (
-                    str(output_context.get("partial_reason") or "").strip()
-                    or "script completed for a flag-recovery task but produced no flag candidate"
-                )
-                result_quality = result_quality or "partial_no_candidate"
-            else:
-                # Near-miss = real progress; don't penalize as partial
-                result_quality = result_quality or "near_miss"
-            output_context["result_quality"] = result_quality
-            output_context["partial_reason"] = partial_reason
-        output_context["worker_rationale"] = rationale
-        output_context["capability"] = capability.value
-        return WorkerResult(
-            todo_id=todo.todo_id,
-            worker_name=self.name,
-            success=success,
-            summary=summary,
-            output_context=output_context,
-            asset_updates=bundle.parsed.asset_updates,
-            finding_updates=bundle.parsed.finding_updates,
-            credential_updates=bundle.parsed.credential_updates,
-            network_updates=bundle.parsed.network_updates,
-            state_delta=state_delta,
-            evidence_updates=[bundle.evidence],
-            notes=list(bundle.parsed.notes),
-            retryable=False if partial else not success,
-            partial=partial,
-            result_quality=result_quality or None,
-            partial_reason=partial_reason,
-        )
-
-    _MAX_INNER_STEPS = 7
-    _MAX_METADATA_RETRIES = 2
-
-    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
-        if self.tool_gateway is None:
-            return WorkerResult(
-                todo_id=task.todo_id,
-                worker_name=self.name,
-                success=False,
-                summary=f"{self.name} cannot run because no tool gateway is configured.",
-                error="tool gateway unavailable",
-                retryable=False,
-            )
-
-        prior_steps: list[dict[str, object]] = []
-        last_bundle = None
-        last_capability = None
-        last_rationale = ""
-        accumulated_hypotheses: list[Hypothesis] = []
-        accumulated_memory: dict[str, str] = {}
-
-        for step in range(self._MAX_INNER_STEPS):
-            # Retry loop for metadata/capability validation errors
-            metadata_retries = 0
-            bundle = None
-            capability = None
-            rationale = ""
-            while True:
-                try:
-                    capability, selected_metadata, rationale, hypothesis_text, mem_updates = self._choose_capability(
-                        task, state, prior_steps=prior_steps if prior_steps else None
-                    )
-                    if hypothesis_text:
-                        accumulated_hypotheses.append(Hypothesis(title=hypothesis_text))
-                    if mem_updates:
-                        accumulated_memory.update(mem_updates)
-                    metadata = self._prepare_metadata(
-                        capability=capability,
-                        todo=task,
-                        state=state,
-                        selected_metadata=selected_metadata,
-                    )
-                    timeout_raw = metadata.pop("timeout_s", None)
-                    timeout_s = int(timeout_raw) if timeout_raw not in (None, "") else None
-                    bundle = self.run_capability(
-                        task=task,
-                        capability=capability,
-                        metadata=metadata,
-                        timeout_s=timeout_s,
-                    )
-                    break  # Success — exit retry loop
-                except (ToolExecutionError, ValueError) as exc:
-                    metadata_retries += 1
-                    if metadata_retries > self._MAX_METADATA_RETRIES:
-                        return WorkerResult(
-                            todo_id=task.todo_id,
-                            worker_name=self.name,
-                            success=False,
-                            summary=f"{self.name} failed to execute its selected tool: {exc}",
-                            error=str(exc),
-                            retryable=False,
-                        )
-                    # Inject error as a prior step so the LLM sees it on retry
-                    cap_str = capability.value if capability and hasattr(capability, "value") else str(capability or "unknown")
-                    prior_steps.append({
-                        "step": step,
-                        "capability": cap_str,
-                        "rationale": rationale,
-                        "summary": f"VALIDATION ERROR: {exc}",
-                        "flag_candidates": [],
-                        "stdout_preview": "",
-                        "stderr_preview": str(exc),
-                        "returncode": -1,
-                        "failure_kind": "metadata_validation",
-                        "failure_detail": str(exc),
-                    })
-
-            last_bundle = bundle
-            last_capability = capability
-            last_rationale = rationale
-
-            output_context = dict(bundle.parsed.output_context)
-            prior_steps.append({
-                "step": step,
-                "capability": capability.value,
-                "rationale": rationale,
-                "summary": bundle.parsed.summary,
-                "flag_candidates": output_context.get("flag_candidates", []),
-                "near_miss_candidates": output_context.get("near_miss_candidates", []),
-                "stdout_preview": str(output_context.get("stdout", ""))[:2000],
-                "stderr_preview": str(output_context.get("stderr", ""))[:1500],
-                "returncode": output_context.get("returncode"),
-                "failure_kind": output_context.get("failure_kind"),
-                "failure_detail": output_context.get("failure_detail"),
-            })
-
-            # Stop early if flag found
-            if bundle.state_delta.flag_candidates:
-                break
-
-            # On last step, skip the continue check
-            if step == self._MAX_INNER_STEPS - 1:
-                break
-
-            if not self._should_continue(task, state, prior_steps):
-                break
-
-        output_context = dict(last_bundle.parsed.output_context)
-        success = _tool_success(last_capability, last_bundle, output_context)
-        if len(prior_steps) > 1:
-            output_context["react_steps"] = len(prior_steps)
-
-        # Encoding cascade: when near-miss detected but no flag found, try
-        # common encoding transformations and add results as flag candidates.
-        cascade_candidates: list[FlagCandidate] = []
-        if not last_bundle.state_delta.flag_candidates:
-            near_misses = output_context.get("near_miss_candidates") or []
-            for nm in near_misses[:3]:
-                for transformed in encoding_cascade(str(nm)):
-                    if CandidatePolicy.accepts_for_state(state, transformed):
-                        cascade_candidates.append(
-                            FlagCandidate(
-                                value=transformed,
-                                source="encoding_cascade",
-                                confidence=0.2,
-                            )
-                        )
-
-        result = self._result_from_bundle(
-            todo=task,
-            capability=last_capability,
-            output_context=output_context,
-            summary=last_bundle.parsed.summary,
-            success=success,
-            bundle=last_bundle,
-            rationale=last_rationale,
-        )
-        if cascade_candidates:
-            existing = list(result.state_delta.flag_candidates) if result.state_delta else []
-            result.state_delta = StateDelta(
-                **{
-                    **result.state_delta.model_dump(),
-                    "flag_candidates": existing + cascade_candidates,
-                }
-            )
-        if accumulated_hypotheses:
-            existing = list(result.state_delta.hypotheses) if result.state_delta else []
-            result.state_delta = StateDelta(
-                **{
-                    **result.state_delta.model_dump(),
-                    "hypotheses": existing + accumulated_hypotheses,
-                }
-            )
-        if accumulated_memory:
-            result.memory_updates = accumulated_memory
-        return result
+    def __init__(self, *, llm_client=None, execution_plane=None, tool_gateway=None):
+        super().__init__(persona=WEB_PERSONA, llm_client=llm_client, execution_plane=execution_plane, tool_gateway=tool_gateway)
 
 
-class ReconWorker(PersonaWorker):
-    """Persona worker for scope mapping and service discovery."""
+class ExploitWorker(Worker):
+    name = EXPLOIT_PERSONA.name
+    routing_summary = EXPLOIT_PERSONA.routing_summary
+    allowed_capabilities = EXPLOIT_PERSONA.allowed_capabilities
 
-    name = "recon-worker"
-    supported_todo_kinds = ("todo",)
-    routing_summary = "Maps authorized scope into assets and collects first-pass host or HTTP metadata."
-    allowed_capabilities = (
-        ToolCapability.HTTP_METADATA,
-        ToolCapability.HOST_INVENTORY,
-        ToolCapability.HOST_BANNER,
-    )
-
-    def _prepare_metadata(
-        self,
-        *,
-        capability: ToolCapability,
-        todo: TodoItem,
-        state: RunState,
-        selected_metadata: dict[str, object],
-    ) -> dict[str, object]:
-        metadata = super()._prepare_metadata(
-            capability=capability,
-            todo=todo,
-            state=state,
-            selected_metadata=selected_metadata,
-        )
-        scope = str(metadata.get("scope") or (state.authorized_scope[0] if state.authorized_scope else ""))
-        parsed = urlparse(scope)
-        asset_id = str(metadata.get("asset_id") or "seed-asset")
-        if parsed.scheme in {"http", "https"}:
-            metadata.setdefault("base_url", scope)
-            metadata.setdefault("hostname", parsed.hostname or "")
-        else:
-            metadata.setdefault("hostname", parsed.hostname or scope)
-        metadata.setdefault("asset_id", asset_id)
-        return metadata
-
-    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
-        result = super().run(task, state)
-        scope = str(task.context.get("scope") or (state.authorized_scope[0] if state.authorized_scope else ""))
-        parsed = urlparse(scope)
-        if result.success and scope and parsed.scheme in {"http", "https"}:
-            asset_id = str(task.context.get("asset_id") or "seed-asset")
-            asset = Asset(
-                asset_id=asset_id,
-                kind=AssetKind.WEB_APPLICATION,
-                hostname=parsed.hostname,
-                base_url=scope,
-                services=[Service(port=parsed.port or (443 if parsed.scheme == "https" else 80), name=parsed.scheme)],
-                tags={"seed", "recon"},
-            )
-            result.asset_updates.append(asset)
-        return result
+    def __init__(self, *, llm_client=None, execution_plane=None, tool_gateway=None):
+        super().__init__(persona=EXPLOIT_PERSONA, llm_client=llm_client, execution_plane=execution_plane, tool_gateway=tool_gateway)
 
 
-class ArtifactWorker(PersonaWorker):
-    """Persona worker for local challenge-file analysis."""
+class FlagWorker(Worker):
+    name = FLAG_PERSONA.name
+    routing_summary = FLAG_PERSONA.routing_summary
+    allowed_capabilities = FLAG_PERSONA.allowed_capabilities
 
-    name = "artifact-worker"
-    supported_todo_kinds = ("todo",)
-    routing_summary = "Inspects bundled files, source, binaries, archives, repositories, databases, and packet captures."
-    preferred_challenge_categories = ("crypto", "rev", "forensics", "misc", "pwn", "web")
-    allowed_capabilities = (
-        ToolCapability.ARTIFACT_TRIAGE,
-        ToolCapability.ARTIFACT_SOURCE,
-        ToolCapability.ARTIFACT_BINARY_TRIAGE,
-        ToolCapability.ARTIFACT_BINARY_DISASSEMBLE,
-        ToolCapability.ARTIFACT_BINARY_EXECUTE,
-        ToolCapability.ARTIFACT_ARCHIVE,
-        ToolCapability.ARTIFACT_SQLITE,
-        ToolCapability.ARTIFACT_PCAP,
-        ToolCapability.ARTIFACT_REPO,
-        ToolCapability.ARTIFACT_RUNTIME,
-        ToolCapability.ARTIFACT_COMPUTATION,
-        ToolCapability.SCRIPT_EXECUTE,
-        ToolCapability.FLAG_HARVEST,
-    )
-
-
-class WebWorker(PersonaWorker):
-    """Persona worker for HTTP content, paths, and forms."""
-
-    name = "web-worker"
-    supported_todo_kinds = ("todo",)
-    routing_summary = "Reviews HTTP content, probes routes, and interacts with discovered forms inside authorized scope."
-    preferred_challenge_categories = ("web",)
-    allowed_capabilities = (
-        ToolCapability.HTTP_METADATA,
-        ToolCapability.HTTP_CONTENT,
-        ToolCapability.HTTP_PROBE_PATHS,
-        ToolCapability.HTTP_FORM_PROBE,
-        ToolCapability.CREDENTIAL_LOGIN,
-        ToolCapability.SCRIPT_EXECUTE,
-    )
-
-
-class ExploitWorker(PersonaWorker):
-    """Persona worker for vulnerability probes and exploit experiments."""
-
-    name = "exploit-worker"
-    supported_todo_kinds = ("todo",)
-    routing_summary = "Runs bounded exploit, credential, vulnerability, and script experiments from accumulated evidence."
-    allowed_capabilities = (
-        ToolCapability.VULN_SCAN,
-        ToolCapability.EXPLOIT_PROBE,
-        ToolCapability.CREDENTIAL_LOGIN,
-        ToolCapability.SCRIPT_EXECUTE,
-    )
-
-
-class FlagWorker(PersonaWorker):
-    """Persona worker for final flag hunting and validation."""
-
-    name = "flag-worker"
-    supported_todo_kinds = ("todo",)
-    routing_summary = "Harvests and validates concrete flag candidates."
-    allowed_capabilities = (
-        ToolCapability.FLAG_HARVEST,
-        ToolCapability.SCRIPT_EXECUTE,
-    )
-
-    def __init__(
-        self,
-        *,
-        llm_client: LLMClient | None = None,
-        execution_plane=None,
-        tool_gateway=None,
-        expected_flag: str | None = None,
-    ) -> None:
-        super().__init__(
-            llm_client=llm_client,
-            execution_plane=execution_plane,
-            tool_gateway=tool_gateway,
-        )
-        self.expected_flag = expected_flag
-
-    # ------------------------------------------------------------------
-    # Fuzzy flag matching: handles wrapper mismatches (flag{X} vs X vs key{X})
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _unwrap(s: str) -> str:
-        """Strip outer prefix{...} wrapper, return inner text."""
-        import re
-        m = re.match(r"[A-Za-z0-9_]+\{(.+)\}\s*$", s, re.DOTALL)
-        return m.group(1) if m else s
-
-    @staticmethod
-    def _extract_prefix(s: str) -> str | None:
-        import re
-        m = re.match(r"([A-Za-z0-9_]+)\{", s)
-        return m.group(1) if m else None
-
-    def _flag_matches(self, candidate: str, expected: str) -> bool:
-        c, e = candidate.strip(), expected.strip()
-        if c == e:
-            return True
-        c_inner, e_inner = self._unwrap(c), self._unwrap(e)
-        # Inner text matches (wrapper difference)
-        if c_inner == e_inner:
-            return True
-        # Candidate is bare inner text, wrap with expected's prefix
-        if prefix := self._extract_prefix(e):
-            if f"{prefix}{{{c}}}" == e:
-                return True
-        # Case-insensitive on inner text
-        if c_inner.lower() == e_inner.lower():
-            return True
-        return False
-
-    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
-        candidates = [
-            candidate
-            for candidate in _strings(task.context.get("candidate_flag"))
-            if CandidatePolicy.accepts_for_state(state, candidate)
-        ]
-        if not candidates:
-            candidates = [candidate.value for candidate in CandidatePolicy.validation_ready_candidates(state)]
-        for candidate in candidates:
-            if self.expected_flag and self._flag_matches(candidate, self.expected_flag):
-                return WorkerResult(
-                    todo_id=task.todo_id,
-                    worker_name=self.name,
-                    success=True,
-                    summary=f"Validated flag candidate {candidate}.",
-                    state_delta=StateDelta(
-                        flag_candidates=[
-                            FlagCandidate(
-                                value=candidate,
-                                source="flag-validation",
-                                confidence=1.0,
-                                validated=True,
-                            )
-                        ]
-                    ),
-                    solved=True,
-                    validated_flag=self.expected_flag,
-                    notes=[f"{self.name} validated the final flag."],
-                )
-        if candidates and self.expected_flag:
-            return WorkerResult(
-                todo_id=task.todo_id,
-                worker_name=self.name,
-                success=False,
-                summary="Flag candidates were tested but did not match the expected flag.",
-                state_delta=StateDelta(
-                    flag_candidates=[
-                        FlagCandidate(
-                            value=candidate,
-                            source="flag-validation",
-                            confidence=0.1,
-                            validated=False,
-                            rejected_reason="candidate mismatch",
-                        )
-                        for candidate in candidates[:12]
-                    ]
-                ),
-                error="candidate mismatch",
-                retryable=False,
-            )
-        return super().run(task, state)
+    def __init__(self, *, llm_client=None, execution_plane=None, tool_gateway=None, expected_flag=None):
+        super().__init__(persona=FLAG_PERSONA, llm_client=llm_client, execution_plane=execution_plane, tool_gateway=tool_gateway, expected_flag=expected_flag)
 
 
 def _flag_factory(context: WorkerBuildContext) -> FlagWorker:
@@ -546,9 +73,9 @@ def _flag_factory(context: WorkerBuildContext) -> FlagWorker:
 
 
 WORKER_SPECS: tuple[WorkerSpec, ...] = (
-    WorkerSpec("ReconWorker", "persona", lambda ctx: ReconWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), ReconWorker.routing_summary),
-    WorkerSpec("ArtifactWorker", "persona", lambda ctx: ArtifactWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), ArtifactWorker.routing_summary),
-    WorkerSpec("WebWorker", "persona", lambda ctx: WebWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), WebWorker.routing_summary),
-    WorkerSpec("ExploitWorker", "persona", lambda ctx: ExploitWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), ExploitWorker.routing_summary),
-    WorkerSpec("FlagWorker", "persona", _flag_factory, FlagWorker.routing_summary),
+    WorkerSpec("ReconWorker", "persona", lambda ctx: ReconWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), ReconWorker.routing_summary.fget(None) if False else RECON_PERSONA.routing_summary),
+    WorkerSpec("ArtifactWorker", "persona", lambda ctx: ArtifactWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), ARTIFACT_PERSONA.routing_summary),
+    WorkerSpec("WebWorker", "persona", lambda ctx: WebWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), WEB_PERSONA.routing_summary),
+    WorkerSpec("ExploitWorker", "persona", lambda ctx: ExploitWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), EXPLOIT_PERSONA.routing_summary),
+    WorkerSpec("FlagWorker", "persona", _flag_factory, FLAG_PERSONA.routing_summary),
 )

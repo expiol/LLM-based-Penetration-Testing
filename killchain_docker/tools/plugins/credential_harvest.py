@@ -221,3 +221,12 @@ def build_arguments(request: ToolExecutionRequest) -> list[str]:
         "max_files": request.metadata.get("max_files", 80),
     }
     return ["-c", SCRIPT, json.dumps(payload)]
+
+def build_tool_output(request, result, parsed):
+    from killchain_docker.tools.output_builder import base_output, extract_flag_candidates, extract_routes
+    ctx = parsed.output_context or {}
+    source = request.capability or request.tool_name
+    output = base_output(request, result, parsed)
+    output.flag_candidates = extract_flag_candidates(ctx, source=source, flag_format=request.metadata.get("flag_format"))
+    output.routes = extract_routes(ctx, request, source=source)
+    return output
