@@ -24,3 +24,9 @@ llm_ctf/toolset/.DS_Store
 keys.cfg
 batch_runs*/
 .cursor/
+
+
+CLAUDE.md
+.claude/
+docs/agents/
+.scratch/

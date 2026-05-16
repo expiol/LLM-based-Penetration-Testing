@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,288 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 
 
+_COMPACT_TEXT_LIMIT = 360
+_COMPACT_GOAL_LIMIT = 260
+_COMPACT_TIMELINE_LIMIT = 80
+
+
+def _compact_text(value: object, *, limit: int = _COMPACT_TEXT_LIMIT) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 15)].rstrip() + "...[truncated]"
+
+
+def _todo_status_counts(state: RunState) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for todo in state.todos:
+        key = str(todo.status)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _worker_counts(state: RunState) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for todo in state.todos:
+        key = str(todo.assigned_worker or "unassigned")
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _compact_todos(state: RunState) -> list[dict[str, object]]:
+    interesting_statuses = {"pending", "running", "partial", "failed", "blocked", "interrupted"}
+    selected = [
+        todo for todo in state.todos
+        if str(todo.status) in interesting_statuses
+    ]
+    if len(selected) < 20:
+        seen = {todo.todo_id for todo in selected}
+        for todo in state.todos[-20:]:
+            if todo.todo_id not in seen:
+                selected.append(todo)
+    return [
+        {
+            "todo_id": todo.todo_id,
+            "phase": str(todo.phase),
+            "status": str(todo.status),
+            "worker": todo.assigned_worker,
+            "attempts": todo.attempts,
+            "family": str(todo.context.get("family") or ""),
+            "goal": _compact_text(todo.goal, limit=_COMPACT_GOAL_LIMIT),
+            "result": _compact_text(todo.result_summary),
+            "error": _compact_text(todo.error),
+        }
+        for todo in selected[-40:]
+    ]
+
+
+def _compact_rounds(state: RunState) -> list[dict[str, object]]:
+    timeline: list[dict[str, object]] = []
+    for round_record in state.rounds[-_COMPACT_TIMELINE_LIMIT:]:
+        timeline.append({
+            "cycle": round_record.cycle,
+            "planner_summary": _compact_text(round_record.planner_summary),
+            "assignments": [
+                {
+                    "todo_id": assignment.todo_id,
+                    "worker": assignment.worker_name,
+                    "rationale": _compact_text(assignment.rationale, limit=180),
+                }
+                for assignment in round_record.assignments
+            ],
+            "results": [
+                {
+                    "todo_id": result.todo_id,
+                    "worker": result.worker_name,
+                    "success": result.success,
+                    "partial": result.partial,
+                    "quality": result.result_quality,
+                    "summary": _compact_text(result.summary),
+                    "error": _compact_text(result.error or result.partial_reason),
+                    "flag_candidates": len(result.state_delta.flag_candidates) if result.state_delta else 0,
+                    "notes": [_compact_text(note, limit=220) for note in result.notes[:3]],
+                }
+                for result in round_record.results
+            ],
+            "router_summary": _compact_text(round_record.summary.summary),
+            "key_findings": [
+                _compact_text(item, limit=260)
+                for item in round_record.summary.key_findings[:5]
+            ],
+            "next_focus": _compact_text(round_record.summary.next_focus),
+        })
+    return timeline
+
+
+def build_compact_run_log(
+    state: RunState,
+    *,
+    events: list[str] | None = None,
+    token_ledger: TokenLedger | None = None,
+) -> dict[str, Any]:
+    """Return an LLM-readable run timeline without large stdout/stderr blobs."""
+
+    challenge = state.metadata.get("challenge", {}) or {}
+    flags = [
+        {
+            "value": candidate.value,
+            "source": candidate.source,
+            "confidence": candidate.confidence,
+            "validated": candidate.validated,
+            "rejected_reason": candidate.rejected_reason,
+        }
+        for candidate in state.flag_candidates.values()
+    ]
+    hypotheses = [
+        {
+            "title": _compact_text(item.title),
+            "status": item.status,
+            "confidence": item.confidence,
+            "category": item.category,
+        }
+        for item in state.hypotheses.values()
+    ][-20:]
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "purpose": "Compact run log for humans and LLMs. See state.json/evidence.json for full stdout, stderr, and raw tool payloads.",
+        "run": {
+            "run_id": state.run_id,
+            "status": str(state.status),
+            "stop_reason": state.stop_reason,
+            "solved": state.solved,
+            "validated_flag": state.validated_flag,
+            "created_at": state.created_at.isoformat(),
+            "updated_at": state.updated_at.isoformat(),
+            "last_cycle_at": state.last_cycle_at.isoformat() if state.last_cycle_at else None,
+        },
+        "challenge": {
+            "canonical_name": challenge.get("canonical_name"),
+            "name": challenge.get("name"),
+            "category": challenge.get("category"),
+            "flag_format": challenge.get("flag_format"),
+            "files": challenge.get("files") or [],
+            "server_name": challenge.get("server_name"),
+            "port": challenge.get("port"),
+        },
+        "counts": {
+            **state.summary(),
+            "todo_status_counts": _todo_status_counts(state),
+            "worker_counts": _worker_counts(state),
+        },
+        "flag_candidates": flags,
+        "working_memory": {
+            key: _compact_text(value, limit=260)
+            for key, value in list(state.working_memory.items())[-30:]
+        },
+        "hypotheses_tail": hypotheses,
+        "open_or_recent_todos": _compact_todos(state),
+        "timeline": _compact_rounds(state),
+        "orchestration_notes_tail": [
+            _compact_text(note, limit=300)
+            for note in state.orchestration_notes[-30:]
+        ],
+        "events_tail": [
+            _compact_text(message, limit=300)
+            for message in (events or [])[-80:]
+        ],
+        "full_artifacts": {
+            "state": "state.json",
+            "evidence": "evidence.json",
+            "events": "events.log",
+            "report": "report.md",
+        },
+    }
+    if token_ledger is not None:
+        payload["token_usage"] = token_ledger.to_dict()
+    return payload
+
+
+def render_compact_run_markdown(payload: dict[str, Any]) -> str:
+    run = payload.get("run") or {}
+    challenge = payload.get("challenge") or {}
+    counts = payload.get("counts") or {}
+    lines = [
+        "# Compact Run Log",
+        "",
+        "This is the LLM-readable timeline. Full raw outputs remain in `state.json`, `evidence.json`, and `events.log`.",
+        "",
+        "## Run",
+        "",
+        f"- Run ID: `{run.get('run_id')}`",
+        f"- Challenge: `{challenge.get('canonical_name') or challenge.get('name')}` ({challenge.get('category')})",
+        f"- Status: `{run.get('status')}` stop_reason=`{run.get('stop_reason')}` solved=`{run.get('solved')}`",
+        f"- Validated flag: `{run.get('validated_flag')}`",
+        f"- Updated: `{run.get('updated_at')}`",
+        f"- Counts: rounds={counts.get('rounds')} todos={counts.get('todos')} open={counts.get('open_todos')} evidence={counts.get('evidence')} flags={counts.get('flag_candidates')}",
+        f"- Todo statuses: `{counts.get('todo_status_counts')}`",
+        "",
+    ]
+
+    token_usage = payload.get("token_usage")
+    if isinstance(token_usage, dict):
+        lines.extend([
+            "## Token Usage",
+            "",
+            f"- Calls: {token_usage.get('llm_calls')} prompt={token_usage.get('prompt_tokens')} completion={token_usage.get('completion_tokens')} total={token_usage.get('total_tokens')}",
+            "",
+        ])
+
+    flags = payload.get("flag_candidates") or []
+    lines.extend(["## Flag Candidates", ""])
+    if flags:
+        for item in flags:
+            lines.append(
+                f"- `{item.get('value')}` source={item.get('source')} confidence={item.get('confidence')} validated={item.get('validated')} rejected={item.get('rejected_reason')}"
+            )
+    else:
+        lines.append("- None accepted into state.")
+    lines.append("")
+
+    memory = payload.get("working_memory") or {}
+    lines.extend(["## Working Memory", ""])
+    if memory:
+        for key, value in memory.items():
+            lines.append(f"- `{key}`: {value}")
+    else:
+        lines.append("- Empty.")
+    lines.append("")
+
+    lines.extend(["## Timeline", ""])
+    timeline = payload.get("timeline") or []
+    if timeline:
+        for item in timeline:
+            lines.append(f"### Cycle {item.get('cycle')}")
+            lines.append("")
+            lines.append(f"- Plan: {item.get('planner_summary')}")
+            for assignment in item.get("assignments") or []:
+                lines.append(f"- Dispatch: `{assignment.get('todo_id')}` -> `{assignment.get('worker')}`")
+            for result in item.get("results") or []:
+                lines.append(
+                    f"- Result: `{result.get('todo_id')}` `{result.get('worker')}` success={result.get('success')} partial={result.get('partial')} quality={result.get('quality')} flags={result.get('flag_candidates')} :: {result.get('summary')}"
+                )
+                if result.get("error"):
+                    lines.append(f"  Error: {result.get('error')}")
+            if item.get("router_summary"):
+                lines.append(f"- Router: {item.get('router_summary')}")
+            if item.get("next_focus"):
+                lines.append(f"- Next focus: {item.get('next_focus')}")
+            lines.append("")
+    else:
+        lines.append("- No rounds recorded yet.")
+        lines.append("")
+
+    todos = payload.get("open_or_recent_todos") or []
+    lines.extend(["## Open Or Recent Todos", ""])
+    if todos:
+        for todo in todos:
+            lines.append(
+                f"- `{todo.get('todo_id')}` status={todo.get('status')} phase={todo.get('phase')} worker={todo.get('worker')} attempts={todo.get('attempts')} family={todo.get('family')} :: {todo.get('goal')}"
+            )
+            if todo.get("result"):
+                lines.append(f"  Result: {todo.get('result')}")
+            if todo.get("error"):
+                lines.append(f"  Error: {todo.get('error')}")
+    else:
+        lines.append("- None.")
+    lines.append("")
+
+    notes = payload.get("orchestration_notes_tail") or []
+    lines.extend(["## Notes Tail", ""])
+    if notes:
+        lines.extend(f"- {note}" for note in notes)
+    else:
+        lines.append("- None.")
+    lines.append("")
+
+    lines.extend(["## Events Tail", ""])
+    for message in payload.get("events_tail") or []:
+        lines.append(f"- {message}")
+    if not payload.get("events_tail"):
+        lines.append("- None.")
+    lines.append("")
+    return "\n".join(lines)
+
+
 class RunPersister:
     """Owns disk paths for one run and writes them lazily.
 
@@ -47,6 +330,8 @@ class RunPersister:
         self.report_path = run_dir / "report.md"
         self.events_path = run_dir / "events.log"
         self.evidence_path = run_dir / "evidence.json"
+        self.compact_json_path = run_dir / "compact_log.json"
+        self.compact_markdown_path = run_dir / "compact_log.md"
 
     def write_config(self, config: RunConfig) -> None:
         _write_json(self.config_path, config.model_dump(mode="json"))
@@ -56,10 +341,23 @@ class RunPersister:
         suffix = "\n" if messages else ""
         self.events_path.write_text("\n".join(messages) + suffix, encoding="utf-8")
 
+    def _write_compact(self, state: RunState, token_ledger: TokenLedger | None = None) -> None:
+        payload = build_compact_run_log(
+            state,
+            events=list(self.recorder.messages),
+            token_ledger=token_ledger,
+        )
+        _write_json(self.compact_json_path, payload)
+        self.compact_markdown_path.write_text(
+            render_compact_run_markdown(payload),
+            encoding="utf-8",
+        )
+
     def write_state(self, state: RunState) -> None:
         try:
             _write_json(self.state_path, state.model_dump(mode="json"))
             self._write_events()
+            self._write_compact(state)
         except Exception as exc:
             self.recorder.emit(
                 f"[persister] checkpoint write failed: {type(exc).__name__}: {exc}"
@@ -90,6 +388,7 @@ class RunPersister:
         )
         self.report_path.write_text(render_markdown_report(state), encoding="utf-8")
         self._write_events()
+        self._write_compact(state, token_ledger)
 
 
 class RunConfig(BaseModel):
@@ -123,6 +422,8 @@ class RunArtifacts(BaseModel):
     events_path: str
     config_path: str
     evidence_path: str
+    compact_json_path: str
+    compact_markdown_path: str
     status: str
 
 
@@ -235,5 +536,7 @@ def run_assessment(
         events_path=str(persister.events_path),
         config_path=str(persister.config_path),
         evidence_path=str(persister.evidence_path),
+        compact_json_path=str(persister.compact_json_path),
+        compact_markdown_path=str(persister.compact_markdown_path),
         status=state.status,
     )
