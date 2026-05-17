@@ -106,6 +106,21 @@ def _bracket_span_candidates(
             continue
         seen_bodies.add(body)
 
+        # Handle "{prefix: actual_body}" pattern (e.g. "{key: VALUE}").
+        # When the body starts with a known CTF prefix followed by ": " or ":",
+        # split it into the embedded prefix and the real body.
+        embedded_prefix_match = re.match(
+            r"([A-Za-z0-9_]{2,})\s*:\s*(.+)$", body, re.DOTALL
+        )
+        if embedded_prefix_match:
+            emb_prefix = embedded_prefix_match.group(1)
+            emb_body = embedded_prefix_match.group(2).strip()
+            if emb_body and len(emb_body) >= 4:
+                # Emit the cleaned candidate directly: prefix{body}
+                clean_candidate = f"{emb_prefix}{{{emb_body}}}"
+                if clean_candidate not in out and plausible_flag(clean_candidate):
+                    out.append(clean_candidate)
+
         prefixes: list[str] = []
         # 1. Configured flag_format prefix wins.
         if flag_format_prefix:
