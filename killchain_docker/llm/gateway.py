@@ -249,11 +249,12 @@ class GatewayLLMClient:
         }
         if self.base_url:
             kwargs["base_url"] = self.base_url
-        raw = OpenAI(**kwargs)
+        raw = OpenAI(**kwargs, max_retries=0)
         # JSON mode works on every OpenAI-compatible backend (including
         # DeepSeek reasoner models that reject Mode.TOOLS).
-        # max_retries=0: retries are owned by generate_json().
-        return instructor.from_openai(raw, mode=instructor.Mode.JSON, max_retries=0)
+        # max_retries=0 is set on the OpenAI client itself so that
+        # retries are owned by generate_json(), not by instructor/openai.
+        return instructor.from_openai(raw, mode=instructor.Mode.JSON)
 
     def _select_model(self, schema: type[BaseModel]) -> str:
         schema_name = schema.__name__
