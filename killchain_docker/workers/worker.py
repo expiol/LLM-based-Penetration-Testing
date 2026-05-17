@@ -6,6 +6,7 @@ summary, metadata preparation) live in the PersonaSpec or custom hooks.
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse
 
 from killchain_docker.llm import LLMClient
@@ -32,7 +33,7 @@ from killchain_docker.workers.tool_metadata import normalize_tool_metadata
 def _tool_success(capability: ToolCapability, bundle, output_context: dict[str, object]) -> bool:
     if bundle.result.exit_code not in (None, 0):
         return False
-    if capability == ToolCapability.SCRIPT_EXECUTE:
+    if capability == ToolCapability.SCRIPT_EXEC:
         returncode = output_context.get("returncode")
         if returncode not in (None, ""):
             try:
@@ -57,7 +58,7 @@ def _is_flag_recovery_task(todo: TodoItem) -> bool:
 class Worker(WorkerAgent):
     """Unified worker driven by an injected Persona strategy."""
 
-    _MAX_INNER_STEPS = 7
+    _MAX_INNER_STEPS = 15
     _MAX_METADATA_RETRIES = 2
 
     def __init__(
@@ -288,7 +289,7 @@ class Worker(WorkerAgent):
         partial_reason = None
         result_quality = str(output_context.get("result_quality") or "")
         if (
-            capability == ToolCapability.SCRIPT_EXECUTE
+            capability == ToolCapability.SCRIPT_EXEC
             and success and not flag_values
             and _is_flag_recovery_task(todo)
         ):
@@ -378,13 +379,11 @@ class Worker(WorkerAgent):
 
     @staticmethod
     def _unwrap(s: str) -> str:
-        import re
         m = re.match(r"[A-Za-z0-9_]+\{(.+)\}\s*$", s, re.DOTALL)
         return m.group(1) if m else s
 
     @staticmethod
     def _extract_prefix(s: str) -> str | None:
-        import re
         m = re.match(r"([A-Za-z0-9_]+)\{", s)
         return m.group(1) if m else None
 

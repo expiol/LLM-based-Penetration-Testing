@@ -50,12 +50,6 @@ FLAG_PREFIX_SHAPE = re.compile(
     rf"^[A-Za-z0-9_]{{{FLAG_PREFIX_MIN_LEN},}}\{{{_FLAG_BODY_CLASS}{{{FLAG_BODY_MIN_LEN},{FLAG_BODY_MAX_LEN}}}\}}$"
 )
 
-#: Same shape but allows non-printable characters (garbled decrypt) — used
-#: ONLY for near-miss reporting, never for validation.
-NEAR_MISS_FLAG_PATTERN = re.compile(
-    rf"[A-Za-z0-9_]{{{FLAG_PREFIX_MIN_LEN},}}\{{[^{{}}\n]{{{FLAG_BODY_MIN_LEN},{FLAG_BODY_MAX_LEN}}}\}}"
-)
-
 # NYU-style non-bracket flags, e.g. CSAW 2013 stfu's
 # ``STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME``.
 FLAG_BARE_TOKEN_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.]{11,199}$")
@@ -225,27 +219,6 @@ def plausible_flag(candidate: str) -> bool:
     if body.lower().strip() in TEMPLATE_NOISE_BODIES:
         return False
     return True
-
-
-def near_miss_flag(candidate: str) -> bool:
-    """Return True when *candidate* has flag shape but garbled (non-printable) bytes."""
-    prefix, sep, body = candidate.partition("{")
-    if not sep or not body.endswith("}"):
-        return False
-    body = body[:-1]
-    if not prefix or not body or len(prefix) < FLAG_PREFIX_MIN_LEN:
-        return False
-    if "(" in prefix or ")" in prefix:
-        return False
-    if prefix.lower() in PYTHON_DUMP_PREFIX_DENYLIST:
-        return False
-    if FLAG_BODY_FORMAT_SPEC_RE.search(body):
-        return False
-    if STRUCTURED_DIAGNOSTIC_BODY_RE.search(body):
-        return False
-    printable = sum(1 for c in body if 32 <= ord(c) <= 126)
-    ratio = printable / len(body)
-    return 0.70 <= ratio < 1.0
 
 
 def validatable_flag_candidate(candidate: str) -> bool:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from enum import StrEnum
+from killchain_docker._compat import StrEnum
 from typing import Any
 from uuid import uuid4
 

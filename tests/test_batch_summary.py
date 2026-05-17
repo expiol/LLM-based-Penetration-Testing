@@ -172,7 +172,7 @@ class BatchSummaryTests(unittest.TestCase):
                     "open_todo_count": 0,
                     "todo_status_counts": {"completed": 4},
                     "worker_counts": {"artifact-worker": 1},
-                    "evidence_tool_counts": {"script_execution": 1},
+                    "evidence_tool_counts": {"script_exec": 1},
                 },
             }
 
@@ -189,7 +189,7 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(payload["paper_metrics"]["success_rate"], 1.0)
             self.assertEqual(payload["paper_metrics"]["todo_count_total"], 4)
             self.assertEqual(payload["paper_metrics"]["worker_totals"]["artifact-worker"], 1)
-            self.assertEqual(payload["paper_metrics"]["evidence_tool_totals"]["script_execution"], 1)
+            self.assertEqual(payload["paper_metrics"]["evidence_tool_totals"]["script_exec"], 1)
             self.assertEqual(payload["paper_metrics"]["category_counts"]["crypto"], 1)
             self.assertEqual(payload["experiment_config"]["max_cycles_arg"], 20)
             self.assertEqual(payload["experiment_config"]["parallel_workers"], 2)
@@ -301,7 +301,7 @@ class BatchSummaryTests(unittest.TestCase):
                             "evidence": {
                                 "e1": {"tool_name": "pcap_review", "summary": "PCAP review completed for 0 file(s): 0 URL(s)"},
                                 "e2": {"tool_name": "source_review", "summary": "Source review failed: no requested source files could be read."},
-                                "e3": {"tool_name": "script_execution", "summary": "Script execution failed (exit 2): exit code 2, 0 flag candidate(s)."},
+                                "e3": {"tool_name": "script_exec", "summary": "Script execution failed (exit 2): exit code 2, 0 flag candidate(s)."},
                             },
                         },
                     }
@@ -425,7 +425,7 @@ class BatchSummaryTests(unittest.TestCase):
                                 "flag-worker": 5,
                                 "web-worker": 50,
                             },
-                            "evidence_tool_counts": {"script_execution": 18},
+                            "evidence_tool_counts": {"script_exec": 18},
                             "open_todo_count": 4,
                         },
                         "state": {"rounds": []},

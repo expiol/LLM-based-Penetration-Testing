@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Sequence
 
 from killchain_docker.controller import RunConfig, run_assessment
 from killchain_docker.llm import StaticLLMClient
@@ -20,9 +20,9 @@ from killchain_docker.tools import (
     ToolExecutionRequest,
     ToolExecutionResult,
     build_execution_plane,
-    jsonl_signal_parser,
 )
-from killchain_docker.tools.plugins import ALL_COMMAND_TOOLS
+from killchain_docker.tools.plugins.shell import build_output as shell_output_builder
+from killchain_docker.tools.plugins.script import build_output as script_output_builder
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -36,312 +36,74 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _jsonl(records: list[dict[str, Any]]) -> str:
-    return "".join(json.dumps(record, ensure_ascii=True) + "\n" for record in records)
+class SimulatedShellPlugin:
+    """Simulated shell plugin for self-test — returns canned output based on command."""
+
+    name = "shell_exec"
+    mode = ExecutionMode.LOCAL_COMMAND
+
+    def __init__(self, expected_flag: str) -> None:
+        self._expected_flag = expected_flag
+
+    def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
+        command = str(request.metadata.get("command") or "")
+
+        # Simulate different shell commands based on content
+        if "nmap" in command or "scan" in command:
+            stdout = (
+                "Starting Nmap 7.92\n"
+                "PORT     STATE SERVICE\n"
+                "8080/tcp open  http-proxy\n"
+                "Nmap done: 1 IP address (1 host up)\n"
+            )
+        elif "curl" in command:
+            stdout = (
+                "<html><title>Selftest Control Panel</title>\n"
+                "<body><a href='/admin'>Admin</a><a href='/debug'>Debug</a>\n"
+                f"<!-- {self._expected_flag} -->\n"
+                "</body></html>\n"
+            )
+        elif "file " in command or "ls " in command:
+            stdout = "app.py: Python script, ASCII text\n"
+        elif "strings" in command or "grep" in command or "flag" in command:
+            stdout = f"{self._expected_flag}\n"
+        else:
+            stdout = "command completed\n"
+
+        return ToolExecutionResult(
+            tool_name=self.name,
+            mode=self.mode,
+            exit_code=0,
+            stdout=stdout,
+        )
 
 
-class SimulatedJsonlPlugin:
-    """Simple in-process plugin used by the self-test execution plane."""
+class SimulatedScriptPlugin:
+    """Simulated script plugin for self-test — returns canned output."""
 
-    mode = ExecutionMode.SIMULATED
+    name = "script_exec"
+    mode = ExecutionMode.LOCAL_COMMAND
 
-    def __init__(
-        self,
-        *,
-        name: str,
-        emit_records: Callable[[ToolExecutionRequest], list[dict[str, Any]]],
-    ) -> None:
-        self.name = name
-        self._emit_records = emit_records
+    def __init__(self, expected_flag: str) -> None:
+        self._expected_flag = expected_flag
 
     def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
         return ToolExecutionResult(
             tool_name=self.name,
             mode=self.mode,
             exit_code=0,
-            stdout=_jsonl(self._emit_records(request)),
+            stdout=f"Script output: {self._expected_flag}\n",
         )
 
 
 def _required_plugin_names() -> set[str]:
-    return {
-        "artifact_triage",
-        "archive_triage",
-        "binary_triage",
-        "http_path_probe",
-        "http_form_probe",
-        "local_host_inventory",
-        "local_http_content",
-        "local_http_metadata",
-        "pcap_review",
-        "repo_review",
-        "sqlite_review",
-        "source_review",
-        "tcp_banner_probe",
-        "vuln_scan",
-    }
+    return {"shell_exec", "script_exec"}
 
 
 def _build_selftest_plane(expected_flag: str) -> ExecutionPlane:
     plane = ExecutionPlane()
-    plane.register_parser("jsonl_signals", jsonl_signal_parser)
-    output_builders = {
-        module.TOOL_NAME: module.build_tool_output
-        for module in ALL_COMMAND_TOOLS
-    }
-
-    def register_simulated(
-        name: str,
-        emit_records: Callable[[ToolExecutionRequest], list[dict[str, Any]]],
-    ) -> None:
-        plane.register_plugin(SimulatedJsonlPlugin(name=name, emit_records=emit_records))
-        plane.register_tool_output_builder(name, output_builders[name])
-
-    def emit_http_metadata(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        asset_id = str(request.metadata.get("asset_id") or "seed-asset")
-        base_url = str(request.metadata.get("base_url") or "http://127.0.0.1:8080")
-        return [
-            {"type": "summary", "text": f"Collected HTTP metadata for {base_url}."},
-            {
-                "type": "asset",
-                "asset_id": asset_id,
-                "kind": "web_application",
-                "hostname": "127.0.0.1",
-                "ip_address": "127.0.0.1",
-                "base_url": base_url,
-                "tags": ["observed", "selftest"],
-                "services": [
-                    {
-                        "port": 8080,
-                        "protocol": "tcp",
-                        "name": "http",
-                        "product": "selftest-httpd/1.0",
-                        "version": "1.0",
-                    }
-                ],
-                "metadata": {"source": "selftest-http-metadata"},
-            },
-            {
-                "type": "output_context",
-                "http_status": 200,
-                "server": "selftest-httpd/1.0",
-                "powered_by": "selftest-app",
-                "security_issues": ["Missing Content-Security-Policy header"],
-                "base_url": base_url,
-            },
-        ]
-
-    def emit_http_content(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        asset_id = str(request.metadata.get("asset_id") or "seed-asset")
-        base_url = str(request.metadata.get("base_url") or "http://127.0.0.1:8080")
-        return [
-            {"type": "summary", "text": f"Reviewed HTTP content for {base_url}."},
-            {
-                "type": "output_context",
-                "title": "Selftest Control Panel",
-                "interesting_links": ["/admin", "/debug"],
-                "forms": [{"action": "/login", "method": "post"}],
-                "keywords": ["admin", "login", "debug"],
-                "potential_flags": [expected_flag],
-            },
-            {
-                "type": "finding",
-                "finding_id": f"finding-{asset_id}-selftest-content",
-                "title": "Selftest content review evidence",
-                "severity": "medium",
-                "description": "Simulated content review exposed administrative surface.",
-                "asset_refs": [asset_id],
-                "evidence_refs": [base_url, expected_flag],
-                "metadata": {"source": "selftest-http-content"},
-            },
-        ]
-
-    def emit_artifact_triage(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        files_root = str(request.metadata.get("files_root") or "/home/ctfplayer/ctf_files")
-        return [
-            {"type": "summary", "text": "Inventoried challenge files."},
-            {
-                "type": "output_context",
-                "files_root": files_root,
-                "binary_files": [],
-                "source_files": ["app.py"],
-                "flag_candidates": [],
-                "file_count": 1,
-            },
-            {
-                "type": "finding",
-                "finding_id": "finding-selftest-artifacts",
-                "title": "Challenge files inventoried",
-                "severity": "info",
-                "description": "Self-test discovered one source file for follow-up review.",
-                "asset_refs": ["challenge"],
-                "evidence_refs": ["app.py"],
-                "metadata": {"source": "selftest-artifact-triage"},
-            },
-        ]
-
-    def emit_source_review(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        inspected_files = list(request.metadata.get("source_files") or ["app.py"])
-        return [
-            {"type": "summary", "text": "Reviewed source artifacts."},
-            {
-                "type": "output_context",
-                "inspected_sources": inspected_files,
-                "interesting_routes": ["/admin"],
-                "secret_files": ["app.py"],
-                "flag_candidates": [],
-            },
-            {
-                "type": "finding",
-                "finding_id": "finding-selftest-source-review",
-                "title": "Source review found admin route",
-                "severity": "medium",
-                "description": "Simulated source review identified an /admin route and a secret-bearing file.",
-                "asset_refs": ["challenge"],
-                "evidence_refs": inspected_files,
-                "metadata": {"source": "selftest-source-review"},
-            },
-        ]
-
-    def emit_binary_triage(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        inspected_files = list(request.metadata.get("binary_files") or [])
-        return [
-            {"type": "summary", "text": "Binary triage completed with no flag candidates."},
-            {
-                "type": "output_context",
-                "inspected_files": inspected_files,
-                "flag_candidates": [],
-            },
-        ]
-
-    def emit_archive_triage(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        inspected_files = list(request.metadata.get("archive_files") or [])
-        return [
-            {"type": "summary", "text": "Archive triage completed with no flag candidates."},
-            {
-                "type": "output_context",
-                "inspected_archives": inspected_files,
-                "flag_candidates": [],
-            },
-        ]
-
-    def emit_sqlite_review(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        inspected_files = list(request.metadata.get("database_files") or [])
-        return [
-            {"type": "summary", "text": "SQLite review completed with no flag candidates."},
-            {
-                "type": "output_context",
-                "inspected_databases": inspected_files,
-                "tables": {},
-                "flag_candidates": [],
-            },
-        ]
-
-    def emit_pcap_review(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        inspected_files = list(request.metadata.get("pcap_files") or [])
-        return [
-            {"type": "summary", "text": "PCAP review completed with no flag candidates."},
-            {
-                "type": "output_context",
-                "inspected_pcaps": inspected_files,
-                "urls": [],
-                "hosts": [],
-                "flag_candidates": [],
-            },
-        ]
-
-    def emit_repo_review(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        inspected_repos = list(request.metadata.get("repo_paths") or [])
-        return [
-            {"type": "summary", "text": "Repository review completed with no flag candidates."},
-            {
-                "type": "output_context",
-                "inspected_repos": inspected_repos,
-                "commit_summaries": {},
-                "flag_candidates": [],
-            },
-        ]
-
-    def emit_host_inventory(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        asset_id = str(request.metadata.get("asset_id") or "selftest-host")
-        hostname = str(request.metadata.get("hostname") or "127.0.0.1")
-        return [
-            {"type": "summary", "text": f"Host inventory completed for {hostname}."},
-            {
-                "type": "asset",
-                "asset_id": asset_id,
-                "kind": "host",
-                "hostname": hostname,
-                "ip_address": "127.0.0.1",
-                "tags": ["selftest", "host"],
-                "services": [{"port": 8080, "protocol": "tcp", "name": "http"}],
-                "metadata": {"source": "selftest-host-inventory"},
-            },
-            {"type": "output_context", "scan_method": "selftest", "ports": [8080]},
-        ]
-
-    def emit_tcp_banner(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        hostname = str(request.metadata.get("hostname") or "127.0.0.1")
-        return [
-            {"type": "summary", "text": f"TCP banner probe completed for {hostname}."},
-            {
-                "type": "output_context",
-                "hostname": hostname,
-                "responsive_ports": [8080],
-                "banner_hits": {"8080": "selftest banner"},
-                "flag_candidates": [],
-            },
-        ]
-
-    def emit_http_path_probe(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        base_url = str(request.metadata.get("base_url") or "http://127.0.0.1:8080")
-        paths = list(request.metadata.get("paths") or [])
-        interesting_paths = [f"{base_url.rstrip('/')}/{path.lstrip('/')}" for path in paths[:3]]
-        return [
-            {"type": "summary", "text": f"HTTP path probe completed for {base_url}."},
-            {
-                "type": "output_context",
-                "base_url": base_url,
-                "path_results": [{"url": url, "status": 200, "title": "Selftest"} for url in interesting_paths],
-                "interesting_paths": interesting_paths,
-                "flag_candidates": [],
-            },
-        ]
-
-    def emit_http_form_probe(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        page_url = str(request.metadata.get("page_url") or "http://127.0.0.1:8080/login")
-        return [
-            {"type": "summary", "text": f"HTTP form probe completed for {page_url}."},
-            {
-                "type": "output_context",
-                "page_url": page_url,
-                "submission_results": [],
-                "flag_candidates": [],
-                "interesting_paths": [],
-            },
-        ]
-
-    def emit_vuln_scan(request: ToolExecutionRequest) -> list[dict[str, Any]]:
-        target = str(request.metadata.get("target") or request.metadata.get("base_url") or "unknown")
-        return [
-            {"type": "summary", "text": f"Simulated vuln scan completed for {target}."},
-            {"type": "output_context", "scan_method": "selftest", "vuln_count": 0},
-        ]
-
-    register_simulated("local_http_metadata", emit_http_metadata)
-    register_simulated("local_http_content", emit_http_content)
-    register_simulated("artifact_triage", emit_artifact_triage)
-    register_simulated("archive_triage", emit_archive_triage)
-    register_simulated("source_review", emit_source_review)
-    register_simulated("binary_triage", emit_binary_triage)
-    register_simulated("sqlite_review", emit_sqlite_review)
-    register_simulated("pcap_review", emit_pcap_review)
-    register_simulated("repo_review", emit_repo_review)
-    register_simulated("local_host_inventory", emit_host_inventory)
-    register_simulated("tcp_banner_probe", emit_tcp_banner)
-    register_simulated("http_path_probe", emit_http_path_probe)
-    register_simulated("http_form_probe", emit_http_form_probe)
-    register_simulated("vuln_scan", emit_vuln_scan)
+    plane.register(SimulatedShellPlugin(expected_flag), shell_output_builder)
+    plane.register(SimulatedScriptPlugin(expected_flag), script_output_builder)
     return plane
 
 
@@ -357,6 +119,7 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
     expected_flag = "flag{selftest-ok}"
     simulated_plane = _build_selftest_plane(expected_flag)
     runtime_root = root / "runtime"
+
     def selftest_llm_response(system_prompt: str, user_prompt: str) -> dict[str, Any]:
         if "PlannerDecision" in system_prompt or "PlannerAgent" in system_prompt:
             snapshot = json.loads(user_prompt)
@@ -389,13 +152,13 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                     "stop_run": False,
                 }
             assets = snapshot.get("assets") or []
-            if assets and "Review selftest web content." not in completed_goals | pending_goals:
+            if assets and "Fetch selftest web content." not in completed_goals | pending_goals:
                 asset = assets[0]
                 return {
-                    "summary": "Review discovered selftest web content.",
+                    "summary": "Fetch selftest web content via curl.",
                     "todos": [
                         {
-                            "goal": "Review selftest web content.",
+                            "goal": "Fetch selftest web content.",
                             "priority": 90,
                             "context": {
                                 "asset_id": asset["asset_id"],
@@ -415,6 +178,7 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                 "notes": [],
                 "stop_run": False,
             }
+
         if "RouterDecision" in system_prompt:
             snapshot = json.loads(user_prompt)
             ready = snapshot.get("ready_todos") or []
@@ -438,6 +202,7 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                     }
                 )
             return {"assignments": assignments, "rationale": "selftest route"}
+
         if "RouterRoundSummary" in system_prompt:
             return {
                 "summary": "Selftest router summary.",
@@ -446,28 +211,34 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                 "next_focus": "",
                 "used_llm": True,
             }
+
         if "ContinueDecision" in system_prompt:
             return {"continue_loop": False, "reason": "selftest uses one tool call per worker run"}
+
+        # ToolUseDecision — worker selects a capability
         snapshot = json.loads(user_prompt)
         todo = snapshot.get("todo") or {}
         goal = str(todo.get("goal") or "").lower()
         context = todo.get("context") or {}
-        catalog = snapshot.get("tool_catalog") or []
-        capabilities = {str(item.get("capability") or "") for item in catalog}
-        capability = next(iter(capabilities), "")
-        if "http.content" in capabilities and (context.get("base_url") or "web content" in goal):
-            capability = "http.content"
-        elif "http.metadata" in capabilities and (context.get("scope") or "scope" in goal):
-            capability = "http.metadata"
-        elif "artifact.triage" in capabilities:
-            capability = "artifact.triage"
-        elif "flag.harvest" in capabilities:
-            capability = "flag.harvest"
+
+        # Recon uses shell.exec with nmap/curl; web uses shell.exec with curl;
+        # artifact uses shell.exec with file/strings; default to shell.exec
+        if context.get("scope") or "scope" in goal:
+            command = f"nmap -sV -p- {context.get('scope', '127.0.0.1')}"
+        elif context.get("base_url") or "web" in goal or "content" in goal:
+            command = f"curl -s {context.get('base_url', 'http://127.0.0.1:8080')}"
+        elif "flag" in goal or "harvest" in goal:
+            command = "grep -r 'flag{' /home/ctfplayer/ctf_files/ 2>/dev/null || echo 'no flags found'"
+        else:
+            command = "file /home/ctfplayer/ctf_files/* 2>/dev/null"
+
         return {
-            "capability": capability,
-            "metadata": {},
-            "rationale": "selftest selected capability",
+            "capability": "shell.exec",
+            "metadata": {"command": command},
+            "rationale": "selftest selected shell.exec capability",
             "expected_signal": "selftest tool result",
+            "hypothesis": None,
+            "memory_updates": {},
         }
 
     selftest_llm = StaticLLMClient(selftest_llm_response)

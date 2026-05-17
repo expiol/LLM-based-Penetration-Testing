@@ -63,12 +63,6 @@ class RagContext:
     exact_self_hit: bool = False
     hits: list[RetrievalHit] | None = None
 
-    @property
-    def high_confidence(self) -> bool:
-        from killchain_docker.prompts.rag import HIGH_CONFIDENCE_SCORE
-
-        return self.top_score >= HIGH_CONFIDENCE_SCORE
-
     def prompt_hits(
         self,
         *,

@@ -426,7 +426,8 @@ class PlannerInjectionTests(unittest.TestCase):
     def test_user_prompt_includes_related_writeups(self):
         client = StaticLLMClient([{}])
         strategy = PlanStrategy(client, augmenter=self.augmenter)
-        prompt = strategy._user_prompt(self.state)
+        ctx = strategy.context_builder.build(self.state)
+        prompt = strategy._render_prompt(ctx)
         payload = json.loads(prompt)
         self.assertIn("related_writeups", payload)
         self.assertGreaterEqual(len(payload["related_writeups"]), 1)
@@ -437,7 +438,8 @@ class PlannerInjectionTests(unittest.TestCase):
     def test_disabled_augmenter_omits_writeups(self):
         client = StaticLLMClient([{}])
         strategy = PlanStrategy(client, augmenter=KnowledgeAugmenter(retriever=None))
-        payload = json.loads(strategy._user_prompt(self.state))
+        ctx = strategy.context_builder.build(self.state)
+        payload = json.loads(strategy._render_prompt(ctx))
         self.assertNotIn("related_writeups", payload)
 
 

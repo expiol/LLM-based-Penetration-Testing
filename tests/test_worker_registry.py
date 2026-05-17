@@ -10,7 +10,6 @@ from killchain_docker.workers import (
     BUILTIN_WORKER_SPECS,
     WorkerBuildContext,
     build_builtin_workers,
-    worker_catalog,
 )
 
 
@@ -20,7 +19,7 @@ class WorkerRegistryTests(unittest.TestCase):
 
         self.assertEqual(
             keys,
-            ["ReconWorker", "ArtifactWorker", "WebWorker", "ExploitWorker", "FlagWorker"],
+            ["recon-worker", "artifact-worker", "web-worker", "exploit-worker", "flag-worker"],
         )
         self.assertEqual(len(keys), len(set(keys)))
 
@@ -33,17 +32,19 @@ class WorkerRegistryTests(unittest.TestCase):
 
         workers = build_builtin_workers(context)
 
-        self.assertEqual([type(worker).__name__ for worker in workers], [spec.key for spec in BUILTIN_WORKER_SPECS])
+        self.assertEqual(
+            [worker.name for worker in workers],
+            [spec.key for spec in BUILTIN_WORKER_SPECS],
+        )
         self.assertEqual(workers[-1].name, "flag-worker")
         self.assertEqual(getattr(workers[-1], "expected_flag"), "flag{ok}")
 
-    def test_catalog_exposes_persona_group(self) -> None:
-        catalog = worker_catalog()
-
-        self.assertEqual(len(catalog), 5)
-        self.assertEqual({item["group"] for item in catalog}, {"persona"})
+    def test_all_specs_are_persona_group(self) -> None:
+        self.assertEqual(
+            {spec.group for spec in BUILTIN_WORKER_SPECS},
+            {"persona"},
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
-

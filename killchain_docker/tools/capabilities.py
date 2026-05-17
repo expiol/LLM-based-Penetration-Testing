@@ -1,14 +1,12 @@
-"""Capability-level adapter over concrete execution plugins.
+"""Capability enum, tool specs, and gateway.
 
-Workers should ask for a capability such as ``http.probe_paths`` or
-``binary.execute``.  The gateway owns the mapping from that stable capability
-name to the current plugin implementation.
+Each ToolCapability maps 1:1 to a registered plugin.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
+from killchain_docker._compat import StrEnum
 from typing import Any
 
 from killchain_docker.tools.core import (
@@ -19,29 +17,39 @@ from killchain_docker.tools.core import (
 
 
 class ToolCapability(StrEnum):
-    HTTP_METADATA = "http.metadata"
-    HTTP_CONTENT = "http.content"
-    HTTP_FORM_PROBE = "http.form_probe"
-    HTTP_PROBE_PATHS = "http.probe_paths"
-    HOST_INVENTORY = "host.inventory"
-    HOST_BANNER = "host.banner"
-    VULN_SCAN = "vuln.scan"
-    CREDENTIAL_HARVEST = "credential.harvest"
-    CREDENTIAL_LOGIN = "credential.login"
-    EXPLOIT_PROBE = "exploit.probe"
-    FLAG_HARVEST = "flag.harvest"
-    SCRIPT_EXECUTE = "script.execute"
-    ARTIFACT_TRIAGE = "artifact.triage"
-    ARTIFACT_ARCHIVE = "artifact.archive"
-    ARTIFACT_SOURCE = "artifact.read_source"
-    ARTIFACT_RUNTIME = "artifact.runtime"
-    ARTIFACT_COMPUTATION = "artifact.computation"
-    ARTIFACT_BINARY_TRIAGE = "binary.triage"
-    ARTIFACT_BINARY_DISASSEMBLE = "binary.disassemble"
-    ARTIFACT_BINARY_EXECUTE = "binary.execute"
-    ARTIFACT_SQLITE = "artifact.sqlite"
-    ARTIFACT_PCAP = "artifact.pcap"
-    ARTIFACT_REPO = "artifact.repo"
+    # Universal low-level
+    SHELL_EXEC = "shell.exec"
+    SCRIPT_EXEC = "script.exec"
+
+    # Network recon
+    NMAP = "nmap"
+    CURL = "curl"
+    NIKTO = "nikto"
+    SQLMAP = "sqlmap"
+
+    # Binary / file analysis
+    FILE_CMD = "file_cmd"
+    STRINGS_CMD = "strings_cmd"
+    BINWALK = "binwalk"
+    RADARE2 = "radare2"
+    OBJDUMP = "objdump"
+    GDB = "gdb"
+
+    # Forensics / stego
+    TSHARK = "tshark"
+    EXIFTOOL = "exiftool"
+    STEGHIDE = "steghide"
+    FOREMOST = "foremost"
+
+    # Database
+    SQLITE3 = "sqlite3"
+
+    # Crypto / cracking
+    JOHN = "john"
+    FCRACKZIP = "fcrackzip"
+
+    # APK / Java
+    JADX = "jadx"
 
 
 @dataclass(frozen=True)
@@ -50,39 +58,22 @@ class ToolSpec:
 
     capability: ToolCapability
     tool_name: str
-    parser_name: str = "jsonl_signals"
-    default_timeout_s: int = 60
+    default_timeout_s: int = 120
 
 
+# Auto-generate specs: capability value == plugin name for all CLI tools.
+# Shell and script have separate plugin names.
 DEFAULT_TOOL_SPECS: dict[ToolCapability, ToolSpec] = {
-    ToolCapability.HTTP_METADATA: ToolSpec(ToolCapability.HTTP_METADATA, "local_http_metadata", default_timeout_s=20),
-    ToolCapability.HTTP_CONTENT: ToolSpec(ToolCapability.HTTP_CONTENT, "local_http_content", default_timeout_s=30),
-    ToolCapability.HTTP_FORM_PROBE: ToolSpec(ToolCapability.HTTP_FORM_PROBE, "http_form_probe", default_timeout_s=90),
-    ToolCapability.HTTP_PROBE_PATHS: ToolSpec(ToolCapability.HTTP_PROBE_PATHS, "http_path_probe", default_timeout_s=45),
-    ToolCapability.HOST_INVENTORY: ToolSpec(ToolCapability.HOST_INVENTORY, "local_host_inventory", default_timeout_s=45),
-    ToolCapability.HOST_BANNER: ToolSpec(ToolCapability.HOST_BANNER, "tcp_banner_probe", default_timeout_s=30),
-    ToolCapability.VULN_SCAN: ToolSpec(ToolCapability.VULN_SCAN, "vuln_scan", default_timeout_s=90),
-    ToolCapability.CREDENTIAL_HARVEST: ToolSpec(ToolCapability.CREDENTIAL_HARVEST, "credential_harvest", default_timeout_s=60),
-    ToolCapability.CREDENTIAL_LOGIN: ToolSpec(ToolCapability.CREDENTIAL_LOGIN, "credential_login_probe", default_timeout_s=90),
-    ToolCapability.EXPLOIT_PROBE: ToolSpec(ToolCapability.EXPLOIT_PROBE, "ctf_exploit_probe", default_timeout_s=120),
-    ToolCapability.FLAG_HARVEST: ToolSpec(ToolCapability.FLAG_HARVEST, "flag_harvest", default_timeout_s=60),
-    ToolCapability.SCRIPT_EXECUTE: ToolSpec(ToolCapability.SCRIPT_EXECUTE, "script_execution", default_timeout_s=120),
-    ToolCapability.ARTIFACT_TRIAGE: ToolSpec(ToolCapability.ARTIFACT_TRIAGE, "artifact_triage", default_timeout_s=60),
-    ToolCapability.ARTIFACT_ARCHIVE: ToolSpec(ToolCapability.ARTIFACT_ARCHIVE, "archive_triage", default_timeout_s=90),
-    ToolCapability.ARTIFACT_SOURCE: ToolSpec(ToolCapability.ARTIFACT_SOURCE, "source_review", default_timeout_s=120),
-    ToolCapability.ARTIFACT_RUNTIME: ToolSpec(ToolCapability.ARTIFACT_RUNTIME, "runtime_probe", default_timeout_s=60),
-    ToolCapability.ARTIFACT_COMPUTATION: ToolSpec(ToolCapability.ARTIFACT_COMPUTATION, "computation_analysis", default_timeout_s=180),
-    ToolCapability.ARTIFACT_BINARY_TRIAGE: ToolSpec(ToolCapability.ARTIFACT_BINARY_TRIAGE, "binary_triage", default_timeout_s=60),
-    ToolCapability.ARTIFACT_BINARY_DISASSEMBLE: ToolSpec(ToolCapability.ARTIFACT_BINARY_DISASSEMBLE, "binary_disassembly", default_timeout_s=90),
-    ToolCapability.ARTIFACT_BINARY_EXECUTE: ToolSpec(ToolCapability.ARTIFACT_BINARY_EXECUTE, "binary_run", default_timeout_s=120),
-    ToolCapability.ARTIFACT_SQLITE: ToolSpec(ToolCapability.ARTIFACT_SQLITE, "sqlite_review", default_timeout_s=60),
-    ToolCapability.ARTIFACT_PCAP: ToolSpec(ToolCapability.ARTIFACT_PCAP, "pcap_review", default_timeout_s=90),
-    ToolCapability.ARTIFACT_REPO: ToolSpec(ToolCapability.ARTIFACT_REPO, "repo_review", default_timeout_s=90),
+    ToolCapability.SHELL_EXEC: ToolSpec(ToolCapability.SHELL_EXEC, "shell_exec"),
+    ToolCapability.SCRIPT_EXEC: ToolSpec(ToolCapability.SCRIPT_EXEC, "script_exec"),
 }
+for _cap in ToolCapability:
+    if _cap not in DEFAULT_TOOL_SPECS:
+        DEFAULT_TOOL_SPECS[_cap] = ToolSpec(_cap, _cap.value)
 
 
 class ToolGateway:
-    """Run stable capabilities through the current execution plane."""
+    """Route capability requests to the execution plane."""
 
     def __init__(
         self,
@@ -100,17 +91,13 @@ class ToolGateway:
         capability: ToolCapability | str,
         metadata: dict[str, Any],
         timeout_s: int | None = None,
-        parser_name: str | None = None,
-        max_retries: int = 1,
     ) -> ToolExecutionBundle:
         cap = ToolCapability(capability)
         spec = self.specs[cap]
         request = ToolExecutionRequest(
             capability=cap.value,
             tool_name=spec.tool_name,
-            parser_name=parser_name or spec.parser_name,
             timeout_s=timeout_s or spec.default_timeout_s,
-            max_retries=max_retries,
             metadata=metadata,
         )
         return self.execution_plane.execute(task_id, request)

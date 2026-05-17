@@ -11,8 +11,6 @@ from killchain_docker.state.constants import (
     BRACKET_SPAN_PATTERN,
     COMMON_FLAG_PREFIXES,
     FLAG_PATTERN,
-    FLAG_BODY_MAX_LEN,
-    FLAG_BODY_MIN_LEN,
     plausible_flag,
 )
 
@@ -286,6 +284,4 @@ __all__ = [
     "extract_flag_candidates",
     "encoding_cascade",
     "_bracket_span_candidates",
-    "FLAG_BODY_MAX_LEN",
-    "FLAG_BODY_MIN_LEN",
 ]

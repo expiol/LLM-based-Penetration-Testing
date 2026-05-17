@@ -67,12 +67,8 @@ class EvidenceContextBuilder:
             if extracted.get("notes"):
                 item["notes"] = _trim_list(extracted.get("notes"), limit=4, width=240)
 
-            if evidence.tool_name == "script_execution":
+            if evidence.tool_name == "script_exec":
                 item.update(self._script_context(ctx, tier=tier))
-            elif evidence.tool_name == "binary_disassembly":
-                item.update(self._binary_disassembly_context(ctx, tier=tier))
-            elif evidence.tool_name == "binary_run":
-                item.update(self._binary_run_context(ctx, tier=tier))
             else:
                 item.update(self._generic_context(ctx))
 
@@ -106,7 +102,7 @@ class EvidenceContextBuilder:
             scored.append((score + recency_bonus + near_miss_boost, index, evidence))
 
         mandatory_ids: set[str] = set()
-        for tool_name in ("script_execution", "binary_disassembly", "binary_run"):
+        for tool_name in ("script_exec", "shell_exec"):
             for _score, _index, evidence in sorted(scored, key=lambda item: item[1], reverse=True):
                 if evidence.tool_name == tool_name:
                     mandatory_ids.add(evidence.evidence_id)
@@ -124,7 +120,7 @@ class EvidenceContextBuilder:
 
     def _score_record(self, tool_name: str, summary: str, ctx: dict[str, object]) -> float:
         score = 0.0
-        if tool_name == "script_execution":
+        if tool_name == "script_exec":
             score += 2.0
             if ctx.get("stdout"):
                 score += 3.0
@@ -140,17 +136,11 @@ class EvidenceContextBuilder:
             # Structural signals: numeric/algorithmic data present
             if any(token in stdout.lower() for token in ("uint", "int32", "byte", "bit")):
                 score += 5.0
-        elif tool_name == "binary_disassembly":
-            score += 5.0  # reduced from 9 so recency can overcome old disassembly
-            disassembly = ctx.get("disassembly")
-            if isinstance(disassembly, dict) and disassembly:
-                score += 5.0
-        elif tool_name == "binary_run":
+        elif tool_name == "shell_exec":
             score += 4.0
-            runs = ctx.get("binary_runs")
-            if isinstance(runs, dict) and runs:
+            if ctx.get("stdout"):
                 score += 2.0
-        elif ctx.get("flag_candidates"):
+        if ctx.get("flag_candidates"):
             score += 10.0
         return score
 
@@ -178,63 +168,6 @@ class EvidenceContextBuilder:
                 result[key] = values
         return _compact(result)
 
-    def _binary_disassembly_context(self, ctx: dict[str, object], *, tier: str = "full") -> dict[str, object]:
-        disassembly = ctx.get("disassembly")
-        if not isinstance(disassembly, dict):
-            return self._generic_context(ctx)
-
-        preview_width = {"full": 1200, "medium": 900, "compressed": 400}[tier]
-        binaries: dict[str, object] = {}
-        for binary_name, raw_info in list(disassembly.items())[:4]:
-            if not isinstance(raw_info, dict):
-                continue
-            info: dict[str, object] = {
-                "binary_traits": raw_info.get("binary_traits"),
-                "function_count_total": raw_info.get("function_count_total"),
-                "function_count_kept": raw_info.get("function_count_kept"),
-                "disassembly_truncated": raw_info.get("disassembly_truncated"),
-                "rodata": _trim_list(raw_info.get("rodata"), limit=8, width=220),
-                "analysis_window_previews": [
-                    self._trim_text(str(window), width=preview_width)
-                    for window in _as_list(raw_info.get("analysis_windows"))[:3]
-                ],
-                "function_previews": self._function_previews(raw_info.get("functions")),
-            }
-            binaries[str(binary_name)] = _compact(info)
-        return _compact({
-            "inspected_binaries": _trim_list(ctx.get("inspected_binaries"), limit=8, width=200),
-            "binary_traits": ctx.get("binary_traits"),
-            "binaries": binaries,
-            "flag_candidates": _trim_list(ctx.get("flag_candidates"), limit=8, width=240),
-        })
-
-    def _binary_run_context(self, ctx: dict[str, object], *, tier: str = "full") -> dict[str, object]:
-        runs = ctx.get("binary_runs")
-        if not isinstance(runs, dict):
-            return self._generic_context(ctx)
-
-        preview_width = {"full": 900, "medium": 600, "compressed": 300}[tier]
-        compact_runs: dict[str, object] = {}
-        for binary_name, raw_info in list(runs.items())[:4]:
-            if not isinstance(raw_info, dict):
-                continue
-            invocations = []
-            for invocation in _as_list(raw_info.get("invocations"))[:5]:
-                if not isinstance(invocation, dict):
-                    continue
-                invocations.append({
-                    "argv": _trim_list(invocation.get("argv"), limit=8, width=160),
-                    "returncode": invocation.get("returncode"),
-                    "stdout_preview": self._trim_text(_string(invocation.get("stdout")), width=preview_width),
-                    "stderr_preview": self._trim_text(_string(invocation.get("stderr")), width=preview_width),
-                })
-            compact_runs[str(binary_name)] = {"invocations": invocations}
-        return _compact({
-            "inspected_binaries": _trim_list(ctx.get("inspected_binaries"), limit=8, width=200),
-            "binary_runs": compact_runs,
-            "flag_candidates": _trim_list(ctx.get("flag_candidates"), limit=8, width=240),
-        })
-
     def _generic_context(self, ctx: dict[str, object]) -> dict[str, object]:
         keep_keys = (
             "files_root",
@@ -260,20 +193,6 @@ class EvidenceContextBuilder:
             elif value not in (None, "", [], {}):
                 out[key] = value
         return out
-
-    def _function_previews(self, functions: object) -> list[dict[str, object]]:
-        previews: list[dict[str, object]] = []
-        for function in _as_list(functions)[:3]:
-            if not isinstance(function, dict):
-                continue
-            previews.append(_compact({
-                "name": function.get("name"),
-                "size_lines": function.get("size_lines"),
-                "truncated": function.get("truncated"),
-                "xref_strings": _trim_list(function.get("xref_strings"), limit=8, width=180),
-                "disassembly_preview": self._trim_text(_string(function.get("disassembly")), width=1200),
-            }))
-        return previews
 
     def _key_lines(self, text: str) -> list[str]:
         if not text:

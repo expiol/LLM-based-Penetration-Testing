@@ -109,11 +109,11 @@ class WorkerAgent(ABC):
 
         last_step = prior_steps[-1] if prior_steps else {}
         last_failed_script = (
-            last_step.get("capability") == "script.execute"
+            last_step.get("capability") == "script.exec"
             and last_step.get("returncode") not in (None, 0)
         )
         last_partial_script = (
-            last_step.get("capability") == "script.execute"
+            last_step.get("capability") == "script.exec"
             and last_step.get("returncode") == 0
             and not last_step.get("flag_candidates")
         )
@@ -206,7 +206,7 @@ class WorkerAgent(ABC):
         if prior_steps:
             last = prior_steps[-1]
             if (
-                last.get("capability") == "script.execute"
+                last.get("capability") == "script.exec"
                 and (last.get("returncode") not in (None, 0) or not last.get("flag_candidates"))
             ):
                 reflexion_context = {
@@ -246,10 +246,15 @@ class WorkerAgent(ABC):
 
         allowed_str = ", ".join(f"'{v}'" for v in allowed_values)
         script_reminder = (
-            "CRITICAL: For script.execute, 'script_code' is MANDATORY and must contain "
+            "CRITICAL: For script.exec, 'script_code' is MANDATORY and must contain "
             "the COMPLETE executable source code as a string — not a description of what "
             "to write, but the actual runnable Python/bash code. "
-        ) if ToolCapability.SCRIPT_EXECUTE in allowed else ""
+        ) if ToolCapability.SCRIPT_EXEC in allowed else ""
+        shell_reminder = (
+            "For shell.exec, 'command' is MANDATORY and must contain the full shell "
+            "command to execute via bash -c. You can use any tool installed in the "
+            "container: curl, nmap, sqlmap, strings, file, binwalk, r2, tshark, etc. "
+        ) if ToolCapability.SHELL_EXEC in allowed else ""
         decision = self.llm_client.generate_json(
             system_prompt=(
                 f"You are {self.name}. Your ONLY available capabilities are: [{allowed_str}]. "
@@ -257,6 +262,7 @@ class WorkerAgent(ABC):
                 "will be REJECTED — do not select capabilities you saw in evidence from other workers. "
                 "Provide the metadata arguments needed by that capability using only the "
                 "field names listed in its metadata_contract. "
+                f"{shell_reminder}"
                 f"{script_reminder}"
                 "Use recent_evidence_context as grounded facts from previous tools. "
                 "If prior_steps is non-empty, use those results to inform your choice — "
@@ -298,15 +304,25 @@ class WorkerAgent(ABC):
         rules = [
             "Choose exactly one capability from tool_catalog.",
             "Use recent_evidence_context before repeating diagnostics already present there.",
-            "Do not read /tmp paths created by previous todos.",
         ]
-        if ToolCapability.SCRIPT_EXECUTE in allowed:
+        if ToolCapability.SHELL_EXEC in allowed:
             rules.extend(
                 [
-                    "For script.execute, make script_code self-contained and print the important stdout.",
-                    "For script.execute, prefer os.environ['CTF_WRITABLE_FILES_ROOT'] for any file you intend "
-                    "to mutate in place; CTF_FILES_ROOT holds the read-only originals. "
-                    "Do not use shutil.copy2 on the originals (it preserves the read-only mode).",
+                    "For shell.exec, put the full command string in 'command'. "
+                    "You can use pipes, redirects, compound commands, and any tool "
+                    "installed in the container (curl, nmap, sqlmap, strings, file, "
+                    "binwalk, r2, objdump, tshark, sqlite3, python3, etc.).",
+                    "Prefer shell.exec for quick one-liners: file inspection, HTTP requests, "
+                    "port scanning, grepping for flags, running installed tools.",
+                ]
+            )
+        if ToolCapability.SCRIPT_EXEC in allowed:
+            rules.extend(
+                [
+                    "For script.exec, make script_code self-contained and print results to stdout.",
+                    "Prefer script.exec for multi-step logic: crypto solvers, binary exploits, "
+                    "brute-force loops, complex data transformations.",
+                    "Challenge files are at /home/ctfplayer/ctf_files by default.",
                 ]
             )
         return rules

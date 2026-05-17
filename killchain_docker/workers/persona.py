@@ -1,12 +1,11 @@
-"""High-level persona workers for the planner-router runtime.
+"""Worker specs for the planner-router runtime.
 
-This module now delegates to the unified Worker class with PersonaSpec injection.
-The legacy class names are preserved as thin aliases for backward compatibility.
+Each persona is a frozen PersonaSpec data object. The WORKER_SPECS tuple
+drives build_builtin_workers() — no intermediate subclasses needed.
 """
 
 from __future__ import annotations
 
-from killchain_docker.llm import LLMClient
 from killchain_docker.workers.protocols import (
     ARTIFACT_PERSONA,
     EXPLOIT_PERSONA,
@@ -18,64 +17,30 @@ from killchain_docker.workers.specs import WorkerBuildContext, WorkerSpec
 from killchain_docker.workers.worker import Worker
 
 
-# Backward-compatible class aliases
-class ReconWorker(Worker):
-    name = RECON_PERSONA.name
-    routing_summary = RECON_PERSONA.routing_summary
-    allowed_capabilities = RECON_PERSONA.allowed_capabilities
-
-    def __init__(self, *, llm_client=None, execution_plane=None, tool_gateway=None):
-        super().__init__(persona=RECON_PERSONA, llm_client=llm_client, execution_plane=execution_plane, tool_gateway=tool_gateway)
-
-
-class ArtifactWorker(Worker):
-    name = ARTIFACT_PERSONA.name
-    routing_summary = ARTIFACT_PERSONA.routing_summary
-    allowed_capabilities = ARTIFACT_PERSONA.allowed_capabilities
-
-    def __init__(self, *, llm_client=None, execution_plane=None, tool_gateway=None):
-        super().__init__(persona=ARTIFACT_PERSONA, llm_client=llm_client, execution_plane=execution_plane, tool_gateway=tool_gateway)
+def _worker_factory(persona):
+    """Return a factory closure that builds a Worker with the given persona."""
+    def factory(ctx: WorkerBuildContext) -> Worker:
+        return Worker(
+            persona=persona,
+            llm_client=ctx.llm_client,
+            execution_plane=ctx.execution_plane,
+        )
+    return factory
 
 
-class WebWorker(Worker):
-    name = WEB_PERSONA.name
-    routing_summary = WEB_PERSONA.routing_summary
-    allowed_capabilities = WEB_PERSONA.allowed_capabilities
-
-    def __init__(self, *, llm_client=None, execution_plane=None, tool_gateway=None):
-        super().__init__(persona=WEB_PERSONA, llm_client=llm_client, execution_plane=execution_plane, tool_gateway=tool_gateway)
-
-
-class ExploitWorker(Worker):
-    name = EXPLOIT_PERSONA.name
-    routing_summary = EXPLOIT_PERSONA.routing_summary
-    allowed_capabilities = EXPLOIT_PERSONA.allowed_capabilities
-
-    def __init__(self, *, llm_client=None, execution_plane=None, tool_gateway=None):
-        super().__init__(persona=EXPLOIT_PERSONA, llm_client=llm_client, execution_plane=execution_plane, tool_gateway=tool_gateway)
-
-
-class FlagWorker(Worker):
-    name = FLAG_PERSONA.name
-    routing_summary = FLAG_PERSONA.routing_summary
-    allowed_capabilities = FLAG_PERSONA.allowed_capabilities
-
-    def __init__(self, *, llm_client=None, execution_plane=None, tool_gateway=None, expected_flag=None):
-        super().__init__(persona=FLAG_PERSONA, llm_client=llm_client, execution_plane=execution_plane, tool_gateway=tool_gateway, expected_flag=expected_flag)
-
-
-def _flag_factory(context: WorkerBuildContext) -> FlagWorker:
-    return FlagWorker(
-        llm_client=context.llm_client,
-        execution_plane=context.execution_plane,
-        expected_flag=context.expected_flag,
+def _flag_worker_factory(ctx: WorkerBuildContext) -> Worker:
+    return Worker(
+        persona=FLAG_PERSONA,
+        llm_client=ctx.llm_client,
+        execution_plane=ctx.execution_plane,
+        expected_flag=ctx.expected_flag,
     )
 
 
 WORKER_SPECS: tuple[WorkerSpec, ...] = (
-    WorkerSpec("ReconWorker", "persona", lambda ctx: ReconWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), ReconWorker.routing_summary.fget(None) if False else RECON_PERSONA.routing_summary),
-    WorkerSpec("ArtifactWorker", "persona", lambda ctx: ArtifactWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), ARTIFACT_PERSONA.routing_summary),
-    WorkerSpec("WebWorker", "persona", lambda ctx: WebWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), WEB_PERSONA.routing_summary),
-    WorkerSpec("ExploitWorker", "persona", lambda ctx: ExploitWorker(llm_client=ctx.llm_client, execution_plane=ctx.execution_plane), EXPLOIT_PERSONA.routing_summary),
-    WorkerSpec("FlagWorker", "persona", _flag_factory, FLAG_PERSONA.routing_summary),
+    WorkerSpec("recon-worker", "persona", _worker_factory(RECON_PERSONA), RECON_PERSONA.routing_summary),
+    WorkerSpec("artifact-worker", "persona", _worker_factory(ARTIFACT_PERSONA), ARTIFACT_PERSONA.routing_summary),
+    WorkerSpec("web-worker", "persona", _worker_factory(WEB_PERSONA), WEB_PERSONA.routing_summary),
+    WorkerSpec("exploit-worker", "persona", _worker_factory(EXPLOIT_PERSONA), EXPLOIT_PERSONA.routing_summary),
+    WorkerSpec("flag-worker", "persona", _flag_worker_factory, FLAG_PERSONA.routing_summary),
 )

@@ -96,7 +96,7 @@ def diagnose_logdir(logdir: Path) -> dict[str, Any]:
         else:
             web_work = int(worker_counts.get("web-worker", 0)) + int(worker_counts.get("exploit-worker", 0))
             script_tool_runs = int(
-                (metrics.get("evidence_tool_counts") or {}).get("script_execution", 0)
+                (metrics.get("evidence_tool_counts") or {}).get("script_exec", 0)
             )
             validations = int(worker_counts.get("flag-worker", 0))
             if payload.get("error"):

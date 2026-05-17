@@ -100,7 +100,3 @@ class PlanStrategy:
         }
         return json.dumps(snapshot, ensure_ascii=True, indent=2)
 
-    # Backward compat: tests may call _user_prompt directly
-    def _user_prompt(self, state: RunState) -> str:
-        ctx = self.context_builder.build(state)
-        return self._render_prompt(ctx)

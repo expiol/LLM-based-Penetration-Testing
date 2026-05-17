@@ -469,8 +469,8 @@ class LLMPlannerTests(unittest.TestCase):
         state.upsert_evidence(
             EvidenceRecord(
                 task_id="todo-script",
-                capability="script.execute",
-                tool_name="script_execution",
+                capability="script.exec",
+                tool_name="script_exec",
                 mode="local_command",
                 summary="Script execution ran without recovering a flag: exit code 0, 0 flag candidate(s).",
                 extracted={
@@ -494,8 +494,8 @@ class LLMPlannerTests(unittest.TestCase):
         state.upsert_evidence(
             EvidenceRecord(
                 task_id="todo-disasm",
-                capability="binary.disassemble",
-                tool_name="binary_disassembly",
+                capability="shell.exec",
+                tool_name="shell_exec",
                 mode="local_command",
                 summary="Binary disassembly completed for 1 file(s): 1 function(s) kept, 0 flag candidate(s).",
                 extracted={
@@ -538,8 +538,9 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIn("535446556aab0223201f1e0a00008540", rendered)
         self.assertIn("partial_no_candidate", rendered)
         self.assertIn("no_candidate", rendered)
-        self.assertIn('"go_like": false', rendered)
-        self.assertIn("804884d: xor ebx,eax", rendered)
+        # Shell evidence goes through generic context; verify top-level keys kept
+        self.assertIn("inspected_binaries", rendered)
+        self.assertIn("stfu", rendered)
         contract = captured["snapshot"]["planning_contract"]  # type: ignore[index]
         self.assertIn("/tmp files", contract["evidence_context_rule"])  # type: ignore[index]
 

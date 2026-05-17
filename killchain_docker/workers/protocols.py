@@ -4,6 +4,9 @@ A Persona defines the strategy for a worker: which capabilities it can use,
 how it prepares metadata, and any custom post-processing. The Worker class
 provides the shared execution loop; persona differences are data + strategy,
 not separate class hierarchies.
+
+Each persona gets shell.exec + script.exec as universal fallbacks, plus
+domain-specific high-level tools.
 """
 
 from __future__ import annotations
@@ -36,12 +39,19 @@ class Persona(Protocol):
     def required_context_keys(self) -> tuple[str, ...]: ...
 
 
+# Universal capabilities available to every persona
+_UNIVERSAL: tuple[ToolCapability, ...] = (
+    ToolCapability.SHELL_EXEC,
+    ToolCapability.SCRIPT_EXEC,
+)
+
+
 @dataclass(frozen=True)
 class PersonaSpec:
     """Concrete persona specification — data, not code."""
 
     name: str
-    allowed_capabilities: tuple[ToolCapability, ...]
+    allowed_capabilities: tuple[ToolCapability, ...] = _UNIVERSAL
     routing_summary: str = ""
     supported_todo_kinds: tuple[str, ...] = ("todo",)
     preferred_challenge_categories: tuple[str, ...] = ()
@@ -49,71 +59,94 @@ class PersonaSpec:
 
 
 # ---------------------------------------------------------------------------
-# Predefined persona specs matching the original 5 worker classes
+# Predefined persona specs
 # ---------------------------------------------------------------------------
 
 RECON_PERSONA = PersonaSpec(
     name="recon-worker",
-    routing_summary="Maps authorized scope into assets and collects first-pass host or HTTP metadata.",
-    allowed_capabilities=(
-        ToolCapability.HTTP_METADATA,
-        ToolCapability.HOST_INVENTORY,
-        ToolCapability.HOST_BANNER,
+    allowed_capabilities=_UNIVERSAL + (
+        ToolCapability.NMAP,
+        ToolCapability.CURL,
+        ToolCapability.NIKTO,
+        ToolCapability.FILE_CMD,
+        ToolCapability.EXIFTOOL,
+    ),
+    routing_summary=(
+        "Maps authorized scope: port scans (nmap), HTTP recon (curl, nikto), "
+        "file identification (file, exiftool). First-pass discovery only."
     ),
 )
 
 ARTIFACT_PERSONA = PersonaSpec(
     name="artifact-worker",
-    routing_summary="Inspects bundled files, source, binaries, archives, repositories, databases, and packet captures.",
-    preferred_challenge_categories=("crypto", "rev", "forensics", "misc", "pwn", "web"),
-    allowed_capabilities=(
-        ToolCapability.ARTIFACT_TRIAGE,
-        ToolCapability.ARTIFACT_SOURCE,
-        ToolCapability.ARTIFACT_BINARY_TRIAGE,
-        ToolCapability.ARTIFACT_BINARY_DISASSEMBLE,
-        ToolCapability.ARTIFACT_BINARY_EXECUTE,
-        ToolCapability.ARTIFACT_ARCHIVE,
-        ToolCapability.ARTIFACT_SQLITE,
-        ToolCapability.ARTIFACT_PCAP,
-        ToolCapability.ARTIFACT_REPO,
-        ToolCapability.ARTIFACT_RUNTIME,
-        ToolCapability.ARTIFACT_COMPUTATION,
-        ToolCapability.SCRIPT_EXECUTE,
-        ToolCapability.FLAG_HARVEST,
+    allowed_capabilities=_UNIVERSAL + (
+        ToolCapability.FILE_CMD,
+        ToolCapability.STRINGS_CMD,
+        ToolCapability.BINWALK,
+        ToolCapability.RADARE2,
+        ToolCapability.OBJDUMP,
+        ToolCapability.GDB,
+        ToolCapability.TSHARK,
+        ToolCapability.EXIFTOOL,
+        ToolCapability.STEGHIDE,
+        ToolCapability.FOREMOST,
+        ToolCapability.SQLITE3,
+        ToolCapability.JADX,
     ),
+    routing_summary=(
+        "Static file analysis: binaries (r2, objdump, gdb, strings), firmware (binwalk), "
+        "pcaps (tshark), databases (sqlite3), stego (steghide, foremost, exiftool), "
+        "APKs (jadx). Offline analysis, no network interaction."
+    ),
+    preferred_challenge_categories=("crypto", "rev", "forensics", "misc", "pwn", "web"),
 )
 
 WEB_PERSONA = PersonaSpec(
     name="web-worker",
-    routing_summary="Reviews HTTP content, probes routes, and interacts with discovered forms inside authorized scope.",
-    preferred_challenge_categories=("web",),
-    allowed_capabilities=(
-        ToolCapability.HTTP_METADATA,
-        ToolCapability.HTTP_CONTENT,
-        ToolCapability.HTTP_PROBE_PATHS,
-        ToolCapability.HTTP_FORM_PROBE,
-        ToolCapability.CREDENTIAL_LOGIN,
-        ToolCapability.SCRIPT_EXECUTE,
+    allowed_capabilities=_UNIVERSAL + (
+        ToolCapability.CURL,
+        ToolCapability.NIKTO,
+        ToolCapability.SQLMAP,
+        ToolCapability.SQLITE3,
     ),
+    routing_summary=(
+        "Web exploitation: HTTP requests (curl), vulnerability scanning (nikto), "
+        "SQL injection (sqlmap), database extraction (sqlite3). "
+        "Operates within authorized scope."
+    ),
+    preferred_challenge_categories=("web",),
 )
 
 EXPLOIT_PERSONA = PersonaSpec(
     name="exploit-worker",
-    routing_summary="Runs bounded exploit, credential, vulnerability, and script experiments from accumulated evidence.",
-    allowed_capabilities=(
-        ToolCapability.VULN_SCAN,
-        ToolCapability.EXPLOIT_PROBE,
-        ToolCapability.CREDENTIAL_LOGIN,
-        ToolCapability.SCRIPT_EXECUTE,
+    allowed_capabilities=_UNIVERSAL + (
+        ToolCapability.NMAP,
+        ToolCapability.CURL,
+        ToolCapability.SQLMAP,
+        ToolCapability.GDB,
+        ToolCapability.JOHN,
+        ToolCapability.FCRACKZIP,
+        ToolCapability.STRINGS_CMD,
+        ToolCapability.RADARE2,
+    ),
+    routing_summary=(
+        "Active exploitation: credential attacks (john, fcrackzip), SQL injection (sqlmap), "
+        "binary exploitation (gdb, r2), network probing (nmap, curl). "
+        "Runs bounded experiments from accumulated evidence."
     ),
 )
 
 FLAG_PERSONA = PersonaSpec(
     name="flag-worker",
-    routing_summary="Harvests and validates concrete flag candidates.",
-    allowed_capabilities=(
-        ToolCapability.FLAG_HARVEST,
-        ToolCapability.SCRIPT_EXECUTE,
+    allowed_capabilities=_UNIVERSAL + (
+        ToolCapability.STRINGS_CMD,
+        ToolCapability.FILE_CMD,
+        ToolCapability.CURL,
+        ToolCapability.SQLITE3,
+    ),
+    routing_summary=(
+        "Flag harvesting: search files (strings, file), query databases (sqlite3), "
+        "submit flags via HTTP (curl). Validates concrete flag candidates."
     ),
 )
 

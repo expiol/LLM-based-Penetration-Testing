@@ -163,7 +163,7 @@ class TodoPolicy:
         if cls._is_compound_disassembly_and_exploit(todo.goal):
             todo.phase = TodoPhase.ANALYSIS
             context["family"] = "binary-analysis"
-            context.setdefault("capability_hint", "binary.disassemble")
+            context.setdefault("capability_hint", "shell.exec")
             todo.goal = (
                 "Extract precise binary algorithm evidence needed for the next "
                 "decryption attempt."

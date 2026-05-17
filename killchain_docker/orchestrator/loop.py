@@ -138,7 +138,7 @@ class Orchestrator:
         Instead of hard-stopping, this bans stalled families and forces the
         planner to try a fundamentally different attack vector.
         """
-        from killchain_docker.orchestrator.policy import ProgressPolicy, TodoPolicy
+        from killchain_docker.orchestrator.policy import ProgressPolicy
 
         self._pivot_count += 1
         self._rounds_without_progress = 0  # Reset counter after pivot

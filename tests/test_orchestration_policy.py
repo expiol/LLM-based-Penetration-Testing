@@ -23,7 +23,7 @@ class CandidatePolicyTests(unittest.TestCase):
         state.apply_state_delta(
             StateDelta(
                 flag_candidates=[
-                    FlagCandidate(value=r"flag{\x96\xff\xa0\rabcd}", source="script.execute")
+                    FlagCandidate(value=r"flag{\x96\xff\xa0\rabcd}", source="script.exec")
                 ]
             )
         )
@@ -36,8 +36,8 @@ class CandidatePolicyTests(unittest.TestCase):
         state.apply_state_delta(
             StateDelta(
                 flag_candidates=[
-                    FlagCandidate(value="flag{wrong_for_this_challenge}", source="script.execute"),
-                    FlagCandidate(value="STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME", source="script.execute"),
+                    FlagCandidate(value="flag{wrong_for_this_challenge}", source="script.exec"),
+                    FlagCandidate(value="STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME", source="script.exec"),
                 ]
             )
         )
@@ -76,7 +76,7 @@ class TodoProgressPolicyTests(unittest.TestCase):
 
         self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
         self.assertEqual(todo.context["family"], "binary-analysis")
-        self.assertEqual(todo.context["capability_hint"], "binary.disassemble")
+        self.assertEqual(todo.context["capability_hint"], "shell.exec")
 
     def test_failed_family_enters_cooldown_without_novelty(self) -> None:
         state = _state()
