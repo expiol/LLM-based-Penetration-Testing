@@ -250,13 +250,9 @@ class GatewayLLMClient:
         if self.base_url:
             kwargs["base_url"] = self.base_url
         raw = OpenAI(**kwargs)
-        # DeepSeek's reasoner-class models (which back v4-flash / v4-pro on
-        # api.deepseek.com) reject the function-calling ``tool_choice`` that
-        # instructor sends in its default Mode.TOOLS path. JSON mode enforces
-        # the schema via response_format + prompt injection and works on
-        # every OpenAI-compatible backend we use.
-        # Disable instructor's own retry loop; retries are managed by
-        # generate_json() so the two layers don't multiply.
+        # JSON mode works on every OpenAI-compatible backend (including
+        # DeepSeek reasoner models that reject Mode.TOOLS).
+        # max_retries=0: retries are owned by generate_json().
         return instructor.from_openai(raw, mode=instructor.Mode.JSON, max_retries=0)
 
     def _select_model(self, schema: type[BaseModel]) -> str:
