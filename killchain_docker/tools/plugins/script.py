@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+import subprocess
+
 from killchain_docker.state import ExploitAttempt
 from killchain_docker.tools.core import (
     ExecutionMode,
@@ -52,6 +55,17 @@ class ScriptPlugin:
         if language == "python":
             interpreter = [self.python_executable]
 
+        # Syntax check before execution — fail fast without wasting container time
+        syntax_error = self._check_syntax(script_code, language)
+        if syntax_error:
+            return ToolExecutionResult(
+                tool_name=self.name,
+                mode=self.mode,
+                exit_code=1,
+                stdout="",
+                stderr=syntax_error,
+            )
+
         escaped_code = script_code.replace("'", "'\\''")
         files_root = request.metadata.get("files_root") or "/home/ctfplayer/ctf_files"
         shell_cmd = (
@@ -62,6 +76,27 @@ class ScriptPlugin:
         )
         argv = [*self.argv_prefix, "bash", "-c", shell_cmd]
         return _run(self.name, argv, request.timeout_s)
+
+    @staticmethod
+    def _check_syntax(code: str, language: str) -> str | None:
+        """Return an error message if the script has syntax errors, else None."""
+        if language == "python":
+            try:
+                ast.parse(code)
+            except SyntaxError as exc:
+                lineno = f" (line {exc.lineno})" if exc.lineno else ""
+                return f"SyntaxError{lineno}: {exc.msg}"
+        elif language in ("bash", "sh"):
+            try:
+                result = subprocess.run(
+                    [language, "-n", "-c", code],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode != 0:
+                    return result.stderr.strip() or f"bash -n failed (exit {result.returncode})"
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                pass  # Cannot check locally — let it run in container
+        return None
 
 
 def build_output(
