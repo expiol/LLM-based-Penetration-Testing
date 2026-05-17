@@ -6,8 +6,11 @@ summary, metadata preparation) live in the PersonaSpec or custom hooks.
 
 from __future__ import annotations
 
+import logging
 import re
 from urllib.parse import urlparse
+
+from pydantic import BaseModel
 
 from killchain_docker.llm import LLMClient
 from killchain_docker.orchestrator.policy import CandidatePolicy
@@ -28,6 +31,29 @@ from killchain_docker.tools.core import _strings
 from killchain_docker.workers.base import WorkerAgent
 from killchain_docker.workers.protocols import Persona, PersonaSpec
 from killchain_docker.workers.tool_metadata import normalize_tool_metadata
+
+log = logging.getLogger(__name__)
+
+
+class _FlagMatchVerdict(BaseModel):
+    """LLM verdict on whether two flag strings are semantically equivalent."""
+    equivalent: bool
+    reason: str = ""
+
+
+_FLAG_MATCH_SYSTEM_PROMPT = """\
+You are a CTF flag validator. Given a candidate string and the expected flag, \
+determine if they represent the same flag value despite possible formatting differences.
+
+Common format variations:
+- Different bracket/prefix styles: `{key: VALUE}` vs `key{VALUE}`
+- Whitespace/punctuation around delimiters: `{key: X}` vs `key{X}`
+- Wrapping differences: bare body vs prefix{body}
+- Case-insensitive prefix: `KEY{x}` vs `key{x}`
+- Extra surrounding context stripped away
+
+Return equivalent=true ONLY if the core flag content is identical (the meaningful \
+secret value is the same). Do NOT return true for completely different values."""
 
 
 def _tool_success(capability: ToolCapability, bundle, output_context: dict[str, object]) -> bool:
@@ -399,7 +425,29 @@ class Worker(WorkerAgent):
                 return True
         if c_inner.lower() == e_inner.lower():
             return True
-        return False
+        # LLM fallback for format variants (e.g. "{key: VALUE}" vs "key{VALUE}")
+        return self._llm_flag_matches(c, e)
+
+    def _llm_flag_matches(self, candidate: str, expected: str) -> bool:
+        """Use LLM to judge whether candidate and expected are the same flag."""
+        if self.llm_client is None:
+            return False
+        try:
+            verdict = self.llm_client.generate_json(
+                system_prompt=_FLAG_MATCH_SYSTEM_PROMPT,
+                user_prompt=f"Candidate: {candidate}\nExpected:  {expected}",
+                schema=_FlagMatchVerdict,
+                temperature=0.0,
+            )
+            if verdict.equivalent:
+                log.info(
+                    "LLM flag match accepted: candidate=%r expected=%r reason=%s",
+                    candidate, expected, verdict.reason,
+                )
+            return verdict.equivalent
+        except Exception as exc:
+            log.debug("LLM flag match fallback failed: %s", exc)
+            return False
 
 
 __all__ = ["Worker"]
