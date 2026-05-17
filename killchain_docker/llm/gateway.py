@@ -255,7 +255,9 @@ class GatewayLLMClient:
         # instructor sends in its default Mode.TOOLS path. JSON mode enforces
         # the schema via response_format + prompt injection and works on
         # every OpenAI-compatible backend we use.
-        return instructor.from_openai(raw, mode=instructor.Mode.JSON)
+        # Disable instructor's own retry loop; retries are managed by
+        # generate_json() so the two layers don't multiply.
+        return instructor.from_openai(raw, mode=instructor.Mode.JSON, max_retries=0)
 
     def _select_model(self, schema: type[BaseModel]) -> str:
         schema_name = schema.__name__
@@ -355,8 +357,13 @@ class GatewayLLMClient:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
+        # Total deadline across all retry attempts so a single generate_json
+        # call never blocks a worker indefinitely.
+        deadline = time.monotonic() + self.timeout_s * (1 + self.max_retries)
         last_exc: Exception | None = None
         for attempt in range(1 + self.max_retries):
+            if time.monotonic() >= deadline:
+                break
             try:
                 parsed, completion = self._create_structured(
                     messages=messages, schema=schema, model=selected_model, temperature=temperature
@@ -371,6 +378,8 @@ class GatewayLLMClient:
                 base_delay = min(self._RETRY_BASE_DELAY * (2 ** attempt), self._RETRY_MAX_DELAY)
                 jitter = base_delay * self._RETRY_JITTER_FRAC
                 delay = max(0.1, base_delay + random.uniform(-jitter, jitter))
+                if delay >= deadline - time.monotonic():
+                    break
                 log.warning(
                     "Gateway transient error (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1,
@@ -380,7 +389,8 @@ class GatewayLLMClient:
                 )
                 time.sleep(delay)
 
-        assert last_exc is not None
+        if last_exc is None:
+            last_exc = TimeoutError("generate_json exceeded deadline")
         raise LLMClientError(
             f"Gateway structured output failed for {schema.__name__} (model={selected_model}): {last_exc}",
             transient=self._is_transient(last_exc),
