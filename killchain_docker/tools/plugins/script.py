@@ -81,7 +81,12 @@ def build_output(
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
 
-    output_context: dict = {}
+    output_context: dict = {
+        "stdout": _truncate(stdout, 4000),
+        "stderr": _truncate(stderr, 1500),
+        "returncode": result.exit_code,
+        "flag_candidates": [fc.value for fc in flags],
+    }
     if status.value == "success" and not flags:
         output_context["result_quality"] = "partial_no_candidate"
 

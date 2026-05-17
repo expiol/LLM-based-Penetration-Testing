@@ -52,9 +52,17 @@ def build_output(
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
 
+    output_context: dict = {
+        "stdout": _truncate(stdout, 4000),
+        "stderr": _truncate(stderr, 1500),
+        "returncode": result.exit_code,
+        "flag_candidates": [fc.value for fc in flags],
+    }
+
     return ToolOutput(
         status=status, summary=summary,
         output_text=_truncate(stdout, 4000),
         raw_log=_truncate(stdout + stderr, 6000),
+        output_context=output_context,
         flag_candidates=flags,
     )
