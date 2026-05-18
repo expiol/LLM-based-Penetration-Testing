@@ -514,9 +514,14 @@ def run_assessment(
     orchestrator.checkpoint_callback = persister.write_state
 
     token_ledger = getattr(active_llm_client, "token_ledger", None)
+    run_error: BaseException | None = None
+    run_traceback = None
 
     try:
         orchestrator.run(max_cycles=config.max_cycles)
+    except BaseException as exc:
+        run_error = exc
+        run_traceback = exc.__traceback__
     finally:
         if token_ledger is not None:
             recorder.emit(
@@ -527,7 +532,7 @@ def run_assessment(
             )
         persister.write_all(state, token_ledger)
 
-    return RunArtifacts(
+    artifacts = RunArtifacts(
         run_id=state.run_id,
         run_dir=str(run_dir),
         state_path=str(persister.state_path),
@@ -540,3 +545,7 @@ def run_assessment(
         compact_markdown_path=str(persister.compact_markdown_path),
         status=state.status,
     )
+    if run_error is not None:
+        setattr(run_error, "run_artifacts", artifacts)
+        raise run_error.with_traceback(run_traceback)
+    return artifacts

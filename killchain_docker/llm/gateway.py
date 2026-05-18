@@ -1,5 +1,6 @@
 """Unified LLM gateway with instructor-based structured output."""
 
+import ast
 import json
 import logging
 import random
@@ -60,6 +61,197 @@ class TokenLedger:
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
         }
+
+
+def _extract_json_object_text(text: str) -> str:
+    """Return the first balanced JSON object from model output text."""
+
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+
+    start = stripped.find("{")
+    if start < 0:
+        return stripped
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(stripped)):
+        char = stripped[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return stripped[start : index + 1]
+    return stripped[start:]
+
+
+def _escape_control_chars_in_json_strings(text: str) -> str:
+    """Escape bare control characters only while inside JSON strings."""
+
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                out.append(char)
+                escaped = False
+            elif char == "\\":
+                out.append(char)
+                escaped = True
+            elif char == '"':
+                out.append(char)
+                in_string = False
+            elif ord(char) < 0x20:
+                if char == "\n":
+                    out.append("\\n")
+                elif char == "\r":
+                    out.append("\\r")
+                elif char == "\t":
+                    out.append("\\t")
+                else:
+                    out.append(f"\\u{ord(char):04x}")
+            else:
+                out.append(char)
+            continue
+
+        out.append(char)
+        if char == '"':
+            in_string = True
+            escaped = False
+    return "".join(out)
+
+
+def _inside_json_string_at(text: str, position: int) -> bool:
+    in_string = False
+    escaped = False
+    for char in text[:position]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+    return in_string
+
+
+def _close_unclosed_string_before_object_boundary(text: str) -> str:
+    """Close a generated string value before the next object field boundary."""
+
+    repaired = text
+    boundaries = (
+        '\n  },\n  "rationale"',
+        '\n  },\n  "expected_signal"',
+        '\n  },\n  "hypothesis"',
+        '\n  },\n  "memory_updates"',
+        "\n  }\n}",
+    )
+    for boundary in boundaries:
+        search_from = 0
+        while True:
+            index = repaired.find(boundary, search_from)
+            if index < 0:
+                break
+            if _inside_json_string_at(repaired, index):
+                repaired = f'{repaired[:index]}"{repaired[index:]}'
+                search_from = index + len(boundary) + 1
+            else:
+                search_from = index + len(boundary)
+    return repaired
+
+
+def _loads_lenient_json_object(text: str) -> Any:
+    """Load model JSON, repairing the common bare-newline-in-string failure."""
+
+    candidate = _extract_json_object_text(text)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        repaired = _close_unclosed_string_before_object_boundary(candidate)
+        repaired = _escape_control_chars_in_json_strings(repaired)
+        return json.loads(repaired)
+
+
+def _completion_content(completion: Any) -> str | None:
+    if completion is None:
+        return None
+    if isinstance(completion, str):
+        return completion
+    if isinstance(completion, dict):
+        choices = completion.get("choices")
+        if isinstance(choices, list) and choices:
+            message = (
+                (choices[0] or {}).get("message")
+                if isinstance(choices[0], dict)
+                else None
+            )
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                return message["content"]
+        content = completion.get("content")
+        return content if isinstance(content, str) else None
+
+    choices = getattr(completion, "choices", None)
+    if choices:
+        first = choices[0]
+        message = getattr(first, "message", None)
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content
+    content = getattr(completion, "content", None)
+    return content if isinstance(content, str) else None
+
+
+def _python_string_literal_after(text: str, marker: str) -> str | None:
+    search_from = 0
+    while True:
+        marker_index = text.find(marker, search_from)
+        if marker_index < 0:
+            return None
+        start = marker_index + len(marker)
+        while start < len(text) and text[start].isspace():
+            start += 1
+        if start >= len(text) or text[start] not in {"'", '"'}:
+            search_from = start
+            continue
+
+        quote = text[start]
+        escaped = False
+        for end in range(start + 1, len(text)):
+            char = text[end]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                try:
+                    value = ast.literal_eval(text[start : end + 1])
+                except (SyntaxError, ValueError):
+                    break
+                return value if isinstance(value, str) else None
+        search_from = start + 1
 
 
 def _normalize_schema_model_map(payload: Any) -> dict[str, str]:
@@ -189,7 +381,7 @@ class StaticLLMClient:
         payload = self._next_payload(system_prompt, user_prompt)
         if isinstance(payload, str):
             try:
-                payload = json.loads(payload)
+                payload = _loads_lenient_json_object(payload)
             except json.JSONDecodeError as exc:
                 raise LLMClientError(f"StaticLLMClient returned invalid JSON: {exc}") from exc
         try:
@@ -255,6 +447,47 @@ class GatewayLLMClient:
         # max_retries=0 is set on the OpenAI client itself so that
         # retries are owned by generate_json(), not by instructor/openai.
         return instructor.from_openai(raw, mode=instructor.Mode.JSON)
+
+    def _completion_from_exception(self, exc: BaseException) -> tuple[str | None, Any | None]:
+        seen: set[int] = set()
+        stack: list[BaseException] = [exc]
+        while stack:
+            current = stack.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            for attr in (
+                "last_completion",
+                "completion",
+                "response",
+                "last_response",
+                "raw_response",
+            ):
+                completion = getattr(current, attr, None)
+                content = _completion_content(completion)
+                if content:
+                    return content, completion
+            if current.__cause__ is not None:
+                stack.append(current.__cause__)
+            if current.__context__ is not None:
+                stack.append(current.__context__)
+
+        content = _python_string_literal_after(str(exc), "content=")
+        return content, None
+
+    def _recover_structured_from_exception(
+        self,
+        exc: BaseException,
+        schema: type[ModelT],
+    ) -> tuple[ModelT, Any | None] | None:
+        content, completion = self._completion_from_exception(exc)
+        if not content:
+            return None
+        try:
+            payload = _loads_lenient_json_object(content)
+            return schema.model_validate(payload), completion
+        except Exception:
+            return None
 
     def _select_model(self, schema: type[BaseModel]) -> str:
         schema_name = schema.__name__
@@ -336,9 +569,21 @@ class GatewayLLMClient:
             "max_tokens": self.max_completion_tokens,
         }
         if hasattr(endpoint, "create_with_completion"):
-            parsed, completion = endpoint.create_with_completion(**kwargs)
+            try:
+                parsed, completion = endpoint.create_with_completion(**kwargs)
+            except Exception as exc:
+                recovered = self._recover_structured_from_exception(exc, schema)
+                if recovered is not None:
+                    return recovered
+                raise
             return parsed, completion
-        parsed = endpoint.create(**kwargs)
+        try:
+            parsed = endpoint.create(**kwargs)
+        except Exception as exc:
+            recovered = self._recover_structured_from_exception(exc, schema)
+            if recovered is not None:
+                return recovered
+            raise
         return parsed, None
 
     def generate_json(

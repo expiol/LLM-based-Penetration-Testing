@@ -444,6 +444,9 @@ def _run_single_challenge_inner(
             expected_flag=challenge.flag, llm_client=llm_client,
         )
     except (KeyboardInterrupt, SystemExit) as exc:
+        recovered_artifacts = getattr(exc, "run_artifacts", None)
+        if recovered_artifacts is not None:
+            artifacts = recovered_artifacts
         interrupted = True
         error_payload = {"type": type(exc).__name__, "message": f"Run interrupted by {type(exc).__name__}"}
         try:
@@ -451,6 +454,9 @@ def _run_single_challenge_inner(
         except Exception:
             traceback_text = error_payload["message"]
     except Exception as exc:
+        recovered_artifacts = getattr(exc, "run_artifacts", None)
+        if recovered_artifacts is not None:
+            artifacts = recovered_artifacts
         message = _called_process_message(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         error_payload = {"type": type(exc).__name__, "message": message}
         try:

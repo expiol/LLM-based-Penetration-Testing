@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from killchain_docker.llm import LLMClientError
@@ -16,7 +17,10 @@ from killchain_docker.batch.runner import (
     _save_batch_progress,
     run_single_challenge_replicas,
 )
+from killchain_docker.controller import RunArtifacts, RunConfig, run_assessment
+from killchain_docker.llm.gateway import TokenLedger
 from killchain_docker.score import diagnose_logdir
+from killchain_docker.state import RunState, RunStatus
 
 
 def _args(logdir: Path) -> argparse.Namespace:
@@ -76,6 +80,81 @@ class _FakeEnvironment:
         return None
 
 
+class _StartedFakeEnvironment(_FakeEnvironment):
+    container = "fake-container"
+
+
+class _RaisingOrchestrator:
+    def __init__(self, state: RunState) -> None:
+        self.state = state
+        self.checkpoint_callback = None
+
+    def run(self, max_cycles: int) -> None:
+        del max_cycles
+        self.state.status = RunStatus.FAILED
+        raise LLMClientError("worker LLM failure")
+
+
+def _write_artifacts(root: Path, status: str = "failed") -> RunArtifacts:
+    run_dir = root / "artifacts" / _FakeChallenge.canonical_name / "run-attached"
+    run_dir.mkdir(parents=True)
+    state_path = run_dir / "state.json"
+    summary_path = run_dir / "summary.json"
+    report_path = run_dir / "report.md"
+    events_path = run_dir / "events.log"
+    config_path = run_dir / "config.json"
+    evidence_path = run_dir / "evidence.json"
+    compact_json_path = run_dir / "compact_log.json"
+    compact_markdown_path = run_dir / "compact_log.md"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run-attached",
+                "status": status,
+                "solved": False,
+                "token_usage": {
+                    "llm_calls": 1,
+                    "prompt_tokens": 7,
+                    "completion_tokens": 2,
+                    "total_tokens": 9,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run-attached",
+                "status": status,
+                "todos": [{"status": "failed", "assigned_worker": "artifact-worker"}],
+                "rounds": [{"cycle": 1}],
+                "evidence": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    report_path.write_text("# report\n", encoding="utf-8")
+    events_path.write_text("[token usage] calls=1 prompt=7 completion=2 total=9\n", encoding="utf-8")
+    config_path.write_text("{}", encoding="utf-8")
+    evidence_path.write_text("{}", encoding="utf-8")
+    compact_json_path.write_text("{}", encoding="utf-8")
+    compact_markdown_path.write_text("# compact\n", encoding="utf-8")
+    return RunArtifacts(
+        run_id="run-attached",
+        run_dir=str(run_dir),
+        state_path=str(state_path),
+        summary_path=str(summary_path),
+        report_path=str(report_path),
+        events_path=str(events_path),
+        config_path=str(config_path),
+        evidence_path=str(evidence_path),
+        compact_json_path=str(compact_json_path),
+        compact_markdown_path=str(compact_markdown_path),
+        status=status,
+    )
+
+
 class BatchSummaryTests(unittest.TestCase):
     def test_single_challenge_interrupt_writes_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,6 +195,59 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertTrue(result["llm_error"])
             self.assertEqual(payload["error"]["type"], "LLMClientError")
             self.assertTrue(payload["llm_error"])
+
+    def test_run_assessment_attaches_artifacts_to_runtime_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = RunState(objective="fake objective", authorized_scope=[])
+            orchestrator = _RaisingOrchestrator(state)
+            ledger = TokenLedger()
+            ledger.record(11, 4)
+            client = SimpleNamespace(token_ledger=ledger)
+            config = RunConfig(
+                objective="fake objective",
+                authorized_scope=[],
+                output_root=tmp,
+                quiet=True,
+            )
+
+            with patch(
+                "killchain_docker.controller.build_runtime",
+                return_value=(state, orchestrator, client),
+            ):
+                with self.assertRaises(LLMClientError) as ctx:
+                    run_assessment(config)
+
+            artifacts = getattr(ctx.exception, "run_artifacts", None)
+            self.assertIsInstance(artifacts, RunArtifacts)
+            assert isinstance(artifacts, RunArtifacts)
+            self.assertEqual(artifacts.status, "failed")
+            summary = json.loads(Path(artifacts.summary_path).read_text(encoding="utf-8"))
+            self.assertEqual(summary["token_usage"]["total_tokens"], 15)
+
+    def test_single_challenge_recovers_attached_artifacts_after_llm_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = _args(root)
+            args.name = None
+            logfile = root / "fake-attached-artifacts.json"
+            artifacts = _write_artifacts(root)
+            exc = LLMClientError("worker LLM failure")
+            setattr(exc, "run_artifacts", artifacts)
+
+            with (
+                patch("killchain_docker.batch.runner.CTFEnvironment", _StartedFakeEnvironment),
+                patch("killchain_docker.batch.runner.build_llm_client_from_env", return_value=object()),
+                patch("killchain_docker.batch.runner.start_challenge_with_retry"),
+                patch("killchain_docker.batch.runner.build_execution_plane", return_value=object()),
+                patch("killchain_docker.batch.runner.run_assessment", side_effect=exc),
+            ):
+                result = _run_single_challenge_inner(args, _FakeChallenge(), logfile)  # type: ignore[arg-type]
+
+            payload = json.loads(logfile.read_text(encoding="utf-8"))
+            self.assertEqual(result["run_id"], "run-attached")
+            self.assertEqual(result["token_usage"]["total_tokens"], 9)
+            self.assertEqual(payload["artifacts"]["run_id"], "run-attached")
+            self.assertEqual(payload["state_metrics"]["todo_count"], 1)
 
     def test_single_replica_interrupted_result_returns_130(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
