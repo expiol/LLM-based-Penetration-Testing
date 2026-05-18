@@ -26,6 +26,7 @@ class Orchestrator:
 
     MAX_CONSECUTIVE_EMPTY_ROUNDS = 4
     FORCED_PIVOT_THRESHOLD = 5  # Rounds without flag progress triggers pivot
+    MAX_TRANSIENT_SKIPS = 3  # Transient LLM errors to tolerate before aborting
 
     def __init__(
         self,
@@ -50,6 +51,7 @@ class Orchestrator:
         self._consecutive_empty_rounds = 0
         self._rounds_without_progress = 0
         self._pivot_count = 0
+        self._transient_skip_count = 0
 
     def _checkpoint(self) -> None:
         if self.checkpoint_callback is None:
@@ -112,7 +114,20 @@ class Orchestrator:
         self.emit(f"[cycle {cycle}] dispatch {todo.todo_id} -> {worker.name}")
         try:
             return worker.run(todo, self.state)
-        except LLMClientError:
+        except LLMClientError as exc:
+            if exc.transient:
+                self.emit(
+                    f"[cycle {cycle}] transient LLM error in {worker.name} "
+                    f"for {todo.todo_id}, returning retryable failure"
+                )
+                return WorkerResult(
+                    todo_id=todo.todo_id,
+                    worker_name=worker.name,
+                    success=False,
+                    summary=f"transient LLM error: {exc}",
+                    error=str(exc),
+                    retryable=True,
+                )
             raise
         except Exception as exc:
             tb_text = traceback.format_exc(limit=20)
@@ -128,6 +143,63 @@ class Orchestrator:
                 error=tb_text,
                 retryable=False,
             )
+
+    @staticmethod
+    def _is_hollow_result(result: WorkerResult) -> bool:
+        """Detect results that report success but produce no meaningful output.
+
+        A hollow result typically means the worker ran a trivial command
+        (e.g. a bare ``curl GET``) instead of executing the planned task.
+        Downgrading these to partial prevents them from masking stagnation.
+        """
+        if not result.success or result.partial or result.solved:
+            return False
+        delta = result.state_delta
+        if delta and (
+            delta.flag_candidates
+            or delta.artifacts
+            or delta.endpoints
+            or delta.routes
+            or delta.hypotheses
+            or delta.vulnerabilities
+            or delta.exploit_attempts
+            or delta.sessions
+        ):
+            return False
+        ctx = result.output_context or {}
+        if ctx.get("flag_candidates") or ctx.get("near_miss_candidates"):
+            return False
+        if result.result_quality:
+            return False
+        if result.finding_updates or result.credential_updates:
+            return False
+        return True
+
+    @staticmethod
+    def _round_had_meaningful_progress(results: list[WorkerResult]) -> bool:
+        """Check whether any result in the round produced new state signals.
+
+        Broadens the original flag-only check to include findings,
+        credentials, vulnerabilities, sessions, and near-miss candidates
+        so that productive non-flag work does not trigger a premature pivot.
+        """
+        for r in results:
+            if not r.success:
+                continue
+            delta = r.state_delta
+            if delta and (
+                delta.flag_candidates
+                or delta.vulnerabilities
+                or delta.sessions
+                or delta.exploit_attempts
+            ):
+                return True
+            if r.finding_updates or r.credential_updates:
+                return True
+            ctx = r.output_context or {}
+            if ctx.get("near_miss_candidates"):
+                return True
+        return False
 
     def _summarize_round(self, results: list[WorkerResult]):
         return self.router.summarize_round(self.state, results=results)
@@ -221,6 +293,19 @@ class Orchestrator:
                         max_cycles_exhausted = False
                         break
                 except LLMClientError as exc:
+                    if exc.transient and self._transient_skip_count < self.MAX_TRANSIENT_SKIPS:
+                        self._transient_skip_count += 1
+                        self.emit(
+                            f"[cycle {cycle}] transient LLM error in planner "
+                            f"(skip {self._transient_skip_count}/{self.MAX_TRANSIENT_SKIPS}), "
+                            f"continuing: {exc}"
+                        )
+                        self.state.orchestration_notes.append(
+                            f"cycle {cycle}: transient LLM error skipped "
+                            f"({self._transient_skip_count}/{self.MAX_TRANSIENT_SKIPS})"
+                        )
+                        self._checkpoint()
+                        continue
                     self.emit(f"[cycle {cycle}] planner LLM error - aborting run")
                     self._mark_llm_error(cycle, "planner", exc)
                     self._checkpoint()
@@ -268,6 +353,13 @@ class Orchestrator:
                         continue
                     executed_assignments.append(assignment)
                     result = self._run_assignment(cycle, todo, worker)
+                    if self._is_hollow_result(result):
+                        result.partial = True
+                        result.partial_reason = (
+                            result.partial_reason
+                            or "worker reported success but produced no meaningful output"
+                        )
+                        self.emit(f"[cycle {cycle}] hollow result downgraded to PARTIAL: {todo.todo_id}")
                     self.state.apply_worker_result(result)
                     results.append(result)
                     status_tag = "PARTIAL" if result.partial else ("ok" if result.success else "FAILED")
@@ -288,12 +380,8 @@ class Orchestrator:
                 )
                 self.emit(f"[cycle {cycle}] router summary: {round_summary.summary[:240]}")
 
-                # Forced Pivot: track rounds without flag progress
-                round_had_flag_progress = any(
-                    r.success and r.state_delta and r.state_delta.flag_candidates
-                    for r in results
-                )
-                if round_had_flag_progress:
+                # Forced Pivot: track rounds without meaningful progress
+                if self._round_had_meaningful_progress(results):
                     self._rounds_without_progress = 0
                     self.state.metadata.pop("forced_pivot", None)
                 else:
@@ -307,12 +395,26 @@ class Orchestrator:
                     max_cycles_exhausted = False
                     break
         except LLMClientError as exc:
-            if self.state.stop_reason != "llm_error":
-                self.emit(f"[cycle {current_cycle}] LLM error - aborting run")
-                self._mark_llm_error(current_cycle, "runtime", exc)
+            if exc.transient and self._transient_skip_count < self.MAX_TRANSIENT_SKIPS:
+                # Transient error escaped from router/summarizer — absorb it.
+                self._transient_skip_count += 1
+                self.emit(
+                    f"[cycle {current_cycle}] transient LLM error escaped "
+                    f"(skip {self._transient_skip_count}/{self.MAX_TRANSIENT_SKIPS}): {exc}"
+                )
+                self.state.orchestration_notes.append(
+                    f"cycle {current_cycle}: transient LLM error absorbed "
+                    f"({self._transient_skip_count}/{self.MAX_TRANSIENT_SKIPS})"
+                )
                 self._checkpoint()
-            max_cycles_exhausted = False
-            raise
+                max_cycles_exhausted = True  # Allow normal termination logic
+            else:
+                if self.state.stop_reason != "llm_error":
+                    self.emit(f"[cycle {current_cycle}] LLM error - aborting run")
+                    self._mark_llm_error(current_cycle, "runtime", exc)
+                    self._checkpoint()
+                max_cycles_exhausted = False
+                raise
         except (KeyboardInterrupt, SystemExit) as exc:
             reason = f"run interrupted by {type(exc).__name__}"
             self.state.interrupt_running_todos(reason)

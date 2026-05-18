@@ -34,6 +34,9 @@ class ToolCapability(StrEnum):
     RADARE2 = "radare2"
     OBJDUMP = "objdump"
     GDB = "gdb"
+    CHECKSEC = "checksec"
+    LTRACE = "ltrace"
+    STRACE = "strace"
 
     # Forensics / stego
     TSHARK = "tshark"

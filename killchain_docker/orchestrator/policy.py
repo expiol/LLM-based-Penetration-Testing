@@ -275,6 +275,7 @@ class ProgressPolicy:
 
     FAILURE_COOLDOWN_THRESHOLD = 3
     MAX_FAMILY_ATTEMPTS = 10  # raised from 6; iterative families are exempt below
+    MAX_FLAG_VALIDATION_ATTEMPTS = 3  # flag-validation is cheap; cap early to avoid loops
     CONSECUTIVE_FAILURE_CAP = 5  # Hard pivot after 5 consecutive failures without new evidence
 
     # Families that are inherently iterative — apply cooldown but no hard cap.
@@ -292,6 +293,31 @@ class ProgressPolicy:
                 return False, f"family {family!r} is BANNED by forced pivot #{forced_pivot.get('pivot_number', '?')}"
 
         total, failed = cls._family_counts(state, family)
+
+        # Flag-validation: cap per-candidate, not per-family.
+        # Different candidates must always get a chance; only block repeated
+        # validation of the *same* candidate value.
+        if family == "flag-validation":
+            candidate_val = str(todo.context.get("candidate_flag") or "").strip()
+            if candidate_val:
+                same_candidate_count = sum(
+                    1 for t in state.todos
+                    if str(t.context.get("family") or TodoPolicy.family_for(t.goal, t.context)) == family
+                    and str(t.context.get("candidate_flag") or "").strip() == candidate_val
+                )
+                if same_candidate_count >= cls.MAX_FLAG_VALIDATION_ATTEMPTS:
+                    return False, (
+                        f"candidate {candidate_val!r} already validated "
+                        f"{same_candidate_count} time(s); "
+                        "propose a different candidate or set stop_run=true"
+                    )
+            elif total >= cls.MAX_FLAG_VALIDATION_ATTEMPTS:
+                # No concrete candidate in context — fall back to family-level cap
+                return False, (
+                    f"family {family!r} hit validation cap ({total} attempts) "
+                    "without a concrete candidate"
+                )
+
         if family in cls._UNCAPPED_FAMILIES:
             # Check consecutive failures without progress
             consecutive = cls._consecutive_failures_without_evidence(state, family)

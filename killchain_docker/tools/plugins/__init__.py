@@ -20,11 +20,15 @@ from killchain_docker.tools.plugins.sqlite3_cmd import Sqlite3Plugin
 from killchain_docker.tools.plugins.john import JohnPlugin
 from killchain_docker.tools.plugins.fcrackzip import FcrackzipPlugin
 from killchain_docker.tools.plugins.jadx import JadxPlugin
+from killchain_docker.tools.plugins.checksec import ChecksecPlugin
+from killchain_docker.tools.plugins.ltrace import LtracePlugin
+from killchain_docker.tools.plugins.strace import StracePlugin
 
 from killchain_docker.tools.plugins import (
     shell, script, nmap, curl, sqlmap, nikto, file_cmd, strings_cmd,
     binwalk, radare2, objdump, gdb, tshark, exiftool, steghide,
     foremost, sqlite3_cmd, john, fcrackzip, jadx,
+    checksec, ltrace, strace,
 )
 
 # Ordered list of (PluginClass, build_output_function) for registry
@@ -49,13 +53,17 @@ ALL_PLUGINS = [
     (JohnPlugin, john.build_output),
     (FcrackzipPlugin, fcrackzip.build_output),
     (JadxPlugin, jadx.build_output),
+    (ChecksecPlugin, checksec.build_output),
+    (LtracePlugin, ltrace.build_output),
+    (StracePlugin, strace.build_output),
 ]
 
 __all__ = [
     "ALL_PLUGINS",
-    "BinwalkPlugin", "CurlPlugin", "ExiftoolPlugin", "FcrackzipPlugin",
-    "FilePlugin", "ForemostPlugin", "GdbPlugin", "JadxPlugin", "JohnPlugin",
+    "BinwalkPlugin", "ChecksecPlugin", "CurlPlugin", "ExiftoolPlugin",
+    "FcrackzipPlugin", "FilePlugin", "ForemostPlugin", "GdbPlugin",
+    "JadxPlugin", "JohnPlugin", "LtracePlugin",
     "NiktoPlugin", "NmapPlugin", "ObjdumpPlugin", "RadarePlugin",
     "ScriptPlugin", "ShellPlugin", "SqlmapPlugin", "Sqlite3Plugin",
-    "SteghidePlugin", "StringsPlugin", "TsharkPlugin",
+    "SteghidePlugin", "StracePlugin", "StringsPlugin", "TsharkPlugin",
 ]

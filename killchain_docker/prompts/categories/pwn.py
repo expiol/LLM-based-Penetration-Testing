@@ -23,21 +23,30 @@ register(CategoryPrompts(
         "2) Vulnerability identification via source review or disassembly, "
         "3) Service interaction to understand the protocol and trigger conditions, "
         "4) Exploit development with pwntools, "
-        "5) Flag capture from shell or direct memory read."
+        "5) Flag capture from shell or direct memory read. "
+        "6) Dynamic analysis with ltrace/strace to understand runtime behavior."
     ),
     analysis_strategy=(
+        "Available tools: pwntools (python3), gdb, gcc/g++ (build-essential with "
+        "i386 multilib), ROPgadget, angr, radare2 (with r2ghidra decompiler), "
+        "objdump, ltrace, strace. Container has libc6-i386 and gcc-multilib. "
         "For pwn challenges: check binary protections with checksec (NX, PIE, canary, "
         "RELRO). Identify vulnerable functions: gets(), scanf(), sprintf(), strcpy(). "
         "Determine buffer sizes and offsets to return address. Check for format string "
         "vulnerabilities. Identify useful gadgets for ROP chains. Look for win functions "
-        "or system() calls already in the binary."
+        "or system() calls already in the binary. "
+        "Use ltrace to trace library calls at runtime (reveals buffer sizes, strcmp args). "
+        "Use strace to trace syscalls (reveals file reads, socket operations). "
+        "If source code is available, compile a custom exploit with gcc."
     ),
     exploit_strategy=(
         "Develop a targeted exploit: calculate overflow offset to RIP/EIP, "
         "construct ROP chain or ret2libc payload if NX is enabled, "
         "use format string to leak addresses if PIE/ASLR, "
         "write pwntools script for reliable exploitation, "
-        "test against the remote service and capture the flag."
+        "test against the remote service and capture the flag. "
+        "For kernel/module challenges: compile C exploits with gcc, "
+        "use sudo if available (container often grants NOPASSWD sudo)."
     ),
     flag_recovery_hints=[
         "Use checksec to identify binary protections",
@@ -47,5 +56,8 @@ register(CategoryPrompts(
         "Use one_gadget to find one-shot shell gadgets in libc",
         "Leak libc addresses via format string or GOT",
         "Use pwntools for scripted exploitation",
+        "Use ltrace to capture strcmp/memcmp arguments (may reveal flag directly)",
+        "Use strace to find file paths the binary reads/writes",
+        "Compile C exploits with gcc when pwntools is insufficient",
     ],
 ))

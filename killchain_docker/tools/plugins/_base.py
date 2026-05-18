@@ -5,7 +5,7 @@ Provides:
   - _require(): metadata field validation
   - _status(): exit code → ToolOutputStatus
   - _flag_candidates_from(): stdout flag extraction
-  - _truncate, extract_flags_from_text: re-exports from core
+  - _truncate: re-export from core
 """
 
 from __future__ import annotations
@@ -13,8 +13,9 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
+from killchain_docker.reasoning.flag import extract_flag_candidates
 from killchain_docker.state import FlagCandidate
-from killchain_docker.state.constants import validatable_flag_candidate
+from killchain_docker.state.constants import FLAG_PATTERN, validatable_flag_candidate
 from killchain_docker.tools.core import (
     ExecutionMode,
     ToolExecutionError,
@@ -23,7 +24,6 @@ from killchain_docker.tools.core import (
     ToolOutput,
     ToolOutputStatus,
     ParsedToolOutput,
-    extract_flags_from_text,
     _truncate,
 )
 
@@ -72,10 +72,31 @@ def _status(result: ToolExecutionResult) -> ToolOutputStatus:
 
 
 def _flag_candidates_from(text: str, *, source: str = "") -> list[FlagCandidate]:
-    raw = extract_flags_from_text(text)
+    """Extract flag candidates from tool output text.
+
+    Uses a two-tier confidence model:
+      - 0.6: direct regex match (canonical ``prefix{body}`` in raw text)
+      - 0.4: derived via encoding decode or bracket-span heuristic
+    """
+    if not text:
+        return []
+
+    # extract_flag_candidates handles the full pipeline: regex, base64/hex/rot13
+    # decode, and bracket-span fallback — no need to call extract_flags_from_text
+    # separately.
+    all_values = extract_flag_candidates(text)
+
+    # Direct regex hits get higher confidence than derived candidates.
+    direct_hits = set(FLAG_PATTERN.findall(text))
+
     return [
-        FlagCandidate(value=v, source=source, confidence=0.6)
-        for v in raw if validatable_flag_candidate(v)
+        FlagCandidate(
+            value=v,
+            source=source,
+            confidence=0.6 if v in direct_hits else 0.4,
+        )
+        for v in all_values
+        if validatable_flag_candidate(v)
     ]
 
 

@@ -137,6 +137,29 @@ _CONTRACTS: dict[ToolCapability, dict[str, object]] = {
         "optional": ["output_dir"],
         "notes": "APK/DEX decompilation. Outputs Java source files.",
     },
+    ToolCapability.CHECKSEC: {
+        "required": ["path"],
+        "optional": [],
+        "notes": "Binary security properties (NX, PIE, canary, RELRO). Returns protection status and attack surface hints.",
+    },
+    ToolCapability.LTRACE: {
+        "required": ["path"],
+        "optional": ["args", "filter", "input_data"],
+        "notes": (
+            "Trace library calls. Reveals strcmp/memcmp args (potential flags/passwords), "
+            "crypto function parameters, buffer sizes. "
+            "filter e.g. 'strcmp+memcmp+strncmp'. input_data sent via stdin."
+        ),
+    },
+    ToolCapability.STRACE: {
+        "required": ["path"],
+        "optional": ["args", "filter", "input_data"],
+        "notes": (
+            "Trace system calls. Reveals file paths accessed (open/openat), "
+            "network connections, and runtime behavior. "
+            "filter e.g. 'trace=open,read,write' or 'trace=network'. input_data sent via stdin."
+        ),
+    },
 }
 
 
@@ -195,6 +218,9 @@ def _normalize_script(raw: dict[str, object], state: RunState) -> dict[str, obje
     }
     if "timeout_s" in raw:
         clean["timeout_s"] = raw["timeout_s"]
+    elif state.authorized_scope:
+        # Network-facing challenges (PoW, protocol interaction) need longer timeouts
+        clean["timeout_s"] = 300
     challenge = state.metadata.get("challenge", {}) or {}
     if "flag_format" in challenge:
         clean["flag_format"] = challenge.get("flag_format") or ""

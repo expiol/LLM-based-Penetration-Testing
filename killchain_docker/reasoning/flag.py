@@ -120,6 +120,11 @@ def _bracket_span_candidates(
                 clean_candidate = f"{emb_prefix}{{{emb_body}}}"
                 if clean_candidate not in out and plausible_flag(clean_candidate):
                     out.append(clean_candidate)
+                    # The embedded prefix already gave us a high-quality
+                    # candidate; skip the generic prefix-combination loop
+                    # for this span to avoid emitting noisy variants like
+                    # flag{key: VALUE}, CTF{key: VALUE}, etc.
+                    continue
 
         prefixes: list[str] = []
         # 1. Configured flag_format prefix wins.

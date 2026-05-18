@@ -152,5 +152,84 @@ class TodoProgressPolicyTests(unittest.TestCase):
         self.assertTrue(allowed)
 
 
+class FlagValidationCapTests(unittest.TestCase):
+    def test_same_candidate_blocked_after_cap(self) -> None:
+        """Repeated validation of the same candidate value is capped."""
+        state = _state()
+        for idx in range(ProgressPolicy.MAX_FLAG_VALIDATION_ATTEMPTS):
+            item = state.queue_todo(
+                TodoItem(
+                    goal=f"Validate flag candidate attempt {idx}",
+                    phase=TodoPhase.FLAG_VALIDATION,
+                    context={"family": "flag-validation", "candidate_flag": "flag{test}"},
+                    dedupe_key=f"flag-val-{idx}",
+                )
+            )
+            item.mark_running("flag-worker")
+            item.mark_failed("candidate mismatch", retryable=False)
+
+        todo = PlannedTodo(
+            goal="Validate flag candidate again",
+            phase=TodoPhase.FLAG_VALIDATION,
+            context={"family": "flag-validation", "candidate_flag": "flag{test}"},
+        )
+
+        allowed, reason = ProgressPolicy.allows(todo, state)
+
+        self.assertFalse(allowed)
+        self.assertIn("already validated", reason)
+
+    def test_same_candidate_allows_under_cap(self) -> None:
+        """Under the cap, repeated validation of the same candidate is allowed."""
+        state = _state()
+        item = state.queue_todo(
+            TodoItem(
+                goal="Validate flag candidate attempt 0",
+                phase=TodoPhase.FLAG_VALIDATION,
+                context={"family": "flag-validation", "candidate_flag": "flag{test}"},
+                dedupe_key="flag-val-0",
+            )
+        )
+        item.mark_running("flag-worker")
+        item.mark_failed("candidate mismatch", retryable=False)
+
+        todo = PlannedTodo(
+            goal="Validate flag candidate attempt 1",
+            phase=TodoPhase.FLAG_VALIDATION,
+            context={"family": "flag-validation", "candidate_flag": "flag{test}"},
+        )
+
+        allowed, _reason = ProgressPolicy.allows(todo, state)
+
+        self.assertTrue(allowed)
+
+    def test_different_candidate_always_allowed(self) -> None:
+        """A new candidate value is never blocked by prior validation attempts."""
+        state = _state()
+        # Exhaust cap for one candidate
+        for idx in range(ProgressPolicy.MAX_FLAG_VALIDATION_ATTEMPTS + 2):
+            item = state.queue_todo(
+                TodoItem(
+                    goal=f"Validate flag{{old}} attempt {idx}",
+                    phase=TodoPhase.FLAG_VALIDATION,
+                    context={"family": "flag-validation", "candidate_flag": "flag{old}"},
+                    dedupe_key=f"flag-val-old-{idx}",
+                )
+            )
+            item.mark_running("flag-worker")
+            item.mark_failed("candidate mismatch", retryable=False)
+
+        # A different candidate must still be allowed
+        todo = PlannedTodo(
+            goal="Validate new candidate",
+            phase=TodoPhase.FLAG_VALIDATION,
+            context={"family": "flag-validation", "candidate_flag": "flag{new_value}"},
+        )
+
+        allowed, _reason = ProgressPolicy.allows(todo, state)
+
+        self.assertTrue(allowed)
+
+
 if __name__ == "__main__":
     unittest.main()

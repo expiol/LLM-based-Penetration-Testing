@@ -253,5 +253,111 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertEqual(final_state.todos[0].status, TodoStatus.BLOCKED)
 
 
+class HollowResultAndProgressTests(unittest.TestCase):
+    def test_hollow_result_marked_partial(self) -> None:
+        """A worker that reports success=True but produces no state signals
+        should be downgraded to partial by the orchestrator."""
+        from killchain_docker.orchestrator.loop import Orchestrator
+        from killchain_docker.state import StateDelta
+
+        result = WorkerResult(
+            todo_id="todo-1",
+            worker_name="web-worker",
+            success=True,
+            summary="curl GET http://example.com/: HTTP 200",
+            state_delta=StateDelta(),
+        )
+
+        self.assertTrue(Orchestrator._is_hollow_result(result))
+
+    def test_non_hollow_result_with_findings(self) -> None:
+        """A successful result that carries finding_updates is NOT hollow."""
+        from killchain_docker.orchestrator.loop import Orchestrator
+        from killchain_docker.state import Finding, Severity, StateDelta
+
+        result = WorkerResult(
+            todo_id="todo-1",
+            worker_name="web-worker",
+            success=True,
+            summary="found SQL injection",
+            state_delta=StateDelta(),
+            finding_updates=[
+                Finding(finding_id="f-1", title="SQLi", severity=Severity.HIGH),
+            ],
+        )
+
+        self.assertFalse(Orchestrator._is_hollow_result(result))
+
+    def test_non_hollow_result_with_flag_candidates(self) -> None:
+        """A successful result with flag_candidates in state_delta is NOT hollow."""
+        from killchain_docker.orchestrator.loop import Orchestrator
+        from killchain_docker.state import FlagCandidate, StateDelta
+
+        result = WorkerResult(
+            todo_id="todo-1",
+            worker_name="exploit-worker",
+            success=True,
+            summary="flag found",
+            state_delta=StateDelta(
+                flag_candidates=[FlagCandidate(value="flag{ok}", source="test")],
+            ),
+        )
+
+        self.assertFalse(Orchestrator._is_hollow_result(result))
+
+    def test_failed_result_is_never_hollow(self) -> None:
+        """A failed result should not be treated as hollow."""
+        from killchain_docker.orchestrator.loop import Orchestrator
+        from killchain_docker.state import StateDelta
+
+        result = WorkerResult(
+            todo_id="todo-1",
+            worker_name="web-worker",
+            success=False,
+            summary="connection refused",
+            state_delta=StateDelta(),
+        )
+
+        self.assertFalse(Orchestrator._is_hollow_result(result))
+
+    def test_progress_includes_non_flag_state_delta(self) -> None:
+        """Findings and credentials count as meaningful progress,
+        preventing a premature forced pivot."""
+        from killchain_docker.orchestrator.loop import Orchestrator
+        from killchain_docker.state import Finding, Severity, StateDelta
+
+        results = [
+            WorkerResult(
+                todo_id="todo-1",
+                worker_name="web-worker",
+                success=True,
+                summary="discovered vulnerability",
+                state_delta=StateDelta(),
+                finding_updates=[
+                    Finding(finding_id="f-1", title="XSS", severity=Severity.MEDIUM),
+                ],
+            ),
+        ]
+
+        self.assertTrue(Orchestrator._round_had_meaningful_progress(results))
+
+    def test_no_progress_when_all_results_empty(self) -> None:
+        """A round where all results are hollow has no progress."""
+        from killchain_docker.orchestrator.loop import Orchestrator
+        from killchain_docker.state import StateDelta
+
+        results = [
+            WorkerResult(
+                todo_id="todo-1",
+                worker_name="web-worker",
+                success=True,
+                summary="curl GET: HTTP 200",
+                state_delta=StateDelta(),
+            ),
+        ]
+
+        self.assertFalse(Orchestrator._round_had_meaningful_progress(results))
+
+
 if __name__ == "__main__":
     unittest.main()

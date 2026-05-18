@@ -86,6 +86,9 @@ ARTIFACT_PERSONA = PersonaSpec(
         ToolCapability.RADARE2,
         ToolCapability.OBJDUMP,
         ToolCapability.GDB,
+        ToolCapability.CHECKSEC,
+        ToolCapability.LTRACE,
+        ToolCapability.STRACE,
         ToolCapability.TSHARK,
         ToolCapability.EXIFTOOL,
         ToolCapability.STEGHIDE,
@@ -94,9 +97,10 @@ ARTIFACT_PERSONA = PersonaSpec(
         ToolCapability.JADX,
     ),
     routing_summary=(
-        "Static file analysis: binaries (r2, objdump, gdb, strings), firmware (binwalk), "
+        "Static and dynamic file analysis: binaries (r2, objdump, gdb, checksec, strings), "
+        "dynamic tracing (ltrace, strace), firmware (binwalk), "
         "pcaps (tshark), databases (sqlite3), stego (steghide, foremost, exiftool), "
-        "APKs (jadx). Offline analysis, no network interaction."
+        "APKs (jadx). Supports both offline analysis and local binary execution."
     ),
     preferred_challenge_categories=("crypto", "rev", "forensics", "misc", "pwn", "web"),
 )
@@ -124,6 +128,8 @@ EXPLOIT_PERSONA = PersonaSpec(
         ToolCapability.CURL,
         ToolCapability.SQLMAP,
         ToolCapability.GDB,
+        ToolCapability.CHECKSEC,
+        ToolCapability.LTRACE,
         ToolCapability.JOHN,
         ToolCapability.FCRACKZIP,
         ToolCapability.STRINGS_CMD,
@@ -131,7 +137,7 @@ EXPLOIT_PERSONA = PersonaSpec(
     ),
     routing_summary=(
         "Active exploitation: credential attacks (john, fcrackzip), SQL injection (sqlmap), "
-        "binary exploitation (gdb, r2), network probing (nmap, curl). "
+        "binary exploitation (gdb, checksec, ltrace, r2), network probing (nmap, curl). "
         "Runs bounded experiments from accumulated evidence."
     ),
 )
