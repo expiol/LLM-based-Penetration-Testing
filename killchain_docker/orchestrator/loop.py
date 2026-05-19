@@ -7,7 +7,8 @@ from collections.abc import Callable, Iterable
 
 from killchain_docker.llm import LLMClientError
 from killchain_docker.orchestrator.planning import PlannerAgent
-from killchain_docker.orchestrator.router import RouterAgent
+from killchain_docker.orchestrator.policy import RoundOutcomePolicy
+from killchain_docker.orchestrator.router import RouterAgent, WorkerDirectory
 from killchain_docker.state import (
     RouterDecision,
     RouterRound,
@@ -44,6 +45,7 @@ class Orchestrator:
         if router is None:
             raise LLMClientError("Orchestrator requires a router; router-less execution is disabled.")
         self.workers = list(workers)
+        self.worker_directory = WorkerDirectory.from_workers(self.workers)
         self.planner = planner
         self.router = router
         self.emit = emit
@@ -60,18 +62,6 @@ class Orchestrator:
             self.checkpoint_callback(self.state)
         except Exception as exc:
             self.emit(f"[checkpoint] failed to persist state: {type(exc).__name__}: {exc}")
-
-    def _worker_catalog(self) -> list[dict[str, object]]:
-        return [
-            {
-                "name": worker.name,
-                "supported_todo_kinds": list(worker.supported_todo_kinds),
-                "routing_summary": worker.routing_summary,
-                "required_context_keys": list(worker.required_context_keys),
-                "preferred_challenge_categories": list(worker.preferred_challenge_categories),
-            }
-            for worker in self.workers
-        ]
 
     def refresh_plan(self, cycle: int) -> tuple[bool, str]:
         decision = self.planner.plan(self.state)
@@ -96,18 +86,12 @@ class Orchestrator:
     def route(self, cycle: int) -> RouterDecision:
         return self.router.route(
             self.state,
-            worker_catalog=self._worker_catalog(),
+            worker_directory=self.worker_directory,
             max_assignments=5,
         )
 
     def select_worker(self, todo: TodoItem, worker_name: str) -> tuple[WorkerAgent | None, str]:
-        worker = next((item for item in self.workers if item.name == worker_name), None)
-        if worker is None:
-            return None, f"router selected unknown worker {worker_name!r}"
-        allowed, reason = worker.can_route_task(todo, self.state)
-        if not allowed:
-            return None, reason or "worker rejected todo"
-        return worker, ""
+        return self.worker_directory.select(worker_name, todo, self.state)
 
     def _run_assignment(self, cycle: int, todo: TodoItem, worker: WorkerAgent) -> WorkerResult:
         todo.mark_running(worker.name)
@@ -150,80 +134,6 @@ class Orchestrator:
         self.state.touch()
         return True
 
-    @staticmethod
-    def _is_hollow_result(result: WorkerResult) -> bool:
-        """Detect results that report success but produce no meaningful output.
-
-        A hollow result typically means the worker ran a trivial command
-        (e.g. a bare ``curl GET``) instead of executing the planned task.
-        Downgrading these to partial prevents them from masking stagnation.
-        """
-        if not result.success or result.partial or result.solved:
-            return False
-        delta = result.state_delta
-        if delta and (
-            delta.flag_candidates
-            or delta.artifacts
-            or delta.endpoints
-            or delta.routes
-            or delta.hypotheses
-            or delta.vulnerabilities
-            or delta.exploit_attempts
-            or delta.sessions
-        ):
-            return False
-        ctx = result.output_context or {}
-        if ctx.get("flag_candidates") or ctx.get("near_miss_candidates"):
-            return False
-        if Orchestrator._has_observation_text(ctx):
-            return False
-        for evidence in result.evidence_updates:
-            extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
-            evidence_ctx = extracted.get("output_context")
-            if isinstance(evidence_ctx, dict) and Orchestrator._has_observation_text(evidence_ctx):
-                return False
-            evidence_result = evidence.result if isinstance(evidence.result, dict) else {}
-            if Orchestrator._has_observation_text(evidence_result):
-                return False
-        if result.result_quality:
-            return False
-        if result.finding_updates or result.credential_updates:
-            return False
-        return True
-
-    @staticmethod
-    def _has_observation_text(payload: dict[str, object]) -> bool:
-        for key in ("stdout", "stderr", "output_text", "raw_log"):
-            if str(payload.get(key) or "").strip():
-                return True
-        return False
-
-    @staticmethod
-    def _round_had_meaningful_progress(results: list[WorkerResult]) -> bool:
-        """Check whether any result in the round produced new state signals.
-
-        Broadens the original flag-only check to include findings,
-        credentials, vulnerabilities, sessions, and near-miss candidates
-        so that productive non-flag work does not trigger a premature pivot.
-        """
-        for r in results:
-            if not r.success:
-                continue
-            delta = r.state_delta
-            if delta and (
-                delta.flag_candidates
-                or delta.vulnerabilities
-                or delta.sessions
-                or delta.exploit_attempts
-            ):
-                return True
-            if r.finding_updates or r.credential_updates:
-                return True
-            ctx = r.output_context or {}
-            if ctx.get("near_miss_candidates"):
-                return True
-        return False
-
     def _summarize_round(self, results: list[WorkerResult]):
         return self.router.summarize_round(self.state, results=results)
 
@@ -236,41 +146,16 @@ class Orchestrator:
         Instead of hard-stopping, this bans stalled families and forces the
         planner to try a fundamentally different attack vector.
         """
-        from killchain_docker.orchestrator.policy import ProgressPolicy
-
         self._pivot_count += 1
         self._rounds_without_progress = 0  # Reset counter after pivot
 
-        # Identify families to ban
-        snapshot = ProgressPolicy.stagnation_snapshot(self.state)
-        failed_counts = snapshot.get("failed_or_partial_family_counts", {})
-        banned_families = sorted(
-            family for family, count in failed_counts.items()
-            if count >= ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD
+        pivot_directive = RoundOutcomePolicy.forced_pivot_directive(
+            self.state,
+            pivot_number=self._pivot_count,
+            cycle=cycle,
+            threshold=self.FORCED_PIVOT_THRESHOLD,
         )
-
-        # Also ban the most-attempted family even if below threshold
-        family_counts = snapshot.get("family_counts", {})
-        if family_counts:
-            top_family = max(family_counts, key=lambda f: family_counts[f])
-            if top_family not in banned_families and family_counts[top_family] >= 3:
-                banned_families.append(top_family)
-
-        pivot_directive = {
-            "pivot_number": self._pivot_count,
-            "triggered_at_cycle": cycle,
-            "banned_families": banned_families,
-            "instruction": (
-                f"FORCED PIVOT #{self._pivot_count}: The run has spent "
-                f"{self.FORCED_PIVOT_THRESHOLD} consecutive rounds without producing "
-                f"a valid flag candidate. The following approach families are NOW BANNED "
-                f"and must NOT be re-attempted: {banned_families}. "
-                "You MUST propose a fundamentally different attack vector: "
-                "different algorithm, different tool, different attack surface, "
-                "or different interpretation of the challenge. "
-                "If no alternative exists, set stop_run=true."
-            ),
-        }
+        banned_families = list(pivot_directive.get("banned_families") or [])
         self.state.metadata["forced_pivot"] = pivot_directive
         self.state.orchestration_notes.append(
             f"cycle {cycle}: forced pivot #{self._pivot_count} — "
@@ -460,7 +345,7 @@ class Orchestrator:
                         self._checkpoint()
                         max_cycles_exhausted = False
                         raise
-                    if self._is_hollow_result(result):
+                    if RoundOutcomePolicy.is_hollow_result(result):
                         result.partial = True
                         result.partial_reason = (
                             result.partial_reason
@@ -502,7 +387,7 @@ class Orchestrator:
                 self.emit(f"[cycle {cycle}] router summary: {round_summary.summary[:240]}")
 
                 # Forced Pivot: track rounds without meaningful progress
-                if self._round_had_meaningful_progress(results):
+                if RoundOutcomePolicy.had_meaningful_progress(results):
                     self._rounds_without_progress = 0
                     self.state.metadata.pop("forced_pivot", None)
                 else:

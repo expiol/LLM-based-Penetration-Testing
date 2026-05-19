@@ -6,11 +6,76 @@ import json
 import unittest
 
 from killchain_docker.llm import StaticLLMClient
-from killchain_docker.orchestrator.router import RouterAgent
+from killchain_docker.orchestrator.router import RouterAgent, WorkerDirectory
 from killchain_docker.state import RunState, TodoItem, TodoPhase, WorkerResult
+from killchain_docker.workers.base import WorkerAgent
+
+
+class _DirectoryWorker(WorkerAgent):
+    supported_todo_kinds = ("todo",)
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        routing_summary: str = "",
+        required_context_keys: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__()
+        self.name = name
+        self.routing_summary = routing_summary
+        self.required_context_keys = required_context_keys
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del state
+        return WorkerResult(
+            todo_id=task.todo_id,
+            worker_name=self.name,
+            success=True,
+            summary="ok",
+        )
 
 
 class RouterAgentTests(unittest.TestCase):
+    def test_routes_with_worker_directory(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(TodoItem(goal="Review files", phase=TodoPhase.ANALYSIS))
+        captured: dict[str, object] = {}
+
+        def respond(system_prompt: str, user_prompt: str):
+            del system_prompt
+            snapshot = json.loads(user_prompt)
+            captured.update(snapshot)
+            return {
+                "assignments": [
+                    {
+                        "todo_id": todo.todo_id,
+                        "worker_name": "artifact-worker",
+                        "rationale": "file review",
+                    }
+                ],
+                "rationale": "directory route",
+            }
+
+        router = RouterAgent(StaticLLMClient(respond))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker(
+                    "artifact-worker",
+                    routing_summary="Static file analysis.",
+                    required_context_keys=("files_root",),
+                )
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(decision.assignments[0].worker_name, "artifact-worker")
+        catalog = captured["worker_catalog"]  # type: ignore[index]
+        self.assertEqual(catalog[0]["routing_summary"], "Static file analysis.")
+        self.assertEqual(catalog[0]["required_context_keys"], ["files_root"])
+
     def test_routes_multiple_todos_to_different_workers(self) -> None:
         state = RunState(objective="Solve.", authorized_scope=[])
         first = state.queue_todo(TodoItem(goal="Map scope", priority=90))
@@ -37,10 +102,10 @@ class RouterAgentTests(unittest.TestCase):
 
         decision = router.route(
             state,
-            worker_catalog=[
-                {"name": "recon-worker"},
-                {"name": "artifact-worker"},
-            ],
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker("recon-worker"),
+                _DirectoryWorker("artifact-worker"),
+            ]),
             max_assignments=5,
         )
 
@@ -77,10 +142,10 @@ class RouterAgentTests(unittest.TestCase):
 
         decision = router.route(
             state,
-            worker_catalog=[
-                {"name": "recon-worker"},
-                {"name": "exploit-worker"},
-            ],
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker("recon-worker"),
+                _DirectoryWorker("exploit-worker"),
+            ]),
             max_assignments=5,
         )
 
@@ -115,10 +180,10 @@ class RouterAgentTests(unittest.TestCase):
 
         decision = router.route(
             state,
-            worker_catalog=[
-                {"name": "artifact-worker"},
-                {"name": "flag-worker"},
-            ],
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker("artifact-worker"),
+                _DirectoryWorker("flag-worker"),
+            ]),
             max_assignments=5,
         )
 
@@ -151,10 +216,10 @@ class RouterAgentTests(unittest.TestCase):
 
         decision = router.route(
             state,
-            worker_catalog=[
-                {"name": "recon-worker"},
-                {"name": "artifact-worker"},
-            ],
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker("recon-worker"),
+                _DirectoryWorker("artifact-worker"),
+            ]),
             max_assignments=5,
         )
 
@@ -178,10 +243,10 @@ class RouterAgentTests(unittest.TestCase):
 
         decision = router.route(
             state,
-            worker_catalog=[
-                {"name": "recon-worker"},
-                {"name": "artifact-worker"},
-            ],
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker("recon-worker"),
+                _DirectoryWorker("artifact-worker"),
+            ]),
             max_assignments=5,
         )
         self.assertEqual(decision.assignments, [])
@@ -220,7 +285,9 @@ class RouterAgentTests(unittest.TestCase):
 
         router.route(
             state,
-            worker_catalog=[{"name": "artifact-worker"}],
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker("artifact-worker"),
+            ]),
             max_assignments=5,
         )
 
@@ -243,7 +310,10 @@ class RouterAgentTests(unittest.TestCase):
 
         decision = router.route(
             state,
-            worker_catalog=[{"name": "flag-worker"}, {"name": "artifact-worker"}],
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker("flag-worker"),
+                _DirectoryWorker("artifact-worker"),
+            ]),
             max_assignments=5,
         )
 
@@ -267,7 +337,10 @@ class RouterAgentTests(unittest.TestCase):
 
         decision = router.route(
             state,
-            worker_catalog=[{"name": "flag-worker"}, {"name": "artifact-worker"}],
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker("flag-worker"),
+                _DirectoryWorker("artifact-worker"),
+            ]),
             max_assignments=5,
         )
 

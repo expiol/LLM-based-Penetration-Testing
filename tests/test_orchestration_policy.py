@@ -5,7 +5,12 @@ from __future__ import annotations
 import unittest
 
 from killchain_docker.orchestrator.planning import PlanningPipeline
-from killchain_docker.orchestrator.policy import CandidatePolicy, ProgressPolicy, TodoPolicy
+from killchain_docker.orchestrator.policy import (
+    CandidatePolicy,
+    ProgressPolicy,
+    RoundOutcomePolicy,
+    TodoPolicy,
+)
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo
 from killchain_docker.state import (
     EvidenceRecord,
@@ -15,6 +20,7 @@ from killchain_docker.state import (
     StateDelta,
     TodoItem,
     TodoPhase,
+    WorkerResult,
 )
 
 
@@ -291,6 +297,57 @@ class TodoProgressPolicyTests(unittest.TestCase):
 
         self.assertFalse(allowed)
         self.assertIn("cooldown", reason)
+
+
+class RoundOutcomePolicyTests(unittest.TestCase):
+    def test_round_progress_includes_near_miss_candidates(self) -> None:
+        results = [
+            WorkerResult(
+                todo_id="todo-1",
+                worker_name="analysis-worker",
+                success=True,
+                summary="found candidate-shaped output",
+                output_context={"near_miss_candidates": ["flag{almost}"]},
+            )
+        ]
+
+        self.assertTrue(RoundOutcomePolicy.had_meaningful_progress(results))
+
+    def test_hollow_success_has_no_output_or_state_signal(self) -> None:
+        result = WorkerResult(
+            todo_id="todo-1",
+            worker_name="recon-worker",
+            success=True,
+            summary="completed",
+        )
+
+        self.assertTrue(RoundOutcomePolicy.is_hollow_result(result))
+
+    def test_forced_pivot_directive_bans_stalled_families(self) -> None:
+        state = _state()
+        for idx in range(ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD):
+            item = state.queue_todo(
+                TodoItem(
+                    goal=f"Retry same decrypt strategy {idx}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "repeated-decrypt"},
+                    dedupe_key=f"repeated-decrypt-{idx}",
+                )
+            )
+            item.mark_running("analysis-worker")
+            item.mark_partial("No valid flag candidate.", "strategy stalled")
+
+        directive = RoundOutcomePolicy.forced_pivot_directive(
+            state,
+            pivot_number=2,
+            cycle=9,
+            threshold=5,
+        )
+
+        self.assertEqual(directive["pivot_number"], 2)
+        self.assertEqual(directive["triggered_at_cycle"], 9)
+        self.assertEqual(directive["banned_families"], ["repeated-decrypt"])
+        self.assertIn("FORCED PIVOT #2", str(directive["instruction"]))
 
 
 class FlagValidationCapTests(unittest.TestCase):

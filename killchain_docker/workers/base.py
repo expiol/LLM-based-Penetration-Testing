@@ -13,6 +13,11 @@ from typing import Any
 from killchain_docker.evidence_context import EvidenceContextBuilder
 from killchain_docker.llm import LLMClient, LLMClientError
 from killchain_docker.prompt_bounds import bounded_value, trim_text
+from killchain_docker.prompt_projection import (
+    execution_record as prompt_execution_record,
+    worker_todo as prompt_worker_todo,
+    working_memory as prompt_working_memory,
+)
 from killchain_docker.reasoning import ToolUseDecision
 from killchain_docker.state import RunState, TodoItem, WorkerResult
 from killchain_docker.tools import (
@@ -166,15 +171,15 @@ class WorkerAgent(ABC):
             "tool_use_rules": self._tool_use_rules(allowed),
             # TASK CONTEXT
             "worker_name": self.name,
-            "todo": self._serialize_task_for_prompt(task),
-            "working_memory": self._serialize_working_memory(state),
+            "todo": prompt_worker_todo(task),
+            "working_memory": prompt_working_memory(state),
             # EVIDENCE
             "recent_evidence_context": evidence_context,
             "prior_steps": bounded_value(prior_steps or [], width=700, list_limit=4, dict_limit=14),
             # BACKGROUND (least critical)
             "state_summary": state.summary(),
             "recent_failures": [
-                self._serialize_execution_record(record)
+                prompt_execution_record(record)
                 for record in state.execution_log[-6:]
                 if not record.success
             ],
@@ -236,42 +241,6 @@ class WorkerAgent(ABC):
                 f"allowed capabilities: {', '.join(allowed_values)}"
             )
         return decision
-
-    @staticmethod
-    def _serialize_task_for_prompt(task: TodoItem) -> dict[str, Any]:
-        return {
-            "todo_id": task.todo_id,
-            "goal": trim_text(task.goal, width=420),
-            "phase": task.phase,
-            "context": bounded_value(task.context, width=420, list_limit=8, dict_limit=14),
-            "priority": task.priority,
-            "success_criteria": bounded_value(task.success_criteria, width=260, list_limit=6),
-            "constraints": bounded_value(task.constraints, width=260, list_limit=6),
-            "status": task.status,
-            "assigned_worker": task.assigned_worker,
-            "result_summary": trim_text(task.result_summary, width=320),
-            "dedupe_key": task.dedupe_key,
-            "attempts": task.attempts,
-            "max_attempts": task.max_attempts,
-            "error": trim_text(task.error, width=220),
-        }
-
-    @staticmethod
-    def _serialize_working_memory(state: RunState) -> dict[str, str]:
-        return {
-            str(key): trim_text(value, width=360)
-            for key, value in list(state.working_memory.items())[-20:]
-        }
-
-    @staticmethod
-    def _serialize_execution_record(record) -> dict[str, Any]:
-        return {
-            "task_id": record.task_id,
-            "worker_name": record.worker_name,
-            "success": record.success,
-            "summary": trim_text(record.summary, width=320),
-            "error": trim_text(record.error, width=220),
-        }
 
     @staticmethod
     def _tool_use_rules(allowed: set[ToolCapability]) -> list[str]:

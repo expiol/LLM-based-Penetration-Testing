@@ -1,0 +1,257 @@
+"""Lenient structured-output helpers for LLM responses.
+
+The gateway owns transport, retries, and failure classification.  This module
+owns the messy but deterministic work of recovering JSON objects from model
+text and exception payloads.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+from typing import Any
+
+
+def extract_json_object_text(text: str) -> str:
+    """Return the first balanced JSON object from model output text."""
+
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+
+    start = stripped.find("{")
+    if start < 0:
+        return stripped
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(stripped)):
+        char = stripped[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return stripped[start : index + 1]
+    return stripped[start:]
+
+
+def escape_control_chars_in_json_strings(text: str) -> str:
+    """Escape bare control characters only while inside JSON strings."""
+
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                out.append(char)
+                escaped = False
+            elif char == "\\":
+                out.append(char)
+                escaped = True
+            elif char == '"':
+                out.append(char)
+                in_string = False
+            elif ord(char) < 0x20:
+                if char == "\n":
+                    out.append("\\n")
+                elif char == "\r":
+                    out.append("\\r")
+                elif char == "\t":
+                    out.append("\\t")
+                else:
+                    out.append(f"\\u{ord(char):04x}")
+            else:
+                out.append(char)
+            continue
+
+        out.append(char)
+        if char == '"':
+            in_string = True
+            escaped = False
+    return "".join(out)
+
+
+def escape_source_backslashes_in_json_strings(text: str) -> str:
+    r"""Preserve source-code backslashes that models often emit inside JSON strings.
+
+    JSON accepts only a small escape alphabet.  LLM-generated script bodies often
+    contain Python/regex escapes such as ``\w`` or ``\b`` without JSON-escaping
+    the backslash first.  This pass repairs those source-code escapes before
+    JSON decoding, while leaving structural JSON escapes for quotes, newlines,
+    and unicode intact.
+    """
+
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    valid_json_escapes = {'"', "\\", "/", "n", "r", "t", "u"}
+    source_code_escapes = {"b", "f"}
+
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if escaped:
+                if char in valid_json_escapes:
+                    out.append(char)
+                elif char in source_code_escapes:
+                    out.append("\\")
+                    out.append(char)
+                else:
+                    out.append("\\")
+                    out.append(char)
+                escaped = False
+                index += 1
+                continue
+            if char == "\\":
+                out.append(char)
+                escaped = True
+                index += 1
+                continue
+            if char == '"':
+                in_string = False
+            out.append(char)
+            index += 1
+            continue
+
+        out.append(char)
+        if char == '"':
+            in_string = True
+            escaped = False
+        index += 1
+    if escaped:
+        out.append("\\")
+    return "".join(out)
+
+
+def inside_json_string_at(text: str, position: int) -> bool:
+    in_string = False
+    escaped = False
+    for char in text[:position]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+    return in_string
+
+
+def close_unclosed_string_before_object_boundary(text: str) -> str:
+    """Close a generated string value before the next object field boundary."""
+
+    repaired = text
+    boundaries = (
+        '\n  },\n  "rationale"',
+        '\n  },\n  "expected_signal"',
+        '\n  },\n  "hypothesis"',
+        '\n  },\n  "memory_updates"',
+        "\n  }\n}",
+    )
+    for boundary in boundaries:
+        search_from = 0
+        while True:
+            index = repaired.find(boundary, search_from)
+            if index < 0:
+                break
+            if inside_json_string_at(repaired, index):
+                repaired = f'{repaired[:index]}"{repaired[index:]}'
+                search_from = index + len(boundary) + 1
+            else:
+                search_from = index + len(boundary)
+    return repaired
+
+
+def loads_lenient_json_object(text: str) -> Any:
+    """Load model JSON, repairing the common bare-newline-in-string failure."""
+
+    candidate = extract_json_object_text(text)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        repaired = close_unclosed_string_before_object_boundary(candidate)
+        repaired = escape_source_backslashes_in_json_strings(repaired)
+        repaired = escape_control_chars_in_json_strings(repaired)
+        return json.loads(repaired)
+
+
+def completion_content(completion: Any) -> str | None:
+    if completion is None:
+        return None
+    if isinstance(completion, str):
+        return completion
+    if isinstance(completion, dict):
+        choices = completion.get("choices")
+        if isinstance(choices, list) and choices:
+            message = (
+                (choices[0] or {}).get("message")
+                if isinstance(choices[0], dict)
+                else None
+            )
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                return message["content"]
+        content = completion.get("content")
+        return content if isinstance(content, str) else None
+
+    choices = getattr(completion, "choices", None)
+    if choices:
+        first = choices[0]
+        message = getattr(first, "message", None)
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content
+    content = getattr(completion, "content", None)
+    return content if isinstance(content, str) else None
+
+
+def python_string_literal_after(text: str, marker: str) -> str | None:
+    search_from = 0
+    while True:
+        marker_index = text.find(marker, search_from)
+        if marker_index < 0:
+            return None
+        start = marker_index + len(marker)
+        while start < len(text) and text[start].isspace():
+            start += 1
+        if start >= len(text) or text[start] not in {"'", '"'}:
+            search_from = start
+            continue
+
+        quote = text[start]
+        escaped = False
+        for end in range(start + 1, len(text)):
+            char = text[end]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                try:
+                    value = ast.literal_eval(text[start : end + 1])
+                except (SyntaxError, ValueError):
+                    break
+                return value if isinstance(value, str) else None
+        search_from = start + 1

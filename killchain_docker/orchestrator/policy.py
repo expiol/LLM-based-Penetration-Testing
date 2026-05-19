@@ -13,7 +13,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from killchain_docker.state import FlagCandidate, TodoItem, TodoPhase, TodoStatus
+from killchain_docker.state import FlagCandidate, TodoItem, TodoPhase, TodoStatus, WorkerResult
 from killchain_docker.state.constants import (
     DEFAULT_FILES_ROOT,
     FLAG_BARE_TOKEN_SHAPE,
@@ -486,6 +486,112 @@ class ProgressPolicy:
                 continue
             previous_refs.update(ContextRefPolicy.values(item.context, *keys))
         return not refs.issubset(previous_refs)
+
+
+class RoundOutcomePolicy:
+    """Classify worker round results before the orchestrator mutates control flow."""
+
+    @staticmethod
+    def has_observation_text(payload: dict[str, object]) -> bool:
+        for key in ("stdout", "stderr", "output_text", "raw_log"):
+            if str(payload.get(key) or "").strip():
+                return True
+        return False
+
+    @classmethod
+    def is_hollow_result(cls, result: WorkerResult) -> bool:
+        """Detect successful results that produced no state signal or observation."""
+        if not result.success or result.partial or result.solved:
+            return False
+        delta = result.state_delta
+        if delta and (
+            delta.flag_candidates
+            or delta.artifacts
+            or delta.endpoints
+            or delta.routes
+            or delta.hypotheses
+            or delta.vulnerabilities
+            or delta.exploit_attempts
+            or delta.sessions
+        ):
+            return False
+        ctx = result.output_context or {}
+        if ctx.get("flag_candidates") or ctx.get("near_miss_candidates"):
+            return False
+        if cls.has_observation_text(ctx):
+            return False
+        for evidence in result.evidence_updates:
+            extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
+            evidence_ctx = extracted.get("output_context")
+            if isinstance(evidence_ctx, dict) and cls.has_observation_text(evidence_ctx):
+                return False
+            evidence_result = evidence.result if isinstance(evidence.result, dict) else {}
+            if cls.has_observation_text(evidence_result):
+                return False
+        if result.result_quality:
+            return False
+        if result.finding_updates or result.credential_updates:
+            return False
+        return True
+
+    @staticmethod
+    def had_meaningful_progress(results: list[WorkerResult]) -> bool:
+        """Return true when a round emitted durable progress signals."""
+        for result in results:
+            if not result.success:
+                continue
+            delta = result.state_delta
+            if delta and (
+                delta.flag_candidates
+                or delta.vulnerabilities
+                or delta.sessions
+                or delta.exploit_attempts
+            ):
+                return True
+            if result.finding_updates or result.credential_updates:
+                return True
+            ctx = result.output_context or {}
+            if ctx.get("near_miss_candidates"):
+                return True
+        return False
+
+    @staticmethod
+    def forced_pivot_directive(
+        state: "RunState",
+        *,
+        pivot_number: int,
+        cycle: int,
+        threshold: int,
+    ) -> dict[str, object]:
+        """Build the metadata directive used to force a strategy pivot."""
+        snapshot = ProgressPolicy.stagnation_snapshot(state)
+        failed_counts = snapshot.get("failed_or_partial_family_counts", {})
+        banned_families = sorted(
+            family for family, count in failed_counts.items()
+            if count >= ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD
+        )
+
+        family_counts = snapshot.get("family_counts", {})
+        if family_counts:
+            top_family = max(family_counts, key=lambda family: family_counts[family])
+            if top_family not in banned_families and family_counts[top_family] >= 3:
+                banned_families.append(top_family)
+
+        return {
+            "pivot_number": pivot_number,
+            "triggered_at_cycle": cycle,
+            "banned_families": banned_families,
+            "instruction": (
+                f"FORCED PIVOT #{pivot_number}: The run has spent "
+                f"{threshold} consecutive rounds without producing "
+                f"a valid flag candidate. The following approach families are NOW BANNED "
+                f"and must NOT be re-attempted: {banned_families}. "
+                "You MUST propose a fundamentally different attack vector: "
+                "different algorithm, different tool, different attack surface, "
+                "or different interpretation of the challenge. "
+                "If no alternative exists, set stop_run=true."
+            ),
+        }
 
 
 class RagPolicy:

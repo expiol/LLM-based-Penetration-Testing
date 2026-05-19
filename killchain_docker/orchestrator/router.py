@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 from killchain_docker.llm import LLMClient, LLMClientError
-from killchain_docker.prompt_bounds import bounded_value, trim_text
+from killchain_docker.prompt_bounds import bounded_value
+from killchain_docker.prompt_projection import router_todo as prompt_router_todo
 from killchain_docker.state import (
     RouterDecision,
     RouterRoundSummary,
@@ -16,6 +19,9 @@ from killchain_docker.state import (
     WorkerResult,
     todo_phase_rank,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    from killchain_docker.workers.base import WorkerAgent
 
 _ROUTER_SYSTEM_PROMPT = """\
 You are RouterAgent in a planner-router-worker CTF workflow.
@@ -40,6 +46,61 @@ Do not invent worker names. Return only JSON matching RouterDecision.
 """
 
 
+class WorkerDirectory:
+    """Typed view over Persona Workers used by Router and Orchestrator."""
+
+    def __init__(
+        self,
+        *,
+        workers: Iterable["WorkerAgent"],
+    ) -> None:
+        self._workers = {worker.name: worker for worker in workers}
+        self._catalog = [
+            self._catalog_entry(worker)
+            for worker in self._workers.values()
+        ]
+        self._worker_names = {
+            str(item.get("name") or "")
+            for item in self._catalog
+            if str(item.get("name") or "")
+        }
+
+    @classmethod
+    def from_workers(cls, workers: Iterable["WorkerAgent"]) -> "WorkerDirectory":
+        return cls(workers=workers)
+
+    @staticmethod
+    def _catalog_entry(worker: "WorkerAgent") -> dict[str, object]:
+        return {
+            "name": worker.name,
+            "supported_todo_kinds": list(worker.supported_todo_kinds),
+            "routing_summary": worker.routing_summary,
+            "required_context_keys": list(worker.required_context_keys),
+            "preferred_challenge_categories": list(worker.preferred_challenge_categories),
+        }
+
+    @property
+    def worker_names(self) -> set[str]:
+        return set(self._worker_names)
+
+    def prompt_catalog(self) -> list[dict[str, object]]:
+        return [dict(item) for item in self._catalog]
+
+    def select(
+        self,
+        worker_name: str,
+        todo: TodoItem,
+        state: RunState,
+    ) -> tuple["WorkerAgent | None", str]:
+        worker = self._workers.get(worker_name)
+        if worker is None:
+            return None, f"router selected unknown worker {worker_name!r}"
+        allowed, reason = worker.can_route_task(todo, state)
+        if not allowed:
+            return None, reason or "worker rejected todo"
+        return worker, ""
+
+
 class RouterAgent:
     """Assign ready todos to persona workers and summarize worker returns."""
 
@@ -55,7 +116,7 @@ class RouterAgent:
         self,
         state: RunState,
         *,
-        worker_catalog: list[dict[str, object]],
+        worker_directory: WorkerDirectory,
         max_assignments: int,
     ) -> RouterDecision:
         ready = self._ready_todos_for_focus_phase(state, max_assignments=max_assignments)
@@ -67,7 +128,7 @@ class RouterAgent:
         non_flag_todos = [t for t in ready if t.phase != TodoPhase.FLAG_VALIDATION]
 
         assignments: list[WorkerAssignment] = []
-        if flag_todos and "flag-worker" in {str(w.get("name") or "") for w in worker_catalog}:
+        if flag_todos and "flag-worker" in worker_directory.worker_names:
             for todo in flag_todos:
                 assignments.append(WorkerAssignment(
                     todo_id=todo.todo_id,
@@ -76,8 +137,8 @@ class RouterAgent:
                 ))
 
         if non_flag_todos:
-            llm_decision = self._llm_route(state, non_flag_todos, worker_catalog)
-            validated = self._validated_decision(llm_decision, state, non_flag_todos, worker_catalog)
+            llm_decision = self._llm_route(state, non_flag_todos, worker_directory)
+            validated = self._validated_decision(llm_decision, non_flag_todos, worker_directory)
             assignments.extend(validated)
 
         if not assignments:
@@ -88,15 +149,15 @@ class RouterAgent:
         self,
         state: RunState,
         ready: list[TodoItem],
-        worker_catalog: list[dict[str, object]],
+        worker_directory: WorkerDirectory,
     ) -> RouterDecision:
         focus_phase = ready[0].phase
         snapshot = {
             "objective": state.objective,
             "summary": state.summary(),
             "focus_phase": focus_phase,
-            "ready_todos": [self._serialize_todo(todo) for todo in ready],
-            "worker_catalog": worker_catalog,
+            "ready_todos": [prompt_router_todo(todo) for todo in ready],
+            "worker_catalog": worker_directory.prompt_catalog(),
             "recent_round_summaries": [
                 round_record.summary.model_dump(mode="json")
                 for round_record in state.rounds[-8:]
@@ -116,21 +177,18 @@ class RouterAgent:
     def _validated_decision(
         self,
         decision: RouterDecision,
-        state: RunState,
         ready: list[TodoItem],
-        worker_catalog: list[dict[str, object]],
+        worker_directory: WorkerDirectory,
     ) -> list[WorkerAssignment]:
         ready_ids = {t.todo_id for t in ready}
-        worker_names = {str(w.get("name") or "") for w in worker_catalog}
+        worker_names = worker_directory.worker_names
         valid: list[WorkerAssignment] = []
-        invalid_reasons: list[str] = []
         seen: set[str] = set()
 
         for a in decision.assignments:
             if a.todo_id not in ready_ids or a.todo_id in seen:
                 continue
             if a.worker_name not in worker_names:
-                invalid_reasons.append(f"{a.worker_name} not in catalog")
                 continue
             seen.add(a.todo_id)
             valid.append(a)
@@ -138,7 +196,6 @@ class RouterAgent:
         if valid:
             return valid
 
-        del invalid_reasons
         return []
 
     def summarize_round(
@@ -199,20 +256,6 @@ class RouterAgent:
             return []
         focus_phase = min((todo.phase for todo in ready), key=todo_phase_rank)
         return [todo for todo in ready if todo.phase == focus_phase][: max(1, max_assignments)]
-
-    @staticmethod
-    def _serialize_todo(todo: TodoItem) -> dict[str, object]:
-        return {
-            "todo_id": todo.todo_id,
-            "goal": trim_text(todo.goal, width=360),
-            "phase": todo.phase,
-            "context": bounded_value(todo.context, width=360, list_limit=8, dict_limit=14),
-            "priority": todo.priority,
-            "success_criteria": bounded_value(todo.success_criteria, width=240, list_limit=6),
-            "constraints": bounded_value(todo.constraints, width=240, list_limit=6),
-            "attempts": todo.attempts,
-            "error": trim_text(todo.error, width=220),
-        }
 
     @staticmethod
     def _bounded_mapping(value: dict[str, object]) -> dict[str, object]:

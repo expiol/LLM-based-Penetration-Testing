@@ -12,6 +12,10 @@ from killchain_docker.llm.gateway import (
     LLMFailureKind,
     StaticLLMClient,
 )
+from killchain_docker.llm.structured_output import (
+    loads_lenient_json_object,
+    python_string_literal_after,
+)
 from killchain_docker.reasoning.coercion import coerce_llm_bool
 from killchain_docker.reasoning.schemas import ToolUseDecision
 
@@ -102,6 +106,21 @@ class TestGatewayTransientClassification(unittest.TestCase):
 
 
 class TestLenientStructuredOutput(unittest.TestCase):
+    def test_decoder_repairs_bare_newline_without_gateway_client(self) -> None:
+        payload = """{
+  "script_code": "print('alpha
+beta')"
+}"""
+
+        decoded = loads_lenient_json_object(payload)
+
+        self.assertEqual(decoded["script_code"], "print('alpha\nbeta')")
+
+    def test_decoder_recovers_content_literal_from_exception_text(self) -> None:
+        text = "InstructorRetryException(content='{\\n  \"ok\": true\\n}', retries=2)"
+
+        self.assertEqual(python_string_literal_after(text, "content="), '{\n  "ok": true\n}')
+
     def test_static_client_repairs_bare_newline_in_json_string(self) -> None:
         payload = """{
   "capability": "script.exec",

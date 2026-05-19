@@ -6,6 +6,7 @@ import json
 import unittest
 
 from killchain_docker.llm import StaticLLMClient
+from killchain_docker.prompt_projection import router_todo, worker_todo, working_memory
 from killchain_docker.state import ExecutionRecord, RunState, TodoItem, WorkerResult
 from killchain_docker.tools import ExecutionPlane, ToolCapability
 from killchain_docker.workers.base import WorkerAgent
@@ -26,6 +27,26 @@ class _PromptWorker(WorkerAgent):
 
 
 class WorkerPromptBoundsTests(unittest.TestCase):
+    def test_prompt_projection_profiles_share_bounding_rules(self) -> None:
+        huge_text = "X" * 5000
+        state = RunState(objective="Solve.")
+        state.working_memory["huge"] = huge_text
+        todo = TodoItem(
+            goal=huge_text,
+            context={"blob": huge_text, "items": [huge_text for _ in range(20)]},
+        )
+
+        router_projection = router_todo(todo)
+        worker_projection = worker_todo(todo)
+
+        self.assertLessEqual(len(router_projection["goal"]), 400)
+        self.assertLessEqual(len(router_projection["context"]["blob"]), 400)
+        self.assertLessEqual(len(worker_projection["goal"]), 460)
+        self.assertLessEqual(len(worker_projection["context"]["blob"]), 460)
+        self.assertEqual(len(router_projection["context"]["items"]), 8)
+        self.assertEqual(len(worker_projection["context"]["items"]), 8)
+        self.assertLessEqual(len(working_memory(state)["huge"]), 400)
+
     def test_worker_tool_selection_prompt_bounds_state_sections(self) -> None:
         captured: dict[str, object] = {}
 

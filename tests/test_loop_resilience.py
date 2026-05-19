@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from killchain_docker.llm import LLMClientError, LLMFailureKind
 from killchain_docker.orchestrator.loop import Orchestrator
 from killchain_docker.orchestrator.planning import PlannerAgent, PlannedTodo, PlannerDecision
+from killchain_docker.orchestrator.policy import RoundOutcomePolicy
 from killchain_docker.state import (
     RouterDecision,
     RouterRoundSummary,
@@ -38,8 +39,8 @@ class _ScriptedPlanner(PlannerAgent):
 
 
 class _ContextRouter:
-    def route(self, state: RunState, *, worker_catalog, max_assignments: int) -> RouterDecision:
-        del worker_catalog, max_assignments
+    def route(self, state: RunState, *, worker_directory, max_assignments: int) -> RouterDecision:
+        del worker_directory, max_assignments
         ready = state.ready_todos(limit=1)
         if not ready:
             return RouterDecision(rationale="empty")
@@ -64,8 +65,8 @@ class _ContextRouter:
 
 
 class _UnknownWorkerRouter:
-    def route(self, state: RunState, *, worker_catalog, max_assignments: int) -> RouterDecision:
-        del worker_catalog, max_assignments
+    def route(self, state: RunState, *, worker_directory, max_assignments: int) -> RouterDecision:
+        del worker_directory, max_assignments
         ready = state.ready_todos(limit=1)
         if not ready:
             return RouterDecision(rationale="empty")
@@ -89,8 +90,8 @@ class _UnknownWorkerRouter:
 
 
 class _NoAssignmentRouter:
-    def route(self, state: RunState, *, worker_catalog, max_assignments: int) -> RouterDecision:
-        del state, worker_catalog, max_assignments
+    def route(self, state: RunState, *, worker_directory, max_assignments: int) -> RouterDecision:
+        del state, worker_directory, max_assignments
         return RouterDecision(rationale="intentionally empty")
 
     def summarize_round(self, state: RunState, *, results: list[WorkerResult]) -> RouterRoundSummary:
@@ -505,7 +506,6 @@ class HollowResultAndProgressTests(unittest.TestCase):
     def test_hollow_result_marked_partial(self) -> None:
         """A worker that reports success=True but produces no state signals
         should be downgraded to partial by the orchestrator."""
-        from killchain_docker.orchestrator.loop import Orchestrator
         from killchain_docker.state import StateDelta
 
         result = WorkerResult(
@@ -516,11 +516,10 @@ class HollowResultAndProgressTests(unittest.TestCase):
             state_delta=StateDelta(),
         )
 
-        self.assertTrue(Orchestrator._is_hollow_result(result))
+        self.assertTrue(RoundOutcomePolicy.is_hollow_result(result))
 
     def test_non_hollow_result_with_findings(self) -> None:
         """A successful result that carries finding_updates is NOT hollow."""
-        from killchain_docker.orchestrator.loop import Orchestrator
         from killchain_docker.state import Finding, Severity, StateDelta
 
         result = WorkerResult(
@@ -534,11 +533,10 @@ class HollowResultAndProgressTests(unittest.TestCase):
             ],
         )
 
-        self.assertFalse(Orchestrator._is_hollow_result(result))
+        self.assertFalse(RoundOutcomePolicy.is_hollow_result(result))
 
     def test_non_hollow_result_with_stdout_observation(self) -> None:
         """Raw stdout is evidence the planner can use, even without typed deltas."""
-        from killchain_docker.orchestrator.loop import Orchestrator
         from killchain_docker.state import StateDelta
 
         result = WorkerResult(
@@ -550,11 +548,10 @@ class HollowResultAndProgressTests(unittest.TestCase):
             state_delta=StateDelta(),
         )
 
-        self.assertFalse(Orchestrator._is_hollow_result(result))
+        self.assertFalse(RoundOutcomePolicy.is_hollow_result(result))
 
     def test_non_hollow_result_with_evidence_observation(self) -> None:
         """Evidence stdout also prevents a successful result being called hollow."""
-        from killchain_docker.orchestrator.loop import Orchestrator
         from killchain_docker.state import EvidenceRecord, StateDelta
 
         result = WorkerResult(
@@ -575,11 +572,10 @@ class HollowResultAndProgressTests(unittest.TestCase):
             ],
         )
 
-        self.assertFalse(Orchestrator._is_hollow_result(result))
+        self.assertFalse(RoundOutcomePolicy.is_hollow_result(result))
 
     def test_non_hollow_result_with_flag_candidates(self) -> None:
         """A successful result with flag_candidates in state_delta is NOT hollow."""
-        from killchain_docker.orchestrator.loop import Orchestrator
         from killchain_docker.state import FlagCandidate, StateDelta
 
         result = WorkerResult(
@@ -592,11 +588,10 @@ class HollowResultAndProgressTests(unittest.TestCase):
             ),
         )
 
-        self.assertFalse(Orchestrator._is_hollow_result(result))
+        self.assertFalse(RoundOutcomePolicy.is_hollow_result(result))
 
     def test_failed_result_is_never_hollow(self) -> None:
         """A failed result should not be treated as hollow."""
-        from killchain_docker.orchestrator.loop import Orchestrator
         from killchain_docker.state import StateDelta
 
         result = WorkerResult(
@@ -607,12 +602,11 @@ class HollowResultAndProgressTests(unittest.TestCase):
             state_delta=StateDelta(),
         )
 
-        self.assertFalse(Orchestrator._is_hollow_result(result))
+        self.assertFalse(RoundOutcomePolicy.is_hollow_result(result))
 
     def test_progress_includes_non_flag_state_delta(self) -> None:
         """Findings and credentials count as meaningful progress,
         preventing a premature forced pivot."""
-        from killchain_docker.orchestrator.loop import Orchestrator
         from killchain_docker.state import Finding, Severity, StateDelta
 
         results = [
@@ -628,11 +622,10 @@ class HollowResultAndProgressTests(unittest.TestCase):
             ),
         ]
 
-        self.assertTrue(Orchestrator._round_had_meaningful_progress(results))
+        self.assertTrue(RoundOutcomePolicy.had_meaningful_progress(results))
 
     def test_no_progress_when_all_results_empty(self) -> None:
         """A round where all results are hollow has no progress."""
-        from killchain_docker.orchestrator.loop import Orchestrator
         from killchain_docker.state import StateDelta
 
         results = [
@@ -645,7 +638,7 @@ class HollowResultAndProgressTests(unittest.TestCase):
             ),
         ]
 
-        self.assertFalse(Orchestrator._round_had_meaningful_progress(results))
+        self.assertFalse(RoundOutcomePolicy.had_meaningful_progress(results))
 
 
 if __name__ == "__main__":

@@ -13,6 +13,11 @@ from typing import Any
 from killchain_docker.evidence_context import EvidenceContextBuilder
 from killchain_docker.knowledge import KnowledgeAugmenter
 from killchain_docker.orchestrator.policy import ProgressPolicy, RagPolicy, TodoPolicy
+from killchain_docker.prompt_projection import (
+    execution_record as prompt_execution_record,
+    planner_todo as prompt_planner_todo,
+    working_memory as prompt_working_memory,
+)
 from killchain_docker.prompt_bounds import bounded_value, trim_text
 from killchain_docker.prompts import get_planner_system_prompt, get_prompts
 from killchain_docker.state import RunState, TodoStatus
@@ -128,11 +133,17 @@ class PlannerContextBuilder:
             findings=self._serialize_findings(state),
             flag_candidates=self._serialize_flag_candidates(state),
             rejected_flag_candidates=self._serialize_rejected_flag_candidates(state),
-            todos=self._serialize_todos(state),
+            todos=[
+                prompt_planner_todo(todo)
+                for todo in state.todos[-self._MAX_TODOS:]
+            ],
             recent_round_summaries=self._serialize_round_summaries(state),
             recent_evidence_context=self.evidence_builder.build(state),
-            recent_execution_log=self._serialize_execution_log(state),
-            working_memory=self._serialize_working_memory(state),
+            recent_execution_log=[
+                prompt_execution_record(record)
+                for record in state.execution_log[-self._MAX_EXECUTION_LOG:]
+            ],
+            working_memory=prompt_working_memory(state, limit=self._MAX_WORKING_MEMORY),
             stagnation=stagnation,
             near_miss_evidence=self._near_miss_evidence(state),
             pivot_summaries=self._pivot_summaries(state),
@@ -227,21 +238,6 @@ class PlannerContextBuilder:
             for item in state.rejected_flag_candidates[-16:]
         ]
 
-    def _serialize_todos(self, state: RunState) -> list[dict[str, Any]]:
-        return [
-            {
-                "todo_id": todo.todo_id,
-                "goal": trim_text(todo.goal, width=360),
-                "phase": todo.phase,
-                "status": todo.status,
-                "priority": todo.priority,
-                "context": bounded_value(todo.context, width=360, list_limit=8, dict_limit=14),
-                "result_summary": todo.result_summary[:300],
-                "error": trim_text(todo.error, width=220),
-            }
-            for todo in state.todos[-self._MAX_TODOS:]
-        ]
-
     def _serialize_round_summaries(self, state: RunState) -> list[dict[str, Any]]:
         return [
             bounded_value(
@@ -252,24 +248,6 @@ class PlannerContextBuilder:
             )
             for round_record in list(getattr(state, "rounds", []) or [])[-self._MAX_ROUNDS:]
         ]
-
-    def _serialize_execution_log(self, state: RunState) -> list[dict[str, Any]]:
-        return [
-            {
-                "task_id": record.task_id,
-                "worker_name": record.worker_name,
-                "success": record.success,
-                "summary": trim_text(record.summary, width=320),
-                "error": trim_text(record.error, width=220),
-            }
-            for record in state.execution_log[-self._MAX_EXECUTION_LOG:]
-        ]
-
-    def _serialize_working_memory(self, state: RunState) -> dict[str, str]:
-        return {
-            str(key): trim_text(value, width=360)
-            for key, value in list(state.working_memory.items())[-self._MAX_WORKING_MEMORY:]
-        }
 
     @staticmethod
     def _build_stagnation(state: RunState) -> dict[str, Any]:
