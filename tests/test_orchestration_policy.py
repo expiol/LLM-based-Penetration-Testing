@@ -7,7 +7,15 @@ import unittest
 from killchain_docker.orchestrator.planning import PlanningPipeline
 from killchain_docker.orchestrator.policy import CandidatePolicy, ProgressPolicy, TodoPolicy
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo
-from killchain_docker.state import FlagCandidate, RunState, StateDelta, TodoItem, TodoPhase
+from killchain_docker.state import (
+    EvidenceRecord,
+    FlagCandidate,
+    Hypothesis,
+    RunState,
+    StateDelta,
+    TodoItem,
+    TodoPhase,
+)
 
 
 def _state(flag_format: str = "flag{...}") -> RunState:
@@ -63,6 +71,20 @@ class CandidatePolicyTests(unittest.TestCase):
 
         self.assertFalse(any(todo.phase == TodoPhase.FLAG_VALIDATION for todo in decision.todos))
 
+    def test_rejected_candidate_is_structured_state(self) -> None:
+        state = _state("key{...}")
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value="key{0: 830, 3: 1, 1: 1}", source="script")
+                ]
+            )
+        )
+
+        self.assertEqual(state.flag_candidates, {})
+        self.assertEqual(len(state.rejected_flag_candidates), 1)
+        self.assertEqual(state.rejected_flag_candidates[0].reason, "invalid_candidate_shape")
+
 
 class TodoProgressPolicyTests(unittest.TestCase):
     def test_compound_binary_then_script_todo_becomes_analysis_only(self) -> None:
@@ -103,7 +125,7 @@ class TodoProgressPolicyTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("cooldown", reason)
 
-    def test_failed_family_allows_new_novelty_key(self) -> None:
+    def test_failed_family_blocks_bare_novelty_key(self) -> None:
         state = _state()
         for idx in range(ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD):
             item = state.queue_todo(
@@ -123,11 +145,60 @@ class TodoProgressPolicyTests(unittest.TestCase):
             context={"family": "lfsr-decrypt", "novelty_key": "main-loop-offset"},
         )
 
+        allowed, reason = ProgressPolicy.allows(todo, state)
+
+        self.assertFalse(allowed)
+        self.assertIn("cooldown", reason)
+
+    def test_failed_family_allows_new_hypothesis_id(self) -> None:
+        state = _state()
+        old_hypothesis = Hypothesis(title="Original LFSR tap hypothesis.")
+        new_hypothesis = Hypothesis(title="Reversed bit-order LFSR tap hypothesis.")
+        state.apply_state_delta(StateDelta(hypotheses=[old_hypothesis, new_hypothesis]))
+        for idx in range(ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD):
+            item = state.queue_todo(
+                TodoItem(
+                    goal=f"Try LFSR decrypt variant {idx}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={
+                        "family": "lfsr-decrypt",
+                        "hypothesis_id": old_hypothesis.hypothesis_id,
+                    },
+                    dedupe_key=f"lfsr-{idx}",
+                )
+            )
+            item.mark_running("exploit-worker")
+            item.mark_failed("candidate mismatch", retryable=False)
+
+        todo = PlannedTodo(
+            goal="Retry LFSR decrypt using the reversed bit-order hypothesis.",
+            phase=TodoPhase.ANALYSIS,
+            context={
+                "family": "lfsr-decrypt",
+                "hypothesis_id": new_hypothesis.hypothesis_id,
+                "novelty_key": "reversed-bit-order",
+            },
+        )
+
         allowed, _reason = ProgressPolicy.allows(todo, state)
 
         self.assertTrue(allowed)
 
-    def test_failed_family_allows_materially_different_goal(self) -> None:
+    def test_default_key_includes_typed_reference_ids(self) -> None:
+        first = PlannedTodo(
+            goal="Test exploit hypothesis.",
+            phase=TodoPhase.EXPLOIT,
+            context={"family": "binary-exploit", "hypothesis_id": "hyp-1"},
+        )
+        second = PlannedTodo(
+            goal="Test exploit hypothesis.",
+            phase=TodoPhase.EXPLOIT,
+            context={"family": "binary-exploit", "hypothesis_id": "hyp-2"},
+        )
+
+        self.assertNotEqual(TodoPolicy.default_key(first), TodoPolicy.default_key(second))
+
+    def test_failed_family_blocks_unstructured_rephrased_goal(self) -> None:
         state = _state()
         for idx in range(ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD):
             item = state.queue_todo(
@@ -147,9 +218,79 @@ class TodoProgressPolicyTests(unittest.TestCase):
             context={"family": "lfsr-decrypt"},
         )
 
+        allowed, reason = ProgressPolicy.allows(todo, state)
+
+        self.assertFalse(allowed)
+        self.assertIn("cooldown", reason)
+
+    def test_failed_family_allows_new_evidence_ids(self) -> None:
+        state = _state()
+        state.upsert_evidence(
+            EvidenceRecord(
+                evidence_id="e-old",
+                task_id="todo-old",
+                capability="shell.exec",
+                tool_name="shell_exec",
+                mode="local_command",
+                summary="Original failed decrypt evidence.",
+            )
+        )
+        state.upsert_evidence(
+            EvidenceRecord(
+                evidence_id="e-new",
+                task_id="todo-new",
+                capability="shell.exec",
+                tool_name="shell_exec",
+                mode="local_command",
+                summary="New disassembly evidence changes the next attempt.",
+            )
+        )
+        for idx in range(ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD):
+            item = state.queue_todo(
+                TodoItem(
+                    goal=f"Try LFSR decrypt variant {idx}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "lfsr-decrypt", "evidence_ids": ["e-old"]},
+                    dedupe_key=f"lfsr-{idx}",
+                )
+            )
+            item.mark_running("exploit-worker")
+            item.mark_failed("candidate mismatch", retryable=False)
+
+        todo = PlannedTodo(
+            goal="Retry LFSR decrypt using new disassembly evidence.",
+            phase=TodoPhase.ANALYSIS,
+            context={"family": "lfsr-decrypt", "evidence_ids": ["e-new"]},
+        )
+
         allowed, _reason = ProgressPolicy.allows(todo, state)
 
         self.assertTrue(allowed)
+
+    def test_failed_family_blocks_unknown_evidence_ids(self) -> None:
+        state = _state()
+        for idx in range(ProgressPolicy.FAILURE_COOLDOWN_THRESHOLD):
+            item = state.queue_todo(
+                TodoItem(
+                    goal=f"Try LFSR decrypt variant {idx}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "lfsr-decrypt", "evidence_ids": ["e-old"]},
+                    dedupe_key=f"lfsr-{idx}",
+                )
+            )
+            item.mark_running("exploit-worker")
+            item.mark_failed("candidate mismatch", retryable=False)
+
+        todo = PlannedTodo(
+            goal="Retry LFSR decrypt using invented evidence.",
+            phase=TodoPhase.ANALYSIS,
+            context={"family": "lfsr-decrypt", "evidence_ids": ["missing-evidence"]},
+        )
+
+        allowed, reason = ProgressPolicy.allows(todo, state)
+
+        self.assertFalse(allowed)
+        self.assertIn("cooldown", reason)
 
 
 class FlagValidationCapTests(unittest.TestCase):

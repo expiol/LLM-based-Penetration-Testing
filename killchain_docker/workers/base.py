@@ -12,7 +12,8 @@ from typing import Any
 
 from killchain_docker.evidence_context import EvidenceContextBuilder
 from killchain_docker.llm import LLMClient, LLMClientError
-from killchain_docker.reasoning import ContinueDecision, ToolUseDecision
+from killchain_docker.prompt_bounds import bounded_value, trim_text
+from killchain_docker.reasoning import ToolUseDecision
 from killchain_docker.state import RunState, TodoItem, WorkerResult
 from killchain_docker.tools import (
     ExecutionPlane,
@@ -93,69 +94,6 @@ class WorkerAgent(ABC):
             timeout_s=timeout_s,
         )
 
-    def _should_continue(
-        self,
-        task: TodoItem,
-        state: RunState,
-        prior_steps: list[dict[str, Any]],
-    ) -> bool:
-        """Ask the LLM whether to run another tool in the inner loop.
-
-        Implements a Reflexion pattern: when the last step was a failed script,
-        the prompt explicitly instructs the LLM to analyze the error and fix it.
-        """
-        if self.llm_client is None:
-            return False
-
-        last_step = prior_steps[-1] if prior_steps else {}
-        last_failed_script = (
-            last_step.get("capability") == "script.exec"
-            and last_step.get("returncode") not in (None, 0)
-        )
-        last_partial_script = (
-            last_step.get("capability") == "script.exec"
-            and last_step.get("returncode") == 0
-            and not last_step.get("flag_candidates")
-        )
-
-        if last_failed_script or last_partial_script:
-            system_prompt = (
-                "You are a worker deciding whether to retry after a script failure. "
-                "The last script either crashed or ran without producing a flag candidate. "
-                "Return continue_loop=true and provide error_analysis (what went wrong) "
-                "and fix_strategy (how to fix it in the next attempt). "
-                "Return continue_loop=false ONLY if the error is unrecoverable "
-                "(e.g. missing challenge file, fundamentally wrong approach). "
-                "Return only JSON matching ContinueDecision."
-            )
-        else:
-            system_prompt = (
-                "You are a worker deciding whether to run one more tool or return results. "
-                "Return continue_loop=true only if the last tool produced partial evidence "
-                "that a follow-up tool would concretely advance (e.g. disassembly found the "
-                "algorithm, now run a script to invert it). "
-                "Return continue_loop=false if a flag was found, the task is complete, "
-                "or another tool would not add new information. "
-                "Return only JSON matching ContinueDecision."
-            )
-
-        decision = self.llm_client.generate_json(
-            system_prompt=system_prompt,
-            user_prompt=json.dumps(
-                {
-                    "worker_name": self.name,
-                    "todo_goal": task.goal,
-                    "prior_steps": prior_steps,
-                    "working_memory": state.working_memory if hasattr(state, "working_memory") else {},
-                },
-                ensure_ascii=True,
-                indent=2,
-            ),
-            schema=ContinueDecision,
-            temperature=0.0,
-        )
-        return bool(decision.continue_loop)
-
     def choose_tool_use(
         self,
         *,
@@ -201,22 +139,22 @@ class WorkerAgent(ABC):
             state, allowed_capabilities=allowed
         )
 
-        # Build Reflexion context from prior steps if last step failed
-        reflexion_context = None
+        # Bounded correction context from the last failed script step.
+        correction_context = None
         if prior_steps:
             last = prior_steps[-1]
             if (
                 last.get("capability") == "script.exec"
                 and (last.get("returncode") not in (None, 0) or not last.get("flag_candidates"))
             ):
-                reflexion_context = {
+                correction_context = {
                     "instruction": (
                         "The previous script attempt failed or produced no flag. "
                         "Analyze the error below and write a CORRECTED script. "
                         "Do NOT repeat the same approach without fixing the issue."
                     ),
-                    "last_stderr": str(last.get("stderr_preview", ""))[:2000],
-                    "last_stdout": str(last.get("stdout_preview", ""))[:2000],
+                    "last_stderr": trim_text(last.get("stderr_preview", ""), width=700),
+                    "last_stdout": trim_text(last.get("stdout_preview", ""), width=700),
                     "failure_kind": last.get("failure_kind"),
                     "failure_detail": last.get("failure_detail"),
                 }
@@ -228,21 +166,21 @@ class WorkerAgent(ABC):
             "tool_use_rules": self._tool_use_rules(allowed),
             # TASK CONTEXT
             "worker_name": self.name,
-            "todo": task.model_dump(mode="json"),
-            "working_memory": state.working_memory if hasattr(state, "working_memory") else {},
+            "todo": self._serialize_task_for_prompt(task),
+            "working_memory": self._serialize_working_memory(state),
             # EVIDENCE
             "recent_evidence_context": evidence_context,
-            "prior_steps": prior_steps or [],
+            "prior_steps": bounded_value(prior_steps or [], width=700, list_limit=4, dict_limit=14),
             # BACKGROUND (least critical)
             "state_summary": state.summary(),
             "recent_failures": [
-                record.model_dump(mode="json")
+                self._serialize_execution_record(record)
                 for record in state.execution_log[-6:]
                 if not record.success
             ],
         }
-        if reflexion_context:
-            user_payload["reflexion_context"] = reflexion_context
+        if correction_context:
+            user_payload["correction_context"] = correction_context
 
         allowed_str = ", ".join(f"'{v}'" for v in allowed_values)
         script_reminder = (
@@ -267,7 +205,7 @@ class WorkerAgent(ABC):
                 "Use recent_evidence_context as grounded facts from previous tools. "
                 "If prior_steps is non-empty, use those results to inform your choice — "
                 "do not repeat a tool that already produced its evidence. "
-                "If reflexion_context is present, you MUST fix the identified error "
+                "If correction_context is present, you MUST fix the identified error "
                 "in your next script — do not repeat the same broken approach. "
                 "Do not depend on /tmp files or other scratch files written by earlier todos; "
                 "read challenge files directly or regenerate needed diagnostics in the "
@@ -298,6 +236,42 @@ class WorkerAgent(ABC):
                 f"allowed capabilities: {', '.join(allowed_values)}"
             )
         return decision
+
+    @staticmethod
+    def _serialize_task_for_prompt(task: TodoItem) -> dict[str, Any]:
+        return {
+            "todo_id": task.todo_id,
+            "goal": trim_text(task.goal, width=420),
+            "phase": task.phase,
+            "context": bounded_value(task.context, width=420, list_limit=8, dict_limit=14),
+            "priority": task.priority,
+            "success_criteria": bounded_value(task.success_criteria, width=260, list_limit=6),
+            "constraints": bounded_value(task.constraints, width=260, list_limit=6),
+            "status": task.status,
+            "assigned_worker": task.assigned_worker,
+            "result_summary": trim_text(task.result_summary, width=320),
+            "dedupe_key": task.dedupe_key,
+            "attempts": task.attempts,
+            "max_attempts": task.max_attempts,
+            "error": trim_text(task.error, width=220),
+        }
+
+    @staticmethod
+    def _serialize_working_memory(state: RunState) -> dict[str, str]:
+        return {
+            str(key): trim_text(value, width=360)
+            for key, value in list(state.working_memory.items())[-20:]
+        }
+
+    @staticmethod
+    def _serialize_execution_record(record) -> dict[str, Any]:
+        return {
+            "task_id": record.task_id,
+            "worker_name": record.worker_name,
+            "success": record.success,
+            "summary": trim_text(record.summary, width=320),
+            "error": trim_text(record.error, width=220),
+        }
 
     @staticmethod
     def _tool_use_rules(allowed: set[ToolCapability]) -> list[str]:

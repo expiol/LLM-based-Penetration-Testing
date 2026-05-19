@@ -128,8 +128,8 @@ def load_corpus(
         description = str(meta.get("description") or "").strip()
         if not description and readme:
             # README often duplicates the challenge.json description under
-            # ``## Description`` — fall back to that so query-time semantic
-            # matching still has a phrase to align against.
+            # ``## Description``; use that so query-time semantic matching
+            # still has a phrase to align against.
             description = _readme_description(readme)
 
         entries.append(

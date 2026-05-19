@@ -113,10 +113,17 @@ python scripts/plot_results.py logs/hy/batch_name/
 
 ## Key Design Decisions
 
-- **Reflexion pattern:** Workers retry failed scripts with error analysis injected as context
+- **Backlog-first planning:** The Planner creates work only when no ready todo is queued; the Router and workers consume the current plan before asking for more.
+- **Bounded script correction:** Workers may make one deterministic corrective script attempt for flag-recovery failures, with structured failure context.
+- **Bounded process lifecycle:** Tool plugins and Docker helpers share one subprocess runner with bounded output capture, stdin delivery, timeout reporting, and process-group cleanup.
+- **Gateway-owned structured output repair:** Common LLM JSON failures around source-code strings are repaired at the gateway before schema validation, keeping workers focused on typed decisions.
+- **Typed LLM failures:** LLM errors carry explicit failure kinds (connection, timeout, schema validation, rate limit, config) so retry and batch reporting are not driven by free-form exception text.
+- **Structured novelty gates:** Cooldown escape requires new current-state `evidence_ids` or `hypothesis_id(s)`; `novelty_key` only labels the approach, and rephrased todo text is not progress.
+- **Decision-owned tool metadata:** Required executable metadata (`command`, `script_code`, paths, targets) comes from the current tool decision; todo context can only supply optional defaults.
 - **Forced Pivot:** After N rounds without progress, stalled approach families are banned and the planner must try a fundamentally different attack vector
 - **RAG augmentation:** Related CTF writeups are retrieved and provided to the planner as hints (with decontamination when they appear misleading)
 - **Progress policy:** Family-based cooldown and novelty detection prevent infinite loops on the same approach
+- **Structured failure evidence:** Rejected flag candidates, no-candidate scripts, bytes/text errors, and network pipe failures are recorded as typed state/evidence signals.
 - **Working memory:** Key discoveries persist across cycles as established facts
 
 ## Requirements

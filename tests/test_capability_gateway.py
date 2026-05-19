@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import sys
+import tempfile
+import time
 import unittest
+from pathlib import Path
 
 from killchain_docker.state import RunState, TodoItem, WorkerResult
 from killchain_docker.tools import (
@@ -14,7 +18,9 @@ from killchain_docker.tools import (
     ToolGateway,
 )
 from killchain_docker.tools.plugins.shell import build_output as shell_output_builder
+from killchain_docker.tools.plugins._base import _run
 from killchain_docker.tools.plugins.script import build_output as script_output_builder
+from killchain_docker.tools.plugins.script import ScriptPlugin
 
 
 class _StaticShellPlugin:
@@ -109,6 +115,96 @@ class CapabilityGatewayTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(state.flag_candidates), 1)
+
+    def test_script_plugin_writes_code_via_stdin_not_shell_argv(self) -> None:
+        plugin = ScriptPlugin()
+        result = plugin.execute(
+            ToolExecutionRequest(
+                capability=ToolCapability.SCRIPT_EXEC.value,
+                tool_name="script_exec",
+                metadata={
+                    "script_code": "print(\"flag{stdin_script_ok}\")\nprint(\"quote:' and dollar:$HOME\")",
+                    "script_language": "python",
+                    "files_root": ".",
+                },
+                timeout_s=20,
+            )
+        )
+
+        self.assertEqual(result.exit_code, 0, result.stderr)
+        self.assertIn("flag{stdin_script_ok}", result.stdout)
+        self.assertIn("dollar:$HOME", result.stdout)
+
+
+class PluginSubprocessRunnerTests(unittest.TestCase):
+    def test_run_passes_stdin_to_child_process(self) -> None:
+        result = _run(
+            "stdin-test",
+            [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+            timeout_s=5,
+            input_text="flag{stdin_runner_ok}",
+        )
+
+        self.assertEqual(result.exit_code, 0, result.stderr)
+        self.assertIn("flag{stdin_runner_ok}", result.stdout)
+
+    def test_run_bounds_stdout_and_stderr_capture(self) -> None:
+        result = _run(
+            "capture-bound-test",
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "sys.stdout.write('A' * 1500 + 'STDOUT_TAIL'); "
+                    "sys.stderr.write('B' * 1500 + 'STDERR_TAIL')"
+                ),
+            ],
+            timeout_s=5,
+            max_output_bytes=200,
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("output truncated", result.stdout)
+        self.assertIn("output truncated", result.stderr)
+        self.assertIn("STDOUT_TAIL", result.stdout)
+        self.assertIn("STDERR_TAIL", result.stderr)
+        self.assertLess(len(result.stdout), 400)
+        self.assertLess(len(result.stderr), 400)
+
+    def test_run_reports_timeout(self) -> None:
+        result = _run(
+            "timeout-test",
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            timeout_s=1,
+        )
+
+        self.assertEqual(result.exit_code, -1)
+        self.assertIn("[timeout after 1s]", result.stderr)
+
+    def test_run_timeout_kills_child_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker = Path(tmpdir) / "child_survived.txt"
+            child_code = (
+                "import pathlib, sys, time; "
+                "time.sleep(2); "
+                "pathlib.Path(sys.argv[1]).write_text('survived')"
+            )
+            parent_code = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}, {str(marker)!r}]); "
+                "time.sleep(30)"
+            )
+
+            result = _run(
+                "timeout-group-test",
+                [sys.executable, "-c", parent_code],
+                timeout_s=1,
+            )
+            time.sleep(2.5)
+
+            self.assertEqual(result.exit_code, -1)
+            self.assertFalse(marker.exists())
 
 
 class _StaticCurlPlugin:

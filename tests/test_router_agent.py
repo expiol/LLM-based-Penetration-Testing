@@ -187,6 +187,49 @@ class RouterAgentTests(unittest.TestCase):
         self.assertEqual(decision.assignments, [])
         self.assertIn("No valid", decision.rationale)
 
+    def test_router_prompt_bounds_ready_todo_context(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        huge_text = "X" * 5000
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Route large context.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "family": "crypto-decrypt",
+                    "blob": huge_text,
+                    "items": [huge_text for _ in range(20)],
+                },
+            )
+        )
+        captured: dict[str, object] = {}
+
+        def respond(_system_prompt: str, user_prompt: str):
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "assignments": [
+                    {
+                        "todo_id": todo.todo_id,
+                        "worker_name": "artifact-worker",
+                        "rationale": "bounded context",
+                    }
+                ],
+                "rationale": "bounded context",
+            }
+
+        router = RouterAgent(StaticLLMClient(respond))
+
+        router.route(
+            state,
+            worker_catalog=[{"name": "artifact-worker"}],
+            max_assignments=5,
+        )
+
+        ready = captured["snapshot"]["ready_todos"]  # type: ignore[index]
+        context = ready[0]["context"]  # type: ignore[index]
+        self.assertLessEqual(len(context["blob"]), 400)
+        self.assertEqual(len(context["items"]), 8)
+        self.assertNotIn("X" * 1000, json.dumps(captured["snapshot"]))
+
     def test_deterministic_flag_validation_route(self) -> None:
         state = RunState(objective="Solve.", authorized_scope=[])
         todo = state.queue_todo(

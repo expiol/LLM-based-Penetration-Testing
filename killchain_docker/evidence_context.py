@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import json
 
 from killchain_docker.state import EvidenceRecord, RunState
 
@@ -25,21 +26,24 @@ class EvidenceContextBuilder:
     def __init__(
         self,
         *,
-        max_records: int = 20,
-        max_text_preview: int = 1800,
-        max_key_lines: int = 24,
+        max_records: int = 14,
+        max_text_preview: int = 1400,
+        max_key_lines: int = 16,
+        max_total_chars: int = 18000,
         category: str = "misc",
     ) -> None:
         if category in ("crypto", "rev", "forensics"):
-            self.max_records = 24
-            self.max_text_preview = 2400
+            self.max_records = 16
+            self.max_text_preview = 1800
         else:
             self.max_records = max_records
             self.max_text_preview = max_text_preview
         self.max_key_lines = max_key_lines
+        self.max_total_chars = max_total_chars
 
     def build(self, state: RunState, allowed_capabilities: set | None = None) -> list[dict[str, object]]:
         out: list[dict[str, object]] = []
+        total_chars = 0
         selected = self._select_records(state, allowed_capabilities=allowed_capabilities)
         total_selected = len(selected)
         for rank, evidence in enumerate(selected):
@@ -73,6 +77,10 @@ class EvidenceContextBuilder:
                 item.update(self._generic_context(ctx))
 
             if len(item) > 5:
+                item_chars = len(json.dumps(item, ensure_ascii=True))
+                if out and total_chars + item_chars > self.max_total_chars:
+                    break
+                total_chars += item_chars
                 out.append(item)
         return out
 

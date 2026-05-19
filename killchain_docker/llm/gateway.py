@@ -11,6 +11,8 @@ from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from killchain_docker._compat import StrEnum
+
 log = logging.getLogger(__name__)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -20,9 +22,61 @@ FIXED_LLM_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "llm_g
 class LLMClientError(RuntimeError):
     """Raised when an LLM call cannot be used safely."""
 
-    def __init__(self, message: str, *, transient: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        transient: bool = False,
+        kind: "LLMFailureKind | str | None" = None,
+        schema_name: str | None = None,
+        model: str | None = None,
+        attempts: int | None = None,
+    ) -> None:
         super().__init__(message)
-        self.transient = transient
+        self.kind = LLMFailureKind.coerce(kind) if kind is not None else (
+            LLMFailureKind.TRANSIENT if transient else LLMFailureKind.UNKNOWN
+        )
+        self.transient = transient or self.kind.is_transient
+        self.schema_name = schema_name
+        self.model = model
+        self.attempts = attempts
+
+
+class LLMFailureKind(StrEnum):
+    """Typed LLM failure reason used for retry and run-state reporting."""
+
+    CONFIG = "config"
+    CONNECTION = "connection"
+    DEADLINE_EXCEEDED = "deadline_exceeded"
+    DEPENDENCY = "dependency"
+    RATE_LIMIT = "rate_limit"
+    SCHEMA_VALIDATION = "schema_validation"
+    SERVICE_UNAVAILABLE = "service_unavailable"
+    TIMEOUT = "timeout"
+    TRANSIENT = "transient"
+    UNKNOWN = "unknown"
+
+    @property
+    def is_transient(self) -> bool:
+        return self in {
+            LLMFailureKind.CONNECTION,
+            LLMFailureKind.DEADLINE_EXCEEDED,
+            LLMFailureKind.RATE_LIMIT,
+            LLMFailureKind.SERVICE_UNAVAILABLE,
+            LLMFailureKind.TIMEOUT,
+            LLMFailureKind.TRANSIENT,
+        }
+
+    @classmethod
+    def coerce(cls, value: "LLMFailureKind | str | None") -> "LLMFailureKind":
+        if isinstance(value, LLMFailureKind):
+            return value
+        if value is None:
+            return cls.UNKNOWN
+        try:
+            return cls(str(value))
+        except ValueError:
+            return cls.UNKNOWN
 
 
 class LLMClient(Protocol):
@@ -141,6 +195,59 @@ def _escape_control_chars_in_json_strings(text: str) -> str:
     return "".join(out)
 
 
+def _escape_source_backslashes_in_json_strings(text: str) -> str:
+    r"""Preserve source-code backslashes that models often emit inside JSON strings.
+
+    JSON accepts only a small escape alphabet.  LLM-generated script bodies often
+    contain Python/regex escapes such as ``\w`` or ``\b`` without JSON-escaping
+    the backslash first.  This pass repairs those source-code escapes before
+    JSON decoding, while leaving structural JSON escapes for quotes, newlines,
+    and unicode intact.
+    """
+
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    valid_json_escapes = {'"', "\\", "/", "n", "r", "t", "u"}
+    source_code_escapes = {"b", "f"}
+
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if escaped:
+                if char in valid_json_escapes:
+                    out.append(char)
+                elif char in source_code_escapes:
+                    out.append("\\")
+                    out.append(char)
+                else:
+                    out.append("\\")
+                    out.append(char)
+                escaped = False
+                index += 1
+                continue
+            if char == "\\":
+                out.append(char)
+                escaped = True
+                index += 1
+                continue
+            if char == '"':
+                in_string = False
+            out.append(char)
+            index += 1
+            continue
+
+        out.append(char)
+        if char == '"':
+            in_string = True
+            escaped = False
+        index += 1
+    if escaped:
+        out.append("\\")
+    return "".join(out)
+
+
 def _inside_json_string_at(text: str, position: int) -> bool:
     in_string = False
     escaped = False
@@ -191,6 +298,7 @@ def _loads_lenient_json_object(text: str) -> Any:
         return json.loads(candidate)
     except json.JSONDecodeError:
         repaired = _close_unclosed_string_before_object_boundary(candidate)
+        repaired = _escape_source_backslashes_in_json_strings(repaired)
         repaired = _escape_control_chars_in_json_strings(repaired)
         return json.loads(repaired)
 
@@ -258,7 +366,10 @@ def _normalize_schema_model_map(payload: Any) -> dict[str, str]:
     if payload is None:
         return {}
     if not isinstance(payload, dict):
-        raise LLMClientError("schema_models must be a JSON object.")
+        raise LLMClientError(
+            "schema_models must be a JSON object.",
+            kind=LLMFailureKind.CONFIG,
+        )
     normalized: dict[str, str] = {}
     for key, value in payload.items():
         if not isinstance(key, str) or not key.strip():
@@ -276,11 +387,15 @@ def _validate_model_names(default_model: str, schema_models: Mapping[str, str]) 
     upstream provider is acceptable; we only reject blank/whitespace names.
     """
     if not default_model or not default_model.strip():
-        raise LLMClientError("default_model must be a non-empty string.")
+        raise LLMClientError(
+            "default_model must be a non-empty string.",
+            kind=LLMFailureKind.CONFIG,
+        )
     for key, value in schema_models.items():
         if not isinstance(value, str) or not value.strip():
             raise LLMClientError(
-                f"schema_models[{key!r}] must be a non-empty string."
+                f"schema_models[{key!r}] must be a non-empty string.",
+                kind=LLMFailureKind.CONFIG,
             )
 
 
@@ -288,13 +403,22 @@ def _load_runtime_config_payload(path: Path) -> dict[str, Any]:
     try:
         raw_text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise LLMClientError(f"Cannot read LLM config file: {path} ({exc})") from exc
+        raise LLMClientError(
+            f"Cannot read LLM config file: {path} ({exc})",
+            kind=LLMFailureKind.CONFIG,
+        ) from exc
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError as exc:
-        raise LLMClientError(f"LLM config file is not valid JSON: {path} ({exc})") from exc
+        raise LLMClientError(
+            f"LLM config file is not valid JSON: {path} ({exc})",
+            kind=LLMFailureKind.CONFIG,
+        ) from exc
     if not isinstance(payload, dict):
-        raise LLMClientError(f"LLM config root must be JSON object: {path}")
+        raise LLMClientError(
+            f"LLM config root must be JSON object: {path}",
+            kind=LLMFailureKind.CONFIG,
+        )
     return payload
 
 
@@ -318,7 +442,10 @@ class LLMSettings(BaseModel):
         default_model = payload.get("default_model") or payload.get("model")
         schema_models = _normalize_schema_model_map(payload.get("schema_models"))
         if not default_model or not isinstance(default_model, str):
-            raise LLMClientError("LLM default model is required (llm_gateway.json::default_model).")
+            raise LLMClientError(
+                "LLM default model is required (llm_gateway.json::default_model).",
+                kind=LLMFailureKind.CONFIG,
+            )
         _validate_model_names(default_model.strip(), schema_models)
 
         resolved_api_key = str(payload.get("api_key") or "").strip()
@@ -383,12 +510,17 @@ class StaticLLMClient:
             try:
                 payload = _loads_lenient_json_object(payload)
             except json.JSONDecodeError as exc:
-                raise LLMClientError(f"StaticLLMClient returned invalid JSON: {exc}") from exc
+                raise LLMClientError(
+                    f"StaticLLMClient returned invalid JSON: {exc}",
+                    kind=LLMFailureKind.SCHEMA_VALIDATION,
+                ) from exc
         try:
             return schema.model_validate(payload)
         except ValidationError as exc:
             raise LLMClientError(
-                f"LLM response failed {schema.__name__} validation: {exc}"
+                f"LLM response failed {schema.__name__} validation: {exc}",
+                kind=LLMFailureKind.SCHEMA_VALIDATION,
+                schema_name=schema.__name__,
             ) from exc
 
 
@@ -428,12 +560,16 @@ class GatewayLLMClient:
             import instructor
         except ImportError as exc:
             raise LLMClientError(
-                "Gateway mode requires 'instructor'. Install dependencies first."
+                "Gateway mode requires 'instructor'. Install dependencies first.",
+                kind=LLMFailureKind.DEPENDENCY,
             ) from exc
         try:
             from openai import OpenAI
         except ImportError as exc:
-            raise LLMClientError("Gateway mode requires 'openai'.") from exc
+            raise LLMClientError(
+                "Gateway mode requires 'openai'.",
+                kind=LLMFailureKind.DEPENDENCY,
+            ) from exc
 
         kwargs: dict[str, Any] = {
             "api_key": self.api_key,
@@ -514,18 +650,33 @@ class GatewayLLMClient:
         name = type(exc).__name__.lower()
         return "validation" in name or "jsondecode" in name
 
-    def _is_transient(self, exc: Exception) -> bool:
+    def _classify_failure(self, exc: Exception) -> LLMFailureKind:
+        if isinstance(exc, LLMClientError):
+            return exc.kind
         if self._is_schema_validation_error(exc):
-            return False
+            return LLMFailureKind.SCHEMA_VALIDATION
         message = str(exc).lower()
-        markers = (
-            "rate limit", "429", "timeout", "timed out", "temporarily",
-            "connection", "service unavailable", "502", "503", "504",
-        )
-        if any(marker in message for marker in markers):
-            return True
+        if "rate limit" in message or "429" in message:
+            return LLMFailureKind.RATE_LIMIT
+        if "timeout" in message or "timed out" in message:
+            return LLMFailureKind.TIMEOUT
+        if "connection" in message:
+            return LLMFailureKind.CONNECTION
+        if "service unavailable" in message or "502" in message or "503" in message or "504" in message:
+            return LLMFailureKind.SERVICE_UNAVAILABLE
+        if "temporarily" in message:
+            return LLMFailureKind.TRANSIENT
         name = type(exc).__name__.lower()
-        return "timeout" in name or "ratelimit" in name or "connection" in name
+        if "ratelimit" in name:
+            return LLMFailureKind.RATE_LIMIT
+        if "timeout" in name:
+            return LLMFailureKind.TIMEOUT
+        if "connection" in name:
+            return LLMFailureKind.CONNECTION
+        return LLMFailureKind.UNKNOWN
+
+    def _is_transient(self, exc: Exception) -> bool:
+        return self._classify_failure(exc).is_transient
 
     def _record_usage(self, completion: Any) -> None:
         usage = getattr(completion, "usage", None)
@@ -603,10 +754,12 @@ class GatewayLLMClient:
         # call never blocks a worker indefinitely.
         deadline = time.monotonic() + self.timeout_s * (1 + self.max_retries)
         last_exc: Exception | None = None
+        attempts_used = 0
         for attempt in range(1 + self.max_retries):
             if time.monotonic() >= deadline:
                 break
             try:
+                attempts_used += 1
                 parsed, completion = self._create_structured(
                     messages=messages, schema=schema, model=selected_model, temperature=temperature
                 )
@@ -633,9 +786,13 @@ class GatewayLLMClient:
 
         if last_exc is None:
             last_exc = TimeoutError("generate_json exceeded deadline")
+        kind = self._classify_failure(last_exc)
         raise LLMClientError(
             f"Gateway structured output failed for {schema.__name__} (model={selected_model}): {last_exc}",
-            transient=self._is_transient(last_exc),
+            kind=kind,
+            schema_name=schema.__name__,
+            model=selected_model,
+            attempts=attempts_used,
         ) from last_exc
 
     def preflight(self) -> None:
@@ -655,9 +812,15 @@ def build_llm_client_from_env(*, preflight: bool = True) -> LLMClient:
 
     settings = LLMSettings.from_env()
     if not settings.api_key:
-        raise LLMClientError(f"'api_key' is required in {FIXED_LLM_CONFIG_PATH}.")
+        raise LLMClientError(
+            f"'api_key' is required in {FIXED_LLM_CONFIG_PATH}.",
+            kind=LLMFailureKind.CONFIG,
+        )
     if not settings.default_model:
-        raise LLMClientError(f"'default_model' is required in {FIXED_LLM_CONFIG_PATH}.")
+        raise LLMClientError(
+            f"'default_model' is required in {FIXED_LLM_CONFIG_PATH}.",
+            kind=LLMFailureKind.CONFIG,
+        )
 
     client = GatewayLLMClient(
         provider=settings.provider,

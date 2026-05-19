@@ -12,9 +12,10 @@ from pathlib import Path
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - Windows fallback
+except ImportError:  # pragma: no cover - Windows compatibility
     fcntl = None
 
+from killchain_docker.processes import run_bounded_process
 from nyuctf.challenge import CTFChallenge
 
 
@@ -80,11 +81,12 @@ def docker_compose_down(challenge: CTFChallenge) -> None:
     if compose is None:
         return
     try:
-        subprocess.run(
+        run_bounded_process(
             ["docker", "compose", "-f", str(compose), "down", "--volumes", "--remove-orphans"],
-            check=False, capture_output=True, timeout=120,
+            timeout_s=120,
+            max_output_bytes=20_000,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except OSError:
         return
 
 

@@ -6,7 +6,12 @@ import unittest
 
 from pydantic import BaseModel
 
-from killchain_docker.llm.gateway import GatewayLLMClient, StaticLLMClient
+from killchain_docker.llm.gateway import (
+    GatewayLLMClient,
+    LLMClientError,
+    LLMFailureKind,
+    StaticLLMClient,
+)
 from killchain_docker.reasoning.coercion import coerce_llm_bool
 from killchain_docker.reasoning.schemas import ToolUseDecision
 
@@ -46,6 +51,10 @@ class TestGatewayTransientClassification(unittest.TestCase):
         )
 
         self.assertFalse(client._is_transient(ValueError(message)))
+        self.assertEqual(
+            client._classify_failure(ValueError(message)),
+            LLMFailureKind.SCHEMA_VALIDATION,
+        )
 
     def test_pydantic_validation_error_is_not_transient(self) -> None:
         client = object.__new__(GatewayLLMClient)
@@ -57,12 +66,39 @@ class TestGatewayTransientClassification(unittest.TestCase):
             self.fail("expected validation error")
 
         self.assertFalse(client._is_transient(validation_error))
+        self.assertEqual(
+            client._classify_failure(validation_error),
+            LLMFailureKind.SCHEMA_VALIDATION,
+        )
 
     def test_network_errors_remain_transient(self) -> None:
         client = object.__new__(GatewayLLMClient)
 
         self.assertTrue(client._is_transient(ConnectionError("Connection error.")))
         self.assertTrue(client._is_transient(TimeoutError("timed out")))
+        self.assertEqual(
+            client._classify_failure(ConnectionError("Connection error.")),
+            LLMFailureKind.CONNECTION,
+        )
+        self.assertEqual(
+            client._classify_failure(TimeoutError("timed out")),
+            LLMFailureKind.TIMEOUT,
+        )
+
+    def test_client_error_carries_typed_failure_metadata(self) -> None:
+        exc = LLMClientError(
+            "structured output failed",
+            kind=LLMFailureKind.SCHEMA_VALIDATION,
+            schema_name="ToolUseDecision",
+            model="test-model",
+            attempts=3,
+        )
+
+        self.assertFalse(exc.transient)
+        self.assertEqual(exc.kind, LLMFailureKind.SCHEMA_VALIDATION)
+        self.assertEqual(exc.schema_name, "ToolUseDecision")
+        self.assertEqual(exc.model, "test-model")
+        self.assertEqual(exc.attempts, 3)
 
 
 class TestLenientStructuredOutput(unittest.TestCase):
@@ -105,6 +141,28 @@ beta')"
         )
 
         self.assertEqual(decision.metadata["script_code"], "print('alpha')")
+
+    def test_static_client_repairs_source_code_backslash_escapes(self) -> None:
+        payload = r"""{
+  "capability": "script.exec",
+  "metadata": {
+    "script_code": "import re\npat = re.compile('\bcmp\w+')"
+  },
+  "rationale": "inspect disassembly",
+  "expected_signal": "matching cmp instructions"
+}"""
+        client = StaticLLMClient([payload])
+
+        decision = client.generate_json(
+            system_prompt="",
+            user_prompt="",
+            schema=ToolUseDecision,
+        )
+
+        self.assertEqual(
+            decision.metadata["script_code"],
+            "import re\npat = re.compile('\\bcmp\\w+')",
+        )
 
     def test_gateway_recovers_completion_embedded_in_instructor_error(self) -> None:
         client = object.__new__(GatewayLLMClient)

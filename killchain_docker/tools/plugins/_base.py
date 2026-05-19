@@ -10,9 +10,9 @@ Provides:
 
 from __future__ import annotations
 
-import subprocess
 from typing import Any
 
+from killchain_docker.processes import DEFAULT_MAX_CAPTURE_BYTES, run_bounded_process
 from killchain_docker.reasoning.flag import extract_flag_candidates
 from killchain_docker.state import FlagCandidate
 from killchain_docker.state.constants import FLAG_PATTERN, validatable_flag_candidate
@@ -27,6 +27,8 @@ from killchain_docker.tools.core import (
     _truncate,
 )
 
+_MAX_CAPTURE_BYTES = DEFAULT_MAX_CAPTURE_BYTES
+
 
 def _run(
     name: str,
@@ -34,26 +36,26 @@ def _run(
     timeout_s: int,
     *,
     cwd: str | None = None,
+    input_text: str | None = None,
+    max_output_bytes: int = _MAX_CAPTURE_BYTES,
 ) -> ToolExecutionResult:
     """Shared subprocess runner for all plugins."""
     try:
-        completed = subprocess.run(
-            argv, capture_output=True, text=True,
-            timeout=timeout_s, check=False, cwd=cwd,
+        result = run_bounded_process(
+            argv,
+            timeout_s=timeout_s,
+            cwd=cwd,
+            input_text=input_text,
+            max_output_bytes=max_output_bytes,
         )
     except OSError as exc:
         raise ToolExecutionError(f"{name} failed: {exc}") from exc
-    except subprocess.TimeoutExpired as exc:
-        stdout = (exc.stdout or b"").decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
-        stderr = (exc.stderr or b"").decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
-        return ToolExecutionResult(
-            tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=-1,
-            stdout=stdout, stderr=f"{stderr}\n[timeout after {timeout_s}s]",
-        )
     return ToolExecutionResult(
-        tool_name=name, mode=ExecutionMode.LOCAL_COMMAND,
-        exit_code=completed.returncode,
-        stdout=completed.stdout, stderr=completed.stderr,
+        tool_name=name,
+        mode=ExecutionMode.LOCAL_COMMAND,
+        exit_code=result.exit_code,
+        stdout=result.stdout,
+        stderr=result.stderr,
     )
 
 
@@ -82,7 +84,7 @@ def _flag_candidates_from(text: str, *, source: str = "") -> list[FlagCandidate]
         return []
 
     # extract_flag_candidates handles the full pipeline: regex, base64/hex/rot13
-    # decode, and bracket-span fallback — no need to call extract_flags_from_text
+    # decode, and bracket-span extraction — no need to call extract_flags_from_text
     # separately.
     all_values = extract_flag_candidates(text)
 

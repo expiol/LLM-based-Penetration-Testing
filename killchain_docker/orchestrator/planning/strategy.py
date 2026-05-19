@@ -29,8 +29,9 @@ _PLANNING_CONTRACT = {
         "Return only the upstream todo now and wait for worker results before planning the dependent todo."
     ),
     "exploit_grounding": (
-        "Only propose exploit-phase todos when the current state already contains grounded findings, "
-        "vulnerabilities, credentials, sessions, hypotheses, evidence, or explicit ids in todo context."
+        "Only propose exploit-phase todos without explicit ids when the current state already contains "
+        "grounded vulnerabilities, credentials, or sessions. Findings, hypotheses, and evidence must be "
+        "cited with explicit ids from the current state in todo context."
     ),
     "stop_rule": "Set stop_run=true only when solved or genuinely exhausted.",
     "evidence_context_rule": (
@@ -39,6 +40,12 @@ _PLANNING_CONTRACT = {
         "that are already present there; plan the next distinct step from that evidence. "
         "Do not plan work that depends on /tmp files written by an earlier todo. "
         "If raw data is needed, use recent_evidence_context or regenerate and print it in the same script."
+    ),
+    "novelty_rule": (
+        "When stagnation_signals lists a cooled-down family, a new todo in that family "
+        "must cite current-state context.evidence_ids or context.hypothesis_id/context.hypothesis_ids "
+        "that were not used by previous todos in that family. context.novelty_key may label "
+        "the new approach, but it is not grounding by itself. Rephrasing the goal is not novelty."
     ),
 }
 
@@ -80,6 +87,7 @@ class PlanStrategy:
             "assets": ctx.assets,
             "findings": ctx.findings,
             "flag_candidates": ctx.flag_candidates,
+            "rejected_flag_candidates": ctx.rejected_flag_candidates,
             "todos": ctx.todos,
             "recent_round_summaries": ctx.recent_round_summaries,
             "recent_evidence_context": ctx.recent_evidence_context,
@@ -99,4 +107,3 @@ class PlanStrategy:
             "open_todos": ctx.open_todo_count,
         }
         return json.dumps(snapshot, ensure_ascii=True, indent=2)
-

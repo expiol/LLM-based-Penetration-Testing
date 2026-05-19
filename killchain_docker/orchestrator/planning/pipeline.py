@@ -7,7 +7,12 @@ from killchain_docker.orchestrator.planning.schemas import (
     PlannerAgent,
     PlannerDecision,
 )
-from killchain_docker.orchestrator.policy import CandidatePolicy, ProgressPolicy, TodoPolicy
+from killchain_docker.orchestrator.policy import (
+    CandidatePolicy,
+    ContextRefPolicy,
+    ProgressPolicy,
+    TodoPolicy,
+)
 from killchain_docker.state import RunState, TodoPhase, TodoStatus, todo_phase_rank
 
 
@@ -172,12 +177,12 @@ class PlanningPipeline(PlannerAgent):
         todos: list[PlannedTodo],
         state: RunState,
     ) -> tuple[list[PlannedTodo], list[str]]:
-        # Only block against pending/running todos and successfully completed ones.
-        # Partial todos should not block re-attempts with the same key.
+        # A dedupe key identifies one semantic attempt.  Re-attempts must carry
+        # new novelty/evidence so they produce a different key.
         seen = {
             todo.dedupe_key
             for todo in state.todos
-            if todo.dedupe_key and todo.status != TodoStatus.PARTIAL
+            if todo.dedupe_key
         }
         atomic_seen: set[tuple[str, str]] = set()
         for todo in state.todos:
@@ -276,29 +281,44 @@ class PlanningPipeline(PlannerAgent):
     def _grounded(todo: PlannedTodo, state: RunState) -> bool:
         context = todo.context or {}
         if todo.phase == TodoPhase.EXPLOIT:
-            return bool(
-                state.findings
-                or state.vulnerabilities
-                or state.credentials
-                or state.sessions
-                or state.hypotheses
-                or state.evidence
-                or any(
-                    context.get(key)
-                    for key in (
-                        "finding_id",
-                        "finding_ids",
-                        "vulnerability_id",
-                        "vulnerability_ids",
-                        "credential_id",
-                        "credential_ids",
-                        "session_id",
-                        "session_ids",
-                        "hypothesis_id",
-                        "hypothesis_ids",
-                        "evidence_id",
-                        "evidence_ids",
-                    )
+            if state.vulnerabilities or state.credentials or state.sessions:
+                return True
+            return (
+                ContextRefPolicy.refs_existing(
+                    context,
+                    state.findings,
+                    "finding_id",
+                    "finding_ids",
+                )
+                or ContextRefPolicy.refs_existing(
+                    context,
+                    state.vulnerabilities,
+                    "vulnerability_id",
+                    "vulnerability_ids",
+                )
+                or ContextRefPolicy.refs_existing(
+                    context,
+                    state.credentials,
+                    "credential_id",
+                    "credential_ids",
+                )
+                or ContextRefPolicy.refs_existing(
+                    context,
+                    state.sessions,
+                    "session_id",
+                    "session_ids",
+                )
+                or ContextRefPolicy.refs_existing(
+                    context,
+                    state.hypotheses,
+                    "hypothesis_id",
+                    "hypothesis_ids",
+                )
+                or ContextRefPolicy.refs_existing(
+                    context,
+                    state.evidence,
+                    "evidence_id",
+                    "evidence_ids",
                 )
             )
         if todo.phase == TodoPhase.FLAG_VALIDATION:

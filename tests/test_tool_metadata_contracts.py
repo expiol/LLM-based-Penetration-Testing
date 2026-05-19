@@ -36,6 +36,21 @@ class ToolMetadataContractTests(unittest.TestCase):
         )
         self.assertEqual(result["command"], "nmap -sV 127.0.0.1")
 
+    def test_selected_command_overrides_stale_context_command(self) -> None:
+        state = RunState(objective="solve")
+        todo = TodoItem(goal="test", context={"command": "rm -rf stale"})
+        result = normalize_tool_metadata(
+            ToolCapability.SHELL_EXEC, todo, state,
+            {"command": "echo current"},
+        )
+        self.assertEqual(result["command"], "echo current")
+
+    def test_required_command_cannot_be_satisfied_by_context(self) -> None:
+        state = RunState(objective="solve")
+        todo = TodoItem(goal="test", context={"command": "echo hidden"})
+        with self.assertRaises(ToolExecutionError):
+            normalize_tool_metadata(ToolCapability.SHELL_EXEC, todo, state, {})
+
     def test_script_exec_normalization_requires_script_code(self) -> None:
         state = RunState(objective="solve")
         todo = TodoItem(goal="test")
@@ -51,6 +66,35 @@ class ToolMetadataContractTests(unittest.TestCase):
         )
         self.assertEqual(result["script_code"], "print('hello')")
         self.assertEqual(result["script_language"], "python")
+
+    def test_selected_script_code_overrides_stale_context_script(self) -> None:
+        state = RunState(objective="solve")
+        todo = TodoItem(goal="test", context={"script_code": "print('stale')"})
+        result = normalize_tool_metadata(
+            ToolCapability.SCRIPT_EXEC, todo, state,
+            {"script_code": "print('current')"},
+        )
+        self.assertEqual(result["script_code"], "print('current')")
+
+    def test_required_script_code_cannot_be_satisfied_by_context(self) -> None:
+        state = RunState(objective="solve")
+        todo = TodoItem(goal="test", context={"script_code": "print('hidden')"})
+        with self.assertRaises(ToolExecutionError):
+            normalize_tool_metadata(ToolCapability.SCRIPT_EXEC, todo, state, {})
+
+    def test_context_can_supply_optional_defaults_only(self) -> None:
+        state = RunState(objective="solve")
+        todo = TodoItem(
+            goal="test",
+            context={"files_root": "/tmp/ctf", "timeout_s": 42},
+        )
+        result = normalize_tool_metadata(
+            ToolCapability.SCRIPT_EXEC, todo, state,
+            {"script_code": "print('hello')"},
+        )
+        self.assertEqual(result["script_code"], "print('hello')")
+        self.assertEqual(result["files_root"], "/tmp/ctf")
+        self.assertEqual(result["timeout_s"], 42)
 
     def test_script_exec_normalizes_language(self) -> None:
         state = RunState(objective="solve")

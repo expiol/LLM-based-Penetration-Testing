@@ -14,7 +14,18 @@ from killchain_docker.orchestrator.planning import (
     TodoPhase,
 )
 from killchain_docker.orchestrator.policy import TodoPolicy
-from killchain_docker.state import EvidenceRecord, FlagCandidate, RunState, TodoItem
+from killchain_docker.state import (
+    EvidenceRecord,
+    ExecutionRecord,
+    Finding,
+    FlagCandidate,
+    Hypothesis,
+    RunState,
+    Severity,
+    StateDelta,
+    TodoItem,
+    Vulnerability,
+)
 
 
 def _state(files: list[str] | None = None, scope: list[str] | None = None) -> RunState:
@@ -191,6 +202,43 @@ class PlanningPipelineDedupTests(unittest.TestCase):
         self.assertEqual(len(inventory_todos), 1)
         self.assertTrue(any("dropped" in note for note in decision.notes))
 
+    def test_partial_todo_blocks_same_dedupe_key_but_allows_new_key(self) -> None:
+        state = _state([])
+        partial = state.queue_todo(
+            TodoItem(
+                goal="Try LFSR decrypt.",
+                phase=TodoPhase.ANALYSIS,
+                context={"family": "crypto-decrypt"},
+                dedupe_key="decrypt-same",
+            )
+        )
+        partial.mark_running("artifact-worker")
+        partial.mark_partial("script completed without a flag", "no candidate")
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(
+                summary="retry",
+                todos=[
+                    PlannedTodo(
+                        goal="Retry the same LFSR decrypt.",
+                        phase=TodoPhase.ANALYSIS,
+                        context={"family": "crypto-decrypt"},
+                        dedupe_key="decrypt-same",
+                    ),
+                    PlannedTodo(
+                        goal="Retry LFSR decrypt using newly extracted tap evidence.",
+                        phase=TodoPhase.ANALYSIS,
+                        context={"family": "crypto-decrypt", "novelty_key": "tap-evidence-1"},
+                        dedupe_key="decrypt-with-tap-evidence",
+                    ),
+                ],
+            ),
+        )
+
+        self.assertEqual([todo.dedupe_key for todo in decision.todos], ["decrypt-with-tap-evidence"])
+        self.assertTrue(any("dropped 1 duplicate" in note for note in decision.notes))
+
 
 class LLMPlannerTests(unittest.TestCase):
     def test_planner_combines_bootstrap_and_llm_todos(self) -> None:
@@ -309,6 +357,216 @@ class LLMPlannerTests(unittest.TestCase):
 
         self.assertEqual(decision.todos, [])
         self.assertTrue(any("ungrounded exploit" in note for note in decision.notes))
+
+    def test_planner_drops_exploit_with_only_global_evidence(self) -> None:
+        state = _state([])
+        state.upsert_evidence(
+            EvidenceRecord(
+                task_id="todo-inventory",
+                capability="shell.exec",
+                tool_name="shell_exec",
+                mode="local_command",
+                summary="Inventory completed.",
+            )
+        )
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "premature exploit",
+                    "todos": [
+                        {
+                            "goal": "Exploit an assumed issue from prior output.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(decision.todos, [])
+        self.assertTrue(any("ungrounded exploit" in note for note in decision.notes))
+
+    def test_planner_allows_exploit_with_explicit_evidence_id(self) -> None:
+        state = _state([])
+        state.upsert_evidence(
+            EvidenceRecord(
+                task_id="todo-analysis",
+                capability="shell.exec",
+                tool_name="shell_exec",
+                mode="local_command",
+                summary="Evidence shows controllable return address.",
+            )
+        )
+        evidence_id = next(iter(state.evidence))
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "grounded exploit",
+                    "todos": [
+                        {
+                            "goal": "Exploit the controllable return address.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {"evidence_ids": [evidence_id]},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.EXPLOIT)
+
+    def test_planner_drops_exploit_with_unknown_evidence_id(self) -> None:
+        state = _state([])
+        state.upsert_evidence(
+            EvidenceRecord(
+                task_id="todo-analysis",
+                capability="shell.exec",
+                tool_name="shell_exec",
+                mode="local_command",
+                summary="Evidence exists, but this is not the referenced record.",
+            )
+        )
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "ungrounded exploit",
+                    "todos": [
+                        {
+                            "goal": "Exploit output that is not in state.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {"evidence_ids": ["missing-evidence"]},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(decision.todos, [])
+        self.assertTrue(any("ungrounded exploit" in note for note in decision.notes))
+
+    def test_planner_allows_exploit_with_existing_hypothesis_id(self) -> None:
+        state = _state([])
+        hypothesis = Hypothesis(title="Stack offset can overwrite the return address.")
+        state.apply_state_delta(StateDelta(hypotheses=[hypothesis]))
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "hypothesis-driven exploit",
+                    "todos": [
+                        {
+                            "goal": "Test exploit payload for the return-address hypothesis.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {"hypothesis_id": hypothesis.hypothesis_id},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.EXPLOIT)
+
+    def test_planner_drops_exploit_with_unreferenced_finding(self) -> None:
+        state = _state([])
+        state.upsert_finding(Finding(finding_id="finding-1", title="SQLi", severity=Severity.HIGH))
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "missing finding ref",
+                    "todos": [
+                        {
+                            "goal": "Exploit the discovered finding.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(decision.todos, [])
+        self.assertTrue(any("ungrounded exploit" in note for note in decision.notes))
+
+    def test_planner_allows_exploit_with_existing_finding_id(self) -> None:
+        state = _state([])
+        state.upsert_finding(Finding(finding_id="finding-1", title="SQLi", severity=Severity.HIGH))
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "finding-driven exploit",
+                    "todos": [
+                        {
+                            "goal": "Exploit the SQL injection finding.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {"finding_id": "finding-1"},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.EXPLOIT)
+
+    def test_planner_allows_exploit_with_typed_vulnerability_state(self) -> None:
+        state = _state([])
+        state.apply_state_delta(
+            StateDelta(vulnerabilities=[Vulnerability(title="Controllable return address.")])
+        )
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "vulnerability-driven exploit",
+                    "todos": [
+                        {
+                            "goal": "Exploit the controllable return address.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.EXPLOIT)
 
     def test_planner_respects_stop_run(self) -> None:
         planner = LLMPlanner(
@@ -534,6 +792,7 @@ class LLMPlannerTests(unittest.TestCase):
         LLMPlanner(StaticLLMClient(responder)).plan(state)
 
         context = captured["snapshot"]["recent_evidence_context"]  # type: ignore[index]
+        self.assertIsInstance(context, list)
         rendered = json.dumps(context)
         self.assertIn("535446556aab0223201f1e0a00008540", rendered)
         self.assertIn("partial_no_candidate", rendered)
@@ -543,6 +802,75 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIn("stfu", rendered)
         contract = captured["snapshot"]["planning_contract"]  # type: ignore[index]
         self.assertIn("/tmp files", contract["evidence_context_rule"])  # type: ignore[index]
+
+    def test_planner_prompt_includes_structured_rejected_candidates(self) -> None:
+        captured: dict[str, object] = {}
+
+        def responder(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {"summary": "stop", "todos": [], "notes": [], "stop_run": True}
+
+        state = _state([])
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value="flag{os.strerror(err) if err else 'Success'}", source="script")
+                ]
+            )
+        )
+
+        LLMPlanner(StaticLLMClient(responder)).plan(state)
+
+        rejected = captured["snapshot"]["rejected_flag_candidates"]  # type: ignore[index]
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["reason"], "invalid_candidate_shape")
+
+    def test_planner_prompt_bounds_mutable_state_sections(self) -> None:
+        captured: dict[str, object] = {}
+
+        def responder(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {"summary": "bounded", "todos": [], "notes": [], "stop_run": True}
+
+        state = _state([])
+        huge_text = "X" * 5000
+        state.queue_todo(
+            TodoItem(
+                goal="Analyze large generated context.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "family": "crypto-decrypt",
+                    "blob": huge_text,
+                    "items": [f"item-{index}-" + huge_text for index in range(20)],
+                    "nested": {"payload": huge_text},
+                },
+                dedupe_key="huge-context",
+            )
+        )
+        state.working_memory["huge"] = huge_text
+        state.execution_log.append(
+            ExecutionRecord(
+                task_id="todo-huge",
+                worker_name="artifact-worker",
+                success=False,
+                summary=huge_text,
+                error=huge_text,
+            )
+        )
+
+        LLMPlanner(StaticLLMClient(responder)).plan(state)
+
+        snapshot = captured["snapshot"]
+        todo_context = snapshot["todos"][0]["context"]  # type: ignore[index]
+        self.assertLessEqual(len(todo_context["blob"]), 400)
+        self.assertIn("truncated", todo_context["blob"])
+        self.assertEqual(len(todo_context["items"]), 8)
+        self.assertLessEqual(len(todo_context["nested"]["payload"]), 400)
+        self.assertLessEqual(len(snapshot["working_memory"]["huge"]), 400)  # type: ignore[index]
+        execution_log = snapshot["recent_execution_log"]  # type: ignore[index]
+        self.assertLessEqual(len(execution_log[0]["summary"]), 360)
+        self.assertLessEqual(len(execution_log[0]["error"]), 260)
+        self.assertNotIn("X" * 1000, json.dumps(snapshot))
 
 
 class PlannedTodoPriorityTests(unittest.TestCase):

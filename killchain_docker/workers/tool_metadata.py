@@ -182,10 +182,10 @@ def normalize_tool_metadata(
     """Validate and clean metadata before dispatching to a plugin."""
 
     cap = ToolCapability(capability)
-    raw: dict[str, object] = {**selected_metadata, **todo.context}
     contract = _CONTRACTS.get(cap)
     if not contract:
         raise ToolExecutionError(f"Unknown capability: {cap.value}")
+    raw = _merge_tool_metadata(contract, todo.context, selected_metadata)
 
     # Generic validation: check required fields
     for field in contract.get("required", []):
@@ -199,6 +199,29 @@ def normalize_tool_metadata(
         return _normalize_script(raw, state)
     # All CLI tools: pass through validated metadata as-is
     return _normalize_cli_tool(raw, contract)
+
+
+def _merge_tool_metadata(
+    contract: dict[str, object],
+    todo_context: dict[str, object],
+    selected_metadata: dict[str, object],
+) -> dict[str, object]:
+    """Merge tool metadata with the current LLM decision as the authority.
+
+    Required tool fields are executable action fields, so they must come from
+    this tool decision.  Todo context may provide optional defaults such as
+    files_root, timeout_s, or session ids, but it cannot override what the
+    worker selected for this dispatch.
+    """
+    required = set(contract.get("required", []))
+    optional = set(contract.get("optional", []))
+    raw: dict[str, object] = {
+        key: value
+        for key, value in todo_context.items()
+        if key in optional and key not in required
+    }
+    raw.update(selected_metadata)
+    return raw
 
 
 def _normalize_shell(raw: dict[str, object]) -> dict[str, object]:

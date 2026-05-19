@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from killchain_docker.llm import LLMClient, LLMClientError
+from killchain_docker.prompt_bounds import bounded_value, trim_text
 from killchain_docker.state import (
     RouterDecision,
     RouterRoundSummary,
@@ -137,57 +138,8 @@ class RouterAgent:
         if valid:
             return valid
 
-        # Retry once with feedback
-        if invalid_reasons:
-            return self._retry_route(state, ready, worker_catalog, invalid_reasons)
+        del invalid_reasons
         return []
-
-    def _retry_route(
-        self,
-        state: RunState,
-        ready: list[TodoItem],
-        worker_catalog: list[dict[str, object]],
-        errors: list[str],
-    ) -> list[WorkerAssignment]:
-        worker_names = {str(w.get("name") or "") for w in worker_catalog}
-        focus_phase = ready[0].phase
-        snapshot = {
-            "objective": state.objective,
-            "summary": state.summary(),
-            "focus_phase": focus_phase,
-            "ready_todos": [self._serialize_todo(todo) for todo in ready],
-            "worker_catalog": worker_catalog,
-            "recent_round_summaries": [
-                round_record.summary.model_dump(mode="json")
-                for round_record in state.rounds[-8:]
-            ],
-            "contract": (
-                "Choose one persona worker for each selected todo. "
-                "Return RouterDecision.assignments with todo_id and worker_name only."
-            ),
-            "previous_errors": (
-                f"Previous attempt failed: {'; '.join(errors)}. "
-                f"Valid workers: {sorted(worker_names)}. Try again."
-            ),
-        }
-        retry_decision = self.llm_client.generate_json(
-            system_prompt=_ROUTER_SYSTEM_PROMPT,
-            user_prompt=json.dumps(snapshot, ensure_ascii=True, indent=2),
-            schema=RouterDecision,
-            temperature=0.2,
-        )
-        # Validate retry — no further retries
-        ready_ids = {t.todo_id for t in ready}
-        valid: list[WorkerAssignment] = []
-        seen: set[str] = set()
-        for a in retry_decision.assignments:
-            if a.todo_id not in ready_ids or a.todo_id in seen:
-                continue
-            if a.worker_name not in worker_names:
-                continue
-            seen.add(a.todo_id)
-            valid.append(a)
-        return valid
 
     def summarize_round(
         self,
@@ -221,7 +173,7 @@ class RouterAgent:
                     "success": result.success,
                     "summary": result.summary,
                     "error": result.error,
-                    "output_context": self._trim_mapping(result.output_context),
+                    "output_context": self._bounded_mapping(result.output_context),
                     "notes": result.notes[-6:],
                 }
                 for result in results
@@ -252,20 +204,17 @@ class RouterAgent:
     def _serialize_todo(todo: TodoItem) -> dict[str, object]:
         return {
             "todo_id": todo.todo_id,
-            "goal": todo.goal,
+            "goal": trim_text(todo.goal, width=360),
             "phase": todo.phase,
-            "context": todo.context,
+            "context": bounded_value(todo.context, width=360, list_limit=8, dict_limit=14),
             "priority": todo.priority,
-            "success_criteria": todo.success_criteria,
-            "constraints": todo.constraints,
+            "success_criteria": bounded_value(todo.success_criteria, width=240, list_limit=6),
+            "constraints": bounded_value(todo.constraints, width=240, list_limit=6),
             "attempts": todo.attempts,
-            "error": todo.error,
+            "error": trim_text(todo.error, width=220),
         }
 
     @staticmethod
-    def _trim_mapping(value: dict[str, object]) -> dict[str, object]:
-        trimmed: dict[str, object] = {}
-        for key, item in value.items():
-            text = str(item)
-            trimmed[key] = text[:1000] if len(text) > 1000 else item
-        return trimmed
+    def _bounded_mapping(value: dict[str, object]) -> dict[str, object]:
+        bounded = bounded_value(value, width=800, list_limit=8, dict_limit=14)
+        return bounded if isinstance(bounded, dict) else {}

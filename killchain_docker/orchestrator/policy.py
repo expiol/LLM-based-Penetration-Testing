@@ -18,7 +18,6 @@ from killchain_docker.state.constants import (
     DEFAULT_FILES_ROOT,
     FLAG_BARE_TOKEN_SHAPE,
     FLAG_PREFIX_SHAPE,
-    normalize_tokens,
     validatable_flag_candidate,
 )
 
@@ -35,6 +34,41 @@ _PREFIX_FROM_FORMAT_RE = re.compile(r"^([A-Za-z0-9_]+)(?:\\?\{|\{)")
 class CandidateDecision:
     accepted: bool
     reason: str = ""
+
+
+class ContextRefPolicy:
+    """Resolve LLM-provided context references against durable state ids."""
+
+    @staticmethod
+    def values(context: dict[str, Any], *keys: str) -> set[str]:
+        refs: set[str] = set()
+        for key in keys:
+            value = context.get(key)
+            if value is None or isinstance(value, bool):
+                continue
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    refs.add(text)
+                continue
+            if isinstance(value, (list, tuple, set, frozenset)):
+                for item in value:
+                    if item is None or isinstance(item, bool):
+                        continue
+                    text = str(item).strip()
+                    if text:
+                        refs.add(text)
+        return refs
+
+    @classmethod
+    def refs_existing(
+        cls,
+        context: dict[str, Any],
+        records: dict[str, Any],
+        *keys: str,
+    ) -> bool:
+        refs = cls.values(context, *keys)
+        return bool(refs and refs.issubset(records.keys()))
 
 
 class CandidatePolicy:
@@ -190,6 +224,12 @@ class TodoPolicy:
             "candidate_flag",
             "novelty_key",
             "capability_hint",
+            "finding_id",
+            "vulnerability_id",
+            "credential_id",
+            "session_id",
+            "hypothesis_id",
+            "evidence_id",
         ):
             value = context.get(key)
             if value:
@@ -204,6 +244,11 @@ class TodoPolicy:
             "repo_paths",
             "paths",
             "seed_terms",
+            "finding_ids",
+            "vulnerability_ids",
+            "credential_ids",
+            "session_ids",
+            "hypothesis_ids",
             "evidence_ids",
         ):
             value = context.get(key)
@@ -311,8 +356,8 @@ class ProgressPolicy:
                         f"{same_candidate_count} time(s); "
                         "propose a different candidate or set stop_run=true"
                     )
+                return True, ""
             elif total >= cls.MAX_FLAG_VALIDATION_ATTEMPTS:
-                # No concrete candidate in context — fall back to family-level cap
                 return False, (
                     f"family {family!r} hit validation cap ({total} attempts) "
                     "without a concrete candidate"
@@ -326,7 +371,7 @@ class ProgressPolicy:
             # Cooldown with tighter Jaccard after many failures
             if failed < cls.FAILURE_COOLDOWN_THRESHOLD:
                 return True, ""
-            if cls._has_new_novelty(todo, state, family, jaccard_threshold=0.3 if failed >= 5 else 0.5):
+            if cls._has_new_novelty(todo, state, family):
                 return True, ""
             return False, f"family {family!r} is in cooldown after {failed} failed/partial attempt(s)"
         if total >= cls.MAX_FAMILY_ATTEMPTS:
@@ -391,7 +436,7 @@ class ProgressPolicy:
         }
 
     @staticmethod
-    def _has_new_novelty(todo: "PlannedTodo", state: "RunState", family: str, jaccard_threshold: float = 0.5) -> bool:
+    def _has_new_novelty(todo: "PlannedTodo", state: "RunState", family: str) -> bool:
         novelty = str(todo.context.get("novelty_key") or "").strip()
         if novelty:
             previous = {
@@ -399,46 +444,48 @@ class ProgressPolicy:
                 for item in state.todos
                 if str(item.context.get("family") or TodoPolicy.family_for(item.goal, item.context)) == family
             }
-            return novelty not in previous
+            if novelty in previous and not ProgressPolicy._has_new_state_refs(todo, state, family):
+                return False
+        return ProgressPolicy._has_new_state_refs(todo, state, family)
 
-        evidence_ids = {
-            str(item).strip()
-            for item in (todo.context.get("evidence_ids") or [])
-            if str(item).strip()
-        }
-        if evidence_ids:
-            previous_ids: set[str] = set()
-            for item in state.todos:
-                current = str(item.context.get("family") or TodoPolicy.family_for(item.goal, item.context))
-                if current != family:
-                    continue
-                previous_ids.update(
-                    str(eid).strip()
-                    for eid in (item.context.get("evidence_ids") or [])
-                    if str(eid).strip()
-                )
-            if not evidence_ids.issubset(previous_ids):
-                return True
+    @staticmethod
+    def _has_new_state_refs(todo: "PlannedTodo", state: "RunState", family: str) -> bool:
+        return (
+            ProgressPolicy._has_new_existing_refs(
+                todo,
+                state.evidence,
+                state,
+                family,
+                "evidence_ids",
+            )
+            or ProgressPolicy._has_new_existing_refs(
+                todo,
+                state.hypotheses,
+                state,
+                family,
+                "hypothesis_id",
+                "hypothesis_ids",
+            )
+        )
 
-        # Fallback novelty: when the planner has not annotated novelty_key but
-        # the goal text differs materially from prior attempts in the family
-        # (low Jaccard token overlap), treat it as a fresh approach.  This
-        # keeps the cooldown gate from stonewalling planners that rephrase
-        # rather than tag novelty explicitly.
-        new_tokens = normalize_tokens(todo.goal)
-        if not new_tokens:
+    @staticmethod
+    def _has_new_existing_refs(
+        todo: "PlannedTodo",
+        records: dict[str, Any],
+        state: "RunState",
+        family: str,
+        *keys: str,
+    ) -> bool:
+        refs = ContextRefPolicy.values(todo.context, *keys)
+        if not refs or not refs.issubset(records.keys()):
             return False
+        previous_refs: set[str] = set()
         for item in state.todos:
             current = str(item.context.get("family") or TodoPolicy.family_for(item.goal, item.context))
             if current != family:
                 continue
-            prior_tokens = normalize_tokens(item.goal)
-            if not prior_tokens:
-                continue
-            overlap = len(new_tokens & prior_tokens) / max(1, len(new_tokens | prior_tokens))
-            if overlap >= jaccard_threshold:
-                return False
-        return True
+            previous_refs.update(ContextRefPolicy.values(item.context, *keys))
+        return not refs.issubset(previous_refs)
 
 
 class RagPolicy:

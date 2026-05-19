@@ -5,7 +5,7 @@ how it prepares metadata, and any custom post-processing. The Worker class
 provides the shared execution loop; persona differences are data + strategy,
 not separate class hierarchies.
 
-Each persona gets shell.exec + script.exec as universal fallbacks, plus
+Each persona gets shell.exec + script.exec as universal base capabilities, plus
 domain-specific high-level tools.
 """
 

@@ -28,7 +28,7 @@ from killchain_docker.tools.plugins._base import (
     _truncate,
 )
 
-# Fallback regex for non-JSON output (table format)
+# Table-format parser regexes for checksec versions without JSON output.
 _RELRO_RE = re.compile(r"(Full RELRO|Partial RELRO|No RELRO)", re.IGNORECASE)
 _CANARY_RE = re.compile(r"(Canary found|No canary found)", re.IGNORECASE)
 _NX_RE = re.compile(r"(NX enabled|NX disabled)", re.IGNORECASE)
@@ -67,7 +67,7 @@ def _parse_json_output(stdout: str, path: str) -> dict[str, Any] | None:
 
 
 def _parse_table_output(stdout: str) -> dict[str, Any]:
-    """Fallback: parse checksec table output with regex."""
+    """Parse checksec table output with regex."""
     props: dict[str, Any] = {}
     m = _RELRO_RE.search(stdout)
     if m:
@@ -152,7 +152,7 @@ def build_output(
     # Determine status
     status = ToolOutputStatus.SUCCESS if result.exit_code in (None, 0) else ToolOutputStatus.FAILURE
 
-    # Parse properties — try JSON first, fallback to table regex
+    # Parse properties from JSON output or checksec's table format.
     raw_props = _parse_json_output(stdout, path)
     if raw_props is None:
         raw_props = _parse_table_output(stdout)

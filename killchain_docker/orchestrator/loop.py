@@ -116,18 +116,8 @@ class Orchestrator:
             return worker.run(todo, self.state)
         except LLMClientError as exc:
             if exc.transient:
-                self.emit(
-                    f"[cycle {cycle}] transient LLM error in {worker.name} "
-                    f"for {todo.todo_id}, returning retryable failure"
-                )
-                return WorkerResult(
-                    todo_id=todo.todo_id,
-                    worker_name=worker.name,
-                    success=False,
-                    summary=f"transient LLM error: {exc}",
-                    error=str(exc),
-                    retryable=True,
-                )
+                todo.release_after_transient_error(str(exc))
+                raise
             raise
         except Exception as exc:
             tb_text = traceback.format_exc(limit=20)
@@ -143,6 +133,22 @@ class Orchestrator:
                 error=tb_text,
                 retryable=False,
             )
+
+    def _skip_transient_llm_error(self, cycle: int, source: str, exc: LLMClientError) -> bool:
+        if not exc.transient or self._transient_skip_count >= self.MAX_TRANSIENT_SKIPS:
+            return False
+        self._transient_skip_count += 1
+        self.emit(
+            f"[cycle {cycle}] transient LLM error in {source} "
+            f"(skip {self._transient_skip_count}/{self.MAX_TRANSIENT_SKIPS}), "
+            f"continuing next cycle: {exc}"
+        )
+        self.state.orchestration_notes.append(
+            f"cycle {cycle}: transient LLM error skipped in {source} "
+            f"({self._transient_skip_count}/{self.MAX_TRANSIENT_SKIPS})"
+        )
+        self.state.touch()
+        return True
 
     @staticmethod
     def _is_hollow_result(result: WorkerResult) -> bool:
@@ -169,11 +175,28 @@ class Orchestrator:
         ctx = result.output_context or {}
         if ctx.get("flag_candidates") or ctx.get("near_miss_candidates"):
             return False
+        if Orchestrator._has_observation_text(ctx):
+            return False
+        for evidence in result.evidence_updates:
+            extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
+            evidence_ctx = extracted.get("output_context")
+            if isinstance(evidence_ctx, dict) and Orchestrator._has_observation_text(evidence_ctx):
+                return False
+            evidence_result = evidence.result if isinstance(evidence.result, dict) else {}
+            if Orchestrator._has_observation_text(evidence_result):
+                return False
         if result.result_quality:
             return False
         if result.finding_updates or result.credential_updates:
             return False
         return True
+
+    @staticmethod
+    def _has_observation_text(payload: dict[str, object]) -> bool:
+        for key in ("stdout", "stderr", "output_text", "raw_log"):
+            if str(payload.get(key) or "").strip():
+                return True
+        return False
 
     @staticmethod
     def _round_had_meaningful_progress(results: list[WorkerResult]) -> bool:
@@ -203,6 +226,9 @@ class Orchestrator:
 
     def _summarize_round(self, results: list[WorkerResult]):
         return self.router.summarize_round(self.state, results=results)
+
+    def _has_ready_backlog(self) -> bool:
+        return bool(self.state.ready_todos(limit=1))
 
     def _inject_forced_pivot(self, cycle: int) -> None:
         """Inject a forced pivot directive into state metadata.
@@ -257,15 +283,80 @@ class Orchestrator:
         self.state.touch()
 
     def _mark_llm_error(self, cycle: int, source: str, exc: LLMClientError) -> None:
-        reason = f"llm_error:{source}:{type(exc).__name__}: {exc}"
+        kind = str(getattr(exc, "kind", "unknown"))
+        reason = f"llm_error:{source}:{kind}:{type(exc).__name__}: {exc}"
         self.state.stop_reason = "llm_error"
         self.state.status = RunStatus.FAILED
+        self.state.metadata["last_llm_error"] = {
+            "cycle": cycle,
+            "source": source,
+            "kind": kind,
+            "transient": bool(getattr(exc, "transient", False)),
+            "schema_name": getattr(exc, "schema_name", None),
+            "model": getattr(exc, "model", None),
+            "attempts": getattr(exc, "attempts", None),
+            "message": str(exc),
+        }
         self.state.orchestration_notes.append(f"cycle {cycle}: {reason}")
         for todo in self.state.todos:
             if todo.status == TodoStatus.RUNNING:
                 todo.mark_failed(reason, retryable=False)
             elif todo.status == TodoStatus.PENDING:
                 todo.mark_blocked("llm_error")
+        self.state.touch()
+
+    def _block_open_todos(self, reason: str) -> None:
+        for todo in self.state.todos:
+            if todo.status in {TodoStatus.PENDING, TodoStatus.RUNNING}:
+                todo.mark_blocked(reason)
+        self.state.orchestration_notes.append(reason)
+        self.state.touch()
+
+    def _terminal_unsolved_reason(self) -> str:
+        if any(todo.status == TodoStatus.FAILED for todo in self.state.todos):
+            return "todo_failed"
+        if any(todo.status == TodoStatus.BLOCKED for todo in self.state.todos):
+            return "todo_blocked"
+        if any(todo.status == TodoStatus.PARTIAL for todo in self.state.todos):
+            return "partial_todos_unsolved"
+        if self.state.todos:
+            return "unsolved_no_work_remaining"
+        return "no_todos_created"
+
+    def _finalize_terminal_state(self, *, max_cycles_exhausted: bool) -> None:
+        if max_cycles_exhausted and self.state.has_open_todos():
+            self.state.stop_reason = "max_cycles_exhausted"
+            self._block_open_todos("max_cycles_exhausted")
+
+        if self.state.solved:
+            self.state.status = RunStatus.SOLVED
+        elif self.state.status == RunStatus.INTERRUPTED:
+            self.state.stop_reason = self.state.stop_reason or "interrupted"
+        elif self.state.status == RunStatus.STOPPED:
+            self.state.stop_reason = self.state.stop_reason or "planner_stop"
+        elif self.state.stop_reason == "llm_error":
+            self.state.status = RunStatus.FAILED
+        elif self.state.stop_reason == "max_cycles_exhausted":
+            self.state.status = RunStatus.FAILED
+        elif self.state.stop_reason == "router_no_assignments":
+            self.state.status = RunStatus.FAILED
+        elif self.state.has_open_todos():
+            self.state.stop_reason = self.state.stop_reason or "open_todos_remaining"
+            self.state.status = RunStatus.FAILED
+        elif any(
+            todo.status in {TodoStatus.FAILED, TodoStatus.BLOCKED, TodoStatus.PARTIAL}
+            for todo in self.state.todos
+        ):
+            self.state.stop_reason = self.state.stop_reason or self._terminal_unsolved_reason()
+            self.state.status = RunStatus.FAILED
+        else:
+            reason = self.state.stop_reason or self._terminal_unsolved_reason()
+            self.state.stop_reason = reason
+            self.state.status = (
+                RunStatus.COMPLETED
+                if reason == "unsolved_no_work_remaining"
+                else RunStatus.FAILED
+            )
         self.state.touch()
 
     def run(self, max_cycles: int = 10) -> RunState:
@@ -282,42 +373,47 @@ class Orchestrator:
                     break
                 self.state.last_cycle_at = utc_now()
 
-                planner_summary = ""
-                try:
-                    planner_stop, planner_summary = self.refresh_plan(cycle)
-                    if planner_stop and (self.state.solved or not self.state.has_open_todos()):
-                        self.emit(f"[cycle {cycle}] planner signalled stop - halting run")
-                        self.state.status = RunStatus.STOPPED
-                        self.state.stop_reason = "planner_stop"
+                planner_summary = "planner skipped: ready todo backlog"
+                if self._has_ready_backlog():
+                    self.emit(f"[cycle {cycle}] planner skipped - ready todo backlog")
+                else:
+                    try:
+                        planner_stop, planner_summary = self.refresh_plan(cycle)
+                        if planner_stop and (self.state.solved or not self.state.has_open_todos()):
+                            self.emit(f"[cycle {cycle}] planner signalled stop - halting run")
+                            self.state.status = RunStatus.STOPPED
+                            self.state.stop_reason = "planner_stop"
+                            self._checkpoint()
+                            max_cycles_exhausted = False
+                            break
+                    except LLMClientError as exc:
+                        if self._skip_transient_llm_error(cycle, "planner", exc):
+                            self._checkpoint()
+                            continue
+                        self.emit(f"[cycle {cycle}] planner LLM error - aborting run")
+                        self._mark_llm_error(cycle, "planner", exc)
                         self._checkpoint()
                         max_cycles_exhausted = False
-                        break
+                        raise
+
+                try:
+                    decision = self.route(cycle)
                 except LLMClientError as exc:
-                    if exc.transient and self._transient_skip_count < self.MAX_TRANSIENT_SKIPS:
-                        self._transient_skip_count += 1
-                        self.emit(
-                            f"[cycle {cycle}] transient LLM error in planner "
-                            f"(skip {self._transient_skip_count}/{self.MAX_TRANSIENT_SKIPS}), "
-                            f"continuing: {exc}"
-                        )
-                        self.state.orchestration_notes.append(
-                            f"cycle {cycle}: transient LLM error skipped "
-                            f"({self._transient_skip_count}/{self.MAX_TRANSIENT_SKIPS})"
-                        )
+                    if self._skip_transient_llm_error(cycle, "router", exc):
                         self._checkpoint()
                         continue
-                    self.emit(f"[cycle {cycle}] planner LLM error - aborting run")
-                    self._mark_llm_error(cycle, "planner", exc)
+                    self.emit(f"[cycle {cycle}] router LLM error - aborting run")
+                    self._mark_llm_error(cycle, "router", exc)
                     self._checkpoint()
                     max_cycles_exhausted = False
                     raise
-
-                decision = self.route(cycle)
                 if not decision.assignments:
                     self._consecutive_empty_rounds += 1
                     self.emit(f"[cycle {cycle}] router selected no assignments")
                     self._checkpoint()
                     if self._consecutive_empty_rounds >= self.MAX_CONSECUTIVE_EMPTY_ROUNDS:
+                        self.state.stop_reason = "router_no_assignments"
+                        self._block_open_todos("router_no_assignments")
                         max_cycles_exhausted = False
                         break
                     continue
@@ -325,6 +421,7 @@ class Orchestrator:
 
                 results: list[WorkerResult] = []
                 executed_assignments = []
+                transient_worker_skip = False
                 for assignment in decision.assignments:
                     if self.state.solved:
                         break
@@ -352,7 +449,17 @@ class Orchestrator:
                         self.emit(f"[cycle {cycle}] blocked {todo.todo_id}: {reason}")
                         continue
                     executed_assignments.append(assignment)
-                    result = self._run_assignment(cycle, todo, worker)
+                    try:
+                        result = self._run_assignment(cycle, todo, worker)
+                    except LLMClientError as exc:
+                        if self._skip_transient_llm_error(cycle, worker.name, exc):
+                            transient_worker_skip = True
+                            break
+                        self.emit(f"[cycle {cycle}] worker LLM error - aborting run")
+                        self._mark_llm_error(cycle, worker.name, exc)
+                        self._checkpoint()
+                        max_cycles_exhausted = False
+                        raise
                     if self._is_hollow_result(result):
                         result.partial = True
                         result.partial_reason = (
@@ -368,7 +475,21 @@ class Orchestrator:
                         self.emit(f"[cycle {cycle}] solved: {self.state.validated_flag}")
                         break
 
-                round_summary = self._summarize_round(results)
+                if transient_worker_skip:
+                    self._checkpoint()
+                    continue
+
+                try:
+                    round_summary = self._summarize_round(results)
+                except LLMClientError as exc:
+                    if self._skip_transient_llm_error(cycle, "round_summarizer", exc):
+                        self._checkpoint()
+                        continue
+                    self.emit(f"[cycle {cycle}] round summarizer LLM error - aborting run")
+                    self._mark_llm_error(cycle, "round_summarizer", exc)
+                    self._checkpoint()
+                    max_cycles_exhausted = False
+                    raise
                 self.state.record_round(
                     RouterRound(
                         cycle=cycle,
@@ -395,55 +516,20 @@ class Orchestrator:
                     max_cycles_exhausted = False
                     break
         except LLMClientError as exc:
-            if exc.transient and self._transient_skip_count < self.MAX_TRANSIENT_SKIPS:
-                # Transient error escaped from router/summarizer — absorb it.
-                self._transient_skip_count += 1
-                self.emit(
-                    f"[cycle {current_cycle}] transient LLM error escaped "
-                    f"(skip {self._transient_skip_count}/{self.MAX_TRANSIENT_SKIPS}): {exc}"
-                )
-                self.state.orchestration_notes.append(
-                    f"cycle {current_cycle}: transient LLM error absorbed "
-                    f"({self._transient_skip_count}/{self.MAX_TRANSIENT_SKIPS})"
-                )
+            if self.state.stop_reason != "llm_error":
+                self.emit(f"[cycle {current_cycle}] LLM error - aborting run")
+                self._mark_llm_error(current_cycle, "runtime", exc)
                 self._checkpoint()
-                max_cycles_exhausted = True  # Allow normal termination logic
-            else:
-                if self.state.stop_reason != "llm_error":
-                    self.emit(f"[cycle {current_cycle}] LLM error - aborting run")
-                    self._mark_llm_error(current_cycle, "runtime", exc)
-                    self._checkpoint()
-                max_cycles_exhausted = False
-                raise
+            max_cycles_exhausted = False
+            raise
         except (KeyboardInterrupt, SystemExit) as exc:
             reason = f"run interrupted by {type(exc).__name__}"
             self.state.interrupt_running_todos(reason)
             self.state.status = RunStatus.INTERRUPTED
+            self.state.stop_reason = "interrupted"
             self.state.orchestration_notes.append(reason)
             self.emit(f"[interrupt] {reason}; marked running todos as interrupted")
             self._checkpoint()
 
-        if max_cycles_exhausted and self.state.has_open_todos():
-            self.state.stop_reason = "max_cycles_exhausted"
-            for todo in self.state.todos:
-                if todo.status in {TodoStatus.PENDING, TodoStatus.RUNNING}:
-                    todo.mark_blocked("max_cycles_exhausted")
-            self.state.orchestration_notes.append("max_cycles_exhausted")
-            self.state.touch()
-
-        if self.state.solved:
-            self.state.status = RunStatus.SOLVED
-        elif self.state.status == RunStatus.INTERRUPTED:
-            pass
-        elif self.state.status == RunStatus.STOPPED:
-            pass
-        elif self.state.stop_reason == "max_cycles_exhausted":
-            self.state.status = RunStatus.FAILED
-        elif self.state.has_open_todos():
-            self.state.stop_reason = self.state.stop_reason or "open_todos_remaining"
-            self.state.status = RunStatus.FAILED
-        elif any(todo.status in {TodoStatus.FAILED, TodoStatus.BLOCKED} for todo in self.state.todos):
-            self.state.status = RunStatus.FAILED
-        else:
-            self.state.status = RunStatus.COMPLETED
+        self._finalize_terminal_state(max_cycles_exhausted=max_cycles_exhausted)
         return self.state

@@ -18,7 +18,7 @@ Key design choices:
   ``exclude_challenge_ids`` to opt back into self-exclusion.
 * Category is a soft pre-filter: when the current challenge category matches
   at least one corpus entry, restrict ranking to that subset.  Otherwise
-  fall back to the full corpus so an unusual category label still surfaces
+  search the full corpus so an unusual category label still surfaces
   useful hits.
 * :func:`get_retriever` is fail-soft: if the dataset isn't downloaded,
   ``fastembed`` isn't installed, or ``AUTOPENTEST_RAG_DISABLED=1`` is set,
@@ -128,7 +128,7 @@ class KnowledgeRetriever:
 
         ``category`` is treated as a soft pre-filter when set: if at least
         one corpus entry uses that category, only those entries are ranked;
-        otherwise we fall back to the full corpus.  This keeps unusual
+        otherwise the full corpus is ranked. This keeps unusual
         category labels (e.g. ``stego``, ``ppc``) from silently producing
         empty results.
 

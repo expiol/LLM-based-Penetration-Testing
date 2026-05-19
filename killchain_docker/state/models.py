@@ -43,6 +43,10 @@ def _flag_candidate_id() -> str:
     return _make_id("flag-candidate")
 
 
+def _rejected_flag_candidate_id() -> str:
+    return _make_id("rejected-flag-candidate")
+
+
 def _hypothesis_id() -> str:
     return _make_id("hypothesis")
 
@@ -336,6 +340,19 @@ class FlagCandidate(BaseModel):
         self.updated_at = utc_now()
 
 
+class RejectedFlagCandidate(BaseModel):
+    """Rejected flag-like value plus the policy reason that rejected it."""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    rejection_id: str = Field(default_factory=_rejected_flag_candidate_id)
+    value: str
+    reason: str
+    source: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    rejected_at: datetime = Field(default_factory=utc_now)
+
+
 class Hypothesis(BaseModel):
     """An analysis or exploit hypothesis with outcome tracking."""
 
@@ -518,6 +535,7 @@ NOTES_LIMIT = 500
 ORCHESTRATION_NOTES_LIMIT = 500
 EVIDENCE_DICT_LIMIT = 800
 TYPED_FACT_DICT_LIMIT = 800
+REJECTED_FLAG_CANDIDATE_LIMIT = 120
 
 
 def _todo_id() -> str:
@@ -661,6 +679,20 @@ class TodoItem(BaseModel):
             self.status = TodoStatus.FAILED
         self.updated_at = utc_now()
 
+    def release_after_transient_error(self, reason: str) -> None:
+        """Return a running todo to pending after infrastructure failure.
+
+        Transient LLM/API/socket failures are not evidence that the planned
+        method failed, so they must not consume the todo's bounded attempts.
+        """
+        del reason
+        if self.status == TodoStatus.RUNNING:
+            self.status = TodoStatus.PENDING
+            if self.attempts > 0:
+                self.attempts -= 1
+        self.error = None
+        self.updated_at = utc_now()
+
     def mark_blocked(self, reason: str) -> None:
         self.status = TodoStatus.BLOCKED
         self.error = reason
@@ -756,6 +788,7 @@ class RunState(BaseModel):
     endpoints: dict[str, Endpoint] = Field(default_factory=dict)
     routes: dict[str, Route] = Field(default_factory=dict)
     flag_candidates: dict[str, FlagCandidate] = Field(default_factory=dict)
+    rejected_flag_candidates: list[RejectedFlagCandidate] = Field(default_factory=list)
     hypotheses: dict[str, Hypothesis] = Field(default_factory=dict)
     vulnerabilities: dict[str, Vulnerability] = Field(default_factory=dict)
     exploit_attempts: dict[str, ExploitAttempt] = Field(default_factory=dict)
@@ -805,6 +838,10 @@ class RunState(BaseModel):
             excess = len(fact_dict) - TYPED_FACT_DICT_LIMIT
             for key in list(fact_dict.keys())[:excess]:
                 del fact_dict[key]
+        if len(self.rejected_flag_candidates) > REJECTED_FLAG_CANDIDATE_LIMIT:
+            del self.rejected_flag_candidates[
+                : len(self.rejected_flag_candidates) - REJECTED_FLAG_CANDIDATE_LIMIT
+            ]
 
     def queue_todo(self, todo: TodoItem) -> TodoItem:
         if not todo.dedupe_key:
@@ -868,6 +905,37 @@ class RunState(BaseModel):
             self.evidence[evidence.evidence_id] = evidence
         self.touch()
 
+    def record_rejected_flag_candidate(
+        self,
+        *,
+        value: str,
+        reason: str,
+        source: str | None = None,
+        evidence_refs: list[str] | None = None,
+    ) -> None:
+        normalized = value.strip()
+        if not normalized:
+            return
+        existing = next(
+            (
+                item for item in self.rejected_flag_candidates
+                if item.value == normalized and item.reason == reason
+            ),
+            None,
+        )
+        refs = sorted(set(evidence_refs or []))
+        if existing is not None:
+            existing.evidence_refs = sorted(set(existing.evidence_refs) | set(refs))
+            return
+        self.rejected_flag_candidates.append(
+            RejectedFlagCandidate(
+                value=normalized,
+                reason=reason,
+                source=source,
+                evidence_refs=refs,
+            )
+        )
+
     def apply_state_delta(self, delta: StateDelta) -> None:
         for artifact in delta.artifacts:
             key = artifact.digest or artifact.path
@@ -893,6 +961,12 @@ class RunState(BaseModel):
 
             decision = CandidatePolicy.decision_for_state(self, candidate.value)
             if not decision.accepted:
+                self.record_rejected_flag_candidate(
+                    value=candidate.value,
+                    reason=decision.reason,
+                    source=candidate.source,
+                    evidence_refs=candidate.evidence_refs,
+                )
                 self.orchestration_notes.append(
                     f"Rejected flag candidate from {candidate.source or 'unknown'}: {decision.reason}"
                 )
@@ -1041,6 +1115,7 @@ class RunState(BaseModel):
             "endpoints": len(self.endpoints),
             "routes": len(self.routes),
             "flag_candidates": len(self.flag_candidates),
+            "rejected_flag_candidates": len(self.rejected_flag_candidates),
             "hypotheses": len(self.hypotheses),
             "vulnerabilities": len(self.vulnerabilities),
             "exploit_attempts": len(self.exploit_attempts),

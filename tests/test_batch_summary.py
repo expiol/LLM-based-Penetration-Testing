@@ -249,6 +249,28 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(payload["artifacts"]["run_id"], "run-attached")
             self.assertEqual(payload["state_metrics"]["todo_count"], 1)
 
+    def test_single_challenge_docker_execution_plane_keeps_stdin_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = _args(root)
+            args.name = None
+            logfile = root / "fake-success.json"
+            artifacts = _write_artifacts(root, status="completed")
+
+            with (
+                patch("killchain_docker.batch.runner.CTFEnvironment", _StartedFakeEnvironment),
+                patch("killchain_docker.batch.runner.build_llm_client_from_env", return_value=object()),
+                patch("killchain_docker.batch.runner.start_challenge_with_retry"),
+                patch("killchain_docker.batch.runner.build_execution_plane", return_value=object()) as build_plane,
+                patch("killchain_docker.batch.runner.run_assessment", return_value=artifacts),
+            ):
+                _run_single_challenge_inner(args, _FakeChallenge(), logfile)  # type: ignore[arg-type]
+
+            build_plane.assert_called_once_with(
+                argv_prefix=["docker", "exec", "-i", "fake-container"],
+                python_executable="python3",
+            )
+
     def test_single_replica_interrupted_result_returns_130(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = _args(Path(tmp))
@@ -426,6 +448,12 @@ class BatchSummaryTests(unittest.TestCase):
                             "message": "docker compose up failed: bind: address already in use",
                         },
                         "state": {
+                            "metadata": {
+                                "last_llm_error": {
+                                    "kind": "schema_validation",
+                                    "schema_name": "ToolUseDecision",
+                                }
+                            },
                             "todos": [
                                 {"status": "failed", "error": "candidate mismatch"},
                                 {"status": "failed", "error": "script.execute missing required metadata.script_code"},
@@ -458,6 +486,7 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(payload["failure_buckets"]["source_target_unresolved"], 1)
             self.assertEqual(payload["failure_buckets"]["candidate_mismatch"], 1)
             self.assertEqual(payload["failure_buckets"]["docker_start_error"], 1)
+            self.assertEqual(payload["failure_buckets"]["llm_schema_validation"], 1)
             self.assertIn("script_missing_code", payload["details"][0]["failure_buckets"])
 
     def test_summary_buckets_unsolved_exhausted_runs(self) -> None:

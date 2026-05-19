@@ -1,4 +1,4 @@
-"""Prompts for miscellaneous challenges (default fallback)."""
+"""Prompts for miscellaneous challenges and uncategorized challenge types."""
 
 from __future__ import annotations
 

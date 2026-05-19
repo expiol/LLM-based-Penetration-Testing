@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-import subprocess
+import shlex
 
 from killchain_docker.state import ExploitAttempt
 from killchain_docker.tools.core import (
@@ -22,14 +22,33 @@ from killchain_docker.tools.plugins._base import (
     ToolExecutionError,
 )
 
-_SUFFIX_MAP = {
-    "python": ".py", "bash": ".sh", "sh": ".sh",
-    "javascript": ".js", "node": ".js", "ruby": ".rb", "perl": ".pl",
-}
 _INTERPRETER_MAP = {
-    "python": ["python3"], "bash": ["bash"], "sh": ["sh"],
+    "python": ["python3", "-u"], "bash": ["bash"], "sh": ["sh"],
     "javascript": ["node"], "node": ["node"], "ruby": ["ruby"], "perl": ["perl"],
 }
+
+
+def _script_failure_signal(stderr: str, exit_code: int | None) -> tuple[str, str]:
+    text = stderr.lower()
+    if "brokenpipeerror" in text:
+        return "network_pipe_closed", "remote endpoint closed the socket while the script was writing"
+    if "connectionreseterror" in text or "connection reset by peer" in text:
+        return "connection_reset", "remote endpoint reset the connection"
+    if "connectionrefusederror" in text or "connection refused" in text:
+        return "connection_refused", "remote endpoint refused the connection"
+    if "timed out" in text or "timeouterror" in text or "[timeout after" in text:
+        return "timeout", "script exceeded its execution or socket timeout"
+    if (
+        "a bytes-like object is required" in text
+        or "can't concat str to bytes" in text
+        or "can't concat bytes to str" in text
+        or "must be str, not bytes" in text
+        or "must be bytes, not str" in text
+    ):
+        return "bytes_text_mismatch", "script mixed bytes and text across an IO boundary"
+    if "syntaxerror" in text:
+        return "syntax_error", "script failed Python or shell syntax validation"
+    return "nonzero_exit", f"script exited with status {exit_code}"
 
 
 class ScriptPlugin:
@@ -50,10 +69,9 @@ class ScriptPlugin:
             raise ToolExecutionError("script.exec requires metadata.script_code")
 
         language = str(request.metadata.get("script_language") or "python").lower()
-        suffix = _SUFFIX_MAP.get(language, ".py")
         interpreter = _INTERPRETER_MAP.get(language, [self.python_executable])
         if language == "python":
-            interpreter = [self.python_executable]
+            interpreter = [self.python_executable, "-u"]
 
         # Syntax check before execution — fail fast without wasting container time
         syntax_error = self._check_syntax(script_code, language)
@@ -66,16 +84,16 @@ class ScriptPlugin:
                 stderr=syntax_error,
             )
 
-        escaped_code = script_code.replace("'", "'\\''")
         files_root = request.metadata.get("files_root") or "/home/ctfplayer/ctf_files"
+        interpreter_cmd = shlex.join(interpreter)
         shell_cmd = (
-            f"_s=$(mktemp /tmp/_script_XXXXXX{suffix}) && "
-            f"printf '%s' '{escaped_code}' > \"$_s\" && "
-            f"cd {files_root} && "
-            f"{' '.join(interpreter)} \"$_s\" ; _rc=$? ; rm -f \"$_s\" ; exit $_rc"
+            "_s=$(mktemp /tmp/_script_XXXXXX) && "
+            f"cat > \"$_s\" && "
+            f"cd {shlex.quote(str(files_root))} && "
+            f"{interpreter_cmd} \"$_s\" ; _rc=$? ; rm -f \"$_s\" ; exit $_rc"
         )
         argv = [*self.argv_prefix, "bash", "-c", shell_cmd]
-        return _run(self.name, argv, request.timeout_s)
+        return _run(self.name, argv, request.timeout_s, input_text=script_code)
 
     @staticmethod
     def _check_syntax(code: str, language: str) -> str | None:
@@ -88,13 +106,16 @@ class ScriptPlugin:
                 return f"SyntaxError{lineno}: {exc.msg}"
         elif language in ("bash", "sh"):
             try:
-                result = subprocess.run(
-                    [language, "-n", "-c", code],
-                    capture_output=True, text=True, timeout=5,
+                result = _run(
+                    "script_syntax_check",
+                    [language, "-n"],
+                    5,
+                    input_text=code,
+                    max_output_bytes=4000,
                 )
-                if result.returncode != 0:
-                    return result.stderr.strip() or f"bash -n failed (exit {result.returncode})"
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                if result.exit_code != 0:
+                    return result.stderr.strip() or f"bash -n failed (exit {result.exit_code})"
+            except ToolExecutionError:
                 pass  # Cannot check locally — let it run in container
         return None
 
@@ -122,8 +143,15 @@ def build_output(
         "returncode": result.exit_code,
         "flag_candidates": [fc.value for fc in flags],
     }
+    if status.value == "failure":
+        failure_kind, failure_detail = _script_failure_signal(stderr, result.exit_code)
+        output_context["failure_kind"] = failure_kind
+        output_context["failure_detail"] = failure_detail
     if status.value == "success" and not flags:
         output_context["result_quality"] = "partial_no_candidate"
+        output_context["partial_reason"] = "script exited successfully but no flag candidate was recovered"
+        output_context["failure_kind"] = "no_candidate"
+        output_context["failure_detail"] = output_context["partial_reason"]
 
     exploit_attempts: list[ExploitAttempt] = []
     if flags or status.value == "failure":

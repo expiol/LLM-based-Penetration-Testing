@@ -58,7 +58,8 @@ PYTHON_EXCEPTION_TOKEN_RE = re.compile(
 )
 
 #: Bracket span: a ``{...}`` substring with printable body, no nested braces.
-#: Used as a fallback when the canonical extractor finds no candidates but
+#: Used by the secondary extractor when the canonical extractor finds no
+#: candidates but
 #: tool output has free-floating bracket-wrapped content (e.g. csawpad's
 #: ``MY key for you is {And yes the nsa can read this to}``).
 BRACKET_SPAN_PATTERN = re.compile(
@@ -108,10 +109,23 @@ FLAG_BODY_FORMAT_SPEC_RE = re.compile(
     r"[A-Za-z_]\w*:[0-9]*[xXdDuifeEgGF](?:\b|(?=\})|$)|(?::[0-9]+[xXdDuifeEgGF](?:\b|(?=\})|$))",
 )
 
-# Structured diagnostic bodies that bracket-span fallback must not wrap as
+# Structured diagnostic bodies that bracket-span extraction must not wrap as
 # flags, e.g. ``flag{'command': './stfu', 'error': '[Errno 2] ...'}``.
 STRUCTURED_DIAGNOSTIC_BODY_RE = re.compile(
     r"['\"]?(?:command|error|exception|traceback|stderr|stdout|returncode|help_output)['\"]?\s*:",
+    re.IGNORECASE,
+)
+
+# Python container/expression echoes that commonly appear when generated
+# scripts print intermediate data structures instead of a recovered secret.
+PYTHON_REPR_BODY_RE = re.compile(
+    r"(^|\s|,)(?:['\"][^'\"]+['\"]|\d+)\s*:\s*[^,]+"
+    r"|[\[\]]"
+    r"|,\s*\([^)]*"
+    r"|\([^)]*,[^)]*\)"
+    r"|\b(?:os|sys|subprocess|socket|json|re)\."
+    r"|\bif\b.+\belse\b"
+    r"|\*\s*\d+",
     re.IGNORECASE,
 )
 
@@ -148,7 +162,7 @@ FLAG_BARE_TOKEN_NOISE_NEEDLES: tuple[str, ...] = (
     "placeholder", "not_implemented",
 )
 
-#: Common CTF prefixes used for the bracket-span fallback (see
+#: Common CTF prefixes used for bracket-span extraction (see
 #: :data:`BRACKET_SPAN_PATTERN`).  When extraction returns nothing but a
 #: bracket span is present, we wrap the body with each of these and emit
 #: them as candidates so the equality-validator can pick the right one.
@@ -156,29 +170,6 @@ COMMON_FLAG_PREFIXES: tuple[str, ...] = (
     "flag", "FLAG", "ctf", "CTF", "key", "KEY",
     "csaw", "CSAW", "nyu", "NYU",
 )
-
-
-# ---------------------------------------------------------------------------
-# Token normalization helpers (used by policy and stagnation detection)
-# ---------------------------------------------------------------------------
-
-import re as _re_tok
-
-_TOKEN_SPLIT_RE = _re_tok.compile(r"[^a-z0-9]+")
-_STOPWORDS = frozenset({
-    "a", "an", "the", "and", "or", "of", "in", "on", "to", "for", "with",
-    "from", "by", "into", "over", "under", "is", "are", "was", "were", "be",
-    "as", "at", "this", "that", "these", "those", "it", "its", "we", "you",
-    "they", "any", "all", "each", "some", "use", "using", "via",
-})
-
-
-def normalize_tokens(text: str) -> set[str]:
-    """Return a set of meaningful tokens (lower-case, deduped, stop-filtered)."""
-    if not text:
-        return set()
-    tokens = {tok for tok in _TOKEN_SPLIT_RE.split(text.lower()) if tok and len(tok) > 2}
-    return tokens - _STOPWORDS
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +204,8 @@ def plausible_flag(candidate: str) -> bool:
     if FLAG_BODY_FORMAT_SPEC_RE.search(body):
         return False
     if STRUCTURED_DIAGNOSTIC_BODY_RE.search(body):
+        return False
+    if PYTHON_REPR_BODY_RE.search(body):
         return False
     if CODE_STATEMENT_BODY_RE.search(body):
         return False

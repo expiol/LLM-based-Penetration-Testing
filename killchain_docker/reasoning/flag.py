@@ -82,7 +82,7 @@ def _bracket_span_candidates(
 ) -> list[str]:
     """Return ``prefix{body}`` candidates derived from free-floating ``{body}`` spans.
 
-    This is the fallback that catches outputs like
+    This secondary extractor catches outputs like
     ``MY key for you is {And yes the nsa can read this to}`` where the
     canonical extractor finds nothing because the prefix is separated from
     ``{`` by punctuation/whitespace.  Prefix selection priority:
@@ -92,7 +92,7 @@ def _bracket_span_candidates(
        context (200 chars before the bracket).  csawpad's
        ``MY key for you is {body}`` has the literal word ``key`` right
        before the span — that's a strong signal.
-    3. The remaining :data:`COMMON_FLAG_PREFIXES` entries as backup.
+    3. The remaining :data:`COMMON_FLAG_PREFIXES` entries.
     4. The alnum word immediately preceding ``{`` (after filtering English
        glue words).  Covers exotic prefixes some challenges use.
     """
@@ -143,12 +143,12 @@ def _bracket_span_candidates(
                 if prefix not in local_hits:
                     local_hits.append(prefix)
         prefixes.extend(local_hits)
-        # 3. Then the rest of the common prefixes as backup.
+        # 3. Then the rest of the common prefixes.
         for prefix in COMMON_FLAG_PREFIXES:
             if prefix not in prefixes:
                 prefixes.append(prefix)
-        # 4. Finally lift the alnum word immediately preceding the bracket
-        #    as a fallback prefix, but reject obvious English glue words.
+        # 4. Finally lift the alnum word immediately preceding the bracket,
+        #    but reject obvious English glue words.
         word_match = re.search(r"([A-Za-z0-9_]{2,})\s*[^A-Za-z0-9_{}]*$", local)
         if word_match:
             word = word_match.group(1)
@@ -208,10 +208,9 @@ def extract_flag_candidates(
             for decoded in _try_decode_blob(blob):
                 _add(decoded)
 
-    # Bracket-span fallback: only fires when canonical extraction missed AND
-    # the source text actually contains a printable bracket span.  This
-    # deliberately runs last so canonical matches always win the dedupe
-    # ordering.
+    # Bracket-span extraction only fires when canonical extraction missed and
+    # the source text actually contains a printable bracket span. This keeps
+    # canonical matches first in the dedupe ordering.
     if not candidates:
         for value in values:
             for span in _bracket_span_candidates(

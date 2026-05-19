@@ -6,11 +6,8 @@ summary, metadata preparation) live in the PersonaSpec or custom hooks.
 
 from __future__ import annotations
 
-import logging
 import re
 from urllib.parse import urlparse
-
-from pydantic import BaseModel
 
 from killchain_docker.llm import LLMClient
 from killchain_docker.orchestrator.policy import CandidatePolicy
@@ -31,29 +28,6 @@ from killchain_docker.tools.core import _strings
 from killchain_docker.workers.base import WorkerAgent
 from killchain_docker.workers.protocols import Persona, PersonaSpec
 from killchain_docker.workers.tool_metadata import normalize_tool_metadata
-
-log = logging.getLogger(__name__)
-
-
-class _FlagMatchVerdict(BaseModel):
-    """LLM verdict on whether two flag strings are semantically equivalent."""
-    equivalent: bool
-    reason: str = ""
-
-
-_FLAG_MATCH_SYSTEM_PROMPT = """\
-You are a CTF flag validator. Given a candidate string and the expected flag, \
-determine if they represent the same flag value despite possible formatting differences.
-
-Common format variations:
-- Different bracket/prefix styles: `{key: VALUE}` vs `key{VALUE}`
-- Whitespace/punctuation around delimiters: `{key: X}` vs `key{X}`
-- Wrapping differences: bare body vs prefix{body}
-- Case-insensitive prefix: `KEY{x}` vs `key{x}`
-- Extra surrounding context stripped away
-
-Return equivalent=true ONLY if the core flag content is identical (the meaningful \
-secret value is the same). Do NOT return true for completely different values."""
 
 
 def _tool_success(capability: ToolCapability, bundle, output_context: dict[str, object]) -> bool:
@@ -84,8 +58,8 @@ def _is_flag_recovery_task(todo: TodoItem) -> bool:
 class Worker(WorkerAgent):
     """Unified worker driven by an injected Persona strategy."""
 
-    _MAX_INNER_STEPS = 15
-    _MAX_METADATA_RETRIES = 2
+    _MAX_INNER_STEPS = 2
+    _MAX_METADATA_RETRIES = 1
 
     def __init__(
         self,
@@ -228,7 +202,7 @@ class Worker(WorkerAgent):
                 break
             if step == self._MAX_INNER_STEPS - 1:
                 break
-            if not self._should_continue(task, state, prior_steps):
+            if not self._should_continue_after_step(task, prior_steps):
                 break
 
         output_context = dict(last_bundle.tool_output.output_context)
@@ -270,6 +244,33 @@ class Worker(WorkerAgent):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _should_continue_after_step(task: TodoItem, prior_steps: list[dict[str, object]]) -> bool:
+        """Deterministic inner-loop policy.
+
+        A worker may make one corrective tool call when a flag-recovery script
+        either fails or runs without a candidate.  Other chaining is left to
+        the planner so evidence and state transitions stay visible.
+        """
+        if len(prior_steps) >= Worker._MAX_INNER_STEPS:
+            return False
+        last = prior_steps[-1] if prior_steps else {}
+        if last.get("flag_candidates"):
+            return False
+        if last.get("capability") != ToolCapability.SCRIPT_EXEC.value:
+            return False
+        if not _is_flag_recovery_task(task):
+            return False
+        returncode = last.get("returncode")
+        failed_or_empty = returncode not in (None, 0) or not last.get("flag_candidates")
+        if not failed_or_empty:
+            return False
+        previous_script_steps = sum(
+            1 for step in prior_steps
+            if step.get("capability") == ToolCapability.SCRIPT_EXEC.value
+        )
+        return previous_script_steps < Worker._MAX_INNER_STEPS
 
     def _choose_capability(
         self, todo: TodoItem, state: RunState, prior_steps: list[dict[str, object]] | None = None,
@@ -425,29 +426,7 @@ class Worker(WorkerAgent):
                 return True
         if c_inner.lower() == e_inner.lower():
             return True
-        # LLM fallback for format variants (e.g. "{key: VALUE}" vs "key{VALUE}")
-        return self._llm_flag_matches(c, e)
-
-    def _llm_flag_matches(self, candidate: str, expected: str) -> bool:
-        """Use LLM to judge whether candidate and expected are the same flag."""
-        if self.llm_client is None:
-            return False
-        try:
-            verdict = self.llm_client.generate_json(
-                system_prompt=_FLAG_MATCH_SYSTEM_PROMPT,
-                user_prompt=f"Candidate: {candidate}\nExpected:  {expected}",
-                schema=_FlagMatchVerdict,
-                temperature=0.0,
-            )
-            if verdict.equivalent:
-                log.info(
-                    "LLM flag match accepted: candidate=%r expected=%r reason=%s",
-                    candidate, expected, verdict.reason,
-                )
-            return verdict.equivalent
-        except Exception as exc:
-            log.debug("LLM flag match fallback failed: %s", exc)
-            return False
+        return False
 
 
 __all__ = ["Worker"]

@@ -5,7 +5,27 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from killchain_docker.processes import run_bounded_process
 from nyuctf.challenge import CTFChallenge
+
+_DOCKER_COMMAND_TIMEOUT_S = 120
+_DOCKER_CAPTURE_BYTES = 20_000
+
+
+def _run_docker_command(cmd: list[str]) -> str:
+    result = run_bounded_process(
+        cmd,
+        timeout_s=_DOCKER_COMMAND_TIMEOUT_S,
+        max_output_bytes=_DOCKER_CAPTURE_BYTES,
+    )
+    if result.exit_code != 0:
+        raise subprocess.CalledProcessError(
+            result.exit_code,
+            cmd,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result.stdout.strip()
 
 
 class CTFEnvironment:
@@ -38,8 +58,7 @@ class CTFEnvironment:
             "linux/amd64",
             self.container_image,
         ]
-        output = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        self.container = output.stdout.strip()
+        self.container = _run_docker_command(cmd)
 
     def copy_into_container(self, hostpath: str | Path, filename: str | Path) -> Path:
         if self.container is None:
@@ -50,25 +69,28 @@ class CTFEnvironment:
             containerpath = Path(filename)
         else:
             containerpath = self.container_home / filename
-            subprocess.run(
-                ["docker", "exec", self.container, "mkdir", "-p", str(containerpath.parent)],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            _run_docker_command([
+                "docker",
+                "exec",
+                self.container,
+                "mkdir",
+                "-p",
+                str(containerpath.parent),
+            ])
 
-        subprocess.run(
-            ["docker", "cp", "-aq", str(hostpath), f"{self.container}:{containerpath}"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        _run_docker_command([
+            "docker",
+            "cp",
+            "-aq",
+            str(hostpath),
+            f"{self.container}:{containerpath}",
+        ])
         return containerpath
 
     def stop_docker(self) -> None:
         if not self.container:
             return
-        subprocess.run(["docker", "stop", self.container], check=True, capture_output=True, text=True)
+        _run_docker_command(["docker", "stop", self.container])
         self.container = None
 
     @property

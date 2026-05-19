@@ -8,18 +8,40 @@ is explicit, no shell interpolation.
 from __future__ import annotations
 
 import shutil
-import subprocess
+import sys
 from pathlib import Path
 from urllib import error, request
 
+from killchain_docker.processes import run_bounded_process
+
 DEFAULT_COMPOSE_REL = Path("docker-compose.lab.yml")
+_DOCKER_COMPOSE_TIMEOUT_S = 600
+_DOCKER_COMPOSE_CAPTURE_BYTES = 20_000
 
 
 def _compose_argv(compose_file: Path) -> list[str]:
     return ["docker", "compose", "-f", str(compose_file.resolve())]
 
 
-def lab_up(compose_file: str | Path | None = None, *, detach: bool = True) -> int:
+def _run_compose_command(cmd: list[str], *, timeout_s: int) -> int:
+    result = run_bounded_process(
+        cmd,
+        timeout_s=timeout_s,
+        max_output_bytes=_DOCKER_COMPOSE_CAPTURE_BYTES,
+    )
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+    return result.exit_code
+
+
+def lab_up(
+    compose_file: str | Path | None = None,
+    *,
+    detach: bool = True,
+    timeout_s: int = _DOCKER_COMPOSE_TIMEOUT_S,
+) -> int:
     """Run ``docker compose up`` (with ``-d`` when ``detach`` is True). Returns exit code."""
 
     path = Path(compose_file or DEFAULT_COMPOSE_REL)
@@ -34,10 +56,15 @@ def lab_up(compose_file: str | Path | None = None, *, detach: bool = True) -> in
     cmd = [*_compose_argv(path), "up"]
     if detach:
         cmd.append("-d")
-    return subprocess.run(cmd, check=False).returncode
+    return _run_compose_command(cmd, timeout_s=timeout_s)
 
 
-def lab_down(compose_file: str | Path | None = None, *, remove_volumes: bool = False) -> int:
+def lab_down(
+    compose_file: str | Path | None = None,
+    *,
+    remove_volumes: bool = False,
+    timeout_s: int = _DOCKER_COMPOSE_TIMEOUT_S,
+) -> int:
     """Run ``docker compose down``. Returns exit code."""
 
     path = Path(compose_file or DEFAULT_COMPOSE_REL)
@@ -52,7 +79,7 @@ def lab_down(compose_file: str | Path | None = None, *, remove_volumes: bool = F
     cmd = [*_compose_argv(path), "down"]
     if remove_volumes:
         cmd.append("-v")
-    return subprocess.run(cmd, check=False).returncode
+    return _run_compose_command(cmd, timeout_s=timeout_s)
 
 
 def lab_health_check(url: str, *, timeout_s: float = 15.0) -> bool:

@@ -4,6 +4,7 @@ from killchain_docker.llm.gateway import (
     GatewayLLMClient,
     LLMClient,
     LLMClientError,
+    LLMFailureKind,
     LLMSettings,
     StaticLLMClient,
     TokenLedger,
@@ -13,6 +14,7 @@ from killchain_docker.llm.gateway import (
 __all__ = [
     "LLMClient",
     "LLMClientError",
+    "LLMFailureKind",
     "LLMSettings",
     "GatewayLLMClient",
     "StaticLLMClient",

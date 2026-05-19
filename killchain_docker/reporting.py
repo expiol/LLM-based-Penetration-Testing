@@ -16,6 +16,7 @@ def render_markdown_report(state: RunState) -> str:
         f"- Run ID: `{state.run_id}`",
         f"- Objective: {state.objective}",
         f"- Status: `{state.status}`",
+        f"- Stop Reason: `{state.stop_reason or 'n/a'}`",
         f"- Solved: `{state.solved}`",
         f"- Validated Flag: `{state.validated_flag or 'n/a'}`",
         f"- Scope entries: {len(state.authorized_scope)}",

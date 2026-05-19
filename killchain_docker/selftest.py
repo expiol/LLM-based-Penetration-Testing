@@ -212,9 +212,6 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                 "used_llm": True,
             }
 
-        if "ContinueDecision" in system_prompt:
-            return {"continue_loop": False, "reason": "selftest uses one tool call per worker run"}
-
         # ToolUseDecision — worker selects a capability
         snapshot = json.loads(user_prompt)
         todo = snapshot.get("todo") or {}

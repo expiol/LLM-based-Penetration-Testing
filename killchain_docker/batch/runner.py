@@ -223,6 +223,12 @@ def _failure_buckets(log_payload: dict[str, Any], result: dict[str, Any]) -> lis
 
     state_payload = log_payload.get("state") if isinstance(log_payload, dict) else None
     if isinstance(state_payload, dict):
+        metadata = state_payload.get("metadata")
+        last_llm_error = metadata.get("last_llm_error") if isinstance(metadata, dict) else None
+        if isinstance(last_llm_error, dict):
+            kind = str(last_llm_error.get("kind") or "").strip()
+            if kind:
+                buckets.add(f"llm_{kind}")
         haystack_parts.extend(str(note) for note in state_payload.get("orchestration_notes") or [])
         for todo in state_payload.get("todos") or []:
             if isinstance(todo, dict):
@@ -436,7 +442,7 @@ def _run_single_challenge_inner(
             raise RuntimeError("environment container did not start")
 
         execution_plane = build_execution_plane(
-            argv_prefix=["docker", "exec", environment.container],
+            argv_prefix=["docker", "exec", "-i", environment.container],
             python_executable="python3",
         )
         artifacts = run_assessment(
@@ -459,6 +465,14 @@ def _run_single_challenge_inner(
             artifacts = recovered_artifacts
         message = _called_process_message(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         error_payload = {"type": type(exc).__name__, "message": message}
+        if isinstance(exc, LLMClientError):
+            error_payload.update({
+                "kind": str(exc.kind),
+                "transient": exc.transient,
+                "schema_name": exc.schema_name,
+                "model": exc.model,
+                "attempts": exc.attempts,
+            })
         try:
             traceback_text = traceback.format_exc()
         except Exception:

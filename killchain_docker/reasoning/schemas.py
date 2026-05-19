@@ -16,13 +16,3 @@ class ToolUseDecision(BaseModel):
     expected_signal: str = ""
     hypothesis: str | None = None
     memory_updates: dict[str, str] = Field(default_factory=dict)
-
-
-class ContinueDecision(BaseModel):
-    """Worker inner-loop decision: run another tool or return results."""
-
-    continue_loop: bool
-    reason: str = ""
-    next_hint: str = ""
-    error_analysis: str = ""
-    fix_strategy: str = ""
