@@ -34,6 +34,17 @@ from killchain_docker.workers.protocols import Persona, PersonaSpec
 from killchain_docker.workers.tool_metadata import normalize_tool_metadata
 
 _INFRASTRUCTURE_FAILURE_KINDS = frozenset({"infrastructure_error"})
+_SCRIPT_REPAIRABLE_FAILURE_KINDS = frozenset({
+    "binary_structure_error",
+    "bytes_text_mismatch",
+    "parse_error",
+    "path_type_mismatch",
+    "syntax_error",
+    "type_error",
+    "undefined_name",
+})
+
+
 def _tool_success(capability: ToolCapability, bundle, output_context: dict[str, object]) -> bool:
     if bundle.tool_output.status != ToolOutputStatus.SUCCESS:
         return False
@@ -92,11 +103,20 @@ def _is_execution_closure_task(todo: TodoItem) -> bool:
     )
 
 
+def _returncode_failed(value: object) -> bool:
+    if value in (None, "", 0):
+        return False
+    try:
+        return int(value) != 0
+    except (TypeError, ValueError):
+        return True
+
+
 class Worker(WorkerAgent):
     """Unified worker driven by an injected Persona strategy."""
 
     _MAX_INNER_STEPS = 3
-    _MAX_METADATA_RETRIES = 0
+    _MAX_METADATA_RETRIES = 1
 
     def __init__(
         self,
@@ -298,6 +318,7 @@ class Worker(WorkerAgent):
                 "summary": bundle.tool_output.summary,
                 "flag_candidates": output_context.get("flag_candidates", []),
                 "near_miss_candidates": output_context.get("near_miss_candidates", []),
+                "traceback": str(output_context.get("traceback", "")),
                 "stdout_preview": str(output_context.get("stdout", ""))[:2000],
                 "stderr_preview": str(output_context.get("stderr", ""))[:1500],
                 "returncode": output_context.get("returncode"),
@@ -387,27 +408,29 @@ class Worker(WorkerAgent):
     def _should_continue_after_step(task: TodoItem, prior_steps: list[dict[str, object]]) -> bool:
         """Deterministic inner-loop policy.
 
-        Worker execution is one external tool call per dispatch. Validation
-        retries may happen before execution, but no executed script chains into
-        a hidden second LLM/tool step; near-miss and failure evidence returns to
-        the planner for an explicit follow-up todo.
+        Validation retries may happen before execution. After the first
+        executed script fails with a repairable Python/runtime error, allow one
+        bounded LLM/tool repair step with the raw traceback in prior context.
+        Near-miss and no-candidate evidence still returns to the planner for an
+        explicit follow-up todo.
         """
         executed_steps = [
             step for step in prior_steps
             if step.get("executed") is not False
         ]
-        if len(executed_steps) >= Worker._MAX_INNER_STEPS:
+        if len(executed_steps) >= min(2, Worker._MAX_INNER_STEPS):
             return False
         last = prior_steps[-1] if prior_steps else {}
         if last.get("flag_candidates"):
             return False
         if last.get("capability") != ToolCapability.SCRIPT_EXEC.value:
             return False
-        if str(last.get("failure_kind") or "") in _INFRASTRUCTURE_FAILURE_KINDS:
+        failure_kind = str(last.get("failure_kind") or "").strip()
+        if failure_kind in _INFRASTRUCTURE_FAILURE_KINDS:
             return False
-        if not _is_execution_closure_task(task):
+        if failure_kind not in _SCRIPT_REPAIRABLE_FAILURE_KINDS:
             return False
-        return False
+        return _returncode_failed(last.get("returncode"))
 
     def _choose_capability(
         self, todo: TodoItem, state: RunState, prior_steps: list[dict[str, object]] | None = None,
@@ -466,6 +489,7 @@ class Worker(WorkerAgent):
         task: TodoItem,
         state: RunState,
     ) -> WorkerResult | None:
+        intent = DispatchIntent.from_context(task.context)
         hint = str(task.context.get("capability_hint") or "").strip()
         direct_capabilities = {
             ToolCapability.ARTIFACT_TRIAGE,
@@ -477,6 +501,8 @@ class Worker(WorkerAgent):
         try:
             capability = ToolCapability(hint)
         except ValueError:
+            return None
+        if intent.required_capability and intent.required_capability != capability.value:
             return None
         if capability not in direct_capabilities:
             return None

@@ -144,9 +144,13 @@ class KnowledgeAugmenter:
     # ------------------------------------------------------------------
 
     def for_planner(self, state: RunState) -> list[dict[str, Any]]:
-        """Deprecated compatibility hook; planners no longer receive hit bodies."""
-        self.context_for(state)
-        return []
+        """Return redacted, provenance-free method hints for planner context."""
+
+        return self.context_for(state).prompt_hits(
+            max_solution_chars=PLANNER_SOLUTION_CHARS,
+            max_description_chars=PLANNER_DESCRIPTION_CHARS,
+            max_files=PLANNER_FILES,
+        )
 
     def context_for(self, state: RunState) -> RagContext:
         """Return typed retrieval context for the run.
@@ -436,7 +440,6 @@ class KnowledgeAugmenter:
         """
         existing = state.metadata.get(_STATE_RAG_KEY)
         cache: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
-        cache.pop("knowledge_hints", None)
         cache.pop("related_writeups", None)
         challenge_meta = state.metadata.get("challenge", {}) or {}
         challenge_year = str(challenge_meta.get("year") or "").strip()
@@ -445,6 +448,16 @@ class KnowledgeAugmenter:
         if not challenge_event_key:
             challenge_event_key = event_key(challenge_year, challenge_event)
         prompt_hits = list(prompt_hits if prompt_hits is not None else hits)
+        knowledge_hints = [
+            _prompt_hit_dict(
+                hit,
+                rank=rank,
+                max_solution_chars=PLANNER_SOLUTION_CHARS,
+                max_description_chars=PLANNER_DESCRIPTION_CHARS,
+                max_files=PLANNER_FILES,
+            )
+            for rank, hit in enumerate(prompt_hits, start=1)
+        ]
         cache.update({
             "enabled": enabled,
             "mode": mode,
@@ -466,6 +479,10 @@ class KnowledgeAugmenter:
             "hit_provenance": [_hit_provenance(hit) for hit in hits],
             "hint_count": len(prompt_hits),
         })
+        if knowledge_hints:
+            cache["knowledge_hints"] = knowledge_hints
+        else:
+            cache.pop("knowledge_hints", None)
         state.metadata[_STATE_RAG_KEY] = cache
 
 

@@ -143,48 +143,6 @@ def escape_source_backslashes_in_json_strings(text: str) -> str:
     return "".join(out)
 
 
-def inside_json_string_at(text: str, position: int) -> bool:
-    in_string = False
-    escaped = False
-    for char in text[:position]:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-    return in_string
-
-
-def close_unclosed_string_before_object_boundary(text: str) -> str:
-    """Close a generated string value before the next object field boundary."""
-
-    repaired = text
-    boundaries = (
-        '\n  },\n  "rationale"',
-        '\n  },\n  "expected_signal"',
-        '\n  },\n  "hypothesis"',
-        '\n  },\n  "memory_updates"',
-        "\n  }\n}",
-    )
-    for boundary in boundaries:
-        search_from = 0
-        while True:
-            index = repaired.find(boundary, search_from)
-            if index < 0:
-                break
-            if inside_json_string_at(repaired, index):
-                repaired = f'{repaired[:index]}"{repaired[index:]}'
-                search_from = index + len(boundary) + 1
-            else:
-                search_from = index + len(boundary)
-    return repaired
-
-
 def close_array_before_object_field(text: str) -> str:
     """Close an array when a model starts the next object field too early."""
 
@@ -263,7 +221,7 @@ def loads_lenient_json_object(text: str) -> Any:
     try:
         return json.loads(candidate)
     except json.JSONDecodeError:
-        repaired = close_unclosed_string_before_object_boundary(candidate)
+        repaired = candidate
         repaired = escape_source_backslashes_in_json_strings(repaired)
         repaired = close_array_before_object_field(repaired)
         repaired = escape_control_chars_in_json_strings(repaired)

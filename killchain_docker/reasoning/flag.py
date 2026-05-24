@@ -11,7 +11,6 @@ from killchain_docker.logging_utils import get_logger
 from killchain_docker.state.constants import (
     BRACKET_SPAN_PATTERN,
     CODE_STATEMENT_BODY_RE,
-    COMMON_FLAG_PREFIXES,
     FLAG_PATTERN,
     FLAG_PREFIX_MAX_LEN,
     PYTHON_REPR_BODY_RE,
@@ -131,7 +130,7 @@ def _try_decode_blob(blob: str) -> list[str]:
         return decoded
 
     if _is_base64ish(stripped):
-        for variant in (stripped, stripped + "=", stripped + "=="):
+        for variant in _base64_decode_variants(stripped):
             try:
                 raw = base64.b64decode(variant, validate=True)
                 text = raw.decode("utf-8", errors="ignore")
@@ -157,6 +156,21 @@ def _try_decode_blob(blob: str) -> list[str]:
         _debug_decode_failure("rot13_blob", exc, value=stripped)
 
     return decoded
+
+
+def _base64_decode_variants(text: str) -> list[str]:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return []
+    unpadded = stripped.rstrip("=")
+    trailing_padding = len(stripped) - len(unpadded)
+    if trailing_padding > 2 or "=" in unpadded:
+        return []
+    remainder = len(unpadded) % 4
+    if remainder == 1:
+        return []
+    padding = (4 - remainder) % 4
+    return [unpadded + ("=" * padding)]
 
 
 def _is_base64ish(text: str) -> bool:
@@ -397,18 +411,14 @@ def _bracket_span_candidates(
 ) -> list[str]:
     """Return ``prefix{body}`` candidates derived from free-floating ``{body}`` spans.
 
-    This secondary extractor catches outputs like
-    ``MY key for you is {And yes the nsa can read this to}`` where the
-    canonical extractor finds nothing because the prefix is separated from
+    This secondary extractor catches outputs where the canonical extractor
+    finds no direct ``prefix{body}`` token because the prefix is separated from
     ``{`` by punctuation/whitespace.  Prefix selection priority:
 
     1. Configured ``flag_format`` prefix (most authoritative).
-    2. Any of :data:`COMMON_FLAG_PREFIXES` that appears within the local
-       context (200 chars before the bracket).  A nearby known prefix right
-       before the span is treated as a strong signal.
-    3. The remaining :data:`COMMON_FLAG_PREFIXES` entries.
-    4. The alnum word immediately preceding ``{`` (after filtering English
-       glue words).  Covers exotic prefixes some challenges use.
+    2. Embedded ``{prefix: body}`` prefixes from the recovered text itself.
+    3. The alnum word immediately preceding ``{`` after filtering English glue
+       words.  No global prefix dictionary is synthesized.
     """
     if not text:
         return []
@@ -448,36 +458,21 @@ def _bracket_span_candidates(
                     continue
 
         prefixes: list[str] = []
-        # 1. Configured flag_format prefix wins.
         if flag_format_prefix:
             cleaned = flag_format_prefix.strip()
+            if cleaned.endswith("{"):
+                cleaned = cleaned[:-1]
             if cleaned and cleaned.replace("_", "").isalnum():
                 prefixes.append(cleaned)
-        # 2. Common CTF prefixes that ALSO appear nearby (within
-        #    _LOCAL_CONTEXT_WINDOW chars before the bracket) get top
-        #    priority — narrative output often spells the prefix out.
         local = text[max(0, match.start() - _LOCAL_CONTEXT_WINDOW): match.start()]
-        local_lower = local.lower()
-        local_hits: list[str] = []
-        for prefix in COMMON_FLAG_PREFIXES:
-            if re.search(rf"\b{re.escape(prefix.lower())}\b", local_lower):
-                if prefix not in local_hits:
-                    local_hits.append(prefix)
-        prefixes.extend(local_hits)
-        # 3. Then the rest of the common prefixes.
-        for prefix in COMMON_FLAG_PREFIXES:
-            if prefix not in prefixes:
-                prefixes.append(prefix)
-        # 4. Finally lift the alnum word immediately preceding the bracket,
-        #    but reject obvious English glue words.
-        word_match = re.search(r"([A-Za-z0-9_]{2,})\s*[^A-Za-z0-9_{}]*$", local)
-        if word_match:
-            word = word_match.group(1)
+        words = re.findall(r"[A-Za-z0-9_]{2,}", local)
+        for word in reversed(words):
             if (
                 word.lower() not in _BRACKET_SPAN_NOISY_PREFIXES
                 and word not in prefixes
             ):
                 prefixes.append(word)
+                break
 
         for prefix in prefixes:
             candidate = f"{prefix}{{{body}}}"
@@ -486,7 +481,7 @@ def _bracket_span_candidates(
             if not plausible_flag(candidate):
                 continue
             out.append(candidate)
-            if len(out) >= max_spans * len(COMMON_FLAG_PREFIXES):
+            if len(out) >= max_spans:
                 return out
     return out
 

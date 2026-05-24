@@ -898,7 +898,9 @@ class KnowledgeAugmenterTests(unittest.TestCase):
             {entry.challenge_id for entry in self.retriever.entries},
         )
         self.assertIn("hit_provenance", cached)
-        self.assertNotIn("knowledge_hints", cached)
+        self.assertEqual(cached["knowledge_hints"], rendered_hits)
+        self.assertNotIn("challenge_id", cached["knowledge_hints"][0])
+        self.assertNotIn("score", cached["knowledge_hints"][0])
         self.assertGreaterEqual(cached["hint_count"], 1)
         self.assertEqual(cached["challenge_event_key"], "2013:csaw-finals")
 
@@ -964,7 +966,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
             ["target-challenge", "distractor-challenge"],
         )
         self.assertEqual(cached["hint_count"], 1)
-        self.assertNotIn("knowledge_hints", cached)
+        self.assertEqual(cached["knowledge_hints"][0]["solution_sketch"], "right method")
 
     def test_strict_mode_does_not_add_direct_context(self):
         retriever = _DirectLookupRetriever()
@@ -1135,7 +1137,7 @@ class PlannerInjectionTests(unittest.TestCase):
         self.addCleanup(env.stop)
         self.retriever, self.augmenter, self.state = _AugmenterFixture.build(self.tmp)
 
-    def test_user_prompt_omits_raw_knowledge_hints(self):
+    def test_user_prompt_includes_redacted_method_hints_without_provenance(self):
         client = StaticLLMClient([{}])
         strategy = PlanStrategy(client, augmenter=self.augmenter)
         ctx = strategy.context_builder.build(self.state)
@@ -1150,6 +1152,11 @@ class PlannerInjectionTests(unittest.TestCase):
         self.assertNotIn("hit_provenance", payload["knowledge_augmentation"])
         self.assertNotIn("related_writeups", payload)
         self.assertNotIn("knowledge_hints", payload)
+        hints = payload["knowledge_augmentation"]["knowledge_hints"]
+        self.assertGreaterEqual(len(hints), 1)
+        self.assertIn("solution_sketch", hints[0])
+        self.assertNotIn("challenge_id", hints[0])
+        self.assertNotIn("score", hints[0])
         self.assertGreaterEqual(payload["knowledge_augmentation"]["hint_count"], 1)
 
     def test_disabled_augmenter_omits_knowledge_hints(self):
@@ -1158,6 +1165,7 @@ class PlannerInjectionTests(unittest.TestCase):
         ctx = strategy.context_builder.build(self.state)
         payload = json.loads(strategy._render_prompt(ctx))
         self.assertNotIn("knowledge_hints", payload)
+        self.assertNotIn("knowledge_hints", payload["knowledge_augmentation"])
 
 
 if __name__ == "__main__":

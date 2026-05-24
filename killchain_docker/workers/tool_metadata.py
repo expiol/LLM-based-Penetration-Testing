@@ -20,14 +20,6 @@ from killchain_docker.tools.core import _first_string
 from killchain_docker.tools.guard_policy import ToolGuardPolicy
 from killchain_docker.tools.plugins.curl import unsupported_url_scheme_reason
 
-_SAFE_CLI_PATH_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyz"
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "0123456789"
-    "/._-:@%+=,"
-)
-
-
 # ---------------------------------------------------------------------------
 # Metadata contracts — shown to the LLM during tool selection
 # ---------------------------------------------------------------------------
@@ -134,8 +126,8 @@ _CONTRACTS: dict[ToolCapability, dict[str, object]] = {
             "max_text_chars",
         ],
         "notes": (
-            "Deterministic bounded inspection for OOXML/ZIP office documents "
-            "(.pptx, .docx, .xlsx), including XML text and embedded media."
+            "Deterministic bounded inspection for OOXML office document "
+            "containers, including XML text and embedded media."
         ),
     },
     ToolCapability.MEDIA_SCAN: {
@@ -708,16 +700,19 @@ def _normalize_challenge_path(value: object, files_root: str) -> str:
     path = (_first_string(value) or "").strip()
     if not path:
         return path
-    if any(char not in _SAFE_CLI_PATH_CHARS for char in path):
+    if _path_shell_fragment(path):
         raise ToolExecutionError(
-            "CLI tool path contains unsupported characters; use shell.exec "
-            "with explicit quoting for unusual filenames"
+            "CLI tool path looks like a shell fragment; pass a single path or use shell.exec"
         )
     if path.startswith("/") or "://" in path:
         return path
     if path.startswith("./"):
         path = path[2:]
     return f"{files_root.rstrip('/')}/{path}"
+
+
+def _path_shell_fragment(path: str) -> bool:
+    return any(token in path for token in ("\n", "\r", ";", "&&", "||", "|", "`", "$(", ">", "<"))
 
 
 def _normalize_script_language(value: str) -> str:

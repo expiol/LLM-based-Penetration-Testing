@@ -92,11 +92,11 @@ TECHNIQUES: tuple[Technique, ...] = (
         evidence_to_seek=(
             "parameter extraction",
             "round-trip or differential self-check",
-            "bounded interpretation scores",
-            "candidate provenance",
+            "bounded execution evidence",
+            "candidate evidence",
         ),
         failure_escape=(
-            "Instrument intermediate states and score alternate encodings/orderings before changing families.",
+            "Use observed execution feedback before changing families.",
         ),
     ),
     Technique(

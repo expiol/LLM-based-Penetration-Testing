@@ -20,7 +20,16 @@ from killchain_docker.scope_guard import (
     todo_loopback_block_reason,
     todo_registered_scratch_dependency_reason,
 )
-from killchain_docker.state import RunState, TodoPhase, TodoStatus, todo_phase_rank
+from killchain_docker.state import (
+    RunState,
+    TodoPhase,
+    TodoStatus,
+    artifact_followup_capability,
+    artifact_followup_priority,
+    artifact_followup_profile,
+    facts_from_artifact,
+    todo_phase_rank,
+)
 
 
 _MAX_ARTIFACT_FOLLOWUP_SEEDS = 12
@@ -100,11 +109,6 @@ class PlanningPipeline(PlannerAgent):
                         "dispatch_intent": {
                             "profile": "artifact_analysis",
                             "required_capability": "artifact.triage",
-                            "completion_contract": [
-                                "bounded_inspection",
-                                "literal_candidate_provenance",
-                                "durable_artifact_registration",
-                            ],
                         },
                     },
                     success_criteria=[
@@ -136,7 +140,6 @@ class PlanningPipeline(PlannerAgent):
                         "family": "flag-validation",
                         "dispatch_intent": {
                             "profile": "flag_validation",
-                            "completion_contract": ["validate_grounded_candidate"],
                         },
                     },
                     success_criteria=["Confirm whether the candidate is the challenge flag."],
@@ -212,12 +215,6 @@ class PlanningPipeline(PlannerAgent):
                         "dispatch_intent": {
                             "profile": "near_miss_repair",
                             "required_capability": "script.exec",
-                            "repair_policy_id": "near_miss_decode_repair",
-                            "completion_contract": [
-                                "bounded_execution",
-                                "candidate_provenance",
-                                "blocker_diagnostic",
-                            ],
                         },
                         "evidence_ids": [evidence_id],
                         "near_miss_candidates": near_misses[:3],
@@ -262,14 +259,17 @@ class PlanningPipeline(PlannerAgent):
                 if not isinstance(record, dict) or not record.get("suspicious"):
                     continue
                 path = str(record.get("path") or "").strip()
-                kind = str(record.get("kind") or "").strip().lower()
                 if not path or path in seen_paths:
                     continue
-                if kind != "png" and not path.lower().endswith(".png"):
+                artifact = cls._artifact_for_path(state, path)
+                if artifact is not None:
+                    is_png = facts_from_artifact(artifact).is_png
+                else:
+                    is_png = cls._media_record_is_png(record)
+                if not is_png:
                     continue
                 if cls._has_capability_todo_for_path(state, path, "png.inspect"):
                     continue
-                artifact = cls._artifact_for_path(state, path)
                 key_material = (
                     str(getattr(artifact, "digest", "") or "").strip()
                     if artifact is not None
@@ -288,11 +288,6 @@ class PlanningPipeline(PlannerAgent):
                                 "profile": "image_inspection",
                                 "required_capability": "png.inspect",
                                 "evidence_ids": [evidence_id],
-                                "completion_contract": [
-                                    "bounded_inspection",
-                                    "literal_candidate_provenance",
-                                    "durable_artifact_registration",
-                                ],
                             },
                             "artifact_id": artifact_id,
                             "artifact_path": path,
@@ -314,6 +309,24 @@ class PlanningPipeline(PlannerAgent):
                 seen_paths.add(path)
                 notes.append(f"Seeded suspicious PNG inspection todo for {path}.")
         return todos, notes
+
+    @staticmethod
+    def _media_record_is_png(record: dict[str, object]) -> bool:
+        kind = str(record.get("kind") or "").strip().lower()
+        file_type = str(record.get("file_type") or "").strip().lower()
+        mime_type = str(
+            record.get("mime_type")
+            or record.get("content_type")
+            or record.get("media_type")
+            or ""
+        ).strip().lower()
+        return (
+            kind == "png"
+            or mime_type == "image/png"
+            or "image/png" in mime_type
+            or "png image" in file_type
+            or "portable network graphics" in file_type
+        )
 
     @classmethod
     def _artifact_followup_seeds(
@@ -337,7 +350,7 @@ class PlanningPipeline(PlannerAgent):
                     "Deferred additional artifact follow-up todos to keep fan-out bounded."
                 )
                 break
-            if not cls._artifact_needs_followup(artifact):
+            if not cls._artifact_needs_followup(artifact, state):
                 continue
             key_material = artifact.digest or artifact.path
             dedupe_key = f"bootstrap:artifact-followup:{key_material}"
@@ -373,11 +386,6 @@ class PlanningPipeline(PlannerAgent):
             dispatch_intent: dict[str, object] = {
                 "profile": cls._artifact_followup_dispatch_profile(capability),
                 "required_capability": capability,
-                "completion_contract": [
-                    "bounded_inspection",
-                    "literal_candidate_provenance",
-                    "durable_artifact_registration",
-                ],
             }
             if evidence_ids:
                 dispatch_intent["evidence_ids"] = evidence_ids
@@ -444,12 +452,6 @@ class PlanningPipeline(PlannerAgent):
                 "profile": "media_inspection",
                 "required_capability": "media.scan",
                 **({"evidence_ids": evidence_ids} if evidence_ids else {}),
-                "completion_contract": [
-                    "bounded_batch_inspection",
-                    "appended_payload_detection",
-                    "literal_candidate_provenance",
-                    "durable_artifact_registration",
-                ],
             },
             "artifact_ids": artifact_ids,
             "paths": paths,
@@ -514,11 +516,6 @@ class PlanningPipeline(PlannerAgent):
                 "profile": "artifact_analysis",
                 "required_capability": "artifact.triage",
                 **({"evidence_ids": evidence_ids} if evidence_ids else {}),
-                "completion_contract": [
-                    "bounded_inspection",
-                    "literal_candidate_provenance",
-                    "durable_artifact_registration",
-                ],
             },
             "artifact_ids": [item for item in artifact_ids if item],
             "paths": paths,
@@ -650,65 +647,25 @@ class PlanningPipeline(PlannerAgent):
         return 70
 
     @staticmethod
-    def _artifact_needs_followup(artifact) -> bool:
-        source = str(getattr(artifact, "source", "") or "").strip().lower()
-        if source in {"artifact_triage", "file", "strings", "exiftool"}:
+    def _artifact_needs_followup(artifact, state: RunState | None = None) -> bool:
+        facts = facts_from_artifact(artifact)
+        if facts.terminal_source:
             return False
-        path = str(getattr(artifact, "path", "") or "")
-        if not path:
+        if facts.is_low_signal or not facts.path:
             return False
-        if source == "disk_extract" and not PlanningPipeline._disk_extract_artifact_needs_followup(artifact):
-            return False
-        if "/.autopentest_artifacts/" in path:
+        if facts.source == "disk_extract":
+            return artifact_followup_priority(artifact) > 0
+        if facts.generated:
             return True
-        return source in {"script_exec", "foremost"}
-
-    @staticmethod
-    def _disk_extract_artifact_needs_followup(artifact) -> bool:
-        if PlanningPipeline._artifact_is_low_signal_os_metadata(artifact):
-            return False
-        return PlanningPipeline._artifact_followup_priority(artifact) > 0
+        return artifact_followup_priority(artifact) > 0
 
     @staticmethod
     def _artifact_followup_priority(artifact) -> int:
-        path = str(getattr(artifact, "path", "") or "").lower()
-        kind = str(getattr(artifact, "kind", "") or "").lower()
-        metadata = getattr(artifact, "metadata", {}) or {}
-        file_type = str(metadata.get("file_type") or "").lower()
-        mime_type = str(metadata.get("mime_type") or "").lower()
-        text = " ".join([path, kind, file_type, mime_type])
-        if any(token in text for token in ("ppt", "pptx", "docx", "xlsx", "pdf", "presentation", "document")):
-            return 100
-        if any(token in text for token in ("zip", "archive", "jar", "apk", "7z", "rar")):
-            return 90
-        if any(token in text for token in ("png", "jpg", "jpeg", "gif", "image")):
-            return 80
-        if any(token in text for token in ("sqlite", "database", ".db")):
-            return 65
-        if any(token in text for token in ("txt", "xml", "json", "csv", "plist", "text/")):
-            return 55
-        if any(token in text for token in ("mp4", "mov", "avi", "media", "video", "audio")):
-            return 45
-        interesting = metadata.get("interesting_strings")
-        if isinstance(interesting, list) and interesting:
-            return 60
-        signature_count = metadata.get("signature_count")
-        try:
-            if int(str(signature_count)) > 0:
-                return 50
-        except (TypeError, ValueError):
-            pass
-        return 0
+        return artifact_followup_priority(artifact)
 
     @staticmethod
     def _artifact_followup_capability(artifact) -> str:
-        if PlanningPipeline._artifact_is_office_document(artifact):
-            return "office.inspect"
-        if PlanningPipeline._artifact_is_batchable_media(artifact):
-            return "media.scan"
-        if PlanningPipeline._artifact_is_png_image(artifact):
-            return "png.inspect"
-        return "artifact.triage"
+        return artifact_followup_capability(artifact)
 
     @staticmethod
     def _artifact_followup_objective(capability: str) -> tuple[str, list[str]]:
@@ -749,113 +706,12 @@ class PlanningPipeline(PlannerAgent):
 
     @staticmethod
     def _artifact_followup_dispatch_profile(capability: str) -> str:
-        if capability == "office.inspect":
-            return "office_inspection"
-        if capability == "media.scan":
-            return "media_inspection"
-        if capability == "png.inspect":
-            return "image_inspection"
-        return "artifact_analysis"
+        return artifact_followup_profile(capability)
 
     @staticmethod
     def _artifact_should_batch_media(artifact) -> bool:
-        return PlanningPipeline._artifact_is_batchable_media(artifact)
-
-    @staticmethod
-    def _artifact_is_batchable_media(artifact) -> bool:
-        source = str(getattr(artifact, "source", "") or "").strip().lower()
-        if source != "office_inspect":
-            return False
-        path = str(getattr(artifact, "path", "") or "").lower().replace("\\", "/")
-        kind = str(getattr(artifact, "kind", "") or "").lower()
-        metadata = getattr(artifact, "metadata", {}) or {}
-        role = str(metadata.get("office_role") or metadata.get("role") or "").lower()
-        text = " ".join([path, kind, role])
-        if "/media/" not in path and "media" not in text and role != "media":
-            return False
-        return any(
-            token in text
-            for token in (
-                ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff",
-                ".mp4", ".mov", ".avi", ".wav", ".mp3",
-                "image", "video", "audio", "media",
-            )
-        )
-
-    @staticmethod
-    def _artifact_is_png_image(artifact) -> bool:
-        path = str(getattr(artifact, "path", "") or "").lower()
-        kind = str(getattr(artifact, "kind", "") or "").lower()
-        source = str(getattr(artifact, "source", "") or "").strip().lower()
-        metadata = getattr(artifact, "metadata", {}) or {}
-        file_type = str(metadata.get("file_type") or "").lower()
-        mime_type = str(metadata.get("mime_type") or "").lower()
-        if "image/png" in mime_type or "png image" in file_type:
-            return True
-        if source in {"office_inspect", "artifact_triage"} and (
-            path.endswith(".png") or "png" in kind
-        ):
-            return True
-        return False
-
-    @staticmethod
-    def _artifact_is_office_document(artifact) -> bool:
-        path = str(getattr(artifact, "path", "") or "").lower()
-        kind = str(getattr(artifact, "kind", "") or "").lower()
-        metadata = getattr(artifact, "metadata", {}) or {}
-        file_type = str(metadata.get("file_type") or "").lower()
-        mime_type = str(metadata.get("mime_type") or "").lower()
-        text = " ".join([path, kind, file_type, mime_type])
-        return any(
-            token in text
-            for token in (
-                ".pptx", ".docx", ".xlsx",
-                "powerpoint", "presentation",
-                "word", "excel", "openxml",
-                "officedocument", "office document",
-            )
-        )
-
-    @staticmethod
-    def _artifact_is_low_signal_os_metadata(artifact) -> bool:
-        path = str(getattr(artifact, "path", "") or "").lower().replace("\\", "/")
-        basename = path.rsplit("/", 1)[-1]
-        low_signal_parts = (
-            "/.spotlight-v100/",
-            "/spotlight-v100/",
-            "/.fseventsd/",
-            "/fseventsd/",
-            "/.trashes/",
-            "/trashes/",
-            "/.trash/",
-            "/__macosx/",
-        )
-        if any(part in path for part in low_signal_parts):
-            return True
-        if basename.startswith("._"):
-            return True
-        if basename in {
-            ".ds_store",
-            "indexstate",
-            "store_generation",
-            "shutdown_time",
-            "fseventsd-uuid",
-        }:
-            return True
-        if basename.startswith(("0.index", "live.0.index", "0.shadowindex", "live.0.shadowindex")):
-            return True
-        if basename.endswith((
-            ".indexhead",
-            ".indexids",
-            ".indexgroups",
-            ".indexpostings",
-            ".indextermids",
-            ".indexpositions",
-            ".indexpositiontable",
-            ".indexdirectory",
-        )):
-            return True
-        return False
+        facts = facts_from_artifact(artifact)
+        return facts.is_embedded_media and facts.is_media
 
     @classmethod
     def _disk_extract_seeds(
@@ -885,11 +741,6 @@ class PlanningPipeline(PlannerAgent):
                         "dispatch_intent": {
                             "profile": "container_extraction",
                             "required_capability": "disk.extract",
-                            "completion_contract": [
-                                "bounded_extraction",
-                                "preserve_provenance",
-                                "durable_artifact_registration",
-                            ],
                         },
                         "artifact_id": getattr(artifact, "artifact_id", ""),
                         "artifact_path": path,
@@ -909,27 +760,7 @@ class PlanningPipeline(PlannerAgent):
 
     @staticmethod
     def _artifact_is_disk_image(artifact) -> bool:
-        path = str(getattr(artifact, "path", "") or "").lower()
-        metadata = getattr(artifact, "metadata", {}) or {}
-        file_type = str(metadata.get("file_type") or "").lower()
-        mime_type = str(metadata.get("mime_type") or "").lower()
-        kind = str(getattr(artifact, "kind", "") or "").lower()
-        text = " ".join([path, file_type, mime_type, kind])
-        return any(
-            token in text
-            for token in (
-                "dos/mbr boot sector",
-                "partition table",
-                "filesystem image",
-                "disk image",
-                "fat16",
-                "fat32",
-                "ntfs",
-                "ext2",
-                "ext3",
-                "ext4",
-            )
-        )
+        return facts_from_artifact(artifact).is_disk_image
 
     @classmethod
     def _candidate_recovery_seeds(
@@ -955,11 +786,6 @@ class PlanningPipeline(PlannerAgent):
                 "family": "candidate-recovery",
                 "dispatch_intent": {
                     "profile": "candidate_recovery",
-                    "completion_contract": [
-                        "evidence_grounded_reasoning",
-                        "candidate_provenance",
-                        "blocker_diagnostic",
-                    ],
                 },
                 "recovery_trigger": "validator_rejection",
                 "rejected_candidate": {
@@ -1045,19 +871,11 @@ class PlanningPipeline(PlannerAgent):
                 "dispatch_intent": {
                     "profile": "execution_closure",
                     "required_capability": "script.exec",
-                    "completion_contract": [
-                        "bounded_execution",
-                        "self_check",
-                        "candidate_provenance",
-                        "blocker_diagnostic",
-                    ],
-                    "repair_policy_id": "execution_closure_repair",
                 },
             },
             success_criteria=[
-                "Derive any candidate only from local artifacts or authorized runtime evidence.",
-                "Print self-check diagnostics and candidate provenance.",
-                "Emit a labeled candidate only after searching the full recovered output.",
+                "Use only local artifacts or authorized runtime evidence.",
+                "Return any recovered candidate through normal tool output.",
             ],
             constraints=[
                 "Do not copy or guess a flag from supplemental context.",
@@ -1086,7 +904,6 @@ class PlanningPipeline(PlannerAgent):
         )
 
     @staticmethod
-    @staticmethod
     def _execution_closure_family(state: RunState) -> str:
         category = str(
             (state.metadata.get("challenge", {}) or {}).get("category") or ""
@@ -1114,7 +931,6 @@ class PlanningPipeline(PlannerAgent):
     _NEAR_MISS_STRONG_TERMS = frozenset({
         "base32",
         "base64",
-        "bytes.fromhex",
         "cipher",
         "ciphertext",
         "codec",

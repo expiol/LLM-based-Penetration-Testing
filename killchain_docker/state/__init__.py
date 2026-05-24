@@ -12,6 +12,13 @@ from killchain_docker.state.file_classification import (
     looks_like_sqlite,
     split_source_and_binary,
 )
+from killchain_docker.state.artifact_facts import (
+    ArtifactFacts,
+    artifact_followup_capability,
+    artifact_followup_priority,
+    artifact_followup_profile,
+    facts_from_artifact,
+)
 from killchain_docker.state.models import (
     Asset,
     AssetKind,
@@ -52,6 +59,7 @@ __all__ = [
     "Asset",
     "AssetKind",
     "Artifact",
+    "ArtifactFacts",
     "Credential",
     "DispatchIntent",
     "Endpoint",
@@ -82,8 +90,12 @@ __all__ = [
     "Vulnerability",
     "WorkerAssignment",
     "WorkerResult",
+    "artifact_followup_capability",
+    "artifact_followup_priority",
+    "artifact_followup_profile",
     "normalize_todo_phase",
     "todo_phase_rank",
+    "facts_from_artifact",
     "classify",
     "files_by_kind",
     "filter_by_kind",

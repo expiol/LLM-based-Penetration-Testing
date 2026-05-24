@@ -20,6 +20,8 @@ from killchain_docker.state import (
     TodoPhase,
     TodoStatus,
     WorkerResult,
+    artifact_followup_capability,
+    facts_from_artifact,
 )
 from killchain_docker.state.constants import (
     DEFAULT_FILES_ROOT,
@@ -124,12 +126,7 @@ class CandidatePolicy:
             return []
 
         variants: list[str] = []
-        if flag_prefix_shape(text) and not text.startswith(expected_prefix + "{"):
-            _prefix, _sep, body = text.partition("{")
-            rewritten = f"{expected_prefix}{{{body}"
-            if rewritten != text and cls.decision(rewritten, flag_format=flag_format).accepted:
-                variants.append(rewritten)
-        elif bare_token_shape(text) and not flag_prefix_shape(text):
+        if bare_token_shape(text) and not flag_prefix_shape(text):
             rewritten = f"{expected_prefix}{{{text}}}"
             if cls.decision(rewritten, flag_format=flag_format).accepted:
                 variants.append(rewritten)
@@ -236,7 +233,6 @@ class TodoPolicy:
             context["dispatch_intent"] = {
                 "profile": "binary_analysis",
                 "required_capability": "shell.exec",
-                "completion_contract": ["algorithm_evidence", "blocker_diagnostic"],
             }
             todo.goal = (
                 "Extract precise binary algorithm evidence needed for the next "
@@ -246,7 +242,13 @@ class TodoPolicy:
                 "Capture the exact algorithm or loop evidence needed for a later script.",
             ]
 
-        context["dispatch_intent"] = DispatchIntent.from_context(context).model_dump(mode="json")
+        intent_payload = DispatchIntent.from_context(context).model_dump(
+            mode="json",
+            exclude_defaults=True,
+        )
+        intent_payload.pop("completion_contract", None)
+        intent_payload.pop("repair_policy_id", None)
+        context["dispatch_intent"] = intent_payload
 
         structural_key = cls.structural_key(todo)
         if structural_key:
@@ -484,26 +486,7 @@ class TodoPolicy:
 
     @staticmethod
     def _artifact_is_disk_image_like(artifact: Any) -> bool:
-        path = str(getattr(artifact, "path", "") or "").lower()
-        kind = str(getattr(artifact, "kind", "") or "").lower()
-        metadata = getattr(artifact, "metadata", {}) or {}
-        file_type = str(metadata.get("file_type") or "").lower()
-        mime_type = str(metadata.get("mime_type") or "").lower()
-        text = " ".join([path, kind, file_type, mime_type])
-        return any(
-            token in text
-            for token in (
-                "dos/mbr boot sector",
-                "partition table",
-                "filesystem image",
-                "disk image",
-                "boot sector",
-                ".img",
-                ".iso",
-                ".dd",
-                ".raw",
-            )
-        )
+        return facts_from_artifact(artifact).is_disk_image
 
     @staticmethod
     def _unique_artifact_mentioned(goal_l: str, state: "RunState") -> Any | None:
@@ -521,19 +504,7 @@ class TodoPolicy:
 
     @staticmethod
     def _capability_for_artifact(artifact: Any) -> str:
-        path = str(getattr(artifact, "path", "") or "").lower()
-        kind = str(getattr(artifact, "kind", "") or "").lower()
-        metadata = getattr(artifact, "metadata", {}) or {}
-        file_type = str(metadata.get("file_type") or "").lower()
-        mime_type = str(metadata.get("mime_type") or "").lower()
-        text = " ".join([path, kind, file_type, mime_type])
-        if any(token in text for token in (".pptx", ".docx", ".xlsx", "openxml", "presentation")):
-            return "office.inspect"
-        if "image/png" in text or ".png" in path or "png" in kind:
-            return "png.inspect"
-        if any(token in text for token in (".jpg", ".jpeg", ".gif", ".bmp", ".mp4", "image", "video")):
-            return "media.scan"
-        return "artifact.triage"
+        return artifact_followup_capability(artifact)
 
     @staticmethod
     def _context_path(context: dict[str, Any]) -> str:
@@ -692,17 +663,8 @@ class TodoPolicy:
         intent = dict(raw_intent) if isinstance(raw_intent, dict) else {}
         intent["profile"] = intent.get("profile") or "execution_closure"
         intent["required_capability"] = intent.get("required_capability") or "script.exec"
-        contract = list(intent.get("completion_contract") or [])
-        for item in (
-            "bounded_execution",
-            "self_check",
-            "candidate_provenance",
-            "blocker_diagnostic",
-        ):
-            if item not in contract:
-                contract.append(item)
-        intent["completion_contract"] = contract
-        intent["repair_policy_id"] = intent.get("repair_policy_id") or "execution_closure_repair"
+        intent.pop("completion_contract", None)
+        intent.pop("repair_policy_id", None)
         context["dispatch_intent"] = intent
 
     @staticmethod

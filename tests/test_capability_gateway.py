@@ -71,6 +71,23 @@ class _StaticScriptPlugin:
         )
 
 
+class _StaticArtifactPlugin:
+    mode = ExecutionMode.SIMULATED
+    name = "artifact_triage"
+
+    def __init__(self) -> None:
+        self.last_request: ToolExecutionRequest | None = None
+
+    def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
+        self.last_request = request
+        return ToolExecutionResult(
+            tool_name=self.name,
+            mode=self.mode,
+            exit_code=0,
+            stdout="artifact only\n",
+        )
+
+
 class _FailingShellPlugin:
     mode = ExecutionMode.SIMULATED
     name = "shell_exec"
@@ -123,6 +140,36 @@ class _NoCandidateScriptPlugin:
             mode=self.mode,
             exit_code=0,
             stdout="decrypted preview contained printable text but no valid flag\n",
+        )
+
+
+class _RepairableScriptPlugin:
+    mode = ExecutionMode.SIMULATED
+    name = "script_exec"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
+        self.calls += 1
+        if self.calls == 1:
+            return ToolExecutionResult(
+                tool_name=self.name,
+                mode=self.mode,
+                exit_code=1,
+                stdout="",
+                stderr=(
+                    "Traceback (most recent call last):\n"
+                    "  File \"/tmp/solver.py\", line 4, in <module>\n"
+                    "    b'abc' + 'def'\n"
+                    "TypeError: can't concat str to bytes\n"
+                ),
+            )
+        return ToolExecutionResult(
+            tool_name=self.name,
+            mode=self.mode,
+            exit_code=0,
+            stdout="FLAG FOUND: flag{repaired_script}\n",
         )
 
 
@@ -259,6 +306,210 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertIn("already selected the capability", captured["system"])
         self.assertIn('"fixed_capability": "script.exec"', captured["user"])
         self.assertNotIn("ONLY available capabilities", captured["system"])
+
+    def test_required_script_capability_preempts_artifact_hint_fast_path(self) -> None:
+        captured: dict[str, str] = {}
+
+        def response(system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["system"] = system_prompt
+            captured["user"] = user_prompt
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('flag{script_test}')"},
+                "rationale": "script is fixed by dispatch intent",
+            }
+
+        plane = ExecutionPlane()
+        script_plugin = _StaticScriptPlugin()
+        artifact_plugin = _StaticArtifactPlugin()
+        plane.register(script_plugin, script_output_builder)
+        plane.register(
+            artifact_plugin,
+            lambda _request, _result, _parsed: ToolOutput(
+                summary="artifact.triage: static",
+                output_context={},
+            ),
+        )
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(
+                    ToolCapability.SCRIPT_EXEC,
+                    ToolCapability.ARTIFACT_TRIAGE,
+                ),
+            ),
+            llm_client=StaticLLMClient(response),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = TodoItem(
+            goal="Decrypt the artifact and print the recovered flag.",
+            context={
+                "capability_hint": "artifact.triage",
+                "dispatch_intent": {"required_capability": "script.exec"},
+                "execution_closure": True,
+            },
+        )
+
+        result = worker.run(todo, state)
+
+        self.assertTrue(result.success)
+        self.assertIsNotNone(script_plugin.last_request)
+        self.assertIsNone(artifact_plugin.last_request)
+        self.assertIn('"fixed_capability": "script.exec"', captured["user"])
+
+    def test_archive_extraction_todo_obeys_artifact_triage_hint(self) -> None:
+        captured: dict[str, str] = {}
+
+        def response(system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["system"] = system_prompt
+            captured["user"] = user_prompt
+            return {
+                "capability": "shell.exec",
+                "metadata": {
+                    "command": (
+                        "mkdir -p \"$CTF_TEMP_DIR/src\" "
+                        "&& tar -tzf \"$CTF_FILES_ROOT/csaw.tar.gz\""
+                    )
+                },
+                "rationale": "archive extraction needs a concrete shell command",
+            }
+
+        plane = ExecutionPlane()
+        shell_plugin = _StaticShellPlugin()
+        artifact_plugin = _StaticArtifactPlugin()
+        plane.register(shell_plugin, shell_output_builder)
+        plane.register(
+            artifact_plugin,
+            lambda _request, _result, _parsed: ToolOutput(
+                summary="artifact.triage: static",
+                output_context={},
+            ),
+        )
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(
+                    ToolCapability.SHELL_EXEC,
+                    ToolCapability.ARTIFACT_TRIAGE,
+                ),
+            ),
+            llm_client=StaticLLMClient(response),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = TodoItem(
+            goal=(
+                "Extract csaw.tar.gz to a bounded workspace and recursively list "
+                "the source tree."
+            ),
+            context={
+                "capability_hint": "artifact.triage",
+                "challenge_files": ["csaw.tar.gz"],
+                "family": "artifact-inventory",
+            },
+        )
+
+        result = worker.run(todo, state)
+
+        self.assertTrue(result.success)
+        self.assertIsNone(shell_plugin.last_request)
+        self.assertIsNotNone(artifact_plugin.last_request)
+        self.assertNotIn("user", captured)
+
+    def test_source_code_review_todo_obeys_artifact_triage_hint(self) -> None:
+        captured: dict[str, str] = {}
+
+        def response(system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["system"] = system_prompt
+            captured["user"] = user_prompt
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('source reviewed')"},
+                "rationale": "source review needs code-aware parsing",
+            }
+
+        plane = ExecutionPlane()
+        script_plugin = _StaticScriptPlugin()
+        artifact_plugin = _StaticArtifactPlugin()
+        plane.register(script_plugin, script_output_builder)
+        plane.register(
+            artifact_plugin,
+            lambda _request, _result, _parsed: ToolOutput(
+                summary="artifact.triage: static",
+                output_context={},
+            ),
+        )
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(
+                    ToolCapability.SCRIPT_EXEC,
+                    ToolCapability.ARTIFACT_TRIAGE,
+                ),
+            ),
+            llm_client=StaticLLMClient(response),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = TodoItem(
+            goal=(
+                "Read and analyze solver.py source code to understand the "
+                "algorithm and porting issues."
+            ),
+            context={
+                "capability_hint": "artifact.triage",
+                "path": "/home/ctfplayer/ctf_files/solver.py",
+                "family": "artifact-followup",
+            },
+        )
+
+        result = worker.run(todo, state)
+
+        self.assertTrue(result.success)
+        self.assertIsNone(script_plugin.last_request)
+        self.assertIsNotNone(artifact_plugin.last_request)
+        self.assertNotIn("user", captured)
+
+    def test_worker_retries_metadata_validation_error_once(self) -> None:
+        captured: list[str] = []
+
+        def response(system_prompt: str, user_prompt: str) -> dict[str, object]:
+            del system_prompt
+            captured.append(user_prompt)
+            if len(captured) == 1:
+                return {
+                    "capability": "shell.exec",
+                    "metadata": {"command": "mmls out.img 2>/dev/null && fls out.img"},
+                    "rationale": "first attempt suppresses diagnostics",
+                }
+            return {
+                "capability": "shell.exec",
+                "metadata": {"command": "mmls out.img 2>&1 && fls out.img 2>&1"},
+                "rationale": "keep stderr visible after guard feedback",
+            }
+
+        plane = ExecutionPlane()
+        shell_plugin = _StaticShellPlugin()
+        plane.register(shell_plugin, shell_output_builder)
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(ToolCapability.SHELL_EXEC,),
+            ),
+            llm_client=StaticLLMClient(response),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = TodoItem(goal="Inspect an image with command-line tooling.")
+
+        result = worker.run(todo, state)
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(captured), 2)
+        self.assertIn("VALIDATION ERROR", captured[1])
+        self.assertIsNotNone(shell_plugin.last_request)
+        self.assertIn("2>&1", shell_plugin.last_request.metadata["command"])
 
     def test_tshark_empty_output_has_structured_signal(self) -> None:
         output = tshark_output_builder(
@@ -416,28 +667,11 @@ class CapabilityGatewayTests(unittest.TestCase):
                     "rationale": "bad one-line Python",
                 },
                 {
-                    "capability": "script.exec",
+                    "capability": "shell.exec",
                     "metadata": {
-                        "script_code": (
-                            "from pathlib import Path\n"
-                            "Path('/tmp/recovered.txt').write_text('x')\n"
-                            "print('done')\n"
-                        ),
+                        "command": "mmls out.img 2>/dev/null && fls out.img",
                     },
-                    "rationale": "bad scratch path",
-                },
-                {
-                    "capability": "script.exec",
-                    "metadata": {
-                        "script_code": (
-                            "import os\n"
-                            "from pathlib import Path\n"
-                            "scratch = Path(os.environ.get('CTF_TEMP_DIR', '.'))\n"
-                            "scratch.joinpath('recovered.txt').write_text('x')\n"
-                            "print('flag{script_test}')\n"
-                        ),
-                    },
-                    "rationale": "use disposable scratch path",
+                    "rationale": "bad stderr suppression",
                 },
             ]),
             tool_gateway=ToolGateway(plane),
@@ -454,7 +688,8 @@ class CapabilityGatewayTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertTrue(result.partial)
-        self.assertEqual(result.result_quality, "shell_python_complexity")
+        self.assertEqual(result.result_quality, "metadata_validation")
+        self.assertIn("suppressed stderr", result.error or "")
         self.assertEqual(result.output_context["agent_handoff"]["target"], "planner")
         self.assertIsNone(shell_plugin.last_request)
         self.assertIsNone(script_plugin.last_request)
@@ -496,6 +731,44 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertTrue(result.partial)
         self.assertEqual(result.memory_updates, {})
         self.assertEqual(state.working_memory, {})
+
+    def test_script_execution_error_retries_once_with_traceback_context(self) -> None:
+        captured: list[str] = []
+        plugin = _RepairableScriptPlugin()
+        plane = ExecutionPlane()
+        plane.register(plugin, script_output_builder)
+
+        def response(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured.append(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('solver attempt')"},
+                "rationale": "repair script using prior traceback",
+            }
+
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(ToolCapability.SCRIPT_EXEC,),
+            ),
+            llm_client=StaticLLMClient(response),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(TodoItem(goal="Decrypt the ciphertext and recover the flag."))
+
+        result = worker.run(todo, state)
+
+        self.assertEqual(plugin.calls, 2)
+        self.assertTrue(result.success)
+        self.assertEqual(result.output_context["react_steps"], 2)
+        self.assertEqual(
+            [candidate.value for candidate in result.state_delta.flag_candidates],
+            ["flag{repaired_script}"],
+        )
+        self.assertEqual(len(captured), 2)
+        self.assertIn("Traceback (most recent call last):", captured[1])
+        self.assertIn("bytes_text_mismatch", captured[1])
 
     def test_artifact_closure_task_hands_near_miss_back_to_planner(self) -> None:
         plugin = _NearMissThenCandidateScriptPlugin()

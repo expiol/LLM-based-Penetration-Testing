@@ -62,6 +62,10 @@ _DIAGNOSTIC_LINE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_HEXDUMP_LINE_RE = re.compile(
+    r"^\s*(?:0x)?[0-9a-fA-F]{1,10}\s*[:|]\s*"
+    r"(?:[0-9a-fA-F]{2}(?:\s+|$)){6,}(?:\s{2,}.*)?$"
+)
 _DIAGNOSTIC_REPORT_RE = re.compile(
     r"(?im)^\s*(?:\[[^\]]+\]\s*)?"
     r"(?:=+\s*top\s+|=+\s*local\s+self-test|=+\s*differential\s+test|"
@@ -299,7 +303,11 @@ def _diagnostic_line_ratio(lines: list[str]) -> float:
     non_empty = [line.strip() for line in lines if line.strip()]
     if not non_empty:
         return 1.0
-    diagnostic = sum(1 for line in non_empty if _DIAGNOSTIC_LINE_RE.match(line))
+    diagnostic = sum(
+        1
+        for line in non_empty
+        if _DIAGNOSTIC_LINE_RE.match(line) or _HEXDUMP_LINE_RE.match(line)
+    )
     return diagnostic / len(non_empty)
 
 
@@ -328,6 +336,7 @@ def _plaintext_blocks(stdout: str) -> list[str]:
             if (
                 _PLAINTEXT_LABEL_RE.search(next_line)
                 or _DIAGNOSTIC_LINE_RE.match(stripped)
+                or _HEXDUMP_LINE_RE.match(stripped)
             ):
                 if following:
                     break
@@ -361,6 +370,8 @@ def _readable_near_misses(stdout: str) -> list[str]:
 
         lines = [line.rstrip() for line in block.replace("\r", "\n").splitlines()]
         non_empty = [line for line in lines if line.strip()]
+        if _diagnostic_line_ratio(non_empty) >= 0.45:
+            continue
         graphic_lines = [
             line for line in non_empty
             if len(line) >= 20 and _graphic_density(line) >= 0.25
@@ -422,6 +433,8 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         or "could not parse" in text
         or "parse error" in text
         or "invalid literal for int" in text
+        or "binascii.error: odd-length string" in text
+        or "binascii.error: non-hexadecimal digit found" in text
     ):
         return "parse_error", "script parsing logic rejected tool or service output; validate delimiters and exact field shape"
     if (
@@ -444,6 +457,8 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         or "must be bytes, not str" in text
         or "byte indices must be integers or slices" in text
         or "ord() expected string of length 1, but int found" in text
+        or "unicodedecodeerror" in text
+        or "unicodeencodeerror" in text
     ):
         return "bytes_text_mismatch", "script mixed bytes and text across an IO boundary"
     if (
@@ -458,6 +473,11 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
             "undefined_name",
             "script referenced a variable, function, or module before assignment",
         )
+    if "attributeerror:" in text and "object has no attribute" in text:
+        return (
+            "type_error",
+            "script used a method on an incompatible value type; inspect and convert the value deliberately",
+        )
     if "typeerror:" in text:
         return (
             "type_error",
@@ -466,6 +486,14 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
     if "syntaxerror" in text:
         return "syntax_error", "script failed Python or shell syntax validation"
     return "nonzero_exit", f"script exited with status {exit_code}"
+
+
+def _traceback_excerpt(output_text: str, *, width: int = 4000) -> str:
+    marker = "Traceback (most recent call last):"
+    index = output_text.find(marker)
+    if index < 0:
+        return ""
+    return _truncate(output_text[index:].strip(), width)
 
 
 def _flag_candidates_from_script_stdout(stdout: str, *, source: str):
@@ -503,6 +531,10 @@ def _candidate_has_readable_context(
     if allow_derived_visual and _looks_like_visual_text_candidate(candidate):
         return True
 
+    if "{" in candidate and candidate not in stdout:
+        if _candidate_body_has_readable_context(stdout, candidate):
+            return True
+
     labels = (
         "flag found", "candidate flag", "possible flag", "valid flag",
         "recovered flag", "validated flag",
@@ -525,6 +557,43 @@ def _candidate_has_readable_context(
         if "\ufffd" not in window and _printable_ratio(window) >= 0.90:
             return True
         start = index + len(candidate)
+
+
+def _candidate_body_has_readable_context(stdout: str, candidate: str) -> bool:
+    prefix, _sep, body_with_brace = candidate.partition("{")
+    body = body_with_brace[:-1] if body_with_brace.endswith("}") else ""
+    if not prefix or not body:
+        return False
+
+    labels = (
+        "answer",
+        "flag",
+        "key",
+        "plaintext",
+        "recovered",
+        "secret",
+        "validated",
+    )
+    negative = ("no flag", "not found", "mismatch", "invalid", "rejected")
+    for needle in (f"{{{body}}}", body):
+        start = 0
+        while True:
+            index = stdout.find(needle, start)
+            if index < 0:
+                break
+            line_start = stdout.rfind("\n", 0, index) + 1
+            line_end = stdout.find("\n", index)
+            if line_end < 0:
+                line_end = len(stdout)
+            window_start = max(line_start, index - 160)
+            window_end = min(line_end, index + len(needle) + 160)
+            context = stdout[window_start:window_end].lower()
+            if any(label in context for label in labels) and not any(
+                item in context for item in negative
+            ):
+                return True
+            start = index + len(needle)
+    return False
 
 
 def _looks_like_visual_text_candidate(candidate: str) -> bool:
@@ -671,6 +740,9 @@ def build_output(
         "returncode": result.exit_code,
         "flag_candidates": [fc.value for fc in flags],
     }
+    traceback = _traceback_excerpt("\n".join(part for part in (stderr, stdout) if part))
+    if traceback:
+        output_context["traceback"] = traceback
     artifacts = _script_artifacts(artifact_records)
     if artifact_records:
         output_context["generated_artifact_records"] = artifact_records[:40]
@@ -765,10 +837,9 @@ def _script_artifacts(records: list[dict[str, object]]) -> list[Artifact]:
         if not path:
             continue
         size = record.get("size")
-        suffix = path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
         file_type = str(record.get("file_type") or "")
         mime_type = str(record.get("mime_type") or "")
-        kind = _script_artifact_kind(path, file_type=file_type, mime_type=mime_type)
+        kind = _script_artifact_kind(file_type=file_type, mime_type=mime_type)
         digest = record.get("digest")
         artifacts.append(
             Artifact(
@@ -782,19 +853,17 @@ def _script_artifacts(records: list[dict[str, object]]) -> list[Artifact]:
                     "relative_path": record.get("relative_path"),
                     "file_type": file_type or None,
                     "mime_type": mime_type or None,
-                    "suffix": suffix or None,
                 },
             )
         )
     return artifacts
 
 
-def _script_artifact_kind(path: str, *, file_type: str = "", mime_type: str = "") -> str:
-    suffix = path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
-    text = " ".join([suffix, file_type.lower(), mime_type.lower()])
+def _script_artifact_kind(*, file_type: str = "", mime_type: str = "") -> str:
+    text = " ".join([file_type.lower(), mime_type.lower()])
     if "image/png" in text or "png image" in text:
         return "script_artifact_png"
-    if "image/jpeg" in text or "jpeg image" in text or "jpg" in text:
+    if "image/jpeg" in text or "jpeg image" in text:
         return "script_artifact_jpeg"
     if "image/gif" in text or "gif image" in text:
         return "script_artifact_gif"
@@ -804,6 +873,4 @@ def _script_artifact_kind(path: str, *, file_type: str = "", mime_type: str = ""
         return "script_artifact_database"
     if "text/" in text or "ascii text" in text or "unicode text" in text:
         return "script_artifact_text"
-    if suffix and len(suffix) <= 12:
-        return f"script_artifact_{suffix}"
     return "script_artifact"

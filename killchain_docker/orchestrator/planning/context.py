@@ -159,12 +159,7 @@ class PlannerContextBuilder:
 
     @staticmethod
     def _planner_knowledge_metadata(raw: object) -> dict[str, Any]:
-        """Return only planner-useful RAG metadata.
-
-        Audit fields such as concrete hit ids, ranking scores, and retrieval
-        identity labels stay in ``state.metadata["rag"]`` for reports. The
-        planner only needs availability and warning policy.
-        """
+        """Return planner-useful RAG context without provenance labels."""
         if not isinstance(raw, dict):
             return {}
         allowed = {
@@ -177,6 +172,11 @@ class PlannerContextBuilder:
         }
         metadata = {key: raw[key] for key in allowed if key in raw}
         hints = raw.get("knowledge_hints")
+        if isinstance(hints, list):
+            metadata["knowledge_hints"] = [
+                hint for hint in hints
+                if isinstance(hint, dict)
+            ][:3]
         if "hint_count" not in metadata and isinstance(hints, list):
             metadata["hint_count"] = sum(1 for item in hints if isinstance(item, dict))
         return metadata

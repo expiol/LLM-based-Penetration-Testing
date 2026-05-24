@@ -92,6 +92,11 @@ def redact_flag_literals(text: str, *, file_path: bool = False) -> str:
             return token
         candidate = token
         suffix = ""
+        if file_path:
+            stem, dot, ext = token.rpartition(".")
+            if dot and stem and ext and _bare_file_literal_context(stem):
+                candidate = stem
+                suffix = f".{ext}"
         if not validatable_flag_candidate(candidate):
             stem, dot, ext = token.rpartition(".")
             if not dot or not validatable_flag_candidate(stem):

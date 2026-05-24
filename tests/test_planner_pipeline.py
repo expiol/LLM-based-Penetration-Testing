@@ -237,11 +237,11 @@ class PlanningPipelineSeedTests(unittest.TestCase):
         self.assertNotIn("bootstrap:evidence-execution-closure", keys)
         self.assertTrue(all(todo.phase == TodoPhase.ANALYSIS for todo in decision.todos))
 
-    def test_seed_generated_unclassified_png_artifact_followup_uses_triage_hint(self) -> None:
+    def test_seed_generated_unclassified_artifact_followup_uses_triage_hint(self) -> None:
         state = _state([])
         artifact = Artifact(
-            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/scratch/out.png",
-            kind="script_artifact_png",
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/scratch/out.random",
+            kind="script_artifact",
             source="script_exec",
             size=4096,
         )
@@ -284,12 +284,75 @@ class PlanningPipelineSeedTests(unittest.TestCase):
         self.assertEqual(followup.context["capability_hint"], "png.inspect")
         self.assertEqual(followup.context["path"], artifact.path)
 
+    def test_generated_source_tree_docs_png_uses_content_followup(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path=(
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/"
+                "scratch/project/docs/assets/img/profiler.png"
+            ),
+            kind="script_artifact_png",
+            source="script_exec",
+            size=4096,
+            digest="docs-png",
+            metadata={
+                "origin": "scratch",
+                "relative_path": "project/docs/assets/img/profiler.png",
+                "file_type": "PNG image data, 1181 x 829, 8-bit/color RGBA",
+                "mime_type": "image/png",
+            },
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        followup = next(
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+            and todo.context.get("path") == artifact.path
+        )
+        self.assertEqual(followup.context["capability_hint"], "png.inspect")
+
+    def test_generated_source_tree_framework_font_does_not_seed_followup(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path=(
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/"
+                "scratch/project/public/assets/fonts/glyphicons-halflings-regular.woff"
+            ),
+            kind="script_artifact",
+            source="script_exec",
+            size=16448,
+            digest="font",
+            metadata={
+                "origin": "scratch",
+                "relative_path": "project/public/assets/fonts/glyphicons-halflings-regular.woff",
+                "file_type": "Web Open Font Format, TrueType",
+                "mime_type": "application/octet-stream",
+            },
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        self.assertFalse(
+            any(
+                todo.context.get("family") == "artifact-followup"
+                and todo.context.get("path") == artifact.path
+                for todo in decision.todos
+            )
+        )
+
     def test_ooxml_child_artifact_seeds_office_inspect_hint(self) -> None:
         state = _state([])
         artifact = Artifact(
             path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk_extract/offset_0/deck.pptx",
             kind="disk_extract_document",
             source="disk_extract",
+            metadata={
+                "file_type": "Microsoft PowerPoint 2007+",
+                "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            },
         )
         state.artifacts[artifact.artifact_id] = artifact
 
@@ -594,6 +657,60 @@ class PlanningPipelineSeedTests(unittest.TestCase):
         self.assertEqual(png_todos[0].dedupe_key, f"bootstrap:artifact-followup:{path}")
         self.assertFalse(any(todo.context.get("capability_hint") == "media.analyze" for todo in decision.todos))
 
+    def test_llm_source_code_analysis_alias_is_not_suffix_rewritten(self) -> None:
+        state = _state(["solver.random"])
+        state.queue_todo(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                context={"family": "artifact-inventory"},
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        ).mark_completed("done")
+        path = "/home/ctfplayer/ctf_files/solver.random"
+        artifact = Artifact(
+            path=path,
+            kind="script_artifact",
+            source="artifact_triage",
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(
+                summary="read source",
+                todos=[
+                    PlannedTodo(
+                        goal=(
+                            "Analyze the referenced source to extract constants, "
+                            "ciphertext arrays, and algorithm order."
+                        ),
+                        phase=TodoPhase.ANALYSIS,
+                        priority=90,
+                        context={
+                            "family": "artifact-followup",
+                            "capability_hint": "source.code_analysis",
+                            "artifact_id": artifact.artifact_id,
+                            "artifact_path": path,
+                            "source_file": "solver.random",
+                            "files_root": "/home/ctfplayer/ctf_files",
+                        },
+                    )
+                ],
+            ),
+        )
+
+        todo = next(
+            item for item in decision.todos
+            if item.context.get("artifact_path") == path
+        )
+        self.assertEqual(todo.context["family"], "artifact-followup")
+        self.assertEqual(todo.context["capability_hint"], "source.code_analysis")
+        self.assertEqual(
+            todo.context["dispatch_intent"]["required_capability"],
+            "source.code_analysis",
+        )
+
     def test_generated_binary_artifact_followup_does_not_crowd_analysis(self) -> None:
         state = _state([])
         artifact = Artifact(
@@ -843,6 +960,10 @@ class PlanningPipelineSeedTests(unittest.TestCase):
             path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk_extract/offset_0/clam.pptx",
             kind="disk_extract_document",
             source="disk_extract",
+            metadata={
+                "file_type": "Microsoft PowerPoint 2007+",
+                "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            },
         )
         index = Artifact(
             path=(
@@ -851,6 +972,7 @@ class PlanningPipelineSeedTests(unittest.TestCase):
             ),
             kind="disk_extract_indexhead",
             source="disk_extract",
+            metadata={"role": "os_metadata", "file_type": "data"},
         )
         state.artifacts[doc.artifact_id] = doc
         state.artifacts[index.artifact_id] = index
@@ -879,6 +1001,10 @@ class PlanningPipelineSeedTests(unittest.TestCase):
             kind="disk_extract_document",
             source="disk_extract",
             digest="e" * 64,
+            metadata={
+                "file_type": "Microsoft PowerPoint 2007+",
+                "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            },
         )
         state.artifacts[doc.artifact_id] = doc
         prior = state.queue_todo(
@@ -910,6 +1036,10 @@ class PlanningPipelineSeedTests(unittest.TestCase):
             kind="disk_extract_document",
             source="disk_extract",
             digest="4" * 64,
+            metadata={
+                "file_type": "Microsoft PowerPoint 2007+",
+                "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            },
         )
         state.artifacts[doc.artifact_id] = doc
 
@@ -1432,7 +1562,28 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
         self.assertEqual(todo.context["family"], "crypto-decrypt")
         self.assertIs(todo.context["execution_closure"], True)
         self.assertEqual(todo.context["dispatch_intent"]["required_capability"], "script.exec")
-        self.assertIn("candidate_provenance", todo.context["dispatch_intent"]["completion_contract"])
+        self.assertNotIn("completion_contract", todo.context["dispatch_intent"])
+        self.assertNotIn("repair_policy_id", todo.context["dispatch_intent"])
+
+    def test_archive_extraction_todo_is_not_filename_rewritten(self) -> None:
+        state = _state(["bundle.random"])
+        todo = PlannedTodo(
+            goal=(
+                "Extract bundle.random to a working directory and list the full "
+                "source tree."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            context={"capability_hint": "artifact.triage"},
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertNotIn("archive_extraction", todo.context)
+        self.assertEqual(todo.context["capability_hint"], "artifact.triage")
+        self.assertEqual(
+            todo.context["dispatch_intent"]["required_capability"],
+            "artifact.triage",
+        )
 
     def test_algorithm_verification_gets_execution_closure_context(self) -> None:
         state = _state(["cipher.py", "capture.bin"])
@@ -1467,7 +1618,7 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
 
         self.assertNotIn("execution_closure", todo.context)
         self.assertNotIn("capability_hint", todo.context)
-        self.assertIsNone(todo.context["dispatch_intent"]["required_capability"])
+        self.assertNotIn("required_capability", todo.context["dispatch_intent"])
         self.assertEqual(todo.context["dispatch_intent"]["evidence_ids"], ["evidence-old"])
 
     def test_execution_continuation_todo_stays_open_dispatch(self) -> None:
@@ -1485,7 +1636,7 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
 
         self.assertNotIn("execution_closure", todo.context)
         self.assertEqual(todo.context["dispatch_intent"]["profile"], "execution_continuation")
-        self.assertIsNone(todo.context["dispatch_intent"]["required_capability"])
+        self.assertNotIn("required_capability", todo.context["dispatch_intent"])
 
     def test_flag_format_template_is_not_a_concrete_candidate(self) -> None:
         state = _state(["stfu", "flag.stfu"])
@@ -2215,7 +2366,7 @@ class LLMPlannerTests(unittest.TestCase):
                             "family": "algorithm-verification",
                             "capability_hint": "script.exec",
                         },
-                        "success_criteria": ["Print candidate provenance."],
+                        "success_criteria": ["Return recovered candidates through normal tool output."],
                     }
                 ],
                 "notes": [],

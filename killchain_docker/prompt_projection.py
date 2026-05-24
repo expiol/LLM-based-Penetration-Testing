@@ -13,6 +13,37 @@ from killchain_docker.prompt_bounds import bounded_value, trim_text
 from killchain_docker.state import Artifact, DispatchIntent, ExecutionRecord, RunState, TodoItem
 
 
+def dispatch_intent(context: dict[str, Any]) -> dict[str, Any]:
+    payload = DispatchIntent.from_context(context).model_dump(
+        mode="json",
+        exclude_defaults=True,
+    )
+    payload.pop("completion_contract", None)
+    payload.pop("repair_policy_id", None)
+    return payload
+
+
+def context_projection(
+    context: dict[str, Any],
+    *,
+    width: int,
+    list_limit: int,
+    dict_limit: int,
+) -> Any:
+    payload = bounded_value(
+        context,
+        width=width,
+        list_limit=list_limit,
+        dict_limit=dict_limit,
+    )
+    if isinstance(payload, dict):
+        raw_intent = payload.get("dispatch_intent")
+        if isinstance(raw_intent, dict):
+            raw_intent.pop("completion_contract", None)
+            raw_intent.pop("repair_policy_id", None)
+    return payload
+
+
 def planner_todo(todo: TodoItem) -> dict[str, Any]:
     return {
         "todo_id": todo.todo_id,
@@ -20,7 +51,12 @@ def planner_todo(todo: TodoItem) -> dict[str, Any]:
         "phase": todo.phase,
         "status": todo.status,
         "priority": todo.priority,
-        "context": bounded_value(todo.context, width=360, list_limit=8, dict_limit=14),
+        "context": context_projection(
+            todo.context,
+            width=360,
+            list_limit=8,
+            dict_limit=14,
+        ),
         "result_summary": trim_text(todo.result_summary, width=300),
         "error": trim_text(todo.error, width=220),
     }
@@ -31,8 +67,13 @@ def router_todo(todo: TodoItem) -> dict[str, object]:
         "todo_id": todo.todo_id,
         "goal": trim_text(todo.goal, width=360),
         "phase": todo.phase,
-        "dispatch_intent": DispatchIntent.from_context(todo.context).model_dump(mode="json"),
-        "context": bounded_value(todo.context, width=360, list_limit=8, dict_limit=14),
+        "dispatch_intent": dispatch_intent(todo.context),
+        "context": context_projection(
+            todo.context,
+            width=360,
+            list_limit=8,
+            dict_limit=14,
+        ),
         "priority": todo.priority,
         "success_criteria": bounded_value(todo.success_criteria, width=240, list_limit=6),
         "constraints": bounded_value(todo.constraints, width=240, list_limit=6),
@@ -46,8 +87,13 @@ def worker_todo(task: TodoItem) -> dict[str, Any]:
         "todo_id": task.todo_id,
         "goal": trim_text(task.goal, width=420),
         "phase": task.phase,
-        "dispatch_intent": DispatchIntent.from_context(task.context).model_dump(mode="json"),
-        "context": bounded_value(task.context, width=420, list_limit=8, dict_limit=14),
+        "dispatch_intent": dispatch_intent(task.context),
+        "context": context_projection(
+            task.context,
+            width=420,
+            list_limit=8,
+            dict_limit=14,
+        ),
         "priority": task.priority,
         "success_criteria": bounded_value(task.success_criteria, width=260, list_limit=6),
         "constraints": bounded_value(task.constraints, width=260, list_limit=6),

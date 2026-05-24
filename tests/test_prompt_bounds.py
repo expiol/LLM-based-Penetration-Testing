@@ -6,7 +6,7 @@ import json
 import unittest
 
 from killchain_docker.llm import StaticLLMClient
-from killchain_docker.prompt_projection import router_todo, worker_todo, working_memory
+from killchain_docker.prompt_projection import planner_todo, router_todo, worker_todo, working_memory
 from killchain_docker.prompts.planner import build_planner_system_prompt
 from killchain_docker.state import (
     Artifact,
@@ -65,18 +65,45 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         state.working_memory["huge"] = huge_text
         todo = TodoItem(
             goal=huge_text,
-            context={"blob": huge_text, "items": [huge_text for _ in range(20)]},
+            context={
+                "blob": huge_text,
+                "items": [huge_text for _ in range(20)],
+                "dispatch_intent": {
+                    "profile": "execution_closure",
+                    "completion_contract": ["legacy_contract"],
+                    "repair_policy_id": "legacy_repair",
+                },
+            },
         )
 
+        planner_projection = planner_todo(todo)
         router_projection = router_todo(todo)
         worker_projection = worker_todo(todo)
 
+        self.assertNotIn(
+            "completion_contract",
+            planner_projection["context"]["dispatch_intent"],
+        )
+        self.assertNotIn(
+            "repair_policy_id",
+            planner_projection["context"]["dispatch_intent"],
+        )
         self.assertLessEqual(len(router_projection["goal"]), 400)
         self.assertLessEqual(len(router_projection["context"]["blob"]), 400)
         self.assertLessEqual(len(worker_projection["goal"]), 460)
         self.assertLessEqual(len(worker_projection["context"]["blob"]), 460)
         self.assertEqual(len(router_projection["context"]["items"]), 8)
         self.assertEqual(len(worker_projection["context"]["items"]), 8)
+        self.assertNotIn(
+            "completion_contract",
+            router_projection["context"]["dispatch_intent"],
+        )
+        self.assertNotIn(
+            "repair_policy_id",
+            worker_projection["context"]["dispatch_intent"],
+        )
+        self.assertNotIn("completion_contract", router_projection["dispatch_intent"])
+        self.assertNotIn("repair_policy_id", worker_projection["dispatch_intent"])
         self.assertLessEqual(len(working_memory(state)["huge"]), 400)
 
     def test_worker_tool_selection_prompt_bounds_state_sections(self) -> None:
@@ -171,10 +198,9 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         self.assertLessEqual(len(prior_steps[0]["stdout_preview"]), 740)
         correction_context = snapshot["correction_context"]  # type: ignore[index]
         self.assertLessEqual(len(correction_context["last_stdout"]), 740)
-        self.assertIn("Enumerate bounded interpretations", correction_context["instruction"])
+        self.assertIn("last_traceback", correction_context["instruction"])
         rules = "\n".join(snapshot["tool_use_rules"])  # type: ignore[index]
         self.assertIn("bound loops", rules)
-        self.assertIn("reference/source code", rules)
         self.assertIn("third-party Python packages", rules)
         self.assertIn("Prefer stdlib", rules)
         self.assertIn("ImportError", rules)
@@ -185,19 +211,11 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         self.assertIn("CTF_ORIGINAL_FILES_ROOT is a separate pristine snapshot", rules)
         self.assertIn("main()", rules)
         self.assertIn("ast.parse", rules)
-        self.assertIn("bounded samples", rules)
-        self.assertIn("full recovery", rules)
-        self.assertIn("execution_closure", rules)
-        self.assertIn("derived artifact", rules)
-        self.assertIn("format-appropriate semantics", rules)
-        self.assertIn("candidate provenance", rules)
-        self.assertIn("higher-priority facts", rules)
-        self.assertIn("low-quality possible candidate", rules)
-        self.assertIn("search the full plaintext", rules)
-        self.assertIn("long bare CTF tokens", correction_context["instruction"])
-        self.assertIn("derived artifact", correction_context["instruction"])
-        self.assertIn("format-appropriate semantics", correction_context["instruction"])
-        self.assertIn("low-quality possible flag", correction_context["instruction"])
+        self.assertNotIn("candidate provenance", rules)
+        self.assertNotIn("format-appropriate semantics", rules)
+        self.assertNotIn("low-quality possible candidate", rules)
+        self.assertNotIn("search the full plaintext", rules)
+        self.assertNotIn("low-quality possible flag", correction_context["instruction"])
         catalog = json.dumps(snapshot["tool_catalog"])  # type: ignore[index]
         self.assertIn("bounded source", catalog)
         self.assertNotIn("reflexion_context", snapshot)
@@ -238,7 +256,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         rules = "\n".join(captured["snapshot"]["tool_use_rules"])  # type: ignore[index]
         self.assertIn("complex Python one-liners", rules)
 
-    def test_script_syntax_failure_requests_complete_program(self) -> None:
+    def test_script_syntax_failure_includes_raw_traceback(self) -> None:
         captured: dict[str, object] = {}
 
         def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
@@ -262,6 +280,11 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 {
                     "capability": "script.exec",
                     "stdout_preview": "",
+                    "traceback": (
+                        "Traceback (most recent call last):\n"
+                        "  File \"/workspace/solver.py\", line 1\n"
+                        "SyntaxError: 'return' outside function"
+                    ),
                     "stderr_preview": "SyntaxError: 'return' outside function",
                     "returncode": 1,
                     "failure_kind": "syntax_error",
@@ -271,12 +294,11 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         )
 
         correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
-        self.assertIn("Fix syntax before changing the algorithm", correction["instruction"])
-        self.assertIn("main()", correction["instruction"])
-        self.assertIn("return outside a function", correction["instruction"])
-        self.assertIn("ast.parse", correction["instruction"])
+        self.assertIn("last_traceback", correction["instruction"])
+        self.assertIn("Correct the syntax", correction["instruction"])
+        self.assertIn("Traceback (most recent call last):", correction["last_traceback"])
 
-    def test_bytes_text_failure_requests_binary_safe_port(self) -> None:
+    def test_bytes_text_failure_exposes_raw_feedback_without_recipe(self) -> None:
         captured: dict[str, object] = {}
 
         def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
@@ -310,13 +332,12 @@ class WorkerPromptBoundsTests(unittest.TestCase):
 
         snapshot = captured["snapshot"]
         correction = snapshot["correction_context"]  # type: ignore[index]
-        self.assertIn("Fix the binary data model", correction["instruction"])
-        self.assertIn("rb/wb", correction["instruction"])
-        self.assertIn("bytes.fromhex()", correction["instruction"])
-        self.assertIn("Python 3 byte iteration as integers", correction["instruction"])
+        self.assertEqual(correction["failure_kind"], "bytes_text_mismatch")
+        self.assertIn("TypeError: byte indices", correction["last_stderr"])
+        self.assertIn("traceback line", correction["instruction"])
         rules = "\n".join(snapshot["tool_use_rules"])  # type: ignore[index]
-        self.assertIn("bytes.fromhex()", rules)
-        self.assertIn("integer-safe XOR helpers", rules)
+        self.assertNotIn("bytes.fromhex()", rules)
+        self.assertNotIn("integer-safe XOR helpers", rules)
 
     def test_path_type_failure_requests_consistent_path_api(self) -> None:
         captured: dict[str, object] = {}
@@ -351,10 +372,8 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         )
 
         correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
-        self.assertIn("Fix path handling", correction["instruction"])
-        self.assertIn("pathlib.Path", correction["instruction"])
-        self.assertIn("Path(...)", correction["instruction"])
-        self.assertIn("os.path.join", correction["instruction"])
+        self.assertIn("incompatible path values", correction["instruction"])
+        self.assertIn("TypeError: unsupported operand", correction["last_stderr"])
 
     def test_network_failure_requests_bounded_stdlib_harness(self) -> None:
         captured: dict[str, object] = {}
@@ -389,11 +408,9 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         )
 
         correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
-        self.assertIn("stdlib-only network harness", correction["instruction"])
-        self.assertIn("connect/read timeouts <=5 seconds", correction["instruction"])
-        self.assertIn("overall deadline <=45 seconds", correction["instruction"])
-        self.assertIn("endpoint is unavailable", correction["instruction"])
-        self.assertIn("protocol or availability failure", correction["instruction"])
+        self.assertIn("observed connection failure", correction["instruction"])
+        self.assertIn("authorized scope", correction["instruction"])
+        self.assertIn("ConnectionRefusedError", correction["last_stderr"])
 
     def test_protocol_parse_error_warns_about_non_newline_prompts(self) -> None:
         captured: dict[str, object] = {}
@@ -428,23 +445,21 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         )
 
         correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
-        self.assertIn("fix input/output parsing", correction["instruction"])
-        self.assertIn("self-test with representative raw fragments", correction["instruction"])
+        self.assertIn("observed raw output", correction["instruction"])
+        self.assertIn("quarters", correction["last_stdout"])
 
     def test_timeout_correction_warns_about_non_newline_prompts(self) -> None:
         instruction = WorkerAgent._script_correction_instruction("timeout")
 
-        self.assertIn("Replace unbounded iteration", instruction)
-        self.assertIn("bounded sampling", instruction)
-        self.assertIn("full recovery only on finalists", instruction)
-        self.assertIn("set them below the tool timeout", instruction)
+        self.assertIn("last_traceback", instruction)
+        self.assertIn("terminates within the tool timeout", instruction)
+        self.assertNotIn("full recovery only on finalists", instruction)
 
     def test_binary_structure_error_correction_preserves_artifact_path(self) -> None:
         instruction = WorkerAgent._script_correction_instruction("binary_structure_error")
 
-        self.assertIn("fix binary structure parsing", instruction)
-        self.assertIn("offset + header_size <= len(data)", instruction)
-        self.assertIn("skip malformed/truncated candidates", instruction)
+        self.assertIn("observed lengths", instruction)
+        self.assertIn("bounds checks", instruction)
 
     def test_scope_violation_correction_constrains_script_paths(self) -> None:
         instruction = WorkerAgent._script_correction_instruction("scope_violation_blocked")
@@ -456,9 +471,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
     def test_scratch_space_correction_uses_disposable_temp_dir(self) -> None:
         instruction = WorkerAgent._script_correction_instruction("scratch_space_exhausted")
 
-        self.assertIn("CTF_TEMP_DIR", instruction)
-        self.assertIn("cap carving/extraction loops", instruction)
-        self.assertIn("under CTF_FILES_ROOT", instruction)
+        self.assertIn("provided writable locations", instruction)
 
     def test_same_todo_unbounded_failure_survives_local_no_candidate_step(self) -> None:
         captured: dict[str, object] = {}
@@ -515,7 +528,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
         self.assertEqual(correction["failure_kind"], "unbounded_loop_guard")
         self.assertIn("1082458112", correction["last_stderr"])
-        self.assertIn("Do not reuse the same oversized value", correction["instruction"])
+        self.assertIn("terminates within the tool timeout", correction["instruction"])
         constraints = correction["execution_constraints"]
         self.assertIn(1082458112, constraints["do_not_iterate_values"])
         self.assertIn(

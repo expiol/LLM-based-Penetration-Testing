@@ -411,7 +411,7 @@ beta')"
         self.assertEqual(decision.capability, "script.exec")
         self.assertEqual(decision.metadata["script_code"], "print('alpha\nbeta')")
 
-    def test_static_client_repairs_missing_string_quote_before_metadata_boundary(self) -> None:
+    def test_static_client_does_not_repair_missing_quote_by_schema_field_name(self) -> None:
         payload = """{
   "capability": "script.exec",
   "metadata": {
@@ -422,13 +422,12 @@ beta')"
 }"""
         client = StaticLLMClient([payload])
 
-        decision = client.generate_json(
-            system_prompt="",
-            user_prompt="",
-            schema=ToolUseDecision,
-        )
-
-        self.assertEqual(decision.metadata["script_code"], "print('alpha')")
+        with self.assertRaises(LLMClientError):
+            client.generate_json(
+                system_prompt="",
+                user_prompt="",
+                schema=ToolUseDecision,
+            )
 
     def test_static_client_repairs_source_code_backslash_escapes(self) -> None:
         payload = r"""{
@@ -463,6 +462,16 @@ beta')"
 
         self.assertEqual(decoded["notes"], ["first note", "second note"])
         self.assertIs(decoded["stop_run"], False)
+
+    def test_decoder_closes_array_before_arbitrary_object_field(self) -> None:
+        payload = """{
+  "items": ["alpha", "beta", "schema_renamed_field": 42
+}"""
+
+        decoded = loads_lenient_json_object(payload)
+
+        self.assertEqual(decoded["items"], ["alpha", "beta"])
+        self.assertEqual(decoded["schema_renamed_field"], 42)
 
     def test_array_repair_ignores_valid_array_entries(self) -> None:
         payload = '{"items": ["alpha", "beta"]}'

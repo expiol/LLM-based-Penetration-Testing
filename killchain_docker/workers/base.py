@@ -198,15 +198,9 @@ class WorkerAgent(ABC):
             "to write, but the actual runnable Python/bash code. "
             "Generated scripts MUST be bounded: no unbounded brute force, no per-step "
             "loops over huge counters, no network waits without socket timeouts, and no "
-            "package installation. If a task involves a large skip/exponent/search space, "
-            "use a logarithmic or algebraic method, cap diagnostic variants, and print "
-            "intermediate values plus failure reasons. Prefer Python stdlib. If an "
+            "package installation. Prefer Python stdlib. If an "
             "optional third-party import is useful, catch ImportError and include a "
             "stdlib fallback in the same script. "
-            "When adapting legacy Python or writeup code for binary data, port bytes/text "
-            "boundaries deliberately: open artifacts in binary mode, use bytes literals, "
-            "bytes.fromhex()/bytes.hex(), and remember that iterating bytes yields ints "
-            "in Python 3. "
         ) if ToolCapability.SCRIPT_EXEC in allowed else ""
         shell_reminder = (
             "For shell.exec, 'command' is MANDATORY and must contain the full shell "
@@ -411,6 +405,7 @@ class WorkerAgent(ABC):
                 failure_kind = "near_miss"
             local_context = {
                 "instruction": self._script_correction_instruction(failure_kind),
+                "last_traceback": trim_text(last.get("traceback", ""), width=2000),
                 "last_stderr": trim_text(last.get("stderr_preview", ""), width=700),
                 "last_stdout": trim_text(last.get("stdout_preview", ""), width=700),
                 "failure_kind": failure_kind,
@@ -531,6 +526,7 @@ class WorkerAgent(ABC):
                 continue
             return {
                 "instruction": cls._script_correction_instruction(failure_kind),
+                "last_traceback": trim_text(ctx.get("traceback", ""), width=2000),
                 "last_stderr": trim_text(ctx.get("stderr", ""), width=700),
                 "last_stdout": trim_text(ctx.get("stdout", ""), width=700),
                 "failure_kind": failure_kind,
@@ -714,24 +710,7 @@ class WorkerAgent(ABC):
                     "CTF_ORIGINAL_FILES_ROOT is a separate pristine snapshot for checking "
                     "original sizes/hashes while the disposable work copy is being modified.",
                     "Prefer script.exec for multi-step logic, parsing, computation, and "
-                    "bounded solvers.",
-                    "Treat the current todo goal, correction_context, and working_memory as "
-                    "higher-priority facts than older evidence or reference/source code. If "
-                    "a corrected value is explicitly stated there, use that value verbatim "
-                    "unless a fresh bounded diagnostic proves it wrong.",
-                    "When todo context, knowledge hints, evidence, or working memory include "
-                    "reference/source code for an algorithm, port its state update order and "
-                    "data conversions faithfully before substituting an equivalent-looking "
-                    "formula.",
-                    "When porting Python 2 or writeup snippets for binary formats, make "
-                    "the bytes/text model explicit: use rb/wb, bytes literals, "
-                    "bytes.fromhex(), bytes.hex(), and integer-safe XOR helpers.",
-                    "When the task context has execution_closure, make the script prove "
-                    "the path before trusting output: extract inputs, run a small self-check "
-                    "when possible, score bounded interpretations, and print candidate provenance.",
-                    "When recovered output is a derived artifact instead of plaintext, "
-                    "regenerate or read it in the same script and inspect it with "
-                    "format-appropriate semantics before declaring no candidate.",
+                    "bounded local diagnostics.",
                     "Every script.exec script must terminate within its timeout by design: "
                     "bound loops, cap brute-force/search variants, set socket/subprocess "
                     "timeouts, and avoid package installation.",
@@ -740,23 +719,6 @@ class WorkerAgent(ABC):
                     "connect/read socket timeouts <=5 seconds and keep the overall script "
                     "deadline <=45 seconds. Do not switch to localhost/127.0.0.1 unless "
                     "that endpoint is explicitly in authorized_scope.",
-                    "When evidence gives several plausible interpretations, enumerate only "
-                    "bounded combinations, score their outputs, and print why rejected "
-                    "interpretations failed.",
-                    "For PCAP extraction tasks, if tshark/tcpflow filters are empty or "
-                    "unavailable, parse packet records or exported payload fields with "
-                    "stdlib logic and reassemble streams; do not only grep the raw pcap "
-                    "container for embedded-file magic bytes.",
-                    "Validate candidate quality before declaring success: require the expected "
-                    "flag shape or high-printability plaintext. Do not exit early after a "
-                    "low-quality possible candidate; print its score/reason and continue "
-                    "bounded enumeration.",
-                    "When a script recovers plaintext, search the full plaintext bytes before "
-                    "printing a preview. Look for canonical brace flags and long bare CTF "
-                    "tokens such as uppercase or separator-heavy words; print any candidate "
-                    "with an explicit label like 'FLAG FOUND: ...'.",
-                    "For large inputs or many variants, score bounded samples first, keep "
-                    "only the best few, and run full recovery on finalists.",
                     "Challenge files are copied from /home/ctfplayer/ctf_files by default.",
                 ]
             )
@@ -766,115 +728,73 @@ class WorkerAgent(ABC):
     def _script_correction_instruction(failure_kind: object) -> str:
         base = (
             "The previous script attempt failed or produced no flag. "
-            "Analyze the error below and write a CORRECTED script. "
-            "Do NOT repeat the same approach without fixing the issue. "
+            "Use last_traceback, last_stderr, last_stdout, and failure_kind as raw "
+            "execution feedback. Write a corrected, complete script and print the "
+            "resulting diagnostics/results to stdout. "
         )
         if str(failure_kind or "") in {"network_pipe_closed", "connection_reset", "connection_refused"}:
             return (
                 base
-                + "Treat this as a protocol or availability failure, not proof that the "
-                "algorithm is wrong. Use a small stdlib-only network harness with "
-                "connect/read timeouts <=5 seconds and an overall deadline <=45 seconds. "
-                "Print the exact connection state and stop cleanly if the endpoint is "
-                "unavailable."
+                + "Correct the script around the observed connection failure without "
+                "leaving the authorized scope."
             )
         if str(failure_kind or "") in {"timeout", "unbounded_loop_guard"}:
             return (
                 base
-                + "Replace unbounded iteration with fast-forward logic, bounded sampling, "
-                "or a smaller diagnostic harness. Do not reuse the same oversized value "
-                "as a loop bound unless fresh evidence proves it is safe. Score bounded "
-                "samples first and run full recovery only on finalists. If using "
-                "signal.alarm, subprocess timeouts, or socket deadlines, set them below "
-                "the tool timeout so the script exits cleanly and preserves diagnostics."
+                + "Correct the implementation so it terminates within the tool timeout "
+                "and preserves useful output if it cannot complete."
             )
         if str(failure_kind or "") == "syntax_error":
             return (
                 base
-                + "Fix syntax before changing the algorithm. Rewrite the script as a "
-                "small complete program with helper functions, a main() function, and "
-                "if __name__ == '__main__': raise SystemExit(main()). Do not use return "
-                "outside a function, break/continue outside loops, or pasted fragments "
-                "that would fail ast.parse. Keep the grounded algorithm and print a "
-                "short diagnostic proving the corrected script ran."
+                + "Correct the syntax before changing the underlying approach."
             )
         if str(failure_kind or "") == "bytes_text_mismatch":
             return (
                 base
-                + "Fix the binary data model before changing the algorithm. Open files "
-                "with rb/wb, keep ciphertext/plaintext/key material as bytes, use bytes "
-                "literals and bytes.fromhex()/bytes.hex(), and write XOR helpers that "
-                "handle Python 3 byte iteration as integers. Add a small self-test for "
-                "the helper before processing full artifacts."
+                + "Use the traceback line to identify the incompatible values and "
+                "convert types deliberately at that boundary."
             )
         if str(failure_kind or "") == "path_type_mismatch":
             return (
                 base
-                + "Fix path handling before changing the algorithm. Use pathlib.Path "
-                "consistently when using the / operator, converting roots with Path(...), "
-                "or use os.path.join consistently for string paths. Add a tiny path "
-                "construction self-test that checks the target exists or prints the "
-                "resolved path before processing full artifacts."
+                + "Use the traceback line to identify the incompatible path values and "
+                "convert types deliberately at that boundary."
             )
         if str(failure_kind or "") == "undefined_name":
             return (
                 base
-                + "Fix the undefined name before changing the algorithm. Do not leave "
-                "placeholder variables from pseudocode or prior notebook cells. Bind every "
-                "name from current evidence, todo context, environment variables, or values "
-                "computed earlier in the same script. Add a small preflight section that "
-                "prints the concrete paths, offsets, host/port, and function names the "
-                "script will use."
+                + "Bind missing names from current task context, prior output, or values "
+                "computed earlier in the same script."
             )
         if str(failure_kind or "") == "type_error":
             return (
                 base
-                + "Fix the Python type mismatch before changing the algorithm. Inspect the "
-                "exact traceback line, print type()/repr() for the operands on a tiny sample, "
-                "and convert deliberately between int, bytes, str, tuple/list, set, and Path. "
-                "Avoid using | unless both operands are known-compatible set/dict/typing "
-                "objects; for bit operations, ensure both operands are ints."
+                + "Use the traceback line to identify the incompatible operation and "
+                "inspect the involved values before converting them."
             )
         if str(failure_kind or "") == "no_candidate":
             return (
                 base
-                + "Enumerate bounded interpretations already present in todo context, "
-                "knowledge hints, or stdout; score outputs by expected shape and "
-                "printability; print the best candidates plus why each failed. Search "
-                "the full recovered output for canonical brace flags and long bare CTF "
-                "tokens before printing a preview. If the recovered output is a "
-                "derived artifact, regenerate or read it in this same script and "
-                "inspect it with format-appropriate semantics. Do not stop after a "
-                "low-quality possible flag."
+                + "Use the previous stdout as evidence and correct the script's result "
+                "extraction or reporting."
             )
         if str(failure_kind or "") == "near_miss":
             return (
                 base
-                + "Treat the previous output as useful but incomplete. Continue from "
-                "the observed bytes/text/artifact shape instead of repeating discovery. "
-                "If a file, image, barcode, QR code, or hidden-data container was "
-                "recovered, inspect it with installed tools or stdlib parsing, extract "
-                "embedded text/metadata/strings, and then search the complete recovered "
-                "content for valid CTF candidates."
+                + "Use the previous stdout as evidence and correct the incomplete "
+                "extraction path."
             )
         if str(failure_kind or "") == "parse_error":
             return (
                 base
-                + "Keep the same grounded algorithm, but fix input/output parsing. "
-                "Derive an exact parser from observed stdout and source/protocol facts, "
-                "accept only the expected value shape, and ignore prompt labels, banners, "
-                "diagnostic lines, or echoed text that merely share a prefix. Add a small "
-                "self-test with representative raw fragments before processing the full data."
+                + "Use the observed raw output to correct the input/output parser."
             )
         if str(failure_kind or "") == "binary_structure_error":
             return (
                 base
-                + "Keep the same artifact and recovery path, but fix binary structure "
-                "parsing. Before every struct.unpack/unpack_from or slice-derived header, "
-                "check that offset + header_size <= len(data), validate magic bytes and "
-                "declared lengths, and skip malformed/truncated candidates instead of "
-                "crashing. Print the surviving offsets, file names, and byte ranges so the "
-                "next step can continue from concrete recovered artifacts."
+                + "Use the traceback line and observed lengths to add bounds checks before "
+                "parsing structured data."
             )
         if str(failure_kind or "") == "scope_violation_blocked":
             return (
@@ -890,11 +810,8 @@ class WorkerAgent(ABC):
         if str(failure_kind or "") == "scratch_space_exhausted":
             return (
                 base
-                + "The previous attempt filled or could not create scratch space. Remove any "
-                "hard-coded /tmp paths, use CTF_TEMP_DIR or tempfile for temporary files, keep "
-                "large artifacts in memory when practical, write only needed generated artifacts "
-                "under CTF_FILES_ROOT during the same call, and cap carving/extraction loops to "
-                "the few best candidates."
+                + "Correct scratch file usage so temporary files stay within the tool's "
+                "provided writable locations and the script preserves concise diagnostics."
             )
         return base
 

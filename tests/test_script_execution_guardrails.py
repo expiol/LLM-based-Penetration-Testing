@@ -303,8 +303,8 @@ class TestValidatableFlagCandidate(unittest.TestCase):
         self.assertFalse(is_validatable_flag_candidate("ns.adobe.com"))
         self.assertFalse(is_validatable_flag_candidate("CTF_TEMP_DIR"))
 
-    def test_rejects_flag_named_artifact_with_opaque_extension(self) -> None:
-        self.assertFalse(is_validatable_flag_candidate("flag.challengeblob"))
+    def test_does_not_reject_bare_token_only_because_it_has_a_suffix_like_segment(self) -> None:
+        self.assertTrue(is_validatable_flag_candidate("FLAG.CHALLENGE_BLOB"))
         self.assertFalse(is_validatable_flag_candidate("plaintext.opaque"))
         self.assertFalse(is_validatable_flag_candidate("x02-EJNENHRBX"))
         self.assertTrue(is_validatable_flag_candidate("TEAM.FOUND_SECRET_VALUE"))
@@ -335,12 +335,12 @@ class TestValidatableFlagCandidate(unittest.TestCase):
 
 
 class TestWorkerInnerLoopPolicy(unittest.TestCase):
-    def test_script_rules_include_pcap_payload_reassembly_escape(self) -> None:
+    def test_script_rules_do_not_include_domain_specific_pcap_escape(self) -> None:
         rules = " ".join(Worker._tool_use_rules({ToolCapability.SCRIPT_EXEC})).lower()
 
-        self.assertIn("pcap extraction", rules)
-        self.assertIn("packet records", rules)
-        self.assertIn("reassemble streams", rules)
+        self.assertNotIn("pcap extraction", rules)
+        self.assertNotIn("packet records", rules)
+        self.assertNotIn("reassemble streams", rules)
 
     def test_script_failure_returns_to_planner_after_prior_diagnostic(self) -> None:
         task = TodoItem(goal="Recover the flag from computed plaintext.")
@@ -356,7 +356,7 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
 
         self.assertFalse(Worker._should_continue_after_step(task, prior_steps))
 
-    def test_metadata_validation_followed_by_script_failure_returns_to_planner(self) -> None:
+    def test_metadata_validation_followed_by_script_failure_allows_one_repair(self) -> None:
         task = TodoItem(goal="Recover the flag from computed plaintext.")
         prior_steps = [
             {
@@ -375,7 +375,7 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
             },
         ]
 
-        self.assertFalse(Worker._should_continue_after_step(task, prior_steps))
+        self.assertTrue(Worker._should_continue_after_step(task, prior_steps))
 
     def test_mechanical_script_failure_after_prior_script_stops(self) -> None:
         task = TodoItem(goal="Recover the flag from computed plaintext.")
@@ -398,7 +398,7 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
 
         self.assertFalse(Worker._should_continue_after_step(task, prior_steps))
 
-    def test_first_mechanical_script_failure_returns_to_planner(self) -> None:
+    def test_first_mechanical_script_failure_allows_one_repair(self) -> None:
         task = TodoItem(goal="Recover the flag from computed plaintext.")
         prior_steps = [
             {
@@ -410,7 +410,7 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
             },
         ]
 
-        self.assertFalse(Worker._should_continue_after_step(task, prior_steps))
+        self.assertTrue(Worker._should_continue_after_step(task, prior_steps))
 
     def test_successful_no_candidate_script_returns_to_planner_by_default(self) -> None:
         task = TodoItem(goal="Recover the flag from computed plaintext.")
@@ -434,7 +434,6 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
                 "dispatch_intent": {
                     "profile": "execution_closure",
                     "required_capability": "script.exec",
-                    "repair_policy_id": "execution_closure_repair",
                 },
             },
         )
@@ -537,7 +536,7 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
 
         self.assertFalse(Worker._should_continue_after_step(task, prior_steps))
 
-    def test_metadata_validation_fails_fast_to_planner(self) -> None:
+    def test_metadata_validation_retries_once_then_hands_back_to_planner(self) -> None:
         calls = 0
 
         def invalid_script_response(_system_prompt: str, _user_prompt: str) -> dict[str, object]:
@@ -559,7 +558,7 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
             RunState(objective="test"),
         )
 
-        self.assertEqual(calls, 1)
+        self.assertEqual(calls, 2)
         self.assertFalse(result.success)
         self.assertTrue(result.partial)
         self.assertEqual(result.result_quality, "syntax_error")
@@ -738,16 +737,43 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
 
 
 class TestBracketSpanExtraction(unittest.TestCase):
-    """csawpad regression: script output `{And yes the nsa ...}` yields candidates."""
+    """Bracket-span recovery uses source-local or configured prefixes only."""
 
-    def test_emits_candidates_with_common_prefixes(self) -> None:
+    def test_uses_local_preceding_word_without_global_prefix_synthesis(self) -> None:
         text = (
             "Message 7:\nMY key for you is "
             "{And yes the nsa can read this to}\n"
         )
         candidates = _bracket_span_candidates(text)
         self.assertIn("key{And yes the nsa can read this to}", candidates)
-        self.assertIn("flag{And yes the nsa can read this to}", candidates)
+        self.assertNotIn("flag{And yes the nsa can read this to}", candidates)
+
+    def test_script_stdout_accepts_bracket_candidate_with_key_context(self) -> None:
+        text = (
+            "validated key plaintext: MY key for you is "
+            "{And yes the nsa can read this to}\n"
+        )
+        candidates = script_module._flag_candidates_from_script_stdout(
+            text,
+            source="script",
+        )
+
+        self.assertIn(
+            "key{And yes the nsa can read this to}",
+            [candidate.value for candidate in candidates],
+        )
+
+    def test_script_stdout_rejects_negative_bracket_context(self) -> None:
+        text = (
+            "no flag found in plaintext: "
+            "{And yes the nsa can read this to}\n"
+        )
+        candidates = script_module._flag_candidates_from_script_stdout(
+            text,
+            source="script",
+        )
+
+        self.assertEqual([candidate.value for candidate in candidates], [])
 
 
 class TestFlagRecoveryTaskDetection(unittest.TestCase):
@@ -780,9 +806,9 @@ class TestFlagRecoveryTaskDetection(unittest.TestCase):
         )
 
     def test_local_context_word_promotes_prefix(self) -> None:
-        text = "Found flag value: {hello_world_12345}"
+        text = "Found customPrefix: {hello_world_12345}"
         candidates = _bracket_span_candidates(text)
-        self.assertEqual(candidates[0], "flag{hello_world_12345}")
+        self.assertEqual(candidates[0], "customPrefix{hello_world_12345}")
 
     def test_flag_format_prefix_wins(self) -> None:
         text = "decrypted: {And yes the nsa can read this to}"
@@ -954,6 +980,22 @@ class TestFlagRecoveryTaskDetection(unittest.TestCase):
         blob = base64.b64encode(b"flag{encoded_ok_123}").decode("ascii")
         self.assertEqual(extract_flag_candidates(blob), ["flag{encoded_ok_123}"])
 
+    def test_invalid_base64_padding_is_skipped_without_debug_traceback(self) -> None:
+        calls: list[str] = []
+        original = flag_module._debug_decode_failure
+
+        def record(operation: str, exc: Exception, *, value: str) -> None:
+            del exc, value
+            calls.append(operation)
+
+        flag_module._debug_decode_failure = record
+        try:
+            self.assertEqual(flag_module._try_decode_blob("QUJDQUJDQUJDQUJD===="), [])
+        finally:
+            flag_module._debug_decode_failure = original
+
+        self.assertEqual(calls, [])
+
     def test_tool_flag_extraction_uses_bounded_scan_text(self) -> None:
         old_extract = tool_base.extract_flag_candidates
         captured: dict[str, int] = {}
@@ -1011,6 +1053,20 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
         self.assertEqual(ctx["failure_kind"], "network_pipe_closed")
         self.assertIn("socket", str(ctx["failure_detail"]))
 
+    def test_preserves_traceback_excerpt_in_output_context(self) -> None:
+        ctx = self._output_context(
+            "noise before traceback\n"
+            "Traceback (most recent call last):\n"
+            "  File \"/workspace/solver.py\", line 7, in <module>\n"
+            "    data.decode('utf-8')\n"
+            "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff\n"
+        )
+
+        traceback = str(ctx["traceback"])
+        self.assertTrue(traceback.startswith("Traceback (most recent call last):"))
+        self.assertIn("solver.py", traceback)
+        self.assertIn("UnicodeDecodeError", traceback)
+
     def test_classifies_broken_pipe_reported_on_stdout(self) -> None:
         ctx = self._output_context(
             stdout=(
@@ -1047,12 +1103,28 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
 
         self.assertEqual(ctx["failure_kind"], "bytes_text_mismatch")
 
+    def test_classifies_unicode_decode_error_as_bytes_text_mismatch(self) -> None:
+        ctx = self._output_context(
+            "Traceback (most recent call last):\n"
+            "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0\n"
+        )
+
+        self.assertEqual(ctx["failure_kind"], "bytes_text_mismatch")
+
     def test_classifies_path_type_mismatch(self) -> None:
         ctx = self._output_context(
             "TypeError: unsupported operand type(s) for /: 'str' and 'str'"
         )
 
         self.assertEqual(ctx["failure_kind"], "path_type_mismatch")
+
+    def test_classifies_odd_length_hex_decode_as_parse_error(self) -> None:
+        ctx = self._output_context(
+            "Traceback (most recent call last):\n"
+            "binascii.Error: Odd-length string\n"
+        )
+
+        self.assertEqual(ctx["failure_kind"], "parse_error")
 
     def test_classifies_undefined_name_runtime_error(self) -> None:
         ctx = self._output_context(
@@ -1073,6 +1145,14 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
 
         self.assertEqual(ctx["failure_kind"], "type_error")
         self.assertIn("incompatible", str(ctx["failure_detail"]))
+
+    def test_classifies_attribute_method_mismatch_as_type_error(self) -> None:
+        ctx = self._output_context(
+            "Traceback (most recent call last):\n"
+            "AttributeError: 'list' object has no attribute 'ljust'\n"
+        )
+
+        self.assertEqual(ctx["failure_kind"], "type_error")
 
     def test_classifies_short_binary_unpack_as_binary_structure_error(self) -> None:
         ctx = self._output_context(
@@ -1599,6 +1679,33 @@ class TestScriptExecutionRuntime(unittest.TestCase):
             "  offset 367:          <tiff:Orientation>1</tiff:Orientation>\n"
             "  offset 275:       <rdf:Description rdf:about=\"\"\n"
             "  offset 55970: SP?8mPC1y\\\n"
+        )
+        output = build_script_output(
+            ToolExecutionRequest(tool_name="script_exec", metadata={"script_language": "python"}),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout=stdout,
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+
+        self.assertNotIn("near_miss_candidates", output.output_context)
+        self.assertEqual(output.output_context["result_quality"], "partial_no_candidate")
+
+    def test_hexdump_preview_report_is_not_near_miss(self) -> None:
+        stdout = (
+            "readable/plaintext-or-ascii-art preview:\n"
+            "0: 88 04 00 4d 53 42 31 00 10 00 00 00 38 45 32 39\n"
+            "010: 02 00 07 00 00 00 ff 00 6a ab 02 23 20 1f 1e 0a\n"
+            "020: 00 00 85 40 8f d1 3a 11 2a b7 c0 0d 7e 80 41 22\n"
+            "030: 10 99 65 20 4a 91 e0 02 00 10 00 00 00 f1 e2 d3 c4\n"
+            "040: 7a 61 58 48 0d 0a ff ee 18 29 34 55 66 77 88 99\n"
+            "050: 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff 00\n"
+            "060: ca fe ba be 00 11 22 33 44 55 66 77 88 99 aa bb\n"
+            "070: 30 31 32 33 34 35 36 37 38 39 41 42 43 44 45 46\n"
         )
         output = build_script_output(
             ToolExecutionRequest(tool_name="script_exec", metadata={"script_language": "python"}),

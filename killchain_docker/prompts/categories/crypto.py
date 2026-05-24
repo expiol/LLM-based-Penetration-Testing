@@ -59,7 +59,6 @@ register(CategoryPrompts(
         "Try small exponent attacks for RSA",
         "Use z3-solver for constraint-based solving (custom ciphers, hash preimage)",
         "Use sage for number theory attacks (discrete log, lattice reduction)",
-        "If output is garbled/near-miss: try bytes.fromhex(), latin-1, XOR 0xFF",
         "Use ltrace on crypto binaries to capture algorithm parameters at runtime",
         "Use pwntools remote() for network protocol interaction with PoW support",
     ],

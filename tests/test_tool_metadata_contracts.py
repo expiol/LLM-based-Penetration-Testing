@@ -163,6 +163,28 @@ class ToolMetadataContractTests(unittest.TestCase):
         with self.assertRaises(ToolExecutionError):
             normalize_tool_metadata(ToolCapability.MEDIA_SCAN, todo, state, {})
 
+    def test_cli_path_normalization_allows_spaces_and_unicode(self) -> None:
+        state = RunState(objective="solve")
+        todo = TodoItem(
+            goal="Inspect unusual path",
+            context={
+                "path": "folder with spaces/\u6587\u4ef6",
+                "files_root": "/home/ctfplayer/ctf_files",
+            },
+        )
+
+        result = normalize_tool_metadata(
+            ToolCapability.ARTIFACT_TRIAGE,
+            todo,
+            state,
+            {},
+        )
+
+        self.assertEqual(
+            result["paths"],
+            ["/home/ctfplayer/ctf_files/folder with spaces/\u6587\u4ef6"],
+        )
+
     def test_shell_exec_normalization_requires_command(self) -> None:
         state = RunState(objective="solve")
         todo = TodoItem(goal="test")

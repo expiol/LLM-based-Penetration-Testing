@@ -68,7 +68,7 @@ class CandidatePolicyTests(unittest.TestCase):
         self.assertFalse(CandidatePolicy.accepts_for_state(state, "flag{correct_length_body}"))
         self.assertTrue(CandidatePolicy.accepts_for_state(state, "key{correct_length_body}"))
 
-    def test_wrong_prefix_candidate_derives_expected_prefix_variant(self) -> None:
+    def test_wrong_prefix_candidate_does_not_derive_without_source_context(self) -> None:
         state = _state("flag{...}")
         state.apply_state_delta(
             StateDelta(
@@ -80,14 +80,21 @@ class CandidatePolicyTests(unittest.TestCase):
 
         self.assertEqual(len(state.rejected_flag_candidates), 1)
         self.assertEqual(state.rejected_flag_candidates[0].reason, "wrong_flag_prefix")
-        active_values = [candidate.value for candidate in state.flag_candidates.values()]
-        self.assertEqual(active_values, ["flag{correct_length_body}"])
-        active = next(iter(state.flag_candidates.values()))
-        self.assertIn("policy-derived", active.source or "")
-        self.assertEqual(
-            active.metadata["derived_from_rejected_candidate"],
-            "ctf{correct_length_body}",
+        self.assertEqual(state.flag_candidates, {})
+
+    def test_arbitrary_wrong_prefix_candidate_does_not_derive_variant(self) -> None:
+        state = _state("flag{...}")
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value="YY{correct_length_body}", source="script.exec")
+                ]
+            )
         )
+
+        self.assertEqual(state.flag_candidates, {})
+        self.assertEqual(len(state.rejected_flag_candidates), 1)
+        self.assertEqual(state.rejected_flag_candidates[0].reason, "wrong_flag_prefix")
 
     def test_bare_candidate_derives_expected_prefix_variant(self) -> None:
         state = _state("flag{...}")

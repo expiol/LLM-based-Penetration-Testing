@@ -202,17 +202,6 @@ FLAG_BARE_TOKEN_DESCRIPTOR_WORDS: frozenset[str] = frozenset({
     "searched", "short", "string", "token", "tokens", "wrapped",
 })
 
-FLAG_BARE_TOKEN_FILE_EXTENSION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,15}$")
-FLAG_BARE_TOKEN_FILE_STEMS: frozenset[str] = frozenset({
-    "answer", "candidate", "cipher", "ciphertext", "data", "decoded",
-    "decrypted", "encrypted", "flag", "input", "key", "output", "plain",
-    "plaintext", "result", "secret", "solve",
-})
-FLAG_BARE_TOKEN_FILE_EXTENSIONS: frozenset[str] = frozenset({
-    "7z", "bin", "bz2", "c", "cap", "csv", "dat", "db", "dec", "elf", "enc",
-    "gz", "h", "hex", "jpg", "json", "log", "md", "out", "pcap", "pcapng",
-    "pem", "png", "py", "sqlite", "sqlite3", "tar", "txt", "xz", "zip",
-})
 FLAG_BARE_TOKEN_VERSION_RE = re.compile(
     r"^[A-Za-z]{2,}[A-Za-z0-9_-]*\d+(?:[.-]\d+)+[A-Za-z0-9_-]*$"
 )
@@ -235,16 +224,6 @@ FLAG_BARE_TOKEN_METADATA_NOISE: frozenset[str] = frozenset({
     "ns.adobe.com",
     "rdf-syntax-ns",
 })
-
-#: Common CTF prefixes used for bracket-span extraction (see
-#: :data:`BRACKET_SPAN_PATTERN`).  When extraction returns nothing but a
-#: bracket span is present, we wrap the body with each of these and emit
-#: them as candidates so the equality-validator can pick the right one.
-COMMON_FLAG_PREFIXES: tuple[str, ...] = (
-    "flag", "FLAG", "ctf", "CTF", "key", "KEY",
-    "csaw", "CSAW", "nyu", "NYU",
-)
-
 
 # ---------------------------------------------------------------------------
 # Plausibility helpers
@@ -288,23 +267,6 @@ def _python_exception_token(text: str) -> bool:
     if not text.endswith(("Error", "Exception", "Warning")):
         return False
     return text[:1].isupper() and text.replace("_", "").isalnum()
-
-
-def _bare_token_file_name(text: str) -> bool:
-    if "." not in text:
-        return False
-    stem, dot, ext = text.rpartition(".")
-    if not stem or not dot:
-        return False
-    ext_lower = ext.lower()
-    if not FLAG_BARE_TOKEN_FILE_EXTENSION_RE.fullmatch(ext_lower):
-        return False
-    stem_tail = stem.rsplit(".", 1)[-1].strip("._-").lower()
-    if ext_lower in FLAG_BARE_TOKEN_FILE_EXTENSIONS:
-        return all(ch.isalnum() or ch in "_.-" for ch in text)
-    if stem_tail in FLAG_BARE_TOKEN_FILE_STEMS:
-        return all(ch.isalnum() or ch in "_.-" for ch in text)
-    return False
 
 
 def _bare_token_descriptor_phrase(text: str) -> bool:
@@ -458,8 +420,6 @@ def validatable_flag_candidate(candidate: str) -> bool:
         if normalized in FLAG_BARE_TOKEN_NOISE_WORDS:
             return False
         if _bare_token_descriptor_phrase(lowered):
-            return False
-        if _bare_token_file_name(text):
             return False
         if _known_nonflag_bare_token(text):
             return False
