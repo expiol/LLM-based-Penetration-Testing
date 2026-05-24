@@ -1470,6 +1470,156 @@ class TestScriptExecutionRuntime(unittest.TestCase):
         self.assertIn("near_miss_candidates", output.output_context)
         self.assertNotIn("failure_kind", output.output_context)
 
+    def test_labeled_decoded_plaintext_block_is_near_miss(self) -> None:
+        stdout = "Plaintext:\n" + "\n".join(
+            [
+                "The recovered readable text is coherent but lacks a final validated token line.",
+                "It includes enough natural language structure to be useful for follow-up analysis.",
+                "The next step should inspect surrounding context rather than discard this text.",
+            ]
+            * 3
+        )
+
+        output = build_script_output(
+            ToolExecutionRequest(tool_name="script_exec", metadata={"script_language": "python"}),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout=stdout,
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+
+        self.assertEqual(output.output_context["result_quality"], "near_miss")
+        self.assertIn("near_miss_candidates", output.output_context)
+
+    def test_network_transcript_is_not_near_miss(self) -> None:
+        stdout = "\n".join(
+            [
+                "[*] Connecting to service.local:31337...",
+                "[+] Connected successfully to service.local:31337",
+                "[*] Received banner (102 bytes):",
+                "b'welcome to the interactive service\\nchoose an option below\\n'",
+                "[*] Sent probe: b'\\n'",
+                "[*] Received response (957 bytes):",
+                "b'  ,88888,,88888,                                      \\n"
+                "  ,88\\'   \\\"menu\\\"  \\\"88,   THIS IS A LONG DECORATIVE BANNER \\n"
+                "  88,    88 88   ,88   WITH STATUS TEXT AND NO RECOVERED SECRET\\n"
+                "  -----------------------------                         \\n'",
+                "[*] Connection closed",
+                "[*] Running basic port check...",
+                "[!] scanner unavailable or timed out after 30 seconds",
+            ]
+            * 3
+        )
+
+        output = build_script_output(
+            ToolExecutionRequest(tool_name="script_exec", metadata={"script_language": "python"}),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout=stdout,
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+
+        self.assertNotIn("near_miss_candidates", output.output_context)
+        self.assertEqual(output.output_context["result_quality"], "partial_no_candidate")
+
+    def test_symbol_table_report_is_not_near_miss(self) -> None:
+        stdout = "\n".join(
+            [
+                "Symbol table '.dynsym' contains 33 entries:",
+                "   Num:    Value          Size Type    Bind   Vis      Ndx Name",
+                "     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND",
+                "     1: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND puts",
+                "     2: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND printf",
+                "Disassembly of section .text:",
+                "0000000000401000 <main>:",
+                "  401000: 55                    push   %rbp",
+                "  401001: 48 89 e5              mov    %rsp,%rbp",
+                "  401004: e8 27 ff ff ff        callq  401030 <puts@plt>",
+            ]
+            * 4
+        )
+
+        output = build_script_output(
+            ToolExecutionRequest(tool_name="script_exec", metadata={"script_language": "python"}),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout=stdout,
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+
+        self.assertNotIn("near_miss_candidates", output.output_context)
+        self.assertEqual(output.output_context["result_quality"], "partial_no_candidate")
+
+    def test_artifact_manifest_is_not_near_miss(self) -> None:
+        stdout = "\n".join(
+            [
+                "Done.",
+                "__KILLCHAIN_SCRIPT_ARTIFACTS__",
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/scratch/payload_001.bin\t7247\tscratch\tpayload_001.bin\tb32172",
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/scratch/payload_002.bin\t8192\tscratch\tpayload_002.bin\t65ac21",
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/scratch/payload_003.bin\t16384\tscratch\tpayload_003.bin\t5bb837",
+                "__KILLCHAIN_SCRIPT_ARTIFACTS_END__",
+            ]
+            * 4
+        )
+
+        output = build_script_output(
+            ToolExecutionRequest(tool_name="script_exec", metadata={"script_language": "python"}),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout=stdout,
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+
+        self.assertNotIn("near_miss_candidates", output.output_context)
+        self.assertEqual(output.output_context["result_quality"], "partial_no_candidate")
+
+    def test_path_listing_and_reference_report_is_not_near_miss(self) -> None:
+        stdout = "\n".join(
+            [
+                "Looking for interesting string reference",
+                "Line 103:   400f40: ff 25 52 31 20 00     jmp *0x203152(%rip)",
+                "Line 168:   401010: ff 25 ea 30 20 00     jmp *0x2030ea(%rip)",
+                "Context around offset 1091: H<.i.r.g.$M.~..1.a{.k.6..H+.2.%X)",
+                "Searching for brace patterns.",
+                "extracted/package/README.md",
+                "extracted/package/static/generated_bundle.js",
+                "extracted/package/test/results/sample_output.js.gz",
+            ]
+            * 4
+        )
+
+        output = build_script_output(
+            ToolExecutionRequest(tool_name="script_exec", metadata={"script_language": "python"}),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout=stdout,
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+
+        self.assertNotIn("near_miss_candidates", output.output_context)
+        self.assertEqual(output.output_context["result_quality"], "partial_no_candidate")
+
     def test_candidate_score_report_is_not_near_miss(self) -> None:
         report = "\n".join(
             [

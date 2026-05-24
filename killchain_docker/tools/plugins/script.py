@@ -51,14 +51,22 @@ _PLAINTEXT_LABEL_RE = re.compile(
     r"first\s+\d+\s+(?:bytes|chars)|output)\b\s*:?",
     re.IGNORECASE,
 )
+_STATUS_PREFIX_RE = re.compile(r"^\s*(?:\[[^\]]{1,16}\]\s*|[-+*!]\s*)+")
 _DIAGNOSTIC_LINE_RE = re.compile(
     r"^(?:"
     r"\d+\.\s+"
     r"|=+\s*(?:top|best|testing)"
-    r"|file\s+size|header|ct\s+size|raw\s+tap|magic|seed|skip|tap"
+    r"|analyzing|attempting|checking|connecting|connected|connection\s+closed"
+    r"|banner|context\s+around|ciphertexts?\s+found"
+    r"|disassembl|dynamic\s+symbols|extract(?:ed|ing)?|file\s+not\s+found"
+    r"|file\s+size|file\s+type|found|header|initial\s+response|magic"
+    r"|interesting\s+strings|line\s+\d+|looking\s+for"
+    r"|received|reading|running|saved|scanner|search(?:ed|ing)?|sent"
+    r"|source|symbol\s+table|target|total|warning|welcome|wrote|writing"
+    r"|ct\s+size|raw\s+tap|seed|skip|tap"
     r"|ciphertext|printable|ratio|score|braces|flags|first\s+bytes"
     r"|case\s+\d+|trying|testing|using|skipping|candidate"
-    r"|actual|error|stdout|stderr|returncode|length"
+    r"|actual|error|stdout|stderr|returncode|length|num\s*:"
     r")\b",
     re.IGNORECASE,
 )
@@ -66,6 +74,17 @@ _HEXDUMP_LINE_RE = re.compile(
     r"^\s*(?:0x)?[0-9a-fA-F]{1,10}\s*[:|]\s*"
     r"(?:[0-9a-fA-F]{2}(?:\s+|$)){6,}(?:\s{2,}.*)?$"
 )
+_ASSEMBLY_LINE_RE = re.compile(
+    r"^\s*(?:0x)?[0-9a-fA-F]{4,16}:\s+"
+    r"(?:[0-9a-fA-F]{2}\s+){1,12}(?:[A-Za-z_.][\w.$@<>+-]*)?"
+)
+_SYMBOL_TABLE_ENTRY_RE = re.compile(
+    r"^\s*\d+:\s+[0-9a-fA-F]{6,}\s+\d+\s+"
+    r"(?:FUNC|OBJECT|NOTYPE|SECTION|FILE|TLS)\b"
+)
+_BYTES_REPR_LINE_RE = re.compile(r"^\s*b[\"'].{40,}[\"']\s*$")
+_PATH_LISTING_LINE_RE = re.compile(r"^\s*(?:\.{0,2}/)?(?:[\w.+@-]+/){1,}\S+\s*$")
+_INDEXED_HEX_VALUE_RE = re.compile(r"^\s*\w+\[\d+\]:\s*[0-9a-fA-F]{24,}\b")
 _DIAGNOSTIC_REPORT_RE = re.compile(
     r"(?im)^\s*(?:\[[^\]]+\]\s*)?"
     r"(?:=+\s*top\s+|=+\s*local\s+self-test|=+\s*differential\s+test|"
@@ -303,12 +322,79 @@ def _diagnostic_line_ratio(lines: list[str]) -> float:
     non_empty = [line.strip() for line in lines if line.strip()]
     if not non_empty:
         return 1.0
-    diagnostic = sum(
-        1
-        for line in non_empty
-        if _DIAGNOSTIC_LINE_RE.match(line) or _HEXDUMP_LINE_RE.match(line)
-    )
+    diagnostic = sum(1 for line in non_empty if _is_diagnostic_line(line))
     return diagnostic / len(non_empty)
+
+
+def _is_diagnostic_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped in {_SCRIPT_ARTIFACTS_START, _SCRIPT_ARTIFACTS_END}:
+        return True
+
+    normalized = _STATUS_PREFIX_RE.sub("", stripped).strip().strip("=- ")
+    if not normalized:
+        return True
+
+    return bool(
+        _DIAGNOSTIC_LINE_RE.match(normalized)
+        or _HEXDUMP_LINE_RE.match(stripped)
+        or _HEXDUMP_LINE_RE.match(normalized)
+        or _ASSEMBLY_LINE_RE.match(stripped)
+        or _ASSEMBLY_LINE_RE.match(normalized)
+        or _SYMBOL_TABLE_ENTRY_RE.match(stripped)
+        or _SYMBOL_TABLE_ENTRY_RE.match(normalized)
+        or _BYTES_REPR_LINE_RE.match(stripped)
+        or _PATH_LISTING_LINE_RE.match(stripped)
+        or _INDEXED_HEX_VALUE_RE.match(stripped)
+    )
+
+
+def _strip_script_artifact_manifest(stdout: str) -> str:
+    lines = stdout.replace("\r", "\n").splitlines()
+    kept: list[str] = []
+    in_manifest = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == _SCRIPT_ARTIFACTS_START:
+            in_manifest = True
+            continue
+        if in_manifest:
+            if stripped == _SCRIPT_ARTIFACTS_END:
+                in_manifest = False
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _looks_like_visual_art_block(lines: list[str]) -> bool:
+    non_empty = [line for line in lines if line.strip()]
+    if len(non_empty) < 3:
+        return False
+    if any(_is_diagnostic_line(line) for line in non_empty):
+        return False
+    graphic_lines = [
+        line for line in non_empty
+        if len(line) >= 20 and _graphic_density(line) >= 0.25
+    ]
+    banner_text_lines = [
+        line for line in non_empty
+        if _looks_like_visual_banner_text_line(line)
+    ]
+    visual_lines = len(graphic_lines) + len(banner_text_lines)
+    return visual_lines >= 3 and visual_lines / len(non_empty) >= 0.50
+
+
+def _looks_like_visual_banner_text_line(line: str) -> bool:
+    if len(line) < 60:
+        return False
+    letters = [ch for ch in line if ch.isalpha()]
+    if len(letters) < 20:
+        return False
+    uppercase = sum(1 for ch in letters if ch.isupper())
+    whitespace = sum(1 for ch in line if ch.isspace())
+    return uppercase / len(letters) >= 0.80 and whitespace / len(line) >= 0.18
 
 
 def _plaintext_blocks(stdout: str) -> list[str]:
@@ -335,8 +421,7 @@ def _plaintext_blocks(stdout: str) -> list[str]:
                 continue
             if (
                 _PLAINTEXT_LABEL_RE.search(next_line)
-                or _DIAGNOSTIC_LINE_RE.match(stripped)
-                or _HEXDUMP_LINE_RE.match(stripped)
+                or _is_diagnostic_line(stripped)
             ):
                 if following:
                     break
@@ -351,14 +436,22 @@ def _plaintext_blocks(stdout: str) -> list[str]:
         return []
     if _diagnostic_line_ratio(lines) >= 0.45:
         return []
-    return [stdout]
+    return []
 
 
 def _readable_near_misses(stdout: str) -> list[str]:
+    stdout = _strip_script_artifact_manifest(stdout)
     if len(stdout) < _MIN_READABLE_NEAR_MISS_LEN:
         return []
 
-    for block in _plaintext_blocks(stdout):
+    labelled_blocks = _plaintext_blocks(stdout)
+    blocks = [(block, False) for block in labelled_blocks]
+    if not blocks:
+        stdout_lines = [line.rstrip() for line in stdout.replace("\r", "\n").splitlines()]
+        if _looks_like_visual_art_block(stdout_lines):
+            blocks = [(stdout, True)]
+
+    for block, require_visual in blocks:
         if _DIAGNOSTIC_REPORT_RE.search(block):
             continue
         if len(block) < _MIN_READABLE_NEAR_MISS_LEN:
@@ -376,8 +469,15 @@ def _readable_near_misses(stdout: str) -> list[str]:
             line for line in non_empty
             if len(line) >= 20 and _graphic_density(line) >= 0.25
         ]
+        banner_text_lines = [
+            line for line in non_empty
+            if _looks_like_visual_banner_text_line(line)
+        ]
         long_text_lines = [line for line in non_empty if len(line) >= 60]
-        if len(graphic_lines) < 3 and len(long_text_lines) < 3:
+        if require_visual:
+            if len(graphic_lines) + len(banner_text_lines) < 3:
+                continue
+        elif len(graphic_lines) < 3 and len(long_text_lines) < 3:
             continue
 
         compact_lines: list[str] = []
