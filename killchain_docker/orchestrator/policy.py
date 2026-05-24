@@ -13,11 +13,19 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from killchain_docker.state import FlagCandidate, TodoItem, TodoPhase, TodoStatus, WorkerResult
+from killchain_docker.state import (
+    DispatchIntent,
+    FlagCandidate,
+    TodoItem,
+    TodoPhase,
+    TodoStatus,
+    WorkerResult,
+)
 from killchain_docker.state.constants import (
     DEFAULT_FILES_ROOT,
-    FLAG_BARE_TOKEN_SHAPE,
-    FLAG_PREFIX_SHAPE,
+    bare_token_shape,
+    flag_prefix_shape,
+    looks_like_escaped_byte_candidate,
     validatable_flag_candidate,
 )
 
@@ -26,7 +34,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from killchain_docker.state import RunState
 
 
-_ESCAPED_BYTE_RE = re.compile(r"\\x[0-9a-fA-F]{2}|\\[0abfnrtv]")
 _PREFIX_FROM_FORMAT_RE = re.compile(r"^([A-Za-z0-9_]+)(?:\\?\{|\{)")
 
 
@@ -88,7 +95,7 @@ class CandidatePolicy:
         text = str(candidate or "").strip()
         if not text:
             return CandidateDecision(False, "empty_candidate")
-        if cls._looks_like_bytes_repr_flag(text):
+        if looks_like_escaped_byte_candidate(text):
             return CandidateDecision(False, "escaped_byte_candidate")
         if not validatable_flag_candidate(text):
             return CandidateDecision(False, "invalid_candidate_shape")
@@ -97,15 +104,41 @@ class CandidatePolicy:
         # Unknown mode: flag_format is None or empty — accept any valid shape
         unknown_mode = not str(flag_format or "").strip()
 
-        if FLAG_BARE_TOKEN_SHAPE.fullmatch(text) and not FLAG_PREFIX_SHAPE.fullmatch(text):
+        if bare_token_shape(text) and not flag_prefix_shape(text):
             if unknown_mode:
                 return CandidateDecision(True)
             return CandidateDecision(False, "bare_token_for_prefix_challenge")
-        if not FLAG_PREFIX_SHAPE.fullmatch(text):
+        if not flag_prefix_shape(text):
             return CandidateDecision(False, "invalid_prefix_candidate")
         if expected_prefix and not text.startswith(expected_prefix + "{"):
             return CandidateDecision(False, "wrong_flag_prefix")
         return CandidateDecision(True)
+
+    @classmethod
+    def derived_candidates(cls, candidate: str, *, flag_format: object = None) -> list[str]:
+        """Return validator-worthy variants implied by policy, not by prompting."""
+
+        text = str(candidate or "").strip()
+        expected_prefix = cls._expected_prefix(flag_format)
+        if not text or not expected_prefix:
+            return []
+
+        variants: list[str] = []
+        if flag_prefix_shape(text) and not text.startswith(expected_prefix + "{"):
+            _prefix, _sep, body = text.partition("{")
+            rewritten = f"{expected_prefix}{{{body}"
+            if rewritten != text and cls.decision(rewritten, flag_format=flag_format).accepted:
+                variants.append(rewritten)
+        elif bare_token_shape(text) and not flag_prefix_shape(text):
+            rewritten = f"{expected_prefix}{{{text}}}"
+            if cls.decision(rewritten, flag_format=flag_format).accepted:
+                variants.append(rewritten)
+        return variants
+
+    @classmethod
+    def derived_candidates_for_state(cls, state: "RunState", candidate: str) -> list[str]:
+        challenge = state.metadata.get("challenge", {}) or {}
+        return cls.derived_candidates(candidate, flag_format=challenge.get("flag_format"))
 
     @classmethod
     def validation_ready_candidates(cls, state: "RunState") -> list[FlagCandidate]:
@@ -115,7 +148,7 @@ class CandidatePolicy:
                 continue
             if cls.accepts_for_state(state, candidate.value):
                 ready.append(candidate)
-        return ready
+        return sorted(ready, key=lambda item: item.confidence, reverse=True)
 
     @classmethod
     def first_candidate_from_context(
@@ -124,6 +157,10 @@ class CandidatePolicy:
         context: dict[str, Any],
         goal: str = "",
     ) -> str | None:
+        grounded = {
+            candidate.value
+            for candidate in cls.validation_ready_candidates(state)
+        }
         for key in (
             "candidate_flag",
             "candidate_flags",
@@ -134,13 +171,13 @@ class CandidatePolicy:
             values = value if isinstance(value, list) else [value]
             for item in values:
                 text = str(item or "").strip()
-                if text and cls.accepts_for_state(state, text):
+                if text and text in grounded and cls.accepts_for_state(state, text):
                     return text
 
         from killchain_docker.reasoning.flag import extract_flag_candidates
 
-        for candidate in extract_flag_candidates(goal):
-            if cls.accepts_for_state(state, candidate):
+        for candidate in extract_flag_candidates(goal, include_bare=False):
+            if candidate in grounded and cls.accepts_for_state(state, candidate):
                 return candidate
         return None
 
@@ -155,17 +192,6 @@ class CandidatePolicy:
         prefix = match.group(1)
         return prefix if prefix.replace("_", "").isalnum() else None
 
-    @staticmethod
-    def _looks_like_bytes_repr_flag(candidate: str) -> bool:
-        if "{" not in candidate or not candidate.endswith("}"):
-            return False
-        _prefix, _sep, body = candidate.partition("{")
-        body = body[:-1]
-        escaped = _ESCAPED_BYTE_RE.findall(body)
-        if "\\x" in body:
-            return True
-        return len(escaped) >= 2
-
 
 class TodoPolicy:
     """Normalize high-level todos and assign stable semantic families."""
@@ -176,28 +202,42 @@ class TodoPolicy:
         challenge = state.metadata.get("challenge", {}) or {}
         challenge_files = list(challenge.get("files", []) or [])
         goal_l = todo.goal.lower()
+        cls._normalize_flag_format_context(context, challenge)
 
         family = cls.family_for(todo.goal, context)
+        family = cls._normalize_artifact_target_context(todo, state, family)
         context["family"] = family
 
         if challenge_files and cls._goal_needs_files(goal_l):
             context.setdefault("files_root", DEFAULT_FILES_ROOT)
             context.setdefault("challenge_files", challenge_files)
 
+        cls._apply_execution_closure_context(todo, context, family)
+
         candidate = CandidatePolicy.first_candidate_from_context(state, context, todo.goal)
+        ready_candidates = CandidatePolicy.validation_ready_candidates(state)
         if candidate:
             context["candidate_flag"] = candidate
             todo.phase = TodoPhase.FLAG_VALIDATION
-        elif todo.phase == TodoPhase.FLAG_VALIDATION and CandidatePolicy.validation_ready_candidates(state):
-            context["candidate_flag"] = CandidatePolicy.validation_ready_candidates(state)[0].value
+        elif todo.phase == TodoPhase.FLAG_VALIDATION and ready_candidates:
+            context["candidate_flag"] = ready_candidates[0].value
             todo.phase = TodoPhase.FLAG_VALIDATION
         elif todo.phase == TodoPhase.FLAG_VALIDATION:
+            todo.phase = TodoPhase.ANALYSIS
+
+        if todo.phase == TodoPhase.EXPLOIT and cls._is_local_artifact_recovery(goal_l, context, family):
             todo.phase = TodoPhase.ANALYSIS
 
         if cls._is_compound_disassembly_and_exploit(todo.goal):
             todo.phase = TodoPhase.ANALYSIS
             context["family"] = "binary-analysis"
-            context.setdefault("capability_hint", "shell.exec")
+            context.pop("execution_closure", None)
+            context["capability_hint"] = "shell.exec"
+            context["dispatch_intent"] = {
+                "profile": "binary_analysis",
+                "required_capability": "shell.exec",
+                "completion_contract": ["algorithm_evidence", "blocker_diagnostic"],
+            }
             todo.goal = (
                 "Extract precise binary algorithm evidence needed for the next "
                 "decryption attempt."
@@ -206,9 +246,25 @@ class TodoPolicy:
                 "Capture the exact algorithm or loop evidence needed for a later script.",
             ]
 
-        if not todo.dedupe_key:
+        context["dispatch_intent"] = DispatchIntent.from_context(context).model_dump(mode="json")
+
+        structural_key = cls.structural_key(todo)
+        if structural_key:
+            todo.dedupe_key = structural_key
+        elif not todo.dedupe_key:
             todo.dedupe_key = cls.default_key(todo)
         return todo
+
+    @staticmethod
+    def _normalize_flag_format_context(
+        context: dict[str, Any],
+        challenge: dict[str, Any],
+    ) -> None:
+        expected_prefix = CandidatePolicy._expected_prefix(challenge.get("flag_format"))
+        if expected_prefix:
+            context["flag_format_prefix"] = f"{expected_prefix}{{"
+            return
+        context.pop("flag_format_prefix", None)
 
     @classmethod
     def default_key(cls, todo: "PlannedTodo | TodoItem") -> str:
@@ -257,6 +313,242 @@ class TodoPolicy:
         return "todo:" + ":".join(important)
 
     @staticmethod
+    def structural_key(todo: "PlannedTodo | TodoItem") -> str | None:
+        context = todo.context or {}
+        hint = str(context.get("capability_hint") or "").strip()
+        path = TodoPolicy._context_path(context)
+        if hint == "disk.extract" and path:
+            return f"bootstrap:disk-extract:{path}"
+        if hint in {"office.inspect", "png.inspect"} and path:
+            return f"bootstrap:artifact-followup:{path}"
+        if hint == "artifact.triage" and path and "/.autopentest_artifacts/" in path:
+            return f"bootstrap:artifact-followup:{path}"
+        return None
+
+    @classmethod
+    def _normalize_artifact_target_context(
+        cls,
+        todo: "PlannedTodo",
+        state: "RunState",
+        family: str,
+    ) -> str:
+        context = todo.context or {}
+        goal_l = todo.goal.lower()
+        if cls._looks_like_disk_extraction(goal_l):
+            if todo.phase == TodoPhase.RECON:
+                todo.phase = TodoPhase.ANALYSIS
+            disk_artifacts = [
+                artifact
+                for artifact in state.artifacts.values()
+                if cls._artifact_is_disk_image_like(artifact)
+            ]
+            if not cls._context_path(context) and len(disk_artifacts) == 1:
+                cls._bind_artifact_target(context, disk_artifacts[0])
+            if cls._context_path(context):
+                context["capability_hint"] = "disk.extract"
+            return "forensics-extract"
+
+        if todo.phase not in {TodoPhase.ANALYSIS, TodoPhase.EXPLOIT}:
+            return family
+        path = cls._context_path(context)
+        if path:
+            artifact = cls._artifact_by_path(state, path)
+            if artifact is not None and cls._capability_hint_targets_artifact(
+                context.get("capability_hint"),
+                artifact,
+            ):
+                context["capability_hint"] = cls._capability_for_artifact(artifact)
+                if family in {"other", "source-review", "forensics-extract"}:
+                    return "artifact-followup"
+            return family
+
+        mentioned = cls._unique_artifact_mentioned(goal_l, state)
+        if mentioned is not None:
+            cls._bind_artifact_target(context, mentioned)
+            if cls._capability_hint_targets_artifact(
+                context.get("capability_hint"),
+                mentioned,
+            ):
+                context["capability_hint"] = cls._capability_for_artifact(mentioned)
+            else:
+                context.setdefault("capability_hint", cls._capability_for_artifact(mentioned))
+            if family in {"other", "source-review", "forensics-extract"}:
+                return "artifact-followup"
+        return family
+
+    @staticmethod
+    def _artifact_by_path(state: "RunState", path: str) -> Any | None:
+        target = str(path or "").strip()
+        if not target:
+            return None
+        for artifact in state.artifacts.values():
+            if str(getattr(artifact, "path", "") or "").strip() == target:
+                return artifact
+        return None
+
+    @staticmethod
+    def _capability_hint_is_abstract(value: object) -> bool:
+        hint = str(value or "").strip().lower().replace("_", ".")
+        return hint in {
+            "",
+            "analyze",
+            "analysis",
+            "artifact.analyze",
+            "artifact.extract",
+            "artifact.inspect",
+            "artifact.parse",
+            "disk.rawscan",
+            "file.analyze",
+            "forensics.analyze",
+            "forensics.extract",
+            "media.analyze",
+            "media.inspect",
+        }
+
+    @staticmethod
+    def _capability_hint_targets_artifact(value: object, artifact: Any) -> bool:
+        """Return true when a target-bound hint should use artifact tooling."""
+
+        if TodoPolicy._capability_hint_is_abstract(value):
+            return True
+        hint = str(value or "").strip().lower().replace("_", ".")
+        canonical = TodoPolicy._capability_for_artifact(artifact)
+        if canonical == "office.inspect":
+            return hint in {
+                "document.analyze",
+                "document.extract",
+                "document.inspect",
+                "office.analyze",
+                "office.extract",
+                "openxml.extract",
+                "ppt.extract",
+                "pptx.extract",
+                "presentation.extract",
+            }
+        if canonical == "png.inspect":
+            return hint in {
+                "image.analyze",
+                "image.extract",
+                "image.inspect",
+                "png.analyze",
+                "png.extract",
+                "stego.analyze",
+                "steganalysis",
+            }
+        if canonical == "media.scan":
+            return hint in {
+                "media.analyze",
+                "media.extract",
+                "media.inspect",
+                "video.analyze",
+                "video.extract",
+            }
+        return False
+
+    @staticmethod
+    def _bind_artifact_target(context: dict[str, Any], artifact: Any) -> None:
+        artifact_id = str(getattr(artifact, "artifact_id", "") or "").strip()
+        path = str(getattr(artifact, "path", "") or "").strip()
+        if artifact_id:
+            context.setdefault("artifact_id", artifact_id)
+        if path:
+            context.setdefault("artifact_path", path)
+            context.setdefault("path", path)
+            context.setdefault("files_root", DEFAULT_FILES_ROOT)
+
+    @staticmethod
+    def _looks_like_disk_extraction(goal_l: str) -> bool:
+        return any(
+            token in goal_l
+            for token in (
+                "disk image",
+                "filesystem",
+                "file system",
+                "partition",
+                "mbr",
+                "boot sector",
+                "embedded zip",
+                "carve",
+            )
+        ) and any(
+            token in goal_l
+            for token in (
+                "extract",
+                "carve",
+                "recover",
+                "analyze",
+                "analyse",
+                "inspect",
+            )
+        )
+
+    @staticmethod
+    def _artifact_is_disk_image_like(artifact: Any) -> bool:
+        path = str(getattr(artifact, "path", "") or "").lower()
+        kind = str(getattr(artifact, "kind", "") or "").lower()
+        metadata = getattr(artifact, "metadata", {}) or {}
+        file_type = str(metadata.get("file_type") or "").lower()
+        mime_type = str(metadata.get("mime_type") or "").lower()
+        text = " ".join([path, kind, file_type, mime_type])
+        return any(
+            token in text
+            for token in (
+                "dos/mbr boot sector",
+                "partition table",
+                "filesystem image",
+                "disk image",
+                "boot sector",
+                ".img",
+                ".iso",
+                ".dd",
+                ".raw",
+            )
+        )
+
+    @staticmethod
+    def _unique_artifact_mentioned(goal_l: str, state: "RunState") -> Any | None:
+        matches: list[Any] = []
+        for artifact in state.artifacts.values():
+            path = str(getattr(artifact, "path", "") or "").strip()
+            if not path:
+                continue
+            basename = path.rsplit("/", 1)[-1].lower()
+            if basename and re.search(rf"(?<![A-Za-z0-9_.-]){re.escape(basename)}(?![A-Za-z0-9_.-])", goal_l):
+                matches.append(artifact)
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    @staticmethod
+    def _capability_for_artifact(artifact: Any) -> str:
+        path = str(getattr(artifact, "path", "") or "").lower()
+        kind = str(getattr(artifact, "kind", "") or "").lower()
+        metadata = getattr(artifact, "metadata", {}) or {}
+        file_type = str(metadata.get("file_type") or "").lower()
+        mime_type = str(metadata.get("mime_type") or "").lower()
+        text = " ".join([path, kind, file_type, mime_type])
+        if any(token in text for token in (".pptx", ".docx", ".xlsx", "openxml", "presentation")):
+            return "office.inspect"
+        if "image/png" in text or ".png" in path or "png" in kind:
+            return "png.inspect"
+        if any(token in text for token in (".jpg", ".jpeg", ".gif", ".bmp", ".mp4", "image", "video")):
+            return "media.scan"
+        return "artifact.triage"
+
+    @staticmethod
+    def _context_path(context: dict[str, Any]) -> str:
+        for key in ("artifact_path", "path", "file_path"):
+            value = context.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        paths = context.get("paths")
+        if isinstance(paths, list) and paths:
+            first = paths[0]
+            if isinstance(first, str) and first.strip():
+                return first.strip()
+        return ""
+
+    @staticmethod
     def family_for(goal: str, context: dict[str, Any] | None = None) -> str:
         context = context or {}
         explicit = str(context.get("family") or "").strip()
@@ -270,10 +562,27 @@ class TodoPolicy:
     @staticmethod
     def _derive_family_from_goal(goal: str) -> str:
         text = goal.lower()
-        if "disassembl" in text or "objdump" in text or "machine code" in text:
+        if (
+            "disassembl" in text
+            or "objdump" in text
+            or "machine code" in text
+            or "binary analysis" in text
+            or "binary-analysis" in text
+            or "reverse engineer" in text
+            or "reverse-engineer" in text
+            or "reversing" in text
+            or "decompile" in text
+            or "radare" in text
+            or "gdb" in text
+        ):
             return "binary-analysis"
         if "run" in text and "binary" in text:
             return "binary-run"
+        if "binary" in text and any(
+            token in text
+            for token in ("algorithm", "analy", "inspect", "recover")
+        ):
+            return "binary-analysis"
         if any(token in text for token in ("decrypt", "keystream", "known-plaintext", "lfsr", "cipher", "xor")):
             return "crypto-decrypt"
         if "flag" in text and any(token in text for token in ("recover", "validate", "candidate")):
@@ -288,6 +597,113 @@ class TodoPolicy:
         if "scope" in text or "recon" in text:
             return "recon"
         return "other"
+
+    @staticmethod
+    def _is_local_artifact_recovery(goal_l: str, context: dict[str, Any], family: str) -> bool:
+        if family not in {"crypto-decrypt", "flag-recovery"}:
+            return False
+        if not any(
+            context.get(key)
+            for key in (
+                "files_root",
+                "challenge_files",
+                "source_files",
+                "binary_files",
+                "data_file",
+                "paths",
+            )
+        ):
+            return False
+        if any(
+            token in goal_l
+            for token in (
+                "http",
+                "remote",
+                "service",
+                "socket",
+                "tcp",
+                "url",
+                "web",
+            )
+        ):
+            return False
+        return any(
+            token in goal_l
+            for token in (
+                "cipher",
+                "decode",
+                "decrypt",
+                "keystream",
+                "lfsr",
+                "plaintext",
+                "port the source",
+                "reverse transformation",
+                "xor",
+            )
+        )
+
+    @staticmethod
+    def _apply_execution_closure_context(
+        todo: "PlannedTodo",
+        context: dict[str, Any],
+        family: str,
+    ) -> None:
+        if todo.phase not in {TodoPhase.ANALYSIS, TodoPhase.EXPLOIT}:
+            return
+        if family not in {
+            "algorithm-verification",
+            "crypto-decrypt",
+            "flag-recovery",
+            "binary-analysis",
+        }:
+            return
+
+        text = " ".join(
+            [
+                todo.goal,
+                " ".join(str(item) for item in todo.success_criteria),
+                " ".join(str(item) for item in todo.constraints),
+            ]
+        ).lower()
+        if not any(
+            token in text
+            for token in (
+                "algorithm",
+                "cipher",
+                "decode",
+                "decrypt",
+                "derive",
+                "flag",
+                "keystream",
+                "lfsr",
+                "recover",
+                "reference",
+                "source",
+            )
+        ):
+            return
+
+        context.setdefault(
+            "execution_closure",
+            True,
+        )
+        context.setdefault("capability_hint", "script.exec")
+        raw_intent = context.get("dispatch_intent")
+        intent = dict(raw_intent) if isinstance(raw_intent, dict) else {}
+        intent["profile"] = intent.get("profile") or "execution_closure"
+        intent["required_capability"] = intent.get("required_capability") or "script.exec"
+        contract = list(intent.get("completion_contract") or [])
+        for item in (
+            "bounded_execution",
+            "self_check",
+            "candidate_provenance",
+            "blocker_diagnostic",
+        ):
+            if item not in contract:
+                contract.append(item)
+        intent["completion_contract"] = contract
+        intent["repair_policy_id"] = intent.get("repair_policy_id") or "execution_closure_repair"
+        context["dispatch_intent"] = intent
 
     @staticmethod
     def _goal_needs_files(goal_l: str) -> bool:
@@ -324,7 +740,14 @@ class ProgressPolicy:
     CONSECUTIVE_FAILURE_CAP = 5  # Hard pivot after 5 consecutive failures without new evidence
 
     # Families that are inherently iterative — apply cooldown but no hard cap.
-    _UNCAPPED_FAMILIES = frozenset({"artifact-inventory", "flag-recovery", "recon", "crypto-decrypt", "binary-analysis"})
+    _UNCAPPED_FAMILIES = frozenset({
+        "algorithm-verification",
+        "artifact-inventory",
+        "flag-recovery",
+        "recon",
+        "crypto-decrypt",
+        "binary-analysis",
+    })
 
     @classmethod
     def allows(cls, todo: "PlannedTodo", state: "RunState") -> tuple[bool, str]:
@@ -333,9 +756,13 @@ class ProgressPolicy:
         # Hard block: forced pivot bans specific families
         forced_pivot = state.metadata.get("forced_pivot")
         if isinstance(forced_pivot, dict):
-            banned = forced_pivot.get("banned_families") or []
-            if family in banned:
-                return False, f"family {family!r} is BANNED by forced pivot #{forced_pivot.get('pivot_number', '?')}"
+            banned = {str(item) for item in (forced_pivot.get("banned_families") or [])}
+            blocked = sorted(cls._todo_family_candidates(todo, family) & banned)
+            if blocked:
+                return False, (
+                    f"family {blocked[0]!r} is BANNED by forced pivot "
+                    f"#{forced_pivot.get('pivot_number', '?')}"
+                )
 
         total, failed = cls._family_counts(state, family)
 
@@ -375,12 +802,55 @@ class ProgressPolicy:
                 return True, ""
             return False, f"family {family!r} is in cooldown after {failed} failed/partial attempt(s)"
         if total >= cls.MAX_FAMILY_ATTEMPTS:
+            if cls._is_evidence_triggered_artifact_followup(todo, state, family):
+                return True, ""
             return False, f"family {family!r} hit hard cap ({total} total attempts)"
         if failed < cls.FAILURE_COOLDOWN_THRESHOLD:
             return True, ""
         if cls._has_new_novelty(todo, state, family):
             return True, ""
         return False, f"family {family!r} is in cooldown after {failed} failed/partial attempt(s)"
+
+    @staticmethod
+    def _is_evidence_triggered_artifact_followup(
+        todo: "PlannedTodo",
+        state: "RunState",
+        family: str,
+    ) -> bool:
+        if family != "artifact-followup":
+            return False
+        context = todo.context or {}
+        capability = str(context.get("capability_hint") or "").strip()
+        if capability not in {"artifact.triage", "media.scan", "office.inspect", "png.inspect"}:
+            return False
+        if not TodoPolicy._context_path(context):
+            return False
+        return ContextRefPolicy.refs_existing(
+            context,
+            state.evidence,
+            "evidence_id",
+            "evidence_ids",
+        )
+
+    @staticmethod
+    def _todo_family_candidates(todo: "PlannedTodo", family: str) -> set[str]:
+        candidates = {family}
+        context = todo.context or {}
+        text = " ".join(
+            [
+                todo.goal,
+                " ".join(str(item) for item in todo.success_criteria),
+                " ".join(str(item) for item in todo.constraints),
+                " ".join(
+                    str(context.get(key) or "")
+                    for key in ("capability_hint", "tool", "tool_name")
+                ),
+            ]
+        )
+        derived = TodoPolicy._derive_family_from_goal(text)
+        if derived != "other":
+            candidates.add(derived)
+        return candidates
 
     @classmethod
     def _family_counts(cls, state: "RunState", family: str) -> tuple[int, int]:
@@ -538,9 +1008,36 @@ class RoundOutcomePolicy:
     def had_meaningful_progress(results: list[WorkerResult]) -> bool:
         """Return true when a round emitted durable progress signals."""
         for result in results:
+            delta = result.state_delta
+            if result.partial:
+                if delta and (
+                    delta.flag_candidates
+                    or delta.artifacts
+                    or delta.endpoints
+                    or delta.routes
+                    or delta.hypotheses
+                    or delta.vulnerabilities
+                    or delta.exploit_attempts
+                    or delta.sessions
+                ):
+                    return True
+                if result.finding_updates or result.credential_updates:
+                    return True
+                ctx = result.output_context or {}
+                if ctx.get("near_miss_candidates") or ctx.get("flag_candidates"):
+                    return True
+                if RoundOutcomePolicy.has_observation_text(ctx):
+                    return True
+                for evidence in result.evidence_updates:
+                    extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
+                    evidence_ctx = extracted.get("output_context")
+                    if isinstance(evidence_ctx, dict) and RoundOutcomePolicy.has_observation_text(evidence_ctx):
+                        return True
+                    evidence_result = evidence.result if isinstance(evidence.result, dict) else {}
+                    if RoundOutcomePolicy.has_observation_text(evidence_result):
+                        return True
             if not result.success:
                 continue
-            delta = result.state_delta
             if delta and (
                 delta.flag_candidates
                 or delta.vulnerabilities

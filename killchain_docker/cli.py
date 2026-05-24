@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import json
-import sys
-import traceback
 from pathlib import Path
 from typing import Sequence
 
 from killchain_docker.controller import RunConfig, run_assessment
 from killchain_docker.lab import DEFAULT_COMPOSE_REL, lab_down, lab_health_check, lab_up
+from killchain_docker.logging_utils import configure_logging, get_logger, write_json_stdout
 from killchain_docker.llm import LLMClientError
 from killchain_docker.selftest import run_selftest
+
+
+LOGGER = get_logger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,11 +25,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--scope", action="append", dest="scope", help="Authorized scope entry")
     run_parser.add_argument("--config", help="Path to a JSON config file")
     run_parser.add_argument("--output-root", help="Directory where run artifacts are stored")
+    run_parser.add_argument("--status-path", help="Optional live status JSON path")
     run_parser.add_argument("--max-cycles", type=int, help="Maximum orchestrator cycles")
+    run_parser.add_argument("--rag-mode", choices=["oracle", "strict", "disabled"], help="RAG policy mode")
     run_parser.add_argument("--quiet", action="store_true", help="Suppress orchestrator event streaming")
 
     demo_parser = subcommands.add_parser("demo", help="Run a built-in local demo")
     demo_parser.add_argument("--output-root", default="runs", help="Directory where run artifacts are stored")
+    demo_parser.add_argument("--status-path", help="Optional live status JSON path")
+    demo_parser.add_argument("--rag-mode", choices=["oracle", "strict", "disabled"], help="RAG policy mode")
     demo_parser.add_argument("--quiet", action="store_true", help="Suppress orchestrator event streaming")
 
     selftest_parser = subcommands.add_parser("selftest", help="Run a local no-docker self-test")
@@ -83,6 +88,8 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
                 output_root=args.output_root,
                 max_cycles=base.max_cycles,
                 quiet=args.quiet,
+                status_path=args.status_path or base.status_path,
+                rag_mode=args.rag_mode or base.rag_mode,
                 metadata=dict(base.metadata),
             )
         return RunConfig(
@@ -91,6 +98,8 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
             output_root=args.output_root,
             max_cycles=4,
             quiet=args.quiet,
+            status_path=args.status_path,
+            rag_mode=args.rag_mode,
         )
 
     base = RunConfig.from_json_file(args.config) if args.config else None
@@ -107,6 +116,8 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         output_root=args.output_root if args.output_root is not None else (base.output_root if base is not None else "runs"),
         max_cycles=args.max_cycles if args.max_cycles is not None else (base.max_cycles if base is not None else 6),
         quiet=args.quiet or (base.quiet if base is not None else False),
+        status_path=args.status_path if args.status_path is not None else (base.status_path if base is not None else None),
+        rag_mode=args.rag_mode if args.rag_mode is not None else (base.rag_mode if base is not None else None),
         metadata=dict(base.metadata) if base is not None else {},
     )
 
@@ -114,15 +125,15 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
 def _lab_cli_main(args: argparse.Namespace) -> int:
     if args.lab_cmd == "up":
         code = lab_up(args.compose, detach=not args.foreground)
-        print(json.dumps({"compose": args.compose, "exit_code": code, "detach": not args.foreground}, indent=2))
+        write_json_stdout({"compose": args.compose, "exit_code": code, "detach": not args.foreground})
         return 0 if code == 0 else 1
     if args.lab_cmd == "down":
         code = lab_down(args.compose, remove_volumes=args.volumes)
-        print(json.dumps({"compose": args.compose, "exit_code": code, "remove_volumes": args.volumes}, indent=2))
+        write_json_stdout({"compose": args.compose, "exit_code": code, "remove_volumes": args.volumes})
         return 0 if code == 0 else 1
     if args.lab_cmd == "health":
         ok = lab_health_check(args.url, timeout_s=args.timeout)
-        print(json.dumps({"url": args.url, "ok": ok, "timeout_s": args.timeout}, indent=2))
+        write_json_stdout({"url": args.url, "ok": ok, "timeout_s": args.timeout})
         return 0 if ok else 1
     raise ValueError(f"unknown lab subcommand: {args.lab_cmd!r}")
 
@@ -130,26 +141,30 @@ def _lab_cli_main(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    configure_logging(quiet=bool(getattr(args, "quiet", False)))
 
     try:
         if args.command == "lab":
             return _lab_cli_main(args)
         if args.command == "selftest":
             payload = run_selftest(args.output_root)
-            print(json.dumps(payload, indent=2, ensure_ascii=True))
+            write_json_stdout(payload)
             return 0
 
         config = _config_from_args(args)
         artifacts = run_assessment(config)
     except (ValueError, LLMClientError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        LOGGER.error(
+            "run rejected",
+            exc_info=True,
+            extra={"command": args.command, "error_type": type(exc).__name__},
+        )
         return 2
     except KeyboardInterrupt:
-        print("\nrun interrupted by user", file=sys.stderr)
+        LOGGER.warning("run interrupted by user", extra={"command": args.command})
         return 130
-    except Exception as exc:
-        print(f"run failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
+    except Exception:
+        LOGGER.exception("run failed", extra={"command": args.command})
         return 1
 
     summary = {
@@ -159,7 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "summary_path": artifacts.summary_path,
         "report_path": artifacts.report_path,
     }
-    print(json.dumps(summary, indent=2, ensure_ascii=True))
+    write_json_stdout(summary)
     return 0
 
 

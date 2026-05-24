@@ -185,6 +185,77 @@ def close_unclosed_string_before_object_boundary(text: str) -> str:
     return repaired
 
 
+def close_array_before_object_field(text: str) -> str:
+    """Close an array when a model starts the next object field too early."""
+
+    out: list[str] = []
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            out.append(char)
+            index += 1
+            continue
+        if char in "{[":
+            stack.append(char)
+            out.append(char)
+            index += 1
+            continue
+        if char in "}]":
+            if stack:
+                stack.pop()
+            out.append(char)
+            index += 1
+            continue
+        if char == "," and stack and stack[-1] == "[" and _object_field_follows(text, index + 1):
+            stack.pop()
+            out.append("],")
+            index += 1
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _object_field_follows(text: str, index: int) -> bool:
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text) or text[index] != '"':
+        return False
+
+    escaped = False
+    index += 1
+    while index < len(text):
+        char = text[index]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            index += 1
+            break
+        index += 1
+
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return index < len(text) and text[index] == ":"
+
+
 def loads_lenient_json_object(text: str) -> Any:
     """Load model JSON, repairing the common bare-newline-in-string failure."""
 
@@ -194,6 +265,7 @@ def loads_lenient_json_object(text: str) -> Any:
     except json.JSONDecodeError:
         repaired = close_unclosed_string_before_object_boundary(candidate)
         repaired = escape_source_backslashes_in_json_strings(repaired)
+        repaired = close_array_before_object_field(repaired)
         repaired = escape_control_chars_in_json_strings(repaired)
         return json.loads(repaired)
 

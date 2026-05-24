@@ -12,6 +12,7 @@ import re
 from collections import Counter
 from typing import Any
 
+from killchain_docker.logging_utils import get_logger
 from killchain_docker.state import Credential, Endpoint
 from killchain_docker.tools.core import (
     ExecutionMode,
@@ -28,6 +29,8 @@ from killchain_docker.tools.plugins._base import (
     _truncate,
 )
 
+
+LOGGER = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Regex patterns
@@ -139,7 +142,11 @@ def build_output(
                     metadata={"pcap": path},
                 ))
         except Exception:
-            pass
+            LOGGER.debug(
+                "failed to decode HTTP basic credential from tshark output",
+                exc_info=True,
+                extra={"pcap": path},
+            )
 
     # FTP credentials
     ftp_users = _FTP_USER_RE.findall(stdout)
@@ -186,6 +193,13 @@ def build_output(
         "filter": filt,
         "packet_count": len(packets),
     }
+    if status.value == "success" and not packets:
+        output_context["failure_kind"] = "empty_result"
+        output_context["failure_detail"] = (
+            "tshark completed but produced no packets"
+            + (f" for filter {filt!r}" if filt else "")
+        )
+        output_context["result_quality"] = "empty_result"
     if proto_counts:
         output_context["protocol_counts"] = dict(proto_counts.most_common(10))
     if ip_set:

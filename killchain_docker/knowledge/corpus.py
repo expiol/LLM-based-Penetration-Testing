@@ -24,6 +24,43 @@ from pathlib import Path
 # sections (``## Setup``, ``## Build``) don't leak into the sketch.
 _SOLUTION_HEADING_RE = re.compile(r"^\s*##+\s*solution\b.*$", re.IGNORECASE | re.MULTILINE)
 _NEXT_HEADING_RE = re.compile(r"^\s*##+\s+", re.MULTILINE)
+_SOLUTION_FILE_RE = re.compile(
+    r"(?i)(?:^|[-_.])(solve|solver|solution|writeup|exploit|decrypt)(?:[-_.]|$)"
+)
+_TEXT_SOLUTION_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".go",
+    ".java",
+    ".js",
+    ".md",
+    ".php",
+    ".pl",
+    ".py",
+    ".rb",
+    ".sage",
+    ".sh",
+    ".txt",
+}
+_SUPPORTING_SOURCE_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".go",
+    ".h",
+    ".hpp",
+    ".java",
+    ".js",
+    ".php",
+    ".pl",
+    ".py",
+    ".rb",
+}
+_MAX_COMPANION_FILES = 3
+_MAX_COMPANION_CHARS = 9000
+_LEADING_BLOCK_COMMENT_RE = re.compile(r"\A\s*/\*.*?\*/\s*", re.DOTALL)
+_LEADING_HASH_COMMENT_RE = re.compile(r"\A(?:\s*#[^\n]*\n){3,}\s*")
 
 
 @dataclass(frozen=True)
@@ -125,13 +162,12 @@ def load_corpus(
         readme = _safe_read_text(chall_dir / "README.md")
         category = (info.get("category") or meta.get("category") or "misc").lower()
         files = list(meta.get("files") or [])
-        description = str(meta.get("description") or "").strip()
-        if not description and readme:
-            # README often duplicates the challenge.json description under
-            # ``## Description``; use that so query-time semantic matching
-            # still has a phrase to align against.
-            description = _readme_description(readme)
+        description = _merged_description(
+            str(meta.get("description") or "").strip(),
+            _readme_description(readme) if readme else "",
+        )
 
+        solution_sketch = extract_solution_sketch(readme)
         entries.append(
             KnowledgeEntry(
                 challenge_id=str(challenge_id),
@@ -142,7 +178,11 @@ def load_corpus(
                 description=description,
                 files=files,
                 writeup=readme,
-                solution_sketch=extract_solution_sketch(readme),
+                solution_sketch=augment_solution_sketch(
+                    chall_dir,
+                    solution_sketch,
+                    challenge_files=files,
+                ),
             )
         )
 
@@ -162,3 +202,104 @@ def _readme_description(readme: str) -> str:
     next_heading = _NEXT_HEADING_RE.search(tail)
     body = tail[: next_heading.start()] if next_heading else tail
     return body.strip()
+
+
+def _merged_description(metadata_description: str, readme_description: str) -> str:
+    metadata_text = metadata_description.strip()
+    readme_text = readme_description.strip()
+    if not metadata_text:
+        return readme_text
+    if not readme_text:
+        return metadata_text
+
+    metadata_l = metadata_text.lower()
+    readme_l = readme_text.lower()
+    if metadata_l in readme_l:
+        return readme_text
+    if readme_l in metadata_l:
+        return metadata_text
+    return f"{metadata_text}\n\n{readme_text}"
+
+
+def augment_solution_sketch(
+    challenge_dir: Path,
+    solution_sketch: str,
+    *,
+    challenge_files: list[str] | None = None,
+) -> str:
+    """Append small companion solver files to a README solution sketch.
+
+    Some NYUCTF writeups use ``## Solution`` only as a pointer to files such
+    as ``solve.py`` or ``foo-solve.py``.  Including those text files keeps RAG
+    method hints faithful without adding challenge-specific branches.
+    """
+
+    sections = [solution_sketch.strip()] if solution_sketch.strip() else []
+    for path in _knowledge_companion_files(challenge_dir, challenge_files or []):
+        text = _safe_read_text(path).strip()
+        if not text:
+            continue
+        rel = path.relative_to(challenge_dir).as_posix()
+        suffix = path.suffix.lstrip(".") or "text"
+        excerpt = _compact_companion_text(text, suffix)[:_MAX_COMPANION_CHARS]
+        sections.append(
+            f"Companion solution file: {rel}\n"
+            f"```{suffix}\n{excerpt}\n```"
+        )
+    return "\n\n".join(sections).strip()
+
+
+def _knowledge_companion_files(challenge_dir: Path, challenge_files: list[str]) -> list[Path]:
+    if not challenge_dir.is_dir():
+        return []
+    solution_files = [
+        path
+        for path in challenge_dir.iterdir()
+        if _is_solution_companion(path)
+    ]
+    selected = sorted(solution_files, key=lambda path: path.name.lower())[:_MAX_COMPANION_FILES]
+    if len(selected) >= _MAX_COMPANION_FILES:
+        return selected
+
+    excluded_names = {Path(item).name for item in challenge_files}
+    selected_set = {path.name for path in selected}
+    supporting = [
+        path
+        for path in challenge_dir.iterdir()
+        if _is_supporting_source(path, excluded_names, selected_set)
+    ]
+    slots = _MAX_COMPANION_FILES - len(selected)
+    return [*selected, *sorted(supporting, key=lambda path: path.name.lower())[:slots]]
+
+
+def _is_solution_companion(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if path.name.lower() in {"readme.md", "challenge.json"}:
+        return False
+    if path.suffix.lower() not in _TEXT_SOLUTION_SUFFIXES:
+        return False
+    return bool(_SOLUTION_FILE_RE.search(path.stem))
+
+
+def _compact_companion_text(text: str, suffix: str) -> str:
+    """Drop leading license banners so prompt budget keeps executable logic."""
+
+    cleaned = text.strip()
+    if suffix in {"c", "cc", "cpp", "h", "hpp", "java", "js", "php"}:
+        cleaned = _LEADING_BLOCK_COMMENT_RE.sub("", cleaned, count=1).lstrip()
+    if suffix in {"py", "sh", "rb", "pl"}:
+        cleaned = _LEADING_HASH_COMMENT_RE.sub("", cleaned, count=1).lstrip()
+    return cleaned
+
+
+def _is_supporting_source(
+    path: Path,
+    excluded_names: set[str],
+    selected_names: set[str],
+) -> bool:
+    if not path.is_file() or path.name in selected_names:
+        return False
+    if path.name in excluded_names or path.name.lower() in {"readme.md", "challenge.json"}:
+        return False
+    return path.suffix.lower() in _SUPPORTING_SOURCE_SUFFIXES

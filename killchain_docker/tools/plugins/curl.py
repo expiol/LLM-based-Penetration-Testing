@@ -43,6 +43,7 @@ _MAX_SESSION_ID_LEN = 64
 _HTTP_STATUS_RE = re.compile(r"HTTP/[\d.]+ (\d+)")
 _SET_COOKIE_RE = re.compile(r"^set-cookie:\s*(.+)", re.IGNORECASE)
 _HEADER_KV_RE = re.compile(r"^([\w-]+):\s*(.+)")
+_HTTP_SCHEMES = {"http", "https"}
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,19 @@ def _extract_base_url(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme else url
 
 
+def unsupported_url_scheme_reason(url: str) -> str | None:
+    """Return a block reason when an explicit URL scheme is not HTTP(S)."""
+
+    parsed = urlparse(str(url or "").strip())
+    scheme = parsed.scheme.lower()
+    if scheme and scheme not in _HTTP_SCHEMES:
+        return (
+            f"curl supports only HTTP/HTTPS URLs, not {scheme}://; "
+            "use script.exec with a bounded socket harness for raw TCP services"
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Plugin
 # ---------------------------------------------------------------------------
@@ -128,6 +142,14 @@ class CurlPlugin:
     def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
         meta = request.metadata
         url = _require(meta, "url", self.name)
+        scheme_reason = unsupported_url_scheme_reason(url)
+        if scheme_reason:
+            return ToolExecutionResult(
+                tool_name=self.name,
+                mode=self.mode,
+                exit_code=126,
+                stderr=scheme_reason,
+            )
         method = str(meta.get("method") or "GET").upper()
         headers = meta.get("headers") or {}
         data = str(meta.get("data") or "")
@@ -254,6 +276,8 @@ def build_output(
         summary += f" [session:{session_id}]"
     if status.value == "failure":
         summary = f"curl {method} {url} failed (exit {result.exit_code})"
+    if result.exit_code == 126 and unsupported_url_scheme_reason(url):
+        summary = f"curl blocked for non-HTTP URL: {url}"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
 
@@ -279,12 +303,17 @@ def build_output(
         ]
     if session_id:
         output_context["session_id"] = session_id
+    if result.exit_code == 126 and unsupported_url_scheme_reason(url):
+        output_context["failure_kind"] = "non_http_url_blocked"
+        output_context["failure_detail"] = (
+            "curl handles HTTP/HTTPS only; use script.exec with socket timeouts for raw TCP"
+        )
 
     # -- Typed state signals -------------------------------------------------
 
     # Endpoint: base URL of the target
     endpoints: list[Endpoint] = []
-    if url:
+    if url and output_context.get("failure_kind") != "non_http_url_blocked":
         base = _extract_base_url(url)
         parsed_url = urlparse(url)
         endpoints.append(Endpoint(
@@ -298,7 +327,11 @@ def build_output(
 
     # Route: the specific URL + method
     routes: list[Route] = []
-    if url and http_status is not None:
+    if (
+        url
+        and http_status is not None
+        and output_context.get("failure_kind") != "non_http_url_blocked"
+    ):
         parsed_url = urlparse(url)
         routes.append(Route(
             url=url,

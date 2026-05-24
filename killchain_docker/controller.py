@@ -3,29 +3,86 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
+import threading
+import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from killchain_docker.knowledge import KnowledgeAugmenter
-from killchain_docker.llm import LLMClient, TokenLedger, build_llm_client_from_env
+from killchain_docker.knowledge import KnowledgeAugmenter, public_rag_payload, rag_mode
+from killchain_docker.logging_utils import (
+    get_logger,
+    json_dumps,
+    json_sanitize,
+    safe_extra,
+    write_json_file,
+    write_text_file,
+)
+from killchain_docker.llm import LLMClient, LLMClientError, TokenLedger, build_llm_client_from_env
 from killchain_docker.orchestrator import (
     LLMPlanner,
     Orchestrator,
     RouterAgent,
 )
 from killchain_docker.reporting import render_markdown_report
-from killchain_docker.state import RunState
+from killchain_docker.state import RunState, RunStatus
+from killchain_docker.thread_status import build_thread_registry, thread_info
 from killchain_docker.tools import ExecutionPlane, build_execution_plane
 from killchain_docker.workers import WorkerBuildContext, build_builtin_workers
 
 
+LOGGER = get_logger(__name__)
+STATUS_HEARTBEAT_INTERVAL_S = 5.0
+_TERMINAL_RUN_STATUSES = {
+    RunStatus.COMPLETED,
+    RunStatus.SOLVED,
+    RunStatus.FAILED,
+    RunStatus.STOPPED,
+    RunStatus.INTERRUPTED,
+}
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json_file(path, payload)
+
+
+def _write_text(path: Path, payload: str) -> None:
+    write_text_file(path, payload)
+
+
+def _record_runtime_exception(state: RunState, exc: BaseException) -> None:
+    error = {
+        "type": type(exc).__name__,
+        "message": str(exc).strip() or type(exc).__name__,
+    }
+    state.metadata["runtime_error"] = error
+
+    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        if state.status not in _TERMINAL_RUN_STATUSES:
+            state.status = RunStatus.INTERRUPTED
+        state.stop_reason = state.stop_reason or "interrupted"
+        note = f"run interrupted by {error['type']}"
+    else:
+        if state.status not in _TERMINAL_RUN_STATUSES:
+            state.status = RunStatus.FAILED
+        state.stop_reason = state.stop_reason or (
+            "llm_error" if isinstance(exc, LLMClientError) else "runtime_error"
+        )
+        note = f"run failed with {error['type']}: {error['message']}"
+
+    if note not in state.orchestration_notes:
+        state.orchestration_notes.append(note)
+
+
+def _runtime_error_payload(state: RunState) -> dict[str, Any] | None:
+    payload = state.metadata.get("runtime_error")
+    return dict(payload) if isinstance(payload, dict) else None
 
 
 _COMPACT_TEXT_LIMIT = 360
@@ -54,6 +111,18 @@ def _worker_counts(state: RunState) -> dict[str, int]:
         key = str(todo.assigned_worker or "unassigned")
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _current_status_todo(state: RunState) -> Any | None:
+    if not state.todos:
+        return None
+    for todo in reversed(state.todos):
+        if str(todo.status) == "running":
+            return todo
+    for todo in reversed(state.todos):
+        if str(todo.status) in {"pending", "partial", "failed", "blocked", "interrupted"}:
+            return todo
+    return None
 
 
 def _compact_todos(state: RunState) -> list[dict[str, object]]:
@@ -158,6 +227,7 @@ def build_compact_run_log(
             "stop_reason": state.stop_reason,
             "solved": state.solved,
             "validated_flag": state.validated_flag,
+            "runtime_error": _runtime_error_payload(state),
             "created_at": state.created_at.isoformat(),
             "updated_at": state.updated_at.isoformat(),
             "last_cycle_at": state.last_cycle_at.isoformat() if state.last_cycle_at else None,
@@ -176,6 +246,7 @@ def build_compact_run_log(
             "todo_status_counts": _todo_status_counts(state),
             "worker_counts": _worker_counts(state),
         },
+        "rag": public_rag_payload(state.metadata.get("rag")) or {},
         "flag_candidates": flags,
         "working_memory": {
             key: _compact_text(value, limit=260)
@@ -224,6 +295,21 @@ def render_compact_run_markdown(payload: dict[str, Any]) -> str:
         f"- Todo statuses: `{counts.get('todo_status_counts')}`",
         "",
     ]
+    runtime_error = run.get("runtime_error")
+    if isinstance(runtime_error, dict):
+        lines.extend([
+            "- Runtime error: "
+            f"`{runtime_error.get('type')}` {runtime_error.get('message')}",
+            "",
+        ])
+    rag = payload.get("rag")
+    if isinstance(rag, dict) and rag:
+        lines.extend([
+            "## RAG",
+            "",
+            f"- Enabled: `{rag.get('enabled')}` status=`{rag.get('status')}` policy=`{rag.get('policy')}` hints={rag.get('hint_count')}",
+            "",
+        ])
 
     token_usage = payload.get("token_usage")
     if isinstance(token_usage, dict):
@@ -320,9 +406,18 @@ class RunPersister:
     land on disk regardless of whether ``orchestrator.run`` raised.
     """
 
-    def __init__(self, run_dir: Path, recorder: EventRecorder) -> None:
+    def __init__(
+        self,
+        run_dir: Path,
+        recorder: EventRecorder,
+        status_path: Path | None = None,
+        token_ledger: TokenLedger | None = None,
+    ) -> None:
         self.run_dir = run_dir
         self.recorder = recorder
+        self.status_path = status_path
+        self.token_ledger = token_ledger
+        self._lock = threading.RLock()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = run_dir / "config.json"
         self.state_path = run_dir / "state.json"
@@ -333,62 +428,254 @@ class RunPersister:
         self.compact_json_path = run_dir / "compact_log.json"
         self.compact_markdown_path = run_dir / "compact_log.md"
 
+    def _status_link(self, path: Path) -> str | None:
+        root = self.status_path.parent if self.status_path else self.run_dir
+        try:
+            return path.resolve().relative_to(root.resolve()).as_posix()
+        except (OSError, ValueError):
+            return None
+
+    def _status_artifacts(self) -> dict[str, str]:
+        paths = {
+            "config_path": self.config_path,
+            "state_path": self.state_path,
+            "summary_path": self.summary_path,
+            "report_path": self.report_path,
+            "events_path": self.events_path,
+            "evidence_path": self.evidence_path,
+            "compact_json_path": self.compact_json_path,
+            "compact_markdown_path": self.compact_markdown_path,
+        }
+        return {
+            key: link
+            for key, path in paths.items()
+            if (link := self._status_link(path))
+        }
+
+    def _token_usage(self) -> dict[str, int] | None:
+        if self.token_ledger is None:
+            return None
+        return self.token_ledger.to_dict()
+
+    def _status_payload(self, state: RunState, *, stage: str) -> dict[str, Any]:
+        challenge = state.metadata.get("challenge", {}) or {}
+        status_todo = _current_status_todo(state)
+        messages = self.recorder.messages
+        records = self.recorder.records
+        latest_event = records[-1] if records else None
+        now = datetime.now(timezone.utc)
+        latest_thread_id = (
+            latest_event.get("thread_id")
+            if isinstance(latest_event, dict) and latest_event.get("thread_id") is not None
+            else threading.get_ident()
+        )
+        latest_thread_name = (
+            latest_event.get("thread_name")
+            if isinstance(latest_event, dict) and latest_event.get("thread_name") is not None
+            else threading.current_thread().name
+        )
+        writer_thread_id = threading.get_ident()
+        writer_thread_name = threading.current_thread().name
+        threads: dict[str, Any] = {
+            "observed": thread_info(latest_thread_id, latest_thread_name),
+            "status_writer": thread_info(writer_thread_id, writer_thread_name),
+        }
+        current_todo = None if status_todo is None else {
+            "todo_id": status_todo.todo_id,
+            "phase": str(status_todo.phase),
+            "status": str(status_todo.status),
+            "worker": status_todo.assigned_worker,
+            "attempts": status_todo.attempts,
+            "goal": _compact_text(status_todo.goal, limit=_COMPACT_GOAL_LIMIT),
+            "result": _compact_text(status_todo.result_summary),
+            "error": _compact_text(status_todo.error),
+        }
+        latest_event_payload = None
+        if latest_event:
+            threads["latest_event"] = thread_info(
+                latest_event.get("thread_id"),
+                latest_event.get("thread_name"),
+            )
+            latest_event_payload = {
+                "sequence": latest_event.get("sequence"),
+                "timestamp": latest_event.get("timestamp"),
+                "level": latest_event.get("level"),
+                "event_type": latest_event.get("event_type"),
+                "thread_id": latest_event.get("thread_id"),
+                "thread_name": latest_event.get("thread_name"),
+                "message": _compact_text(latest_event.get("message")),
+            }
+        runtime_error = _runtime_error_payload(state)
+        message = messages[-1] if messages else None
+        threads["registry"] = build_thread_registry(
+            challenge=str(challenge.get("canonical_name") or challenge.get("name") or ""),
+            stage=stage,
+            status=str(state.status),
+            pid=os.getpid(),
+            observed=threads["observed"],
+            status_writer=threads["status_writer"],
+            latest_event=latest_event_payload,
+            current_todo=current_todo,
+            runtime_error=runtime_error,
+            message=message,
+            recent_events=records,
+        )
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "challenge": challenge.get("canonical_name") or challenge.get("name"),
+            "pid": os.getpid(),
+            "thread_id": latest_thread_id,
+            "thread_name": latest_thread_name,
+            "status_writer_thread_id": writer_thread_id,
+            "status_writer_thread_name": writer_thread_name,
+            "threads": threads,
+            "stage": stage,
+            "status": str(state.status),
+            "run_id": state.run_id,
+            "solved": state.solved,
+            "stop_reason": state.stop_reason,
+            "updated_at": now.isoformat(),
+            "state_updated_at": state.updated_at.isoformat(),
+            "last_cycle_at": state.last_cycle_at.isoformat() if state.last_cycle_at else None,
+            "runtime_sec": round(max(0.0, (now - state.created_at).total_seconds()), 3),
+            "message": message,
+            "worker": status_todo.assigned_worker if status_todo else None,
+            "current_todo": current_todo,
+            "state_metrics": {
+                **state.summary(),
+                "todo_status_counts": _todo_status_counts(state),
+                "worker_counts": _worker_counts(state),
+            },
+            "runtime_error": runtime_error,
+            "rag": public_rag_payload(state.metadata.get("rag")),
+            "artifacts": self._status_artifacts(),
+        }
+        token_usage = self._token_usage()
+        if token_usage is not None:
+            payload["token_usage"] = token_usage
+        if latest_event_payload:
+            payload["latest_event"] = latest_event_payload
+        run_dir = self._status_link(self.run_dir)
+        if run_dir:
+            payload["run_dir"] = run_dir
+        return payload
+
+    def write_runtime_status(self, state: RunState, *, stage: str) -> None:
+        if self.status_path is None:
+            return
+        with self._lock:
+            _write_json(self.status_path, self._status_payload(state, stage=stage))
+
     def write_config(self, config: RunConfig) -> None:
-        _write_json(self.config_path, config.model_dump(mode="json"))
+        with self._lock:
+            _write_json(self.config_path, config.model_dump(mode="json"))
 
     def _write_events(self) -> None:
-        messages = list(self.recorder.messages)
-        suffix = "\n" if messages else ""
-        self.events_path.write_text("\n".join(messages) + suffix, encoding="utf-8")
+        lines = [
+            json_dumps(record, indent=None, sort_keys=True)
+            for record in self.recorder.records
+        ]
+        suffix = "\n" if lines else ""
+        _write_text(self.events_path, "\n".join(lines) + suffix)
 
-    def _write_compact(self, state: RunState, token_ledger: TokenLedger | None = None) -> None:
+    def _write_compact(self, state: RunState) -> None:
         payload = build_compact_run_log(
             state,
             events=list(self.recorder.messages),
-            token_ledger=token_ledger,
+            token_ledger=self.token_ledger,
         )
         _write_json(self.compact_json_path, payload)
-        self.compact_markdown_path.write_text(
-            render_compact_run_markdown(payload),
-            encoding="utf-8",
-        )
+        _write_text(self.compact_markdown_path, render_compact_run_markdown(payload))
 
     def write_state(self, state: RunState) -> None:
         try:
-            _write_json(self.state_path, state.model_dump(mode="json"))
-            self._write_events()
-            self._write_compact(state)
+            with self._lock:
+                _write_json(self.state_path, state.model_dump(mode="json"))
+                self._write_events()
+                self._write_compact(state)
+                self.write_runtime_status(state, stage="assessment")
         except Exception as exc:
+            LOGGER.exception(
+                "checkpoint write failed",
+                extra={"run_dir": str(self.run_dir), "status_path": str(self.status_path) if self.status_path else None},
+            )
             self.recorder.emit(
-                f"[persister] checkpoint write failed: {type(exc).__name__}: {exc}"
+                f"[persister] checkpoint write failed: {type(exc).__name__}: {exc}",
+                level=logging.ERROR,
+                event_type="persistence",
             )
 
-    def write_all(
+    def write_all(self, state: RunState) -> None:
+        with self._lock:
+            _write_json(self.state_path, state.model_dump(mode="json"))
+            summary = state.summary()
+            summary["objective"] = state.objective
+            summary["authorized_scope"] = state.authorized_scope
+            summary["worker_notes"] = len(state.notes)
+            summary["orchestration_notes"] = len(state.orchestration_notes)
+            runtime_error = _runtime_error_payload(state)
+            if runtime_error is not None:
+                summary["runtime_error"] = runtime_error
+            public_rag = public_rag_payload(state.metadata.get("rag"))
+            if public_rag is not None:
+                summary["rag"] = public_rag
+            token_usage = self._token_usage()
+            if token_usage is not None:
+                summary["token_usage"] = token_usage
+            _write_json(self.summary_path, summary)
+            _write_json(
+                self.evidence_path,
+                {
+                    "evidence": {
+                        key: value.model_dump(mode="json")
+                        for key, value in sorted(state.evidence.items(), key=lambda item: item[0])
+                    }
+                },
+            )
+            _write_text(self.report_path, render_markdown_report(state))
+            self._write_events()
+            self._write_compact(state)
+            self.write_runtime_status(state, stage="complete")
+
+
+class RuntimeStatusHeartbeat:
+    """Periodically refresh live status while the orchestrator is blocked."""
+
+    def __init__(
         self,
+        persister: RunPersister,
         state: RunState,
-        token_ledger: TokenLedger | None,
+        *,
+        interval_s: float = STATUS_HEARTBEAT_INTERVAL_S,
     ) -> None:
-        _write_json(self.state_path, state.model_dump(mode="json"))
-        summary = state.summary()
-        summary["objective"] = state.objective
-        summary["authorized_scope"] = state.authorized_scope
-        summary["worker_notes"] = len(state.notes)
-        summary["orchestration_notes"] = len(state.orchestration_notes)
-        if token_ledger is not None:
-            summary["token_usage"] = token_ledger.to_dict()
-        _write_json(self.summary_path, summary)
-        _write_json(
-            self.evidence_path,
-            {
-                "evidence": {
-                    key: value.model_dump(mode="json")
-                    for key, value in sorted(state.evidence.items(), key=lambda item: item[0])
-                }
-            },
+        self.persister = persister
+        self.state = state
+        self.interval_s = max(0.0, float(interval_s))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self.persister.status_path is None or self.interval_s <= 0:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"status-heartbeat-{self.state.run_id}",
+            daemon=True,
         )
-        self.report_path.write_text(render_markdown_report(state), encoding="utf-8")
-        self._write_events()
-        self._write_compact(state, token_ledger)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=max(1.0, self.interval_s * 2))
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            try:
+                self.persister.write_runtime_status(self.state, stage="assessment")
+            except Exception:
+                LOGGER.exception("runtime status heartbeat failed", extra={"run_id": self.state.run_id})
 
 
 class RunConfig(BaseModel):
@@ -401,6 +688,8 @@ class RunConfig(BaseModel):
     output_root: str = "runs"
     max_cycles: int = Field(default=8, ge=1)
     quiet: bool = False
+    status_path: str | None = None
+    rag_mode: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
@@ -428,16 +717,121 @@ class RunArtifacts(BaseModel):
 
 
 class EventRecorder:
-    """Collects orchestrator emit events and optionally echoes them to stdout."""
+    """Collects structured runtime events and optionally logs them."""
+
+    MAX_MESSAGES = 2_000
 
     def __init__(self, *, quiet: bool = False) -> None:
         self.quiet = quiet
-        self.messages: list[str] = []
+        self._messages: list[str] = []
+        self._records: list[dict[str, Any]] = []
+        self._context: dict[str, Any] = {}
+        self._sequence = 0
+        self._lock = threading.Lock()
 
-    def emit(self, message: str) -> None:
-        self.messages.append(message)
+    @property
+    def messages(self) -> list[str]:
+        with self._lock:
+            return list(self._messages)
+
+    @property
+    def records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [json_sanitize(record) for record in self._records]
+
+    def bind_context(self, **context: Any) -> None:
+        with self._lock:
+            self._context.update({
+                key: json_sanitize(value)
+                for key, value in context.items()
+                if value is not None
+            })
+
+    def emit(
+        self,
+        message: str,
+        *,
+        level: int = logging.INFO,
+        event_type: str | None = None,
+        **context: Any,
+    ) -> None:
+        record = self._record(message, level=level, event_type=event_type, context=context)
         if not self.quiet:
-            print(message)
+            LOGGER.log(level, message, extra=safe_extra(self._log_context(record)))
+
+    def _record(
+        self,
+        message: str,
+        *,
+        level: int,
+        event_type: str | None,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._sequence += 1
+            merged_context = {
+                **self._context,
+                **{
+                    key: json_sanitize(value)
+                    for key, value in context.items()
+                    if value is not None
+                },
+            }
+            record = {
+                "schema_version": 1,
+                "sequence": self._sequence,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "level": logging.getLevelName(level),
+                "event_type": event_type or self._infer_event_type(message),
+                "message": message,
+                "pid": os.getpid(),
+                "thread_id": threading.get_ident(),
+                "thread_name": threading.current_thread().name,
+                "context": merged_context,
+            }
+            self._messages.append(message)
+            self._records.append(record)
+            if len(self._messages) > self.MAX_MESSAGES:
+                del self._messages[: len(self._messages) - self.MAX_MESSAGES]
+            if len(self._records) > self.MAX_MESSAGES:
+                del self._records[: len(self._records) - self.MAX_MESSAGES]
+            return record
+
+    @staticmethod
+    def _infer_event_type(message: str) -> str:
+        if message.startswith("[token usage]"):
+            return "token_usage"
+        if message.startswith("[interrupt]"):
+            return "interrupt"
+        if message.startswith("[persister]"):
+            return "persistence"
+        if "] plan:" in message:
+            return "planner"
+        if "] dispatch " in message:
+            return "dispatch"
+        if "] router summary:" in message:
+            return "router_summary"
+        if "] solved:" in message:
+            return "solved"
+        if "] transient LLM error" in message:
+            return "llm_transient_error"
+        if "LLM error" in message:
+            return "llm_error"
+        if "FAILED" in message or "UNHANDLED EXCEPTION" in message:
+            return "failure"
+        return "runtime"
+
+    @staticmethod
+    def _log_context(record: dict[str, Any]) -> dict[str, Any]:
+        context = record.get("context")
+        return {
+            **(context if isinstance(context, dict) else {}),
+            "event_type": record.get("event_type"),
+            "event_sequence": record.get("sequence"),
+            "event_pid": record.get("pid"),
+            "event_thread_id": record.get("thread_id"),
+            "event_thread_name": record.get("thread_name"),
+        }
 
 
 def build_runtime(
@@ -458,17 +852,24 @@ def build_runtime(
     # ``from_default`` resolves to the module-level retriever singleton
     # (or ``None`` when fastembed / the dataset isn't available), so the
     # caller never has to know whether RAG is wired up.
-    augmenter = KnowledgeAugmenter.from_default()
+    resolved_rag_mode = rag_mode(config.rag_mode)
+    augmenter = KnowledgeAugmenter.from_default(mode=resolved_rag_mode)
+    metadata = dict(config.metadata)
+    rag_metadata = metadata.get("rag")
+    metadata["rag"] = {
+        **(rag_metadata if isinstance(rag_metadata, dict) else {}),
+        "mode": resolved_rag_mode,
+    }
 
     planner = LLMPlanner(llm_client, augmenter=augmenter)
     router = RouterAgent(llm_client)
-    emit = recorder.emit if recorder is not None else print
+    emit = recorder.emit if recorder is not None else LOGGER.info
 
     execution_plane = execution_plane or build_execution_plane()
     state = RunState(
         objective=config.objective,
         authorized_scope=config.authorized_scope,
-        metadata=dict(config.metadata),
+        metadata=metadata,
     )
     worker_context = WorkerBuildContext(
         llm_client=llm_client,
@@ -509,28 +910,63 @@ def run_assessment(
         llm_client=llm_client,
     )
     run_dir = Path(config.output_root) / state.run_id
-    persister = RunPersister(run_dir, recorder)
-    persister.write_config(config)
-    orchestrator.checkpoint_callback = persister.write_state
-
+    status_path = Path(config.status_path) if config.status_path else None
     token_ledger = getattr(active_llm_client, "token_ledger", None)
+    persister = RunPersister(run_dir, recorder, status_path, token_ledger)
+    recorder.bind_context(
+        run_id=state.run_id,
+        challenge=(state.metadata.get("challenge", {}) or {}).get("canonical_name")
+        or (state.metadata.get("challenge", {}) or {}).get("name"),
+    )
+    persister.write_config(config)
+    persister.write_runtime_status(state, stage="initialized")
+    orchestrator.checkpoint_callback = persister.write_state
+    heartbeat = RuntimeStatusHeartbeat(persister, state)
+    heartbeat.start()
+
     run_error: BaseException | None = None
     run_traceback = None
 
     try:
         orchestrator.run(max_cycles=config.max_cycles)
+    except (KeyboardInterrupt, SystemExit) as exc:
+        run_error = exc
+        run_traceback = exc.__traceback__
+        _record_runtime_exception(state, exc)
+        LOGGER.warning(
+            "run interrupted; finalizing artifacts",
+            exc_info=True,
+            extra={"run_id": state.run_id},
+        )
     except BaseException as exc:
         run_error = exc
         run_traceback = exc.__traceback__
+        _record_runtime_exception(state, exc)
+        LOGGER.exception(
+            "run failed; finalizing artifacts",
+            extra={"run_id": state.run_id},
+        )
     finally:
+        heartbeat.stop()
         if token_ledger is not None:
+            token_usage = token_ledger.to_dict()
             recorder.emit(
-                f"[token usage] calls={token_ledger.llm_calls} "
-                f"prompt={token_ledger.prompt_tokens} "
-                f"completion={token_ledger.completion_tokens} "
-                f"total={token_ledger.total_tokens}"
+                f"[token usage] calls={token_usage['llm_calls']} "
+                f"prompt={token_usage['prompt_tokens']} "
+                f"completion={token_usage['completion_tokens']} "
+                f"total={token_usage['total_tokens']}",
+                event_type="token_usage",
+                llm_calls=token_usage["llm_calls"],
+                prompt_tokens=token_usage["prompt_tokens"],
+                completion_tokens=token_usage["completion_tokens"],
+                total_tokens=token_usage["total_tokens"],
             )
-        persister.write_all(state, token_ledger)
+        try:
+            persister.write_all(state)
+        except Exception:
+            LOGGER.exception("failed to persist final run artifacts", extra={"run_id": state.run_id})
+            if run_error is None:
+                raise
 
     artifacts = RunArtifacts(
         run_id=state.run_id,

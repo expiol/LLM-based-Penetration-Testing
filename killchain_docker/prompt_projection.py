@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from killchain_docker.prompt_bounds import bounded_value, trim_text
-from killchain_docker.state import ExecutionRecord, RunState, TodoItem
+from killchain_docker.state import Artifact, DispatchIntent, ExecutionRecord, RunState, TodoItem
 
 
 def planner_todo(todo: TodoItem) -> dict[str, Any]:
@@ -31,6 +31,7 @@ def router_todo(todo: TodoItem) -> dict[str, object]:
         "todo_id": todo.todo_id,
         "goal": trim_text(todo.goal, width=360),
         "phase": todo.phase,
+        "dispatch_intent": DispatchIntent.from_context(todo.context).model_dump(mode="json"),
         "context": bounded_value(todo.context, width=360, list_limit=8, dict_limit=14),
         "priority": todo.priority,
         "success_criteria": bounded_value(todo.success_criteria, width=240, list_limit=6),
@@ -45,6 +46,7 @@ def worker_todo(task: TodoItem) -> dict[str, Any]:
         "todo_id": task.todo_id,
         "goal": trim_text(task.goal, width=420),
         "phase": task.phase,
+        "dispatch_intent": DispatchIntent.from_context(task.context).model_dump(mode="json"),
         "context": bounded_value(task.context, width=420, list_limit=8, dict_limit=14),
         "priority": task.priority,
         "success_criteria": bounded_value(task.success_criteria, width=260, list_limit=6),
@@ -67,6 +69,26 @@ def execution_record(record: ExecutionRecord) -> dict[str, Any]:
         "summary": trim_text(record.summary, width=320),
         "error": trim_text(record.error, width=220),
     }
+
+
+def artifact_record(artifact: Artifact) -> dict[str, Any]:
+    return {
+        "artifact_id": artifact.artifact_id,
+        "path": trim_text(artifact.path, width=420),
+        "kind": artifact.kind,
+        "source": artifact.source,
+        "size": artifact.size,
+        "digest": artifact.digest,
+        "preview": trim_text(artifact.preview, width=260),
+        "metadata": bounded_value(artifact.metadata, width=260, list_limit=6, dict_limit=10),
+    }
+
+
+def artifacts(state: RunState, *, limit: int = 30) -> list[dict[str, Any]]:
+    return [
+        artifact_record(artifact)
+        for artifact in list(state.artifacts.values())[-limit:]
+    ]
 
 
 def working_memory(state: RunState, *, limit: int = 20, width: int = 360) -> dict[str, str]:

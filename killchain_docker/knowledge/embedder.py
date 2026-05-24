@@ -28,7 +28,10 @@ from typing import Iterable, Protocol, runtime_checkable
 
 import numpy as np
 
+from killchain_docker.logging_utils import atomic_tmp_path, get_logger
+
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+LOGGER = get_logger(__name__)
 
 
 @runtime_checkable
@@ -188,12 +191,16 @@ class CachedEmbeddingMatrix:
                 if cached.shape[0] == len(text_list):
                     return cached.astype(np.float32, copy=False)
             except (OSError, ValueError):
-                # Corrupt cache — fall through to re-encode and overwrite.
-                pass
+                LOGGER.debug(
+                    "embedding cache read failed; re-encoding corpus",
+                    exc_info=True,
+                    extra={"cache_path": str(cache_path), "model_id": self._backend.model_id},
+                )
         matrix = self._backend.encode(text_list)
+        tmp_path: Path | None = None
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+            tmp_path = atomic_tmp_path(cache_path)
             # ``numpy.save`` appends ``.npy`` when given a *path*, so we hand
             # it a binary file handle instead — that way the on-disk name is
             # exactly ``cache_path`` and the atomic ``replace`` works.
@@ -201,8 +208,21 @@ class CachedEmbeddingMatrix:
                 np.save(fh, matrix, allow_pickle=False)
             tmp_path.replace(cache_path)
         except OSError:
-            # Cache failure is non-fatal — we already have the matrix in RAM.
-            pass
+            LOGGER.debug(
+                "embedding cache write failed; continuing without cache",
+                exc_info=True,
+                extra={"cache_path": str(cache_path), "model_id": self._backend.model_id},
+            )
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    LOGGER.debug(
+                        "embedding cache temporary file cleanup failed",
+                        exc_info=True,
+                        extra={"tmp_path": str(tmp_path), "cache_path": str(cache_path)},
+                    )
         return matrix
 
     def _resolve_cache_path(self, texts: list[str]) -> Path:

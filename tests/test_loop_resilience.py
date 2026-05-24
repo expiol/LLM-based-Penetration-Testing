@@ -5,16 +5,26 @@ from __future__ import annotations
 import unittest
 from collections.abc import Iterable
 
+from killchain_docker.controller import EventRecorder
 from killchain_docker.llm import LLMClientError, LLMFailureKind
 from killchain_docker.orchestrator.loop import Orchestrator
-from killchain_docker.orchestrator.planning import PlannerAgent, PlannedTodo, PlannerDecision
+from killchain_docker.orchestrator.planning import (
+    PlannerAgent,
+    PlannedTodo,
+    PlannerDecision,
+    PlanningPipeline,
+)
 from killchain_docker.orchestrator.policy import RoundOutcomePolicy
 from killchain_docker.state import (
+    Artifact,
+    FlagCandidate,
     RouterDecision,
     RouterRoundSummary,
     RunState,
     RunStatus,
+    StateDelta,
     TodoItem,
+    TodoPhase,
     TodoStatus,
     WorkerAssignment,
     WorkerResult,
@@ -36,6 +46,59 @@ class _ScriptedPlanner(PlannerAgent):
             self._cursor += 1
             return decision
         return PlannerDecision(summary="no more todos", todos=[], notes=[], stop_run=False)
+
+
+class _SeedRefreshPipeline:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def merge(self, state: RunState, *, llm_decision: PlannerDecision | None) -> PlannerDecision:
+        del state, llm_decision
+        self.calls += 1
+        return PlannerDecision(
+            summary="deterministic seed refresh",
+            todos=[
+                PlannedTodo(
+                    goal="Execute deterministic high-priority seed",
+                    priority=100,
+                    context={"worker_name": "success-worker"},
+                    dedupe_key="seed-refresh",
+                )
+            ],
+        )
+
+
+class _PipelinePlanner(PlannerAgent):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.pipeline = _SeedRefreshPipeline()
+
+    def plan(self, state: RunState) -> PlannerDecision:
+        del state
+        self.calls += 1
+        return PlannerDecision(
+            summary="initial backlog",
+            todos=[
+                PlannedTodo(
+                    goal="Execute first queued todo",
+                    priority=50,
+                    context={"worker_name": "success-worker"},
+                    dedupe_key="backlog-first",
+                ),
+                PlannedTodo(
+                    goal="Execute second queued todo",
+                    priority=10,
+                    context={"worker_name": "success-worker"},
+                    dedupe_key="backlog-second",
+                ),
+            ],
+        )
+
+
+class _ScriptedPlannerWithPipeline(_ScriptedPlanner):
+    def __init__(self, scripts: Iterable[PlannerDecision]) -> None:
+        super().__init__(scripts)
+        self.pipeline = PlanningPipeline()
 
 
 class _ContextRouter:
@@ -151,6 +214,179 @@ class _SuccessWorker(WorkerAgent):
         )
 
 
+class _ArtifactProducerWorker(WorkerAgent):
+    name = "artifact-producer"
+    supported_todo_kinds = ("todo",)
+
+    def __init__(self, artifact_path: str) -> None:
+        super().__init__()
+        self.artifact_path = artifact_path
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del state
+        return WorkerResult(
+            todo_id=task.todo_id,
+            worker_name=self.name,
+            success=True,
+            summary="generated artifact",
+            state_delta=StateDelta(
+                artifacts=[
+                    Artifact(
+                        path=self.artifact_path,
+                        kind="png_inspect_lsb",
+                        source="png_inspect",
+                        digest="closure-digest",
+                    )
+                ]
+            ),
+            result_quality="artifact_generated",
+        )
+
+
+class _ArtifactClosureWorker(WorkerAgent):
+    name = "artifact-worker"
+    supported_todo_kinds = ("todo",)
+    allowed_capabilities = ("artifact.triage",)
+    supported_dispatch_profiles = ("artifact_analysis",)
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del state
+        paths = task.context.get("paths") or [task.context.get("path")]
+        paths = [str(path) for path in paths if path]
+        return WorkerResult(
+            todo_id=task.todo_id,
+            worker_name=self.name,
+            success=True,
+            summary=f"triaged {len(paths)} generated artifact(s)",
+            output_context={
+                "capability": "artifact.triage",
+                "paths": paths,
+            },
+            result_quality="artifact_triaged",
+        )
+
+
+class _CandidateWorker(WorkerAgent):
+    name = "candidate-worker"
+    supported_todo_kinds = ("todo",)
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del state
+        return WorkerResult(
+            todo_id=task.todo_id,
+            worker_name=self.name,
+            success=True,
+            summary="candidate recovered",
+            state_delta=StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value="flag{final_cycle_ok}", source="candidate-worker")
+                ]
+            ),
+            result_quality="candidate_recovered",
+        )
+
+
+class _ManyCandidateWorker(WorkerAgent):
+    name = "many-candidate-worker"
+    supported_todo_kinds = ("todo",)
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del state
+        return WorkerResult(
+            todo_id=task.todo_id,
+            worker_name=self.name,
+            success=True,
+            summary="many candidates recovered",
+            state_delta=StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value=f"flag{{candidate_{index}}}", source=self.name)
+                    for index in range(5)
+                ]
+            ),
+            result_quality="candidate_recovered",
+        )
+
+
+class _StreamingCandidateWorker(WorkerAgent):
+    name = "streaming-candidate-worker"
+    supported_todo_kinds = ("todo",)
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        self.report_flag_candidates(
+            state,
+            task,
+            [FlagCandidate(value="flag{candidate_4}", source=self.name)],
+        )
+        return WorkerResult(
+            todo_id=task.todo_id,
+            worker_name=self.name,
+            success=True,
+            summary="continued after candidate push",
+            result_quality="candidate_recovered",
+        )
+
+
+class _ExpectedFlagWorker(WorkerAgent):
+    name = "flag-worker"
+    supported_todo_kinds = ("todo",)
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del state
+        candidate = str(task.context.get("candidate_flag") or "")
+        if candidate in {"flag{final_cycle_ok}", "flag{candidate_4}"}:
+            return WorkerResult(
+                todo_id=task.todo_id,
+                worker_name=self.name,
+                success=True,
+                summary="validated",
+                state_delta=StateDelta(
+                    flag_candidates=[
+                        FlagCandidate(
+                            value=candidate,
+                            source="flag-validation",
+                            validated=True,
+                        )
+                    ]
+                ),
+                solved=True,
+                validated_flag=candidate,
+                result_quality="flag_validated",
+            )
+        return WorkerResult(
+            todo_id=task.todo_id,
+            worker_name=self.name,
+            success=False,
+            summary="mismatch",
+            error="candidate mismatch",
+            retryable=False,
+        )
+
+
+class _BackgroundExpectedFlagWorker(_ExpectedFlagWorker):
+    expected_flag = "flag{candidate_4}"
+
+    def _flag_matches(self, candidate: str, expected: str) -> bool:
+        return candidate == expected
+
+
+class _ProgressWorker(WorkerAgent):
+    name = "progress-worker"
+    supported_todo_kinds = ("todo",)
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        self.report_progress(state, task, "progress-worker choosing tool")
+        self.report_progress(state, task, "progress-worker selected script.exec")
+        self.report_progress(state, task, "progress-worker executing script.exec")
+        self.report_progress(state, task, "progress-worker completed script.exec")
+        return WorkerResult(
+            todo_id=task.todo_id,
+            worker_name=self.name,
+            success=True,
+            summary="ok",
+            result_quality="test_success",
+        )
+
+
 class _FailedWorker(WorkerAgent):
     name = "failed-worker"
     supported_todo_kinds = ("todo",)
@@ -167,6 +403,15 @@ class _FailedWorker(WorkerAgent):
         )
 
 
+class _ExplodingWorker(WorkerAgent):
+    name = "exploding-worker"
+    supported_todo_kinds = ("todo",)
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del task, state
+        raise RuntimeError("synthetic worker crash")
+
+
 class _PartialWorker(WorkerAgent):
     name = "partial-worker"
     supported_todo_kinds = ("todo",)
@@ -180,6 +425,23 @@ class _PartialWorker(WorkerAgent):
             summary="script produced no flag",
             partial=True,
             partial_reason="script completed with no flag candidate",
+        )
+
+
+class _PartialFailureWorker(WorkerAgent):
+    name = "partial-failure-worker"
+    supported_todo_kinds = ("todo",)
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del state
+        return WorkerResult(
+            todo_id=task.todo_id,
+            worker_name=self.name,
+            success=False,
+            summary="script failed with useful diagnostics",
+            partial=True,
+            partial_reason="range too large; use bounded interpretation",
+            retryable=False,
         )
 
 
@@ -201,7 +463,52 @@ def _state() -> RunState:
 
 
 class OrchestratorLoopTests(unittest.TestCase):
-    def test_worker_llm_error_aborts_run(self) -> None:
+    def test_worker_events_include_structured_todo_context(self) -> None:
+        recorder = EventRecorder(quiet=True)
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Report progress",
+                        context={"worker_name": "progress-worker"},
+                        dedupe_key="progress-once",
+                    )
+                ],
+            )
+        ])
+        state = _state()
+        orchestrator = Orchestrator(
+            state=state,
+            workers=[_ProgressWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=recorder.emit,
+        )
+
+        orchestrator.run(max_cycles=1)
+
+        progress_events = [
+            record for record in recorder.records
+            if record.get("event_type") == "worker_progress"
+        ]
+        self.assertTrue(progress_events)
+        context = progress_events[0]["context"]
+        self.assertEqual(context["todo_id"], state.todos[0].todo_id)
+        self.assertEqual(context["todo_status"], "running")
+        self.assertEqual(context["todo_phase"], "recon")
+        self.assertEqual(context["worker"], "progress-worker")
+        result_events = [
+            record for record in recorder.records
+            if record.get("event_type") == "worker_result"
+        ]
+        self.assertTrue(result_events)
+        result_context = result_events[0]["context"]
+        self.assertEqual(result_context["todo_id"], state.todos[0].todo_id)
+        self.assertEqual(result_context["todo_status"], "completed")
+        self.assertEqual(result_context["worker"], "progress-worker")
+
+    def test_worker_llm_error_fails_todo_and_continues(self) -> None:
         events: list[str] = []
         planner = _ScriptedPlanner([
             PlannerDecision(
@@ -234,21 +541,21 @@ class OrchestratorLoopTests(unittest.TestCase):
             emit=events.append,
         )
 
-        with self.assertRaises(LLMClientError):
-            orchestrator.run(max_cycles=4)
+        final_state = orchestrator.run(max_cycles=2)
 
         failing = next(todo for todo in state.todos if todo.dedupe_key == "raise-once")
+        succeeding = next(todo for todo in state.todos if todo.dedupe_key == "succeed-once")
         self.assertEqual(failing.status, TodoStatus.FAILED)
-        self.assertEqual(state.status, RunStatus.FAILED)
-        self.assertEqual(state.stop_reason, "llm_error")
-        self.assertEqual(state.metadata["last_llm_error"]["kind"], "schema_validation")
-        self.assertEqual(state.metadata["last_llm_error"]["schema_name"], "ToolUseDecision")
-        self.assertEqual(state.metadata["last_llm_error"]["model"], "test-model")
-        self.assertEqual(state.metadata["last_llm_error"]["attempts"], 2)
-        self.assertFalse(state.has_open_todos())
-        self.assertFalse(any(todo.dedupe_key == "succeed-once" for todo in state.todos))
-        self.assertEqual(len(state.rounds), 0)
-        self.assertTrue(any("LLM error" in event for event in events))
+        self.assertEqual(succeeding.status, TodoStatus.COMPLETED)
+        self.assertEqual(final_state.status, RunStatus.FAILED)
+        self.assertEqual(final_state.stop_reason, "todo_failed")
+        self.assertEqual(final_state.metadata["last_llm_error"]["kind"], "schema_validation")
+        self.assertEqual(final_state.metadata["last_llm_error"]["schema_name"], "ToolUseDecision")
+        self.assertEqual(final_state.metadata["last_llm_error"]["model"], "test-model")
+        self.assertEqual(final_state.metadata["last_llm_error"]["attempts"], 2)
+        self.assertFalse(final_state.has_open_todos())
+        self.assertEqual(len(final_state.rounds), 2)
+        self.assertTrue(any("marking" in event and "failed and continuing" in event for event in events))
 
     def test_transient_worker_llm_error_does_not_consume_todo_attempt(self) -> None:
         events: list[str] = []
@@ -338,7 +645,136 @@ class OrchestratorLoopTests(unittest.TestCase):
         )
         self.assertTrue(any("planner skipped" in event for event in events))
 
+    def test_ready_backlog_refreshes_deterministic_seeds_without_llm_planning(self) -> None:
+        events: list[str] = []
+        state = _state()
+        planner = _PipelinePlanner()
+        orchestrator = Orchestrator(
+            state=state,
+            workers=[_SuccessWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=events.append,
+        )
+
+        final_state = orchestrator.run(max_cycles=3)
+
+        by_id = {todo.todo_id: todo.dedupe_key for todo in final_state.todos}
+        executed = [by_id[item.task_id] for item in final_state.execution_log]
+        self.assertEqual(planner.calls, 1)
+        self.assertEqual(planner.pipeline.calls, 2)
+        self.assertEqual(
+            executed,
+            ["backlog-first", "seed-refresh", "backlog-second"],
+        )
+        self.assertEqual(final_state.status, RunStatus.COMPLETED)
+        self.assertTrue(any("deterministic seed refresh" in event for event in events))
+
+    def test_checkpoints_long_running_activity_states(self) -> None:
+        events: list[str] = []
+        snapshots: list[list[str]] = []
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Checkpoint running state",
+                        context={"worker_name": "progress-worker"},
+                        dedupe_key="checkpoint-running",
+                    )
+                ],
+            )
+        ])
+
+        def checkpoint(state: RunState) -> None:
+            snapshots.append([str(todo.status) for todo in state.todos])
+
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_ProgressWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=events.append,
+            checkpoint_callback=checkpoint,
+        )
+
+        orchestrator.run(max_cycles=1)
+
+        self.assertTrue(any("planning next todos" in event for event in events))
+        self.assertTrue(any("routing ready todos" in event for event in events))
+        self.assertTrue(any("choosing tool" in event for event in events))
+        self.assertTrue(any("selected" in event for event in events))
+        self.assertTrue(any("executing" in event for event in events))
+        self.assertTrue(any("completed" in event for event in events))
+        self.assertTrue(any("summarizing worker results" in event for event in events))
+        self.assertIn(["running"], snapshots)
+        self.assertIn(["completed"], snapshots)
+
+    def test_checkpoint_callback_failure_logs_traceback(self) -> None:
+        events: list[str] = []
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Trigger checkpoint failure",
+                        context={"worker_name": "success-worker"},
+                        dedupe_key="checkpoint-failure",
+                    )
+                ],
+            )
+        ])
+
+        def checkpoint(state: RunState) -> None:
+            del state
+            raise RuntimeError("synthetic checkpoint failure")
+
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_SuccessWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=events.append,
+            checkpoint_callback=checkpoint,
+        )
+
+        with self.assertLogs("killchain_docker.orchestrator.loop", level="ERROR") as captured:
+            orchestrator.run(max_cycles=1)
+
+        self.assertTrue(any("checkpoint callback failed" in message for message in captured.output))
+        self.assertTrue(any("Traceback" in message for message in captured.output))
+        self.assertTrue(any("failed to persist state" in event for event in events))
+
+    def test_unhandled_worker_exception_logs_traceback(self) -> None:
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Crash worker once",
+                        context={"worker_name": "exploding-worker"},
+                        dedupe_key="worker-crash",
+                    )
+                ],
+            )
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_ExplodingWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+
+        with self.assertLogs("killchain_docker.orchestrator.loop", level="ERROR") as captured:
+            final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(final_state.status, RunStatus.FAILED)
+        self.assertTrue(any("worker execution failed" in message for message in captured.output))
+        self.assertTrue(any("synthetic worker crash" in message for message in captured.output))
+
     def test_blocked_assignment_makes_run_failed_not_completed(self) -> None:
+        recorder = EventRecorder(quiet=True)
         planner = _ScriptedPlanner([
             PlannerDecision(
                 summary="cycle 1",
@@ -350,15 +786,22 @@ class OrchestratorLoopTests(unittest.TestCase):
             workers=[_SuccessWorker()],
             planner=planner,
             router=_UnknownWorkerRouter(),  # type: ignore[arg-type]
-            emit=lambda _: None,
+            emit=recorder.emit,
         )
 
         final_state = orchestrator.run(max_cycles=1)
+        blocked_events = [
+            record for record in recorder.records
+            if record.get("event_type") == "worker_blocked"
+        ]
 
         self.assertEqual(final_state.status, RunStatus.FAILED)
         self.assertEqual(final_state.stop_reason, "todo_blocked")
         self.assertEqual(final_state.todos[0].status, TodoStatus.BLOCKED)
         self.assertIn("Assignment blocked", final_state.rounds[0].summary.summary)
+        self.assertTrue(blocked_events)
+        self.assertEqual(blocked_events[0]["context"]["todo_status"], "blocked")
+        self.assertEqual(blocked_events[0]["context"]["worker"], "missing-worker")
 
     def test_terminal_worker_failure_sets_stop_reason(self) -> None:
         planner = _ScriptedPlanner([
@@ -414,6 +857,49 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertEqual(final_state.stop_reason, "partial_todos_unsolved")
         self.assertEqual(final_state.todos[0].status, TodoStatus.PARTIAL)
 
+    def test_partial_script_failure_allows_next_planner_cycle(self) -> None:
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Recover flag with generated solver",
+                        context={"worker_name": "partial-failure-worker"},
+                        dedupe_key="partial-script-failure",
+                    )
+                ],
+            ),
+            PlannerDecision(
+                summary="cycle 2",
+                todos=[
+                    PlannedTodo(
+                        goal="Try corrected bounded interpretation",
+                        context={"worker_name": "success-worker"},
+                        dedupe_key="corrected-follow-up",
+                    )
+                ],
+            ),
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_PartialFailureWorker(), _SuccessWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+
+        final_state = orchestrator.run(max_cycles=2)
+
+        self.assertEqual(planner.calls, 2)
+        self.assertEqual(
+            {todo.dedupe_key: todo.status for todo in final_state.todos},
+            {
+                "partial-script-failure": TodoStatus.PARTIAL,
+                "corrected-follow-up": TodoStatus.COMPLETED,
+            },
+        )
+        self.assertEqual(final_state.stop_reason, "partial_todos_unsolved")
+
     def test_keyboard_interrupt_marks_running_todo_interrupted(self) -> None:
         planner = _ScriptedPlanner([
             PlannerDecision(
@@ -463,6 +949,174 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertEqual(final_state.stop_reason, "max_cycles_exhausted")
         self.assertFalse(final_state.has_open_todos())
         self.assertEqual(final_state.todos[0].status, TodoStatus.BLOCKED)
+
+    def test_final_cycle_candidate_gets_validation_pass(self) -> None:
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Recover a candidate on the last cycle.",
+                        context={"worker_name": "candidate-worker"},
+                        dedupe_key="recover-last-cycle",
+                    )
+                ],
+            )
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_CandidateWorker(), _ExpectedFlagWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+
+        final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(final_state.status, RunStatus.SOLVED)
+        self.assertEqual(final_state.validated_flag, "flag{final_cycle_ok}")
+        self.assertTrue(any(todo.phase == TodoPhase.FLAG_VALIDATION for todo in final_state.todos))
+        self.assertEqual(final_state.rounds[-1].planner_summary, "final flag validation pass")
+
+    def test_final_cycle_generated_artifact_gets_deterministic_closure_pass(self) -> None:
+        artifact_path = (
+            "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+            "png_inspect_image6_1050/lsb_all_2_msb.bin"
+        )
+        planner = _ScriptedPlannerWithPipeline([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Generate a derived artifact on the last cycle.",
+                        context={"worker_name": "artifact-producer"},
+                        dedupe_key="generate-derived-artifact",
+                    )
+                ],
+            )
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[
+                _ArtifactProducerWorker(artifact_path),
+                _ArtifactClosureWorker(),
+            ],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+
+        final_state = orchestrator.run(max_cycles=1)
+
+        closure_todos = [
+            todo for todo in final_state.todos
+            if todo.context.get("capability_hint") == "artifact.triage"
+        ]
+        self.assertEqual(planner.calls, 1)
+        self.assertEqual(len(closure_todos), 1)
+        self.assertEqual(closure_todos[0].status, TodoStatus.COMPLETED)
+        self.assertEqual(closure_todos[0].assigned_worker, "artifact-worker")
+        self.assertEqual(closure_todos[0].context.get("path"), artifact_path)
+        self.assertTrue(
+            any(
+                round_.planner_summary == "final deterministic evidence closure pass"
+                for round_ in final_state.rounds
+            )
+        )
+
+    def test_final_validation_pass_checks_all_remaining_candidates(self) -> None:
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Recover candidates on the last cycle.",
+                        context={"worker_name": "many-candidate-worker"},
+                        dedupe_key="recover-many-candidates",
+                    )
+                ],
+            )
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_ManyCandidateWorker(), _ExpectedFlagWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+
+        final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(final_state.status, RunStatus.SOLVED)
+        self.assertEqual(final_state.validated_flag, "flag{candidate_4}")
+
+    def test_background_flag_validator_solves_without_validation_todo(self) -> None:
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Recover candidates while validation runs in the background.",
+                        context={"worker_name": "many-candidate-worker"},
+                        dedupe_key="recover-many-background",
+                    )
+                ],
+            )
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_ManyCandidateWorker(), _BackgroundExpectedFlagWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+
+        final_state = orchestrator.run(max_cycles=3)
+
+        self.assertEqual(final_state.status, RunStatus.SOLVED)
+        self.assertEqual(final_state.validated_flag, "flag{candidate_4}")
+        self.assertFalse(
+            any(todo.phase == TodoPhase.FLAG_VALIDATION for todo in final_state.todos)
+        )
+        self.assertTrue(
+            any(
+                item.reason == "candidate mismatch"
+                for item in final_state.rejected_flag_candidates
+            )
+        )
+        self.assertNotIn(
+            "flag{candidate_0}",
+            {candidate.value for candidate in final_state.flag_candidates.values()},
+        )
+
+    def test_background_candidate_push_interrupts_running_worker(self) -> None:
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Push candidate while worker is still running.",
+                        context={"worker_name": "streaming-candidate-worker"},
+                        dedupe_key="push-candidate-background",
+                    )
+                ],
+            )
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_StreamingCandidateWorker(), _BackgroundExpectedFlagWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+
+        final_state = orchestrator.run(max_cycles=3)
+
+        self.assertEqual(final_state.status, RunStatus.SOLVED)
+        self.assertEqual(final_state.validated_flag, "flag{candidate_4}")
+        self.assertEqual(final_state.stop_reason, "background_flag_validated")
+        self.assertEqual(final_state.todos[0].status, TodoStatus.INTERRUPTED)
+        self.assertFalse(final_state.rounds)
 
     def test_no_todos_created_is_terminal_failure(self) -> None:
         orchestrator = Orchestrator(

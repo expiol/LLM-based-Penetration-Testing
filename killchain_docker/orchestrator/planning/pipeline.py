@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from killchain_docker.orchestrator.planning.schemas import (
     PlannedTodo,
     PlannerAgent,
@@ -13,7 +15,17 @@ from killchain_docker.orchestrator.policy import (
     ProgressPolicy,
     TodoPolicy,
 )
+from killchain_docker.scope_guard import (
+    todo_ephemeral_artifact_dependency_reason,
+    todo_loopback_block_reason,
+    todo_registered_scratch_dependency_reason,
+)
 from killchain_docker.state import RunState, TodoPhase, TodoStatus, todo_phase_rank
+
+
+_MAX_ARTIFACT_FOLLOWUP_SEEDS = 12
+_MAX_ARTIFACT_TRIAGE_BATCH_PATHS = 8
+_MAX_MEDIA_SCAN_BATCH_PATHS = 12
 
 
 class PlanningPipeline(PlannerAgent):
@@ -37,8 +49,11 @@ class PlanningPipeline(PlannerAgent):
         *,
         llm_decision: PlannerDecision | None,
     ) -> PlannerDecision:
-        seed_todos, seed_notes = self.seed_todos(state)
         llm_todos = list((llm_decision.todos if llm_decision else []) or [])
+        seed_todos, seed_notes = self.seed_todos(
+            state,
+            include_execution_closure_seed=self._include_execution_closure_seed(state, llm_todos),
+        )
         notes = list((llm_decision.notes if llm_decision else []) or [])
         notes.extend(seed_notes)
 
@@ -49,17 +64,23 @@ class PlanningPipeline(PlannerAgent):
 
         deduped, dedupe_notes = self._dedupe(normalized, state)
         gated, gate_notes = self._phase_gate(deduped, state)
-        allowed, progress_notes = self._progress_gate(gated, state)
+        scoped, scope_notes = self._scope_gate(gated, state)
+        allowed, progress_notes = self._progress_gate(scoped, state)
 
         return PlannerDecision(
             summary=(llm_decision.summary if llm_decision else "")
             or f"Planning pipeline proposed {len(allowed)} todo(s).",
             todos=allowed,
-            notes=[*notes, *dedupe_notes, *gate_notes, *progress_notes],
+            notes=[*notes, *dedupe_notes, *gate_notes, *scope_notes, *progress_notes],
             stop_run=bool(llm_decision.stop_run) if llm_decision else False,
         )
 
-    def seed_todos(self, state: RunState) -> tuple[list[PlannedTodo], list[str]]:
+    def seed_todos(
+        self,
+        state: RunState,
+        *,
+        include_execution_closure_seed: bool = True,
+    ) -> tuple[list[PlannedTodo], list[str]]:
         todos: list[PlannedTodo] = []
         notes: list[str] = []
         challenge = state.metadata.get("challenge", {}) or {}
@@ -76,6 +97,15 @@ class PlanningPipeline(PlannerAgent):
                         "challenge_files": challenge_files,
                         "family": "artifact-inventory",
                         "capability_hint": "artifact.triage",
+                        "dispatch_intent": {
+                            "profile": "artifact_analysis",
+                            "required_capability": "artifact.triage",
+                            "completion_contract": [
+                                "bounded_inspection",
+                                "literal_candidate_provenance",
+                                "durable_artifact_registration",
+                            ],
+                        },
                     },
                     success_criteria=[
                         "Classify files by kind.",
@@ -86,7 +116,12 @@ class PlanningPipeline(PlannerAgent):
                 )
             )
 
-        for candidate in CandidatePolicy.validation_ready_candidates(state)[:4]:
+        if include_execution_closure_seed:
+            closure_seed = self._execution_closure_seed(state, challenge_files)
+            if closure_seed is not None:
+                todos.append(closure_seed)
+
+        for candidate in CandidatePolicy.validation_ready_candidates(state)[:1]:
             dedupe_key = f"bootstrap:flag-validation:{candidate.value}"
             if self._has_todo_key(state, dedupe_key):
                 continue
@@ -99,12 +134,35 @@ class PlanningPipeline(PlannerAgent):
                         "candidate_flag": candidate.value,
                         "flag_candidate_id": candidate.candidate_id,
                         "family": "flag-validation",
+                        "dispatch_intent": {
+                            "profile": "flag_validation",
+                            "completion_contract": ["validate_grounded_candidate"],
+                        },
                     },
                     success_criteria=["Confirm whether the candidate is the challenge flag."],
                     constraints=["Validate only grounded candidates already present in state."],
                     dedupe_key=dedupe_key,
                 )
             )
+
+        artifact_todos, artifact_notes = self._artifact_followup_seeds(state)
+        todos.extend(artifact_todos)
+        notes.extend(artifact_notes)
+
+        suspicious_media_todos, suspicious_media_notes = self._suspicious_media_followup_seeds(state)
+        todos.extend(suspicious_media_todos)
+        notes.extend(suspicious_media_notes)
+
+        disk_todos, disk_notes = self._disk_extract_seeds(state)
+        todos.extend(disk_todos)
+        notes.extend(disk_notes)
+
+        recovery_todos, recovery_notes = self._candidate_recovery_seeds(
+            state,
+            challenge_files,
+        )
+        todos.extend(recovery_todos)
+        notes.extend(recovery_notes)
 
         for index, scope in enumerate(state.authorized_scope, start=1):
             dedupe_key = f"bootstrap:scope:{scope}"
@@ -129,24 +187,38 @@ class PlanningPipeline(PlannerAgent):
                 )
             )
 
-        # Seed near-miss refinement todos: garbled output is a strong signal
-        # that the algorithm is correct but has a byte-level encoding error.
+        # Seed near-miss refinement todos only for decode/decrypt contexts.
+        # Protocol solvers can emit readable partial output that is not a
+        # byte-level plaintext recovery signal.
         for evidence_id, evidence in list(state.evidence.items()):
             extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
             ctx = extracted.get("output_context") or {}
             near_misses = list(ctx.get("near_miss_candidates") or [])
             if not near_misses:
                 continue
+            if not self._near_miss_refinement_allowed(state, evidence, ctx, near_misses):
+                continue
             dedupe_key = f"bootstrap:near-miss-refinement:{evidence_id}"
             if self._has_todo_key(state, dedupe_key):
                 continue
             todos.append(
                 PlannedTodo(
-                    goal="Refine decryption script: near-miss output detected — fix byte-level encoding error.",
+                    goal="Resolve near-miss output from grounded evidence.",
                     phase=TodoPhase.ANALYSIS,
                     priority=90,
                     context={
                         "family": "crypto-decrypt",
+                        "capability_hint": "script.exec",
+                        "dispatch_intent": {
+                            "profile": "near_miss_repair",
+                            "required_capability": "script.exec",
+                            "repair_policy_id": "near_miss_decode_repair",
+                            "completion_contract": [
+                                "bounded_execution",
+                                "candidate_provenance",
+                                "blocker_diagnostic",
+                            ],
+                        },
                         "evidence_ids": [evidence_id],
                         "near_miss_candidates": near_misses[:3],
                         "novelty_key": f"near-miss:{evidence_id}",
@@ -154,7 +226,9 @@ class PlanningPipeline(PlannerAgent):
                         "challenge_files": challenge_files,
                     },
                     success_criteria=["Produce a valid flag candidate from the near-miss output."],
-                    constraints=["Try: bytes.fromhex(), base64.b64decode(), latin-1 decode, XOR with 0xFF."],
+                    constraints=[
+                        "Use only current-state evidence and authorized challenge artifacts.",
+                    ],
                     dedupe_key=dedupe_key,
                 )
             )
@@ -164,9 +238,991 @@ class PlanningPipeline(PlannerAgent):
             notes.append("No authorized scope or challenge files are available for bootstrap.")
         return todos, notes
 
+    @classmethod
+    def _suspicious_media_followup_seeds(
+        cls,
+        state: RunState,
+    ) -> tuple[list[PlannedTodo], list[str]]:
+        if CandidatePolicy.validation_ready_candidates(state):
+            return [], []
+        todos: list[PlannedTodo] = []
+        notes: list[str] = []
+        seen_paths: set[str] = set()
+        for evidence_id, evidence in state.evidence.items():
+            if evidence.tool_name != "media_scan":
+                continue
+            extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
+            ctx = extracted.get("output_context")
+            if not isinstance(ctx, dict):
+                continue
+            media_records = ctx.get("media")
+            if not isinstance(media_records, list):
+                continue
+            for record in media_records:
+                if not isinstance(record, dict) or not record.get("suspicious"):
+                    continue
+                path = str(record.get("path") or "").strip()
+                kind = str(record.get("kind") or "").strip().lower()
+                if not path or path in seen_paths:
+                    continue
+                if kind != "png" and not path.lower().endswith(".png"):
+                    continue
+                if cls._has_capability_todo_for_path(state, path, "png.inspect"):
+                    continue
+                artifact = cls._artifact_for_path(state, path)
+                key_material = (
+                    str(getattr(artifact, "digest", "") or "").strip()
+                    if artifact is not None
+                    else ""
+                ) or path
+                artifact_id = str(getattr(artifact, "artifact_id", "") or "").strip() if artifact is not None else ""
+                todos.append(
+                    PlannedTodo(
+                        goal="Inspect suspicious PNG media artifact deterministically.",
+                        phase=TodoPhase.ANALYSIS,
+                        priority=93,
+                        context={
+                            "family": "artifact-followup",
+                            "capability_hint": "png.inspect",
+                            "dispatch_intent": {
+                                "profile": "image_inspection",
+                                "required_capability": "png.inspect",
+                                "evidence_ids": [evidence_id],
+                                "completion_contract": [
+                                    "bounded_inspection",
+                                    "literal_candidate_provenance",
+                                    "durable_artifact_registration",
+                                ],
+                            },
+                            "artifact_id": artifact_id,
+                            "artifact_path": path,
+                            "path": path,
+                            "files_root": "/home/ctfplayer/ctf_files",
+                            "evidence_ids": [evidence_id],
+                            "novelty_key": f"suspicious-png-inspect:{key_material}",
+                        },
+                        success_criteria=[
+                            "Parse PNG chunks, text metadata, and bounded LSB surfaces.",
+                            "Register extracted payloads as durable artifacts with source provenance.",
+                        ],
+                        constraints=[
+                            "Use deterministic PNG inspection before generated scripts.",
+                        ],
+                        dedupe_key=f"bootstrap:suspicious-png-inspect:{key_material}",
+                    )
+                )
+                seen_paths.add(path)
+                notes.append(f"Seeded suspicious PNG inspection todo for {path}.")
+        return todos, notes
+
+    @classmethod
+    def _artifact_followup_seeds(
+        cls,
+        state: RunState,
+    ) -> tuple[list[PlannedTodo], list[str]]:
+        if CandidatePolicy.validation_ready_candidates(state):
+            return [], []
+        todos: list[PlannedTodo] = []
+        notes: list[str] = []
+        artifacts = sorted(
+            state.artifacts.values(),
+            key=cls._artifact_followup_priority,
+            reverse=True,
+        )
+        triage_batch: list[object] = []
+        media_batch: list[object] = []
+        for artifact in artifacts:
+            if len(todos) >= _MAX_ARTIFACT_FOLLOWUP_SEEDS:
+                notes.append(
+                    "Deferred additional artifact follow-up todos to keep fan-out bounded."
+                )
+                break
+            if not cls._artifact_needs_followup(artifact):
+                continue
+            key_material = artifact.digest or artifact.path
+            dedupe_key = f"bootstrap:artifact-followup:{key_material}"
+            if cls._has_todo_key(state, dedupe_key) or cls._has_artifact_followup_path(state, artifact.path):
+                continue
+            if cls._artifact_should_batch_media(artifact):
+                media_batch.append(artifact)
+                if len(media_batch) >= _MAX_MEDIA_SCAN_BATCH_PATHS:
+                    batch = cls._media_scan_batch_todo(media_batch)
+                    if batch is not None:
+                        todos.append(batch)
+                        notes.append(
+                            "Seeded batched media scan todo for "
+                            f"{len(media_batch)} embedded media artifact(s)."
+                        )
+                    media_batch = []
+                continue
+            capability = cls._artifact_followup_capability(artifact)
+            if capability == "artifact.triage":
+                triage_batch.append(artifact)
+                if len(triage_batch) >= _MAX_ARTIFACT_TRIAGE_BATCH_PATHS:
+                    batch = cls._artifact_triage_batch_todo(triage_batch)
+                    if batch is not None:
+                        todos.append(batch)
+                        notes.append(
+                            "Seeded batched artifact follow-up todo for "
+                            f"{len(triage_batch)} generated artifact(s)."
+                        )
+                    triage_batch = []
+                continue
+            goal, success_criteria = cls._artifact_followup_objective(capability)
+            evidence_ids = cls._artifact_evidence_ids(artifact)
+            dispatch_intent: dict[str, object] = {
+                "profile": cls._artifact_followup_dispatch_profile(capability),
+                "required_capability": capability,
+                "completion_contract": [
+                    "bounded_inspection",
+                    "literal_candidate_provenance",
+                    "durable_artifact_registration",
+                ],
+            }
+            if evidence_ids:
+                dispatch_intent["evidence_ids"] = evidence_ids
+            todos.append(
+                PlannedTodo(
+                    goal=goal,
+                    phase=TodoPhase.ANALYSIS,
+                    priority=cls._artifact_followup_todo_priority(artifact, capability),
+                    context={
+                        "family": "artifact-followup",
+                        "capability_hint": capability,
+                        "dispatch_intent": dispatch_intent,
+                        "artifact_id": artifact.artifact_id,
+                        "artifact_path": artifact.path,
+                        "path": artifact.path,
+                        "files_root": "/home/ctfplayer/ctf_files",
+                        "novelty_key": f"artifact-followup:{key_material}",
+                        **({"evidence_ids": evidence_ids} if evidence_ids else {}),
+                    },
+                    success_criteria=success_criteria,
+                    constraints=[
+                        "Use bounded read-only inspection before deeper generated scripts.",
+                    ],
+                    dedupe_key=dedupe_key,
+                )
+            )
+            notes.append(f"Seeded artifact follow-up todo for {artifact.artifact_id}.")
+        if media_batch and len(todos) < _MAX_ARTIFACT_FOLLOWUP_SEEDS:
+            batch = cls._media_scan_batch_todo(media_batch)
+            if batch is not None:
+                todos.append(batch)
+                notes.append(
+                    "Seeded batched media scan todo for "
+                    f"{len(media_batch)} embedded media artifact(s)."
+                )
+        if triage_batch and len(todos) < _MAX_ARTIFACT_FOLLOWUP_SEEDS:
+            batch = cls._artifact_triage_batch_todo(triage_batch)
+            if batch is not None:
+                todos.append(batch)
+                notes.append(
+                    "Seeded batched artifact follow-up todo for "
+                    f"{len(triage_batch)} generated artifact(s)."
+                )
+        return todos, notes
+
+    @staticmethod
+    def _media_scan_batch_todo(artifacts: list[object]) -> PlannedTodo | None:
+        paths = [str(getattr(item, "path", "") or "") for item in artifacts]
+        paths = [path for path in paths if path]
+        if not paths:
+            return None
+        artifact_ids = [str(getattr(item, "artifact_id", "") or "") for item in artifacts]
+        evidence_ids = PlanningPipeline._artifacts_evidence_ids(artifacts)
+        key_parts = [
+            str(getattr(item, "digest", None) or getattr(item, "path", "") or "")
+            for item in artifacts
+        ]
+        key_parts = [part for part in key_parts if part]
+        batch_key = "|".join(key_parts)
+        context: dict[str, object] = {
+            "family": "artifact-followup",
+            "capability_hint": "media.scan",
+            "dispatch_intent": {
+                "profile": "media_inspection",
+                "required_capability": "media.scan",
+                **({"evidence_ids": evidence_ids} if evidence_ids else {}),
+                "completion_contract": [
+                    "bounded_batch_inspection",
+                    "appended_payload_detection",
+                    "literal_candidate_provenance",
+                    "durable_artifact_registration",
+                ],
+            },
+            "artifact_ids": artifact_ids,
+            "paths": paths,
+            "files_root": "/home/ctfplayer/ctf_files",
+            "novelty_key": f"media-scan:{batch_key}",
+            **({"evidence_ids": evidence_ids} if evidence_ids else {}),
+        }
+        dedupe_key = f"bootstrap:media-scan-batch:{batch_key}"
+        if len(paths) == 1:
+            context["artifact_id"] = artifact_ids[0] if artifact_ids else ""
+            context["artifact_path"] = paths[0]
+            context["path"] = paths[0]
+            context["novelty_key"] = f"media-scan:{key_parts[0] if key_parts else paths[0]}"
+            dedupe_key = f"bootstrap:media-scan:{key_parts[0] if key_parts else paths[0]}"
+        return PlannedTodo(
+            goal="Batch-scan embedded media artifacts deterministically.",
+            phase=TodoPhase.ANALYSIS,
+            priority=90,
+            context=context,
+            success_criteria=[
+                "Inspect media files for appended payloads, keyword strings, and literal flag evidence.",
+                "Register extracted payloads as durable artifacts with source provenance.",
+                "Summarize only bounded high-signal findings before deeper per-file analysis.",
+            ],
+            constraints=[
+                "Use bounded read-only media inspection before generated scripts or per-image fan-out.",
+            ],
+            dedupe_key=dedupe_key,
+        )
+
+    @staticmethod
+    def _artifact_triage_batch_todo(artifacts: list[object]) -> PlannedTodo | None:
+        paths: list[str] = []
+        artifact_ids: list[str] = []
+        key_parts: list[str] = []
+        evidence_ids = PlanningPipeline._artifacts_evidence_ids(artifacts)
+        priority = 70
+        for artifact in artifacts[:_MAX_ARTIFACT_TRIAGE_BATCH_PATHS]:
+            path = str(getattr(artifact, "path", "") or "").strip()
+            if not path or path in paths:
+                continue
+            paths.append(path)
+            artifact_ids.append(str(getattr(artifact, "artifact_id", "") or ""))
+            key_parts.append(str(getattr(artifact, "digest", None) or path))
+            priority = max(
+                priority,
+                PlanningPipeline._artifact_followup_todo_priority(
+                    artifact,
+                    "artifact.triage",
+                ),
+            )
+        if not paths:
+            return None
+        batch_key = "|".join(key_parts)
+        goal, success_criteria = PlanningPipeline._artifact_followup_objective(
+            "artifact.triage"
+        )
+        context: dict[str, object] = {
+            "family": "artifact-followup",
+            "capability_hint": "artifact.triage",
+            "dispatch_intent": {
+                "profile": "artifact_analysis",
+                "required_capability": "artifact.triage",
+                **({"evidence_ids": evidence_ids} if evidence_ids else {}),
+                "completion_contract": [
+                    "bounded_inspection",
+                    "literal_candidate_provenance",
+                    "durable_artifact_registration",
+                ],
+            },
+            "artifact_ids": [item for item in artifact_ids if item],
+            "paths": paths,
+            "files_root": "/home/ctfplayer/ctf_files",
+            "novelty_key": f"artifact-followup-batch:{batch_key}",
+            **({"evidence_ids": evidence_ids} if evidence_ids else {}),
+        }
+        dedupe_key = f"bootstrap:artifact-followup-batch:{batch_key}"
+        if len(paths) == 1:
+            context["artifact_id"] = artifact_ids[0] if artifact_ids else ""
+            context["artifact_path"] = paths[0]
+            context["path"] = paths[0]
+            context["novelty_key"] = f"artifact-followup:{key_parts[0]}"
+            dedupe_key = f"bootstrap:artifact-followup:{key_parts[0]}"
+        return PlannedTodo(
+            goal=goal,
+            phase=TodoPhase.ANALYSIS,
+            priority=priority,
+            context=context,
+            success_criteria=success_criteria,
+            constraints=[
+                "Use bounded read-only inspection before deeper generated scripts.",
+            ],
+            dedupe_key=dedupe_key,
+        )
+
+    @staticmethod
+    def _artifact_evidence_ids(artifact: object) -> list[str]:
+        metadata = getattr(artifact, "metadata", {}) or {}
+        raw = metadata.get("evidence_ids") or metadata.get("evidence_id")
+        values = raw if isinstance(raw, list) else [raw]
+        out: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in out:
+                out.append(text)
+        return out
+
+    @staticmethod
+    def _artifacts_evidence_ids(artifacts: list[object]) -> list[str]:
+        out: list[str] = []
+        for artifact in artifacts:
+            for evidence_id in PlanningPipeline._artifact_evidence_ids(artifact):
+                if evidence_id not in out:
+                    out.append(evidence_id)
+        return out
+
+    @staticmethod
+    def _has_artifact_followup_path(state: RunState, path: str) -> bool:
+        target = str(path or "").strip()
+        if not target:
+            return False
+        for todo in state.todos:
+            is_artifact_followup = str(todo.context.get("family") or "") == "artifact-followup"
+            if str(todo.context.get("path") or "").strip() == target:
+                if is_artifact_followup:
+                    return True
+            if str(todo.context.get("artifact_path") or "").strip() == target:
+                if is_artifact_followup:
+                    return True
+            if str(todo.context.get("executed_path") or "").strip() == target:
+                return True
+            paths = todo.context.get("paths")
+            if isinstance(paths, list) and target in {str(item).strip() for item in paths}:
+                if is_artifact_followup:
+                    return True
+            executed_paths = todo.context.get("executed_paths")
+            if isinstance(executed_paths, list) and target in {str(item).strip() for item in executed_paths}:
+                return True
+        return False
+
+    @staticmethod
+    def _has_capability_todo_for_path(
+        state: RunState,
+        path: str,
+        capability: str,
+    ) -> bool:
+        target = str(path or "").strip()
+        expected = str(capability or "").strip()
+        if not target or not expected:
+            return False
+        for todo in state.todos:
+            current_capability = str(todo.context.get("capability_hint") or "").strip()
+            if current_capability != expected:
+                intent = todo.context.get("dispatch_intent")
+                if isinstance(intent, dict):
+                    current_capability = str(intent.get("required_capability") or "").strip()
+            if current_capability != expected:
+                current_capability = str(todo.context.get("executed_capability") or "").strip()
+            if current_capability != expected:
+                continue
+            if str(todo.context.get("path") or "").strip() == target:
+                return True
+            if str(todo.context.get("artifact_path") or "").strip() == target:
+                return True
+            if str(todo.context.get("executed_path") or "").strip() == target:
+                return True
+            paths = todo.context.get("paths")
+            if isinstance(paths, list) and target in {str(item).strip() for item in paths}:
+                return True
+            executed_paths = todo.context.get("executed_paths")
+            if isinstance(executed_paths, list) and target in {str(item).strip() for item in executed_paths}:
+                return True
+        return False
+
+    @staticmethod
+    def _artifact_for_path(state: RunState, path: str):
+        target = str(path or "").strip()
+        if not target:
+            return None
+        for artifact in state.artifacts.values():
+            if str(getattr(artifact, "path", "") or "").strip() == target:
+                return artifact
+        return None
+
+    @staticmethod
+    def _artifact_followup_todo_priority(artifact, capability: str) -> int:
+        if capability in {"office.inspect", "png.inspect"}:
+            return 91
+        if capability == "media.scan":
+            return 90
+        score = PlanningPipeline._artifact_followup_priority(artifact)
+        if score >= 90:
+            return 89
+        if score >= 80:
+            return 84
+        if score >= 60:
+            return 78
+        return 70
+
+    @staticmethod
+    def _artifact_needs_followup(artifact) -> bool:
+        source = str(getattr(artifact, "source", "") or "").strip().lower()
+        if source in {"artifact_triage", "file", "strings", "exiftool"}:
+            return False
+        path = str(getattr(artifact, "path", "") or "")
+        if not path:
+            return False
+        if source == "disk_extract" and not PlanningPipeline._disk_extract_artifact_needs_followup(artifact):
+            return False
+        if "/.autopentest_artifacts/" in path:
+            return True
+        return source in {"script_exec", "foremost"}
+
+    @staticmethod
+    def _disk_extract_artifact_needs_followup(artifact) -> bool:
+        if PlanningPipeline._artifact_is_low_signal_os_metadata(artifact):
+            return False
+        return PlanningPipeline._artifact_followup_priority(artifact) > 0
+
+    @staticmethod
+    def _artifact_followup_priority(artifact) -> int:
+        path = str(getattr(artifact, "path", "") or "").lower()
+        kind = str(getattr(artifact, "kind", "") or "").lower()
+        metadata = getattr(artifact, "metadata", {}) or {}
+        file_type = str(metadata.get("file_type") or "").lower()
+        mime_type = str(metadata.get("mime_type") or "").lower()
+        text = " ".join([path, kind, file_type, mime_type])
+        if any(token in text for token in ("ppt", "pptx", "docx", "xlsx", "pdf", "presentation", "document")):
+            return 100
+        if any(token in text for token in ("zip", "archive", "jar", "apk", "7z", "rar")):
+            return 90
+        if any(token in text for token in ("png", "jpg", "jpeg", "gif", "image")):
+            return 80
+        if any(token in text for token in ("sqlite", "database", ".db")):
+            return 65
+        if any(token in text for token in ("txt", "xml", "json", "csv", "plist", "text/")):
+            return 55
+        if any(token in text for token in ("mp4", "mov", "avi", "media", "video", "audio")):
+            return 45
+        interesting = metadata.get("interesting_strings")
+        if isinstance(interesting, list) and interesting:
+            return 60
+        signature_count = metadata.get("signature_count")
+        try:
+            if int(str(signature_count)) > 0:
+                return 50
+        except (TypeError, ValueError):
+            pass
+        return 0
+
+    @staticmethod
+    def _artifact_followup_capability(artifact) -> str:
+        if PlanningPipeline._artifact_is_office_document(artifact):
+            return "office.inspect"
+        if PlanningPipeline._artifact_is_batchable_media(artifact):
+            return "media.scan"
+        if PlanningPipeline._artifact_is_png_image(artifact):
+            return "png.inspect"
+        return "artifact.triage"
+
+    @staticmethod
+    def _artifact_followup_objective(capability: str) -> tuple[str, list[str]]:
+        if capability == "office.inspect":
+            return (
+                "Inspect Office document container deterministically.",
+                [
+                    "Extract human-readable document text with part provenance.",
+                    "Register embedded media or container payloads as durable artifacts.",
+                    "Surface only literal flag-like evidence from the document.",
+                ],
+            )
+        if capability == "png.inspect":
+            return (
+                "Inspect PNG image structure and hidden payload surfaces deterministically.",
+                [
+                    "Parse PNG chunks and text metadata with provenance.",
+                    "Run bounded LSB extraction on supported PNG pixel formats.",
+                    "Register extracted payloads as durable artifacts when useful.",
+                ],
+            )
+        if capability == "media.scan":
+            return (
+                "Batch-scan embedded media artifacts deterministically.",
+                [
+                    "Detect appended payloads and media metadata with source provenance.",
+                    "Surface only literal flag-like evidence from media strings.",
+                    "Register extracted payloads as durable artifacts when useful.",
+                ],
+            )
+        return (
+            "Run deterministic first-pass triage on a newly generated artifact.",
+            [
+                "Classify the artifact type.",
+                "Extract metadata, printable strings, signatures, and flag-like evidence.",
+            ],
+        )
+
+    @staticmethod
+    def _artifact_followup_dispatch_profile(capability: str) -> str:
+        if capability == "office.inspect":
+            return "office_inspection"
+        if capability == "media.scan":
+            return "media_inspection"
+        if capability == "png.inspect":
+            return "image_inspection"
+        return "artifact_analysis"
+
+    @staticmethod
+    def _artifact_should_batch_media(artifact) -> bool:
+        return PlanningPipeline._artifact_is_batchable_media(artifact)
+
+    @staticmethod
+    def _artifact_is_batchable_media(artifact) -> bool:
+        source = str(getattr(artifact, "source", "") or "").strip().lower()
+        if source != "office_inspect":
+            return False
+        path = str(getattr(artifact, "path", "") or "").lower().replace("\\", "/")
+        kind = str(getattr(artifact, "kind", "") or "").lower()
+        metadata = getattr(artifact, "metadata", {}) or {}
+        role = str(metadata.get("office_role") or metadata.get("role") or "").lower()
+        text = " ".join([path, kind, role])
+        if "/media/" not in path and "media" not in text and role != "media":
+            return False
+        return any(
+            token in text
+            for token in (
+                ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff",
+                ".mp4", ".mov", ".avi", ".wav", ".mp3",
+                "image", "video", "audio", "media",
+            )
+        )
+
+    @staticmethod
+    def _artifact_is_png_image(artifact) -> bool:
+        path = str(getattr(artifact, "path", "") or "").lower()
+        kind = str(getattr(artifact, "kind", "") or "").lower()
+        source = str(getattr(artifact, "source", "") or "").strip().lower()
+        metadata = getattr(artifact, "metadata", {}) or {}
+        file_type = str(metadata.get("file_type") or "").lower()
+        mime_type = str(metadata.get("mime_type") or "").lower()
+        if "image/png" in mime_type or "png image" in file_type:
+            return True
+        if source in {"office_inspect", "artifact_triage"} and (
+            path.endswith(".png") or "png" in kind
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _artifact_is_office_document(artifact) -> bool:
+        path = str(getattr(artifact, "path", "") or "").lower()
+        kind = str(getattr(artifact, "kind", "") or "").lower()
+        metadata = getattr(artifact, "metadata", {}) or {}
+        file_type = str(metadata.get("file_type") or "").lower()
+        mime_type = str(metadata.get("mime_type") or "").lower()
+        text = " ".join([path, kind, file_type, mime_type])
+        return any(
+            token in text
+            for token in (
+                ".pptx", ".docx", ".xlsx",
+                "powerpoint", "presentation",
+                "word", "excel", "openxml",
+                "officedocument", "office document",
+            )
+        )
+
+    @staticmethod
+    def _artifact_is_low_signal_os_metadata(artifact) -> bool:
+        path = str(getattr(artifact, "path", "") or "").lower().replace("\\", "/")
+        basename = path.rsplit("/", 1)[-1]
+        low_signal_parts = (
+            "/.spotlight-v100/",
+            "/spotlight-v100/",
+            "/.fseventsd/",
+            "/fseventsd/",
+            "/.trashes/",
+            "/trashes/",
+            "/.trash/",
+            "/__macosx/",
+        )
+        if any(part in path for part in low_signal_parts):
+            return True
+        if basename.startswith("._"):
+            return True
+        if basename in {
+            ".ds_store",
+            "indexstate",
+            "store_generation",
+            "shutdown_time",
+            "fseventsd-uuid",
+        }:
+            return True
+        if basename.startswith(("0.index", "live.0.index", "0.shadowindex", "live.0.shadowindex")):
+            return True
+        if basename.endswith((
+            ".indexhead",
+            ".indexids",
+            ".indexgroups",
+            ".indexpostings",
+            ".indextermids",
+            ".indexpositions",
+            ".indexpositiontable",
+            ".indexdirectory",
+        )):
+            return True
+        return False
+
+    @classmethod
+    def _disk_extract_seeds(
+        cls,
+        state: RunState,
+    ) -> tuple[list[PlannedTodo], list[str]]:
+        if CandidatePolicy.validation_ready_candidates(state):
+            return [], []
+        todos: list[PlannedTodo] = []
+        notes: list[str] = []
+        for artifact in state.artifacts.values():
+            if not cls._artifact_is_disk_image(artifact):
+                continue
+            key_material = getattr(artifact, "digest", None) or getattr(artifact, "path", "")
+            dedupe_key = f"bootstrap:disk-extract:{key_material}"
+            if cls._has_todo_key(state, dedupe_key):
+                continue
+            path = str(getattr(artifact, "path", "") or "")
+            todos.append(
+                PlannedTodo(
+                    goal="Extract files from the detected disk image.",
+                    phase=TodoPhase.ANALYSIS,
+                    priority=94,
+                    context={
+                        "family": "forensics-extract",
+                        "capability_hint": "disk.extract",
+                        "dispatch_intent": {
+                            "profile": "container_extraction",
+                            "required_capability": "disk.extract",
+                            "completion_contract": [
+                                "bounded_extraction",
+                                "preserve_provenance",
+                                "durable_artifact_registration",
+                            ],
+                        },
+                        "artifact_id": getattr(artifact, "artifact_id", ""),
+                        "artifact_path": path,
+                        "path": path,
+                        "files_root": "/home/ctfplayer/ctf_files",
+                        "novelty_key": f"disk-extract:{key_material}",
+                    },
+                    success_criteria=[
+                        "Create durable artifacts for recovered filesystem or container files.",
+                    ],
+                    constraints=["Keep extraction bounded and preserve provenance."],
+                    dedupe_key=dedupe_key,
+                )
+            )
+            notes.append(f"Seeded disk extraction todo for {artifact.artifact_id}.")
+        return todos, notes
+
+    @staticmethod
+    def _artifact_is_disk_image(artifact) -> bool:
+        path = str(getattr(artifact, "path", "") or "").lower()
+        metadata = getattr(artifact, "metadata", {}) or {}
+        file_type = str(metadata.get("file_type") or "").lower()
+        mime_type = str(metadata.get("mime_type") or "").lower()
+        kind = str(getattr(artifact, "kind", "") or "").lower()
+        text = " ".join([path, file_type, mime_type, kind])
+        return any(
+            token in text
+            for token in (
+                "dos/mbr boot sector",
+                "partition table",
+                "filesystem image",
+                "disk image",
+                "fat16",
+                "fat32",
+                "ntfs",
+                "ext2",
+                "ext3",
+                "ext4",
+            )
+        )
+
+    @classmethod
+    def _candidate_recovery_seeds(
+        cls,
+        state: RunState,
+        challenge_files: list[object],
+    ) -> tuple[list[PlannedTodo], list[str]]:
+        if CandidatePolicy.validation_ready_candidates(state):
+            return [], []
+
+        challenge = state.metadata.get("challenge", {}) or {}
+        expected_prefix = CandidatePolicy._expected_prefix(challenge.get("flag_format"))
+        todos: list[PlannedTodo] = []
+        notes: list[str] = []
+        for rejected in reversed(state.rejected_flag_candidates):
+            if not cls._rejection_is_actionable(rejected.reason):
+                continue
+            dedupe_key = f"bootstrap:candidate-recovery:{rejected.rejection_id}"
+            if cls._has_todo_key(state, dedupe_key):
+                continue
+
+            context: dict[str, object] = {
+                "family": "candidate-recovery",
+                "dispatch_intent": {
+                    "profile": "candidate_recovery",
+                    "completion_contract": [
+                        "evidence_grounded_reasoning",
+                        "candidate_provenance",
+                        "blocker_diagnostic",
+                    ],
+                },
+                "recovery_trigger": "validator_rejection",
+                "rejected_candidate": {
+                    "value": rejected.value,
+                    "reason": rejected.reason,
+                    "source": rejected.source,
+                },
+                "novelty_key": f"validator-rejection:{rejected.rejection_id}",
+            }
+            refs = [ref for ref in rejected.evidence_refs if ref in state.evidence]
+            if refs:
+                context["evidence_ids"] = refs[:3]
+            if expected_prefix:
+                context["flag_format_prefix"] = f"{expected_prefix}{{"
+            if challenge_files:
+                context["files_root"] = "/home/ctfplayer/ctf_files"
+                context["challenge_files"] = list(challenge_files)
+
+            todos.append(
+                PlannedTodo(
+                    goal=(
+                        "Re-derive a corrected flag candidate from the original "
+                        "evidence after validator rejection."
+                    ),
+                    phase=TodoPhase.ANALYSIS,
+                    priority=96,
+                    context=context,
+                    success_criteria=[
+                        "Explain which evidence supports or invalidates the rejected value.",
+                        "Return one corrected candidate with provenance, or a blocker naming the missing fact.",
+                    ],
+                    constraints=[
+                        "Do not resubmit the rejected value unchanged.",
+                        "Use only current-state evidence and authorized challenge artifacts.",
+                    ],
+                    dedupe_key=dedupe_key,
+                )
+            )
+            notes.append(
+                "Seeded candidate recovery todo from validator feedback "
+                f"{rejected.rejection_id}."
+            )
+            break
+        return todos, notes
+
+    @staticmethod
+    def _rejection_is_actionable(reason: str) -> bool:
+        return reason not in {
+            "empty_candidate",
+            "escaped_byte_candidate",
+            "invalid_candidate_shape",
+            "invalid_prefix_candidate",
+        }
+
+    @classmethod
+    def _execution_closure_seed(
+        cls,
+        state: RunState,
+        challenge_files: list[object],
+    ) -> PlannedTodo | None:
+        if CandidatePolicy.validation_ready_candidates(state):
+            return None
+        if not challenge_files:
+            return None
+        if not cls._artifact_inventory_completed(state):
+            return None
+        dedupe_key = "bootstrap:evidence-execution-closure"
+        if cls._has_todo_key(state, dedupe_key):
+            return None
+        return PlannedTodo(
+            goal=(
+                "Build and run a bounded solver harness from current evidence "
+                "and local challenge artifacts."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            priority=92,
+            context={
+                "family": cls._execution_closure_family(state),
+                "files_root": "/home/ctfplayer/ctf_files",
+                "challenge_files": list(challenge_files),
+                "capability_hint": "script.exec",
+                "execution_closure": True,
+                "dispatch_intent": {
+                    "profile": "execution_closure",
+                    "required_capability": "script.exec",
+                    "completion_contract": [
+                        "bounded_execution",
+                        "self_check",
+                        "candidate_provenance",
+                        "blocker_diagnostic",
+                    ],
+                    "repair_policy_id": "execution_closure_repair",
+                },
+            },
+            success_criteria=[
+                "Derive any candidate only from local artifacts or authorized runtime evidence.",
+                "Print self-check diagnostics and candidate provenance.",
+                "Emit a labeled candidate only after searching the full recovered output.",
+            ],
+            constraints=[
+                "Do not copy or guess a flag from supplemental context.",
+                "Use installed tools or Python standard library; do not install packages.",
+                "Keep loops and searches bounded.",
+            ],
+            dedupe_key=dedupe_key,
+        )
+
+    @classmethod
+    def _include_execution_closure_seed(
+        cls,
+        state: RunState,
+        llm_todos: list[PlannedTodo],
+    ) -> bool:
+        if llm_todos:
+            return False
+        return cls._artifact_inventory_completed(state)
+
+    @staticmethod
+    def _artifact_inventory_completed(state: RunState) -> bool:
+        return any(
+            todo.dedupe_key == "bootstrap:artifact-inventory"
+            and todo.status == TodoStatus.COMPLETED
+            for todo in state.todos
+        )
+
+    @staticmethod
+    @staticmethod
+    def _execution_closure_family(state: RunState) -> str:
+        category = str(
+            (state.metadata.get("challenge", {}) or {}).get("category") or ""
+        ).strip().lower()
+        if category in {"forensics", "forensic", "stego", "steganography"}:
+            return "forensics-extract"
+        if category in {"rev", "reversing", "pwn"}:
+            return "algorithm-verification"
+        if category in {"crypto", "cryptography", "misc"}:
+            return "algorithm-verification"
+        return "technical-context-execution"
+
     @staticmethod
     def _has_todo_key(state: RunState, dedupe_key: str) -> bool:
         return any(todo.dedupe_key == dedupe_key for todo in state.todos)
+
+    _NEAR_MISS_CATEGORIES = frozenset({
+        "crypto",
+        "cryptography",
+        "forensics",
+        "forensic",
+        "stego",
+        "steganography",
+    })
+    _NEAR_MISS_STRONG_TERMS = frozenset({
+        "base32",
+        "base64",
+        "bytes.fromhex",
+        "cipher",
+        "ciphertext",
+        "codec",
+        "decode",
+        "decrypt",
+        "encoding",
+        "flag text",
+        "hidden text",
+        "keystream",
+        "latin-1",
+        "lfsr",
+        "mojibake",
+        "ocr",
+        "plaintext",
+        "plain text",
+        "recover text",
+        "stego",
+        "xor",
+    })
+    _NEAR_MISS_WEAK_TERMS = frozenset({
+        "ascii",
+        "ascii-art",
+        "garbled",
+        "hex",
+        "unicode",
+    })
+    _NEAR_MISS_PROTOCOL_TERMS = frozenset({
+        "broken pipe",
+        "connect",
+        "connection",
+        "http",
+        "menu",
+        "netcat",
+        "prompt",
+        "protocol",
+        "raw tcp",
+        "remote",
+        "round ",
+        "socket",
+        "tcp",
+        "telnet",
+    })
+
+    @staticmethod
+    def _near_miss_refinement_allowed(
+        state: RunState,
+        evidence,
+        ctx: dict,
+        near_misses: list[object],
+    ) -> bool:
+        texts = [
+            evidence.summary,
+            evidence.tool_name,
+            evidence.capability or "",
+            str(ctx.get("failure_kind") or ""),
+            str(ctx.get("failure_detail") or ""),
+            str(ctx.get("partial_reason") or ""),
+            str(ctx.get("result_quality") or ""),
+            str(ctx.get("stdout") or ""),
+            str(ctx.get("stderr") or ""),
+            PlanningPipeline._near_miss_candidate_body(near_misses),
+        ]
+        todo = state.get_todo(evidence.task_id)
+        if todo is not None:
+            texts.extend([
+                todo.goal,
+                todo.result_summary,
+                todo.error or "",
+                " ".join(todo.success_criteria),
+                " ".join(todo.constraints),
+                " ".join(str(value) for value in todo.context.values()),
+            ])
+        haystack = "\n".join(texts).lower()
+        has_strong_decode_signal = any(
+            term in haystack
+            for term in PlanningPipeline._NEAR_MISS_STRONG_TERMS
+        )
+        if has_strong_decode_signal:
+            return True
+
+        has_protocol_signal = any(
+            term in haystack
+            for term in PlanningPipeline._NEAR_MISS_PROTOCOL_TERMS
+        )
+        if has_protocol_signal:
+            return False
+
+        has_weak_decode_signal = any(
+            term in haystack
+            for term in PlanningPipeline._NEAR_MISS_WEAK_TERMS
+        )
+        if has_weak_decode_signal:
+            return True
+
+        challenge = state.metadata.get("challenge", {}) or {}
+        category = str(challenge.get("category") or "").strip().lower()
+        return category in PlanningPipeline._NEAR_MISS_CATEGORIES
+
+    @staticmethod
+    def _near_miss_candidate_body(near_misses: list[object]) -> str:
+        bodies: list[str] = []
+        for item in near_misses[:3]:
+            text = str(item)
+            lines = text.splitlines()
+            if lines and "preview:" in lines[0].lower():
+                text = "\n".join(lines[1:])
+            bodies.append(text)
+        return "\n".join(bodies)
 
     # Atomic recon families: at most one open/done todo of this family per
     # files_root.  Re-running them adds no signal beyond the first execution.
@@ -189,6 +1245,20 @@ class PlanningPipeline(PlannerAgent):
             family = str(todo.context.get("family") or "")
             if family in self._ATOMIC_RECON_FAMILIES and todo.phase == TodoPhase.RECON:
                 atomic_seen.add((family, str(todo.context.get("files_root") or "")))
+        validation_seen: set[str] = set()
+        for todo in state.todos:
+            if todo.phase != TodoPhase.FLAG_VALIDATION:
+                continue
+            if todo.status not in {
+                TodoStatus.PENDING,
+                TodoStatus.RUNNING,
+                TodoStatus.COMPLETED,
+                TodoStatus.PARTIAL,
+            }:
+                continue
+            candidate = CandidatePolicy.first_candidate_from_context(state, todo.context, todo.goal)
+            if candidate:
+                validation_seen.add(candidate)
         out: list[PlannedTodo] = []
         dropped = 0
         for todo in todos:
@@ -204,6 +1274,13 @@ class PlanningPipeline(PlannerAgent):
                     dropped += 1
                     continue
                 atomic_seen.add(atomic_key)
+            if todo.phase == TodoPhase.FLAG_VALIDATION:
+                candidate = CandidatePolicy.first_candidate_from_context(state, todo.context, todo.goal)
+                if candidate and candidate in validation_seen:
+                    dropped += 1
+                    continue
+                if candidate:
+                    validation_seen.add(candidate)
             seen.add(todo.dedupe_key)
             out.append(todo)
         notes = [f"Planning pipeline dropped {dropped} duplicate todo(s)."] if dropped else []
@@ -257,6 +1334,45 @@ class PlanningPipeline(PlannerAgent):
             else:
                 notes.append(f"Planning progress gate dropped todo: {reason}.")
         return out, notes
+
+    def _scope_gate(
+        self,
+        todos: list[PlannedTodo],
+        state: RunState,
+    ) -> tuple[list[PlannedTodo], list[str]]:
+        kept: list[PlannedTodo] = []
+        dropped = 0
+        challenge = state.metadata.get("challenge", {}) or {}
+        challenge_files = challenge.get("files", []) if isinstance(challenge, dict) else []
+        artifact_paths = [
+            str(artifact.path)
+            for artifact in state.artifacts.values()
+            if str(getattr(artifact, "path", "") or "").strip()
+        ]
+        for todo in todos:
+            reason = todo_loopback_block_reason(
+                goal=todo.goal,
+                context=todo.context or {},
+                authorized_scope=state.authorized_scope,
+            )
+            reason = reason or todo_registered_scratch_dependency_reason(
+                goal=todo.goal,
+                context=todo.context or {},
+                allowed_artifact_paths=artifact_paths,
+            )
+            reason = reason or todo_ephemeral_artifact_dependency_reason(
+                goal=todo.goal,
+                context=todo.context or {},
+                challenge_files=challenge_files,
+                files_root=(todo.context or {}).get("files_root"),
+                allowed_artifact_paths=artifact_paths,
+            )
+            if reason:
+                dropped += 1
+                continue
+            kept.append(todo)
+        notes = [f"Planning scope gate dropped {dropped} out-of-scope todo(s)."] if dropped else []
+        return kept, notes
 
     @staticmethod
     def _frontier_phase(todos: list[PlannedTodo], state: RunState) -> TodoPhase | None:
@@ -320,7 +1436,95 @@ class PlanningPipeline(PlannerAgent):
                     "evidence_id",
                     "evidence_ids",
                 )
+                or PlanningPipeline._refs_observed_endpoint(context, state)
             )
         if todo.phase == TodoPhase.FLAG_VALIDATION:
             return CandidatePolicy.first_candidate_from_context(state, context, todo.goal) is not None
         return True
+
+    @staticmethod
+    def _refs_observed_endpoint(context: dict, state: RunState) -> bool:
+        if ContextRefPolicy.refs_existing(
+            context,
+            state.endpoints,
+            "endpoint_id",
+            "endpoint_ids",
+        ):
+            return True
+
+        observed = [
+            endpoint
+            for endpoint in state.endpoints.values()
+            if PlanningPipeline._endpoint_has_positive_observation(endpoint)
+        ]
+        if not observed:
+            return False
+
+        for endpoint in observed:
+            if PlanningPipeline._endpoint_url_matches(context, endpoint):
+                return True
+            if PlanningPipeline._endpoint_host_port_matches(context, endpoint):
+                return True
+        return False
+
+    @staticmethod
+    def _endpoint_has_positive_observation(endpoint) -> bool:
+        if endpoint.status_code is not None:
+            return True
+        if endpoint.metadata:
+            return True
+        protocol = str(endpoint.protocol or "").lower()
+        return bool(endpoint.hostname and endpoint.port and protocol not in {"", "http", "https"})
+
+    @staticmethod
+    def _endpoint_url_matches(context: dict, endpoint) -> bool:
+        for raw in ContextRefPolicy.values(context, "url", "base_url", "scope"):
+            parsed = PlanningPipeline._parse_endpoint_ref(raw)
+            if parsed is None:
+                continue
+            hostname, port = parsed
+            if PlanningPipeline._same_endpoint(endpoint, hostname, port):
+                return True
+        return False
+
+    @staticmethod
+    def _endpoint_host_port_matches(context: dict, endpoint) -> bool:
+        hosts = {
+            value.lower()
+            for value in ContextRefPolicy.values(context, "host", "hostname", "server_name")
+        }
+        ports = ContextRefPolicy.values(context, "port", "ports")
+        if not hosts or not ports:
+            return False
+        endpoint_host = str(endpoint.hostname or "").lower()
+        endpoint_port = str(endpoint.port or "")
+        return endpoint_host in hosts and endpoint_port in ports
+
+    @staticmethod
+    def _parse_endpoint_ref(raw: object) -> tuple[str, int | None] | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        candidate = text if "://" in text else f"//{text}"
+        try:
+            parsed = urlparse(candidate)
+        except ValueError:
+            return None
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            return None
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port is None and parsed.scheme == "http":
+            port = 80
+        elif port is None and parsed.scheme == "https":
+            port = 443
+        return hostname, port
+
+    @staticmethod
+    def _same_endpoint(endpoint, hostname: str, port: int | None) -> bool:
+        if str(endpoint.hostname or "").lower() != hostname:
+            return False
+        return port is None or endpoint.port == port

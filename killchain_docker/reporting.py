@@ -2,7 +2,37 @@
 
 from __future__ import annotations
 
+from killchain_docker.knowledge import public_rag_payload
 from killchain_docker.state import RunState
+
+
+def _compact_text(value: object, *, limit: int = 360) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 15)].rstrip() + "...[truncated]"
+
+
+def _runtime_error_line(state: RunState) -> str | None:
+    payload = state.metadata.get("runtime_error")
+    if not isinstance(payload, dict):
+        return None
+    error_type = _compact_text(payload.get("type") or "RuntimeError", limit=80)
+    message = _compact_text(payload.get("message"), limit=360)
+    return f"- Runtime Error: `{error_type}` {message}".rstrip()
+
+
+def _rag_line(state: RunState) -> str | None:
+    payload = public_rag_payload(state.metadata.get("rag"))
+    if not payload:
+        return None
+    return (
+        "- RAG: "
+        f"enabled=`{payload.get('enabled')}` "
+        f"status=`{payload.get('status')}` "
+        f"policy=`{payload.get('policy')}` "
+        f"hints={payload.get('hint_count')}"
+    )
 
 
 def render_markdown_report(state: RunState) -> str:
@@ -33,6 +63,13 @@ def render_markdown_report(state: RunState) -> str:
         "## Assets",
         "",
     ]
+    runtime_error = _runtime_error_line(state)
+    if runtime_error:
+        lines.insert(22, runtime_error)
+    rag = _rag_line(state)
+    if rag:
+        insert_at = 23 if runtime_error else 22
+        lines.insert(insert_at, rag)
 
     if state.assets:
         for asset in sorted(state.assets.values(), key=lambda item: item.asset_id):

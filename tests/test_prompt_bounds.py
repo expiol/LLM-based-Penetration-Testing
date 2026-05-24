@@ -7,7 +7,15 @@ import unittest
 
 from killchain_docker.llm import StaticLLMClient
 from killchain_docker.prompt_projection import router_todo, worker_todo, working_memory
-from killchain_docker.state import ExecutionRecord, RunState, TodoItem, WorkerResult
+from killchain_docker.prompts.planner import build_planner_system_prompt
+from killchain_docker.state import (
+    Artifact,
+    EvidenceRecord,
+    ExecutionRecord,
+    RunState,
+    TodoItem,
+    WorkerResult,
+)
 from killchain_docker.tools import ExecutionPlane, ToolCapability
 from killchain_docker.workers.base import WorkerAgent
 
@@ -27,6 +35,30 @@ class _PromptWorker(WorkerAgent):
 
 
 class WorkerPromptBoundsTests(unittest.TestCase):
+    def test_planner_prompt_keeps_evaluation_terms_out_of_summaries(self) -> None:
+        prompt = build_planner_system_prompt("crypto")
+
+        self.assertIn("technical rationale only", prompt)
+        self.assertIn("mode labels", prompt)
+        self.assertIn("writeups", prompt)
+        self.assertIn("similarity", prompt)
+        self.assertIn("knowledge hints", prompt)
+        self.assertIn("source identity labels", prompt)
+        self.assertIn("authorized_scope", prompt)
+        self.assertIn("localhost", prompt)
+        for disallowed in (
+            "RSA with small primes",
+            "known-plaintext attacks",
+            "ltrace/strace",
+            "binwalk",
+            "steghide",
+            "execution-closure",
+            "score bounded interpretations",
+            "format-appropriate semantics",
+            "CTF technique matrix",
+        ):
+            self.assertNotIn(disallowed, prompt)
+
     def test_prompt_projection_profiles_share_bounding_rules(self) -> None:
         huge_text = "X" * 5000
         state = RunState(objective="Solve.")
@@ -62,6 +94,27 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         huge_text = "X" * 5000
         state = RunState(objective="Solve.")
         state.working_memory["huge"] = huge_text
+        state.artifacts["artifact-large"] = Artifact(
+            artifact_id="artifact-large",
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/" + huge_text,
+            kind="foremost_gif",
+            source="foremost",
+            size=12,
+        )
+        state.metadata["rag"] = {
+            "knowledge_hints": [
+                {
+                    "rank": 1,
+                    "category": "crypto",
+                    "solution_sketch": "REFERENCE-CODE\nprint('ok')",
+                    "score": 0.99,
+                    "challenge_id": "hidden-source-id",
+                },
+                {"rank": 2, "category": "crypto", "solution_sketch": "second"},
+                {"rank": 3, "category": "crypto", "solution_sketch": "third"},
+                {"rank": 4, "category": "crypto", "solution_sketch": "fourth"},
+            ]
+        }
         state.execution_log.append(
             ExecutionRecord(
                 task_id="todo-huge",
@@ -72,7 +125,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
             )
         )
         task = TodoItem(
-            goal="Choose a bounded tool call.",
+            goal="Choose a bounded script tool call to decrypt data.",
             context={
                 "family": "crypto-decrypt",
                 "blob": huge_text,
@@ -87,7 +140,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         worker.choose_tool_use(
             task=task,
             state=state,
-            allowed_capabilities=[ToolCapability.SHELL_EXEC],
+            allowed_capabilities=[ToolCapability.SHELL_EXEC, ToolCapability.SCRIPT_EXEC],
             prior_steps=[
                 {
                     "capability": "script.exec",
@@ -95,6 +148,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                     "stderr_preview": huge_text,
                     "flag_candidates": [],
                     "returncode": 1,
+                    "failure_kind": "no_candidate",
                 }
             ],
         )
@@ -103,15 +157,371 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         todo_context = snapshot["todo"]["context"]  # type: ignore[index]
         self.assertLessEqual(len(todo_context["blob"]), 460)
         self.assertEqual(len(todo_context["items"]), 8)
+        artifacts = snapshot["artifacts"]  # type: ignore[index]
+        self.assertEqual(artifacts[0]["kind"], "foremost_gif")
+        self.assertLessEqual(len(artifacts[0]["path"]), 460)
         self.assertLessEqual(len(snapshot["working_memory"]["huge"]), 400)  # type: ignore[index]
+        self.assertNotIn("knowledge_hints", snapshot)
+        self.assertNotIn("REFERENCE-CODE", json.dumps(snapshot))
+        self.assertNotIn("solution_sketch", json.dumps(snapshot))
+        self.assertNotIn("challenge_id", json.dumps(snapshot))
         recent_failures = snapshot["recent_failures"]  # type: ignore[index]
         self.assertLessEqual(len(recent_failures[0]["summary"]), 360)
         prior_steps = snapshot["prior_steps"]  # type: ignore[index]
         self.assertLessEqual(len(prior_steps[0]["stdout_preview"]), 740)
         correction_context = snapshot["correction_context"]  # type: ignore[index]
         self.assertLessEqual(len(correction_context["last_stdout"]), 740)
+        self.assertIn("Enumerate bounded interpretations", correction_context["instruction"])
+        rules = "\n".join(snapshot["tool_use_rules"])  # type: ignore[index]
+        self.assertIn("bound loops", rules)
+        self.assertIn("reference/source code", rules)
+        self.assertIn("third-party Python packages", rules)
+        self.assertIn("Prefer stdlib", rules)
+        self.assertIn("ImportError", rules)
+        self.assertIn("stdlib fallback", rules)
+        self.assertIn("connect/read socket timeouts <=5 seconds", rules)
+        self.assertIn("localhost/127.0.0.1", rules)
+        self.assertIn("explicit challenge paths", rules)
+        self.assertIn("CTF_ORIGINAL_FILES_ROOT is a separate pristine snapshot", rules)
+        self.assertIn("main()", rules)
+        self.assertIn("ast.parse", rules)
+        self.assertIn("bounded samples", rules)
+        self.assertIn("full recovery", rules)
+        self.assertIn("execution_closure", rules)
+        self.assertIn("derived artifact", rules)
+        self.assertIn("format-appropriate semantics", rules)
+        self.assertIn("candidate provenance", rules)
+        self.assertIn("higher-priority facts", rules)
+        self.assertIn("low-quality possible candidate", rules)
+        self.assertIn("search the full plaintext", rules)
+        self.assertIn("long bare CTF tokens", correction_context["instruction"])
+        self.assertIn("derived artifact", correction_context["instruction"])
+        self.assertIn("format-appropriate semantics", correction_context["instruction"])
+        self.assertIn("low-quality possible flag", correction_context["instruction"])
+        catalog = json.dumps(snapshot["tool_catalog"])  # type: ignore[index]
+        self.assertIn("bounded source", catalog)
         self.assertNotIn("reflexion_context", snapshot)
         self.assertNotIn("X" * 1000, json.dumps(snapshot))
+
+    def test_shell_python_syntax_failure_requests_script_exec(self) -> None:
+        captured: dict[str, object] = {}
+
+        def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('fixed')"},
+                "rationale": "use multiline script",
+                "expected_signal": "runs",
+            }
+
+        worker = _PromptWorker(
+            llm_client=StaticLLMClient(respond),
+            execution_plane=ExecutionPlane(),
+        )
+        worker.choose_tool_use(
+            task=TodoItem(goal="Parse a binary header with Python."),
+            state=RunState(objective="Solve."),
+            allowed_capabilities=[ToolCapability.SHELL_EXEC, ToolCapability.SCRIPT_EXEC],
+            prior_steps=[
+                {
+                    "capability": "shell.exec",
+                    "stdout_preview": "",
+                    "stderr_preview": "SyntaxError: invalid syntax",
+                    "returncode": 1,
+                }
+            ],
+        )
+
+        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        self.assertIn("choose script.exec", correction["instruction"])
+        rules = "\n".join(captured["snapshot"]["tool_use_rules"])  # type: ignore[index]
+        self.assertIn("complex Python one-liners", rules)
+
+    def test_script_syntax_failure_requests_complete_program(self) -> None:
+        captured: dict[str, object] = {}
+
+        def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "def main():\n    print('fixed')\nmain()"},
+                "rationale": "fix syntax",
+                "expected_signal": "script parses",
+            }
+
+        worker = _PromptWorker(
+            llm_client=StaticLLMClient(respond),
+            execution_plane=ExecutionPlane(),
+        )
+        worker.choose_tool_use(
+            task=TodoItem(goal="Repair generated Python solver syntax."),
+            state=RunState(objective="Solve."),
+            allowed_capabilities=[ToolCapability.SCRIPT_EXEC],
+            prior_steps=[
+                {
+                    "capability": "script.exec",
+                    "stdout_preview": "",
+                    "stderr_preview": "SyntaxError: 'return' outside function",
+                    "returncode": 1,
+                    "failure_kind": "syntax_error",
+                    "failure_detail": "script failed Python syntax validation",
+                }
+            ],
+        )
+
+        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        self.assertIn("Fix syntax before changing the algorithm", correction["instruction"])
+        self.assertIn("main()", correction["instruction"])
+        self.assertIn("return outside a function", correction["instruction"])
+        self.assertIn("ast.parse", correction["instruction"])
+
+    def test_bytes_text_failure_requests_binary_safe_port(self) -> None:
+        captured: dict[str, object] = {}
+
+        def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "def main():\n    print('fixed')\nmain()"},
+                "rationale": "fix bytes",
+                "expected_signal": "script handles binary data",
+            }
+
+        worker = _PromptWorker(
+            llm_client=StaticLLMClient(respond),
+            execution_plane=ExecutionPlane(),
+        )
+        worker.choose_tool_use(
+            task=TodoItem(goal="Repair generated Python XOR solver."),
+            state=RunState(objective="Solve."),
+            allowed_capabilities=[ToolCapability.SCRIPT_EXEC],
+            prior_steps=[
+                {
+                    "capability": "script.exec",
+                    "stdout_preview": "",
+                    "stderr_preview": "TypeError: byte indices must be integers or slices, not str",
+                    "returncode": 1,
+                    "failure_kind": "bytes_text_mismatch",
+                    "failure_detail": "script mixed bytes and text across an IO boundary",
+                }
+            ],
+        )
+
+        snapshot = captured["snapshot"]
+        correction = snapshot["correction_context"]  # type: ignore[index]
+        self.assertIn("Fix the binary data model", correction["instruction"])
+        self.assertIn("rb/wb", correction["instruction"])
+        self.assertIn("bytes.fromhex()", correction["instruction"])
+        self.assertIn("Python 3 byte iteration as integers", correction["instruction"])
+        rules = "\n".join(snapshot["tool_use_rules"])  # type: ignore[index]
+        self.assertIn("bytes.fromhex()", rules)
+        self.assertIn("integer-safe XOR helpers", rules)
+
+    def test_path_type_failure_requests_consistent_path_api(self) -> None:
+        captured: dict[str, object] = {}
+
+        def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "from pathlib import Path\nprint(Path('.'))"},
+                "rationale": "fix path API",
+                "expected_signal": "script builds paths",
+            }
+
+        worker = _PromptWorker(
+            llm_client=StaticLLMClient(respond),
+            execution_plane=ExecutionPlane(),
+        )
+        worker.choose_tool_use(
+            task=TodoItem(goal="Repair generated Python artifact solver paths."),
+            state=RunState(objective="Solve."),
+            allowed_capabilities=[ToolCapability.SCRIPT_EXEC],
+            prior_steps=[
+                {
+                    "capability": "script.exec",
+                    "stdout_preview": "",
+                    "stderr_preview": "TypeError: unsupported operand type(s) for /: 'str' and 'str'",
+                    "returncode": 1,
+                    "failure_kind": "path_type_mismatch",
+                    "failure_detail": "script mixed string paths with pathlib operations",
+                }
+            ],
+        )
+
+        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        self.assertIn("Fix path handling", correction["instruction"])
+        self.assertIn("pathlib.Path", correction["instruction"])
+        self.assertIn("Path(...)", correction["instruction"])
+        self.assertIn("os.path.join", correction["instruction"])
+
+    def test_network_failure_requests_bounded_stdlib_harness(self) -> None:
+        captured: dict[str, object] = {}
+
+        def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "import socket\nprint('probe')"},
+                "rationale": "bound network retry",
+                "expected_signal": "connection state",
+            }
+
+        worker = _PromptWorker(
+            llm_client=StaticLLMClient(respond),
+            execution_plane=ExecutionPlane(),
+        )
+        worker.choose_tool_use(
+            task=TodoItem(goal="Probe an interactive TCP service without hanging."),
+            state=RunState(objective="Solve."),
+            allowed_capabilities=[ToolCapability.SCRIPT_EXEC],
+            prior_steps=[
+                {
+                    "capability": "script.exec",
+                    "stdout_preview": "",
+                    "stderr_preview": "ConnectionRefusedError: [Errno 61] Connection refused",
+                    "returncode": 1,
+                    "failure_kind": "connection_refused",
+                    "failure_detail": "remote endpoint refused the connection",
+                }
+            ],
+        )
+
+        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        self.assertIn("stdlib-only network harness", correction["instruction"])
+        self.assertIn("connect/read timeouts <=5 seconds", correction["instruction"])
+        self.assertIn("overall deadline <=45 seconds", correction["instruction"])
+        self.assertIn("endpoint is unavailable", correction["instruction"])
+        self.assertIn("protocol or availability failure", correction["instruction"])
+
+    def test_protocol_parse_error_warns_about_non_newline_prompts(self) -> None:
+        captured: dict[str, object] = {}
+
+        def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "import socket\nprint('fixed parser')"},
+                "rationale": "fix prompt parser",
+                "expected_signal": "protocol transcript handled",
+            }
+
+        worker = _PromptWorker(
+            llm_client=StaticLLMClient(respond),
+            execution_plane=ExecutionPlane(),
+        )
+        worker.choose_tool_use(
+            task=TodoItem(goal="Fix an interactive TCP solver that mis-parsed prompts."),
+            state=RunState(objective="Solve."),
+            allowed_capabilities=[ToolCapability.SCRIPT_EXEC],
+            prior_steps=[
+                {
+                    "capability": "script.exec",
+                    "stdout_preview": "quarters (25c): dimes (10c): nickels (5c): pennies (1c):",
+                    "stderr_preview": "",
+                    "returncode": 0,
+                    "failure_kind": "parse_error",
+                    "failure_detail": "script parsing logic rejected tool or service output",
+                }
+            ],
+        )
+
+        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        self.assertIn("fix input/output parsing", correction["instruction"])
+        self.assertIn("self-test with representative raw fragments", correction["instruction"])
+
+    def test_timeout_correction_warns_about_non_newline_prompts(self) -> None:
+        instruction = WorkerAgent._script_correction_instruction("timeout")
+
+        self.assertIn("Replace unbounded iteration", instruction)
+        self.assertIn("bounded sampling", instruction)
+        self.assertIn("full recovery only on finalists", instruction)
+        self.assertIn("set them below the tool timeout", instruction)
+
+    def test_binary_structure_error_correction_preserves_artifact_path(self) -> None:
+        instruction = WorkerAgent._script_correction_instruction("binary_structure_error")
+
+        self.assertIn("fix binary structure parsing", instruction)
+        self.assertIn("offset + header_size <= len(data)", instruction)
+        self.assertIn("skip malformed/truncated candidates", instruction)
+
+    def test_scope_violation_correction_constrains_script_paths(self) -> None:
+        instruction = WorkerAgent._script_correction_instruction("scope_violation_blocked")
+
+        self.assertIn("CTF_FILES_ROOT", instruction)
+        self.assertIn("CTF_TEMP_DIR", instruction)
+        self.assertIn("do not hard-code /tmp", instruction)
+
+    def test_scratch_space_correction_uses_disposable_temp_dir(self) -> None:
+        instruction = WorkerAgent._script_correction_instruction("scratch_space_exhausted")
+
+        self.assertIn("CTF_TEMP_DIR", instruction)
+        self.assertIn("cap carving/extraction loops", instruction)
+        self.assertIn("under CTF_FILES_ROOT", instruction)
+
+    def test_same_todo_unbounded_failure_survives_local_no_candidate_step(self) -> None:
+        captured: dict[str, object] = {}
+
+        def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('bounded')"},
+                "rationale": "use bounded corrected value",
+                "expected_signal": "no huge range",
+            }
+
+        task = TodoItem(goal="Decrypt data with corrected skip=34112.")
+        state = RunState(objective="Solve.")
+        state.evidence["evidence-unbounded"] = EvidenceRecord(
+            evidence_id="evidence-unbounded",
+            task_id=task.todo_id,
+            capability="script.exec",
+            tool_name="script_exec",
+            mode="local_command",
+            summary="script failed: range too large",
+            extracted={
+                "output_context": {
+                    "failure_kind": "unbounded_loop_guard",
+                    "failure_detail": "script attempted an oversized range",
+                    "stdout": "Skip raw: 34112\nSkip after SWAP: 1082458112\n",
+                    "stderr": "RuntimeError: range too large for script.exec: 1082458112 > 5000000",
+                    "returncode": 1,
+                }
+            },
+        )
+        worker = _PromptWorker(
+            llm_client=StaticLLMClient(respond),
+            execution_plane=ExecutionPlane(),
+        )
+
+        worker.choose_tool_use(
+            task=task,
+            state=state,
+            allowed_capabilities=[ToolCapability.SCRIPT_EXEC],
+            prior_steps=[
+                {
+                    "capability": "script.exec",
+                    "stdout_preview": "diagnostic ran but no flag",
+                    "stderr_preview": "",
+                    "flag_candidates": [],
+                    "returncode": 0,
+                    "failure_kind": "no_candidate",
+                }
+            ],
+        )
+
+        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        self.assertEqual(correction["failure_kind"], "unbounded_loop_guard")
+        self.assertIn("1082458112", correction["last_stderr"])
+        self.assertIn("Do not reuse the same oversized value", correction["instruction"])
+        constraints = correction["execution_constraints"]
+        self.assertIn(1082458112, constraints["do_not_iterate_values"])
+        self.assertIn(
+            {"label": "corrected_skip", "value": 34112, "source": "todo.goal"},
+            constraints["bounded_counter_candidates"],
+        )
 
 
 if __name__ == "__main__":

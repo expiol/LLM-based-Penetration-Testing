@@ -92,6 +92,123 @@ class Severity(StrEnum):
     CRITICAL = "critical"
 
 
+class DispatchIntent(BaseModel):
+    """Structured routing and execution intent for a todo.
+
+    This is the machine-readable contract between planner, router, and worker.
+    Natural-language goal text can explain the objective; dispatch behavior
+    should live here so worker assignment does not depend on prompt prose.
+    """
+
+    profile: str = "open"
+    required_capability: str | None = None
+    allowed_capabilities: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    target_refs: dict[str, Any] = Field(default_factory=dict)
+    completion_contract: list[str] = Field(default_factory=list)
+    repair_policy_id: str | None = None
+
+    @field_validator("profile", mode="before")
+    @classmethod
+    def _coerce_profile(cls, value: Any) -> str:
+        normalized = str(value or "open").strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"", "other", "generic", "todo", "task"}:
+            return "open"
+        return normalized
+
+    @field_validator("required_capability", "repair_policy_id", mode="before")
+    @classmethod
+    def _coerce_optional_text(cls, value: Any) -> str | None:
+        if value in (None, "", [], {}, ()):
+            return None
+        return str(value).strip() or None
+
+    @field_validator("allowed_capabilities", "evidence_ids", "completion_contract", mode="before")
+    @classmethod
+    def _coerce_text_list(cls, value: Any) -> list[str]:
+        if value in (None, "", {}, ()):
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        text = str(value).strip()
+        return [text] if text else []
+
+    @classmethod
+    def from_context(cls, context: dict[str, Any] | None) -> "DispatchIntent":
+        """Build a dispatch intent from structured and legacy todo context."""
+
+        context = context or {}
+        raw = context.get("dispatch_intent")
+        if isinstance(raw, DispatchIntent):
+            return raw
+        payload = dict(raw) if isinstance(raw, dict) else {}
+
+        capability = str(
+            payload.get("required_capability")
+            or context.get("capability_hint")
+            or ""
+        ).strip()
+        if capability and "required_capability" not in payload:
+            payload["required_capability"] = capability
+
+        evidence_ids = payload.get("evidence_ids") or context.get("evidence_ids")
+        if evidence_ids and "evidence_ids" not in payload:
+            payload["evidence_ids"] = evidence_ids
+
+        target_refs = payload.get("target_refs")
+        if not isinstance(target_refs, dict):
+            refs: dict[str, Any] = {}
+            for key in (
+                "artifact_id",
+                "artifact_ids",
+                "artifact_path",
+                "path",
+                "paths",
+                "file_path",
+                "files_root",
+                "asset_id",
+                "endpoint_id",
+                "endpoint_ids",
+                "scope",
+                "base_url",
+                "hostname",
+                "url",
+            ):
+                value = context.get(key)
+                if value not in (None, "", [], {}, ()):
+                    refs[key] = value
+            if refs:
+                payload["target_refs"] = refs
+            else:
+                payload.pop("target_refs", None)
+
+        if "profile" not in payload:
+            payload["profile"] = cls._profile_from_context(context, capability)
+
+        return cls.model_validate(payload)
+
+    @staticmethod
+    def _profile_from_context(context: dict[str, Any], capability: str) -> str:
+        family = str(context.get("family") or "").strip().lower().replace("-", "_")
+        if family in {"artifact_followup", "artifact_inventory"}:
+            return "artifact_analysis"
+        if family in {"forensics_extract"} or capability == "disk.extract":
+            return "container_extraction"
+        if capability == "office.inspect":
+            return "office_inspection"
+        if capability == "png.inspect":
+            return "image_inspection"
+        if context.get("execution_closure"):
+            return "execution_closure"
+        if context.get("candidate_flag"):
+            return "flag_validation"
+        if context.get("scope") or context.get("base_url") or context.get("url"):
+            return "scope_mapping"
+        if family in {"", "other", "generic", "todo", "task"}:
+            return "open"
+        return family or "open"
+
+
 class AssetKind(StrEnum):
     UNKNOWN = "unknown"
     HOST = "host"
@@ -747,6 +864,66 @@ class WorkerResult(BaseModel):
     memory_updates: dict[str, str] = Field(default_factory=dict)
 
 
+_NON_DIAGNOSTIC_FAILURE_QUALITIES = frozenset({
+    "infrastructure_error",
+    "llm_error",
+    "llm_schema_validation",
+    "metadata_validation",
+    "scope_violation_blocked",
+})
+
+
+def _state_delta_has_signal(delta: StateDelta | None) -> bool:
+    if delta is None:
+        return False
+    return bool(
+        delta.artifacts
+        or delta.endpoints
+        or delta.routes
+        or delta.flag_candidates
+        or delta.hypotheses
+        or delta.vulnerabilities
+        or delta.exploit_attempts
+        or delta.sessions
+    )
+
+
+def _payload_has_observation(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for key in ("stdout", "stderr", "output_text", "raw_log", "stdout_preview", "stderr_preview"):
+        if str(payload.get(key) or "").strip():
+            return True
+    return False
+
+
+def _failed_result_has_diagnostic_signal(result: WorkerResult) -> bool:
+    if result.success or result.partial or result.retryable:
+        return False
+    quality = str(result.result_quality or result.output_context.get("failure_kind") or "").strip()
+    if quality in _NON_DIAGNOSTIC_FAILURE_QUALITIES:
+        return False
+    if _state_delta_has_signal(result.state_delta):
+        return True
+    if result.asset_updates or result.finding_updates or result.credential_updates or result.network_updates:
+        return True
+    ctx = result.output_context or {}
+    if ctx.get("flag_candidates") or ctx.get("near_miss_candidates"):
+        return True
+    if _payload_has_observation(ctx):
+        return True
+    for evidence in result.evidence_updates:
+        if _payload_has_observation(evidence.result):
+            return True
+        extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
+        if _payload_has_observation(extracted):
+            return True
+        evidence_ctx = extracted.get("output_context")
+        if _payload_has_observation(evidence_ctx):
+            return True
+    return False
+
+
 class RouterRoundSummary(BaseModel):
     """Router synthesis for one execution round."""
 
@@ -936,6 +1113,15 @@ class RunState(BaseModel):
             )
         )
 
+    def _rejected_flag_reason(self, value: str) -> str | None:
+        normalized = value.strip()
+        if not normalized:
+            return None
+        for item in reversed(self.rejected_flag_candidates):
+            if item.value == normalized:
+                return item.reason or "previously_rejected"
+        return None
+
     def apply_state_delta(self, delta: StateDelta) -> None:
         for artifact in delta.artifacts:
             key = artifact.digest or artifact.path
@@ -959,17 +1145,48 @@ class RunState(BaseModel):
         for candidate in delta.flag_candidates:
             from killchain_docker.orchestrator.policy import CandidatePolicy
 
+            derived_values: list[str] = []
             decision = CandidatePolicy.decision_for_state(self, candidate.value)
+            rejection_reason = candidate.rejected_reason
             if not decision.accepted:
-                self.record_rejected_flag_candidate(
-                    value=candidate.value,
-                    reason=decision.reason,
-                    source=candidate.source,
-                    evidence_refs=candidate.evidence_refs,
+                rejection_reason = decision.reason
+                derived_values = CandidatePolicy.derived_candidates_for_state(
+                    self,
+                    candidate.value,
                 )
-                self.orchestration_notes.append(
-                    f"Rejected flag candidate from {candidate.source or 'unknown'}: {decision.reason}"
-                )
+            elif candidate.validated is not True and not rejection_reason:
+                rejection_reason = self._rejected_flag_reason(candidate.value)
+            if candidate.validated is False and not rejection_reason:
+                rejection_reason = "candidate_validation_failed"
+            if rejection_reason:
+                self._reject_flag_candidate(candidate, rejection_reason)
+                for derived_value in derived_values:
+                    if self._rejected_flag_reason(derived_value):
+                        continue
+                    derived = FlagCandidate(
+                        value=derived_value,
+                        source=f"{candidate.source or 'unknown'}:policy-derived",
+                        confidence=max(0.1, min(candidate.confidence, 0.45)),
+                        evidence_refs=list(candidate.evidence_refs),
+                        metadata={
+                            **dict(candidate.metadata),
+                            "derived_from_rejected_candidate": candidate.value,
+                            "derivation": "expected_prefix_rewrite",
+                        },
+                    )
+                    if CandidatePolicy.decision_for_state(self, derived.value).accepted:
+                        existing_id = next(
+                            (
+                                current_id
+                                for current_id, current in self.flag_candidates.items()
+                                if current.value == derived.value
+                            ),
+                            None,
+                        )
+                        if existing_id is not None:
+                            self.flag_candidates[existing_id].merge(derived)
+                        else:
+                            self.flag_candidates[derived.candidate_id] = derived
                 continue
             existing_id = next(
                 (
@@ -993,10 +1210,40 @@ class RunState(BaseModel):
             self.sessions[session.session_id] = session
         self.touch()
 
+    def _reject_flag_candidate(self, candidate: FlagCandidate, reason: str) -> None:
+        self.record_rejected_flag_candidate(
+            value=candidate.value,
+            reason=reason,
+            source=candidate.source,
+            evidence_refs=candidate.evidence_refs,
+        )
+        rejected_ids = [
+            current_id
+            for current_id, current in self.flag_candidates.items()
+            if current.value == candidate.value
+        ]
+        for current_id in rejected_ids:
+            del self.flag_candidates[current_id]
+        self.orchestration_notes.append(
+            f"Rejected flag candidate from {candidate.source or 'unknown'}: {reason}"
+        )
+
     def apply_worker_result(self, result: WorkerResult) -> None:
         todo = self.get_todo(result.todo_id)
         if todo is None:
             raise KeyError(f"Unknown todo id: {result.todo_id}")
+        self._record_todo_execution_context(todo, result)
+        if _failed_result_has_diagnostic_signal(result):
+            result.partial = True
+            result.partial_reason = (
+                result.partial_reason
+                or result.error
+                or result.summary
+                or "tool failed after producing diagnostic evidence"
+            )
+            result.result_quality = result.result_quality or "diagnostic_evidence"
+            result.output_context.setdefault("result_quality", result.result_quality)
+            result.output_context.setdefault("partial_reason", result.partial_reason)
         if result.partial:
             todo.mark_partial(result.summary, result.partial_reason or result.error)
         elif result.success:
@@ -1013,6 +1260,7 @@ class RunState(BaseModel):
         for evidence in result.evidence_updates:
             self.upsert_evidence(evidence)
         self.network_edges.extend(result.network_updates)
+        self._annotate_result_artifacts(result)
         self.apply_state_delta(result.state_delta)
 
         if result.memory_updates:
@@ -1039,6 +1287,49 @@ class RunState(BaseModel):
         )
         self.notes.extend(result.notes)
         self.touch()
+
+    @staticmethod
+    def _annotate_result_artifacts(result: WorkerResult) -> None:
+        evidence_ids = [
+            evidence.evidence_id
+            for evidence in result.evidence_updates
+            if getattr(evidence, "evidence_id", "")
+        ]
+        capability = str(result.output_context.get("capability") or "").strip()
+        for artifact in result.state_delta.artifacts:
+            if evidence_ids:
+                existing = artifact.metadata.get("evidence_ids")
+                if isinstance(existing, list):
+                    merged = [str(item) for item in existing if str(item).strip()]
+                else:
+                    merged = []
+                for evidence_id in evidence_ids:
+                    if evidence_id not in merged:
+                        merged.append(evidence_id)
+                artifact.metadata["evidence_ids"] = merged
+            artifact.metadata.setdefault("source_task_id", result.todo_id)
+            artifact.metadata.setdefault("source_worker", result.worker_name)
+            if capability:
+                artifact.metadata.setdefault("source_capability", capability)
+
+    @staticmethod
+    def _record_todo_execution_context(todo: TodoItem, result: WorkerResult) -> None:
+        ctx = result.output_context if isinstance(result.output_context, dict) else {}
+        capability = str(ctx.get("capability") or "").strip()
+        if capability:
+            todo.context.setdefault("executed_capability", capability)
+
+        for key in ("path", "artifact_path", "file_path"):
+            value = str(ctx.get(key) or "").strip()
+            if value:
+                todo.context.setdefault("executed_path", value)
+                break
+
+        paths = ctx.get("paths")
+        if isinstance(paths, list):
+            clean_paths = [str(item).strip() for item in paths if str(item).strip()]
+            if clean_paths:
+                todo.context.setdefault("executed_paths", clean_paths)
 
     def record_round(self, round_record: RouterRound) -> None:
         self.rounds.append(round_record)

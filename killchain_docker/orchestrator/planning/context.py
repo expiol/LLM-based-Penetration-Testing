@@ -13,13 +13,15 @@ from typing import Any
 from killchain_docker.evidence_context import EvidenceContextBuilder
 from killchain_docker.knowledge import KnowledgeAugmenter
 from killchain_docker.orchestrator.policy import ProgressPolicy, RagPolicy, TodoPolicy
+from killchain_docker.orchestrator.planning.techniques import technique_matrix_for
 from killchain_docker.prompt_projection import (
+    artifacts as prompt_artifacts,
     execution_record as prompt_execution_record,
     planner_todo as prompt_planner_todo,
     working_memory as prompt_working_memory,
 )
 from killchain_docker.prompt_bounds import bounded_value, trim_text
-from killchain_docker.prompts import get_planner_system_prompt, get_prompts
+from killchain_docker.prompts import get_planner_system_prompt
 from killchain_docker.state import RunState, TodoStatus
 
 
@@ -49,14 +51,14 @@ class PlannerContext:
     authorized_scope: list[str] = field(default_factory=list)
     challenge_category: str = "misc"
 
-    # Strategy prompts
-    analysis_strategy: str = ""
-    exploit_strategy: str = ""
-    flag_recovery_hints: str = ""
+    # Strategy context
+    planning_profiles: list[dict[str, object]] = field(default_factory=list)
 
     # State snapshot
     state_summary: dict[str, Any] = field(default_factory=dict)
     assets: list[dict[str, Any]] = field(default_factory=list)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    endpoints: list[dict[str, Any]] = field(default_factory=list)
     findings: list[dict[str, Any]] = field(default_factory=list)
     flag_candidates: list[dict[str, Any]] = field(default_factory=list)
     rejected_flag_candidates: list[dict[str, Any]] = field(default_factory=list)
@@ -74,6 +76,7 @@ class PlannerContext:
     pivot_summaries: list[dict[str, Any]] = field(default_factory=list)
 
     # Knowledge augmentation
+    knowledge_augmentation: dict[str, Any] = field(default_factory=dict)
     related_writeups: list[dict[str, Any]] = field(default_factory=list)
     related_writeups_warning: str | None = None
 
@@ -90,6 +93,8 @@ class PlannerContextBuilder:
 
     _MAX_TODOS = 40
     _MAX_ASSETS = 20
+    _MAX_ARTIFACTS = 40
+    _MAX_ENDPOINTS = 20
     _MAX_FINDINGS = 20
     _MAX_ROUNDS = 8
     _MAX_EXECUTION_LOG = 12
@@ -106,30 +111,23 @@ class PlannerContextBuilder:
 
     def build(self, state: RunState) -> PlannerContext:
         category = self._category(state)
-        prompts = get_prompts(category)
         stagnation = self._build_stagnation(state)
 
+        if self.augmenter is not None:
+            self.augmenter.context_for(state)
         RagPolicy.annotate(state)
-        related_writeups = self.augmenter.for_planner(state) if self.augmenter else []
-        writeups_warning = None
-        if related_writeups:
-            rag_meta = state.metadata.get("rag")
-            if isinstance(rag_meta, dict) and rag_meta.get("policy") == "possibly_misleading":
-                writeups_warning = (
-                    "Prior attempts informed by these writeups have stalled in "
-                    f"{rag_meta.get('stalled_families', [])}. Treat the writeups as "
-                    "hints, not ground truth; consider alternative ciphers/algorithms."
-                )
+        rag_meta = state.metadata.get("rag")
+        knowledge_augmentation = self._planner_knowledge_metadata(rag_meta)
 
         return PlannerContext(
             objective=state.objective,
             authorized_scope=list(state.authorized_scope),
             challenge_category=category,
-            analysis_strategy=prompts.analysis_strategy,
-            exploit_strategy=prompts.exploit_strategy,
-            flag_recovery_hints=prompts.flag_recovery_hints,
+            planning_profiles=technique_matrix_for(category),
             state_summary=state.summary(),
             assets=self._serialize_assets(state),
+            artifacts=prompt_artifacts(state, limit=self._MAX_ARTIFACTS),
+            endpoints=self._serialize_endpoints(state),
             findings=self._serialize_findings(state),
             flag_candidates=self._serialize_flag_candidates(state),
             rejected_flag_candidates=self._serialize_rejected_flag_candidates(state),
@@ -147,8 +145,7 @@ class PlannerContextBuilder:
             stagnation=stagnation,
             near_miss_evidence=self._near_miss_evidence(state),
             pivot_summaries=self._pivot_summaries(state),
-            related_writeups=related_writeups,
-            related_writeups_warning=writeups_warning,
+            knowledge_augmentation=dict(knowledge_augmentation),
             open_todo_count=self._open_todo_count(state),
             temperature=self._compute_temperature(state),
         )
@@ -159,6 +156,30 @@ class PlannerContextBuilder:
     # ------------------------------------------------------------------
     # Private helpers (moved from PlanStrategy)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _planner_knowledge_metadata(raw: object) -> dict[str, Any]:
+        """Return only planner-useful RAG metadata.
+
+        Audit fields such as concrete hit ids, ranking scores, and retrieval
+        identity labels stay in ``state.metadata["rag"]`` for reports. The
+        planner only needs availability and warning policy.
+        """
+        if not isinstance(raw, dict):
+            return {}
+        allowed = {
+            "enabled",
+            "status",
+            "hit_count",
+            "hint_count",
+            "policy",
+            "stalled_families",
+        }
+        metadata = {key: raw[key] for key in allowed if key in raw}
+        hints = raw.get("knowledge_hints")
+        if "hint_count" not in metadata and isinstance(hints, list):
+            metadata["hint_count"] = sum(1 for item in hints if isinstance(item, dict))
+        return metadata
 
     @staticmethod
     def _category(state: RunState) -> str:
@@ -200,6 +221,23 @@ class PlannerContextBuilder:
                 "tags": sorted(asset.tags),
             }
             for asset in list(state.assets.values())[-PlannerContextBuilder._MAX_ASSETS:]
+        ]
+
+    @staticmethod
+    def _serialize_endpoints(state: RunState) -> list[dict[str, Any]]:
+        return [
+            {
+                "endpoint_id": endpoint.endpoint_id,
+                "asset_ref": endpoint.asset_ref,
+                "url": endpoint.url,
+                "hostname": endpoint.hostname,
+                "port": endpoint.port,
+                "protocol": endpoint.protocol,
+                "status_code": endpoint.status_code,
+                "title": endpoint.title,
+                "metadata_preview": str(endpoint.metadata)[:360],
+            }
+            for endpoint in list(state.endpoints.values())[-PlannerContextBuilder._MAX_ENDPOINTS:]
         ]
 
     def _serialize_findings(self, state: RunState) -> list[dict[str, Any]]:

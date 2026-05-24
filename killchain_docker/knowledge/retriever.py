@@ -11,23 +11,24 @@ Key design choices:
 * ``BAAI/bge-small-en-v1.5`` (384-dim, ~67 MB ONNX) as the default encoder.
   All vectors are L2-normalized inside the embedder, so cosine similarity
   collapses to a plain dot product here.
-* No self-exclusion by default — the user explicitly chose the upper-bound
-  setting where the retriever is allowed to surface the *current* challenge
-  itself.  That makes the retriever effectively an "oracle hint provider"
-  when running on the same split it indexes.  Pass non-empty
-  ``exclude_challenge_ids`` to opt back into self-exclusion.
+* No challenge-id exclusion by default.  Assisted runs may surface a
+  challenge-identical method hint so the benchmark can isolate execution
+  ability from retrieval quality.  Pass non-empty ``exclude_challenge_ids``
+  for answer-excluded retrieval checks.
 * Category is a soft pre-filter: when the current challenge category matches
   at least one corpus entry, restrict ranking to that subset.  Otherwise
   search the full corpus so an unusual category label still surfaces
   useful hits.
 * :func:`get_retriever` is fail-soft: if the dataset isn't downloaded,
   ``fastembed`` isn't installed, or ``AUTOPENTEST_RAG_DISABLED=1`` is set,
-  it returns ``None`` and the caller skips augmentation.
+  it returns ``None`` and the caller skips augmentation. Invalid RAG policy
+  names fail fast so strict/oracle experiments cannot be silently mixed.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from typing import Iterable
 
 import numpy as np
 
+from killchain_docker.logging_utils import get_logger
 from killchain_docker.knowledge.corpus import KnowledgeEntry, load_corpus
 from killchain_docker.knowledge.embedder import (
     CachedEmbeddingMatrix,
@@ -43,6 +45,97 @@ from killchain_docker.knowledge.embedder import (
     EmbeddingUnavailable,
     build_default_embedder,
 )
+from killchain_docker.state.constants import validatable_flag_candidate
+
+
+LOGGER = get_logger(__name__)
+RAG_MODE_ENV = "AUTOPENTEST_RAG_MODE"
+RAG_MODE_ORACLE = "oracle"
+RAG_MODE_STRICT = "strict"
+RAG_MODE_DISABLED = "disabled"
+RAG_MODES = frozenset({RAG_MODE_ORACLE, RAG_MODE_STRICT, RAG_MODE_DISABLED})
+_FLAG_LITERAL_RE = re.compile(r"\b[A-Za-z0-9_]{2,32}\{[^{}\n]{1,160}\}")
+_BARE_FLAG_LITERAL_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9_\-.]{11,199}\b")
+_BARE_FLAG_CONTEXT_RE = re.compile(
+    r"(?:flag|answer|secret|submit|final(?:\s+plaintext)?|plaintext)\s*"
+    r"(?:is|:|=|->|-)?\s*$",
+    re.IGNORECASE,
+)
+_FILE_ANSWER_WORDS = frozenset({"answer", "secret", "password", "passphrase"})
+
+
+def event_key(year: str, event: str) -> str:
+    """Stable key for comparing corpus events across runtime metadata."""
+
+    year_text = str(year or "").strip()
+    event_text = str(event or "").strip()
+    if not year_text or not event_text:
+        return ""
+    normalized_event = re.sub(r"\s+", "-", event_text.lower())
+    return f"{year_text}:{normalized_event}"
+
+
+def redact_flag_literals(text: str, *, file_path: bool = False) -> str:
+    """Remove literal flag values from retrieved writeups.
+
+    RAG should transfer methods and evidence expectations, not memorize or
+    leak concrete benchmark answers.
+    """
+
+    redacted = _FLAG_LITERAL_RE.sub("[REDACTED_FLAG]", text)
+
+    def replace_bare(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if token == "REDACTED_FLAG":
+            return token
+        if not any(separator in token for separator in "_.-"):
+            return token
+        candidate = token
+        suffix = ""
+        if not validatable_flag_candidate(candidate):
+            stem, dot, ext = token.rpartition(".")
+            if not dot or not validatable_flag_candidate(stem):
+                return token
+            candidate = stem
+            suffix = f".{ext}"
+        if not _bare_flag_literal_context(text, match.start(), candidate):
+            if not file_path or not _bare_file_literal_context(candidate):
+                return token
+        return f"[REDACTED_FLAG]{suffix}"
+
+    return _BARE_FLAG_LITERAL_RE.sub(replace_bare, redacted)
+
+
+def _bare_file_literal_context(token: str) -> bool:
+    if _high_uppercase_ratio(token):
+        return True
+    parts = {
+        part
+        for part in re.split(r"[_.-]+", token.lower())
+        if part
+    }
+    return bool(parts & _FILE_ANSWER_WORDS)
+
+
+def _high_uppercase_ratio(token: str) -> bool:
+    letters = [ch for ch in token if ch.isalpha()]
+    if not letters:
+        return False
+    uppercase = sum(1 for ch in letters if ch.isupper())
+    return uppercase / len(letters) >= 0.6
+
+
+def _bare_flag_literal_context(text: str, token_start: int, token: str) -> bool:
+    prefix = text[max(0, token_start - 80):token_start]
+    if _high_uppercase_ratio(token):
+        return True
+    return bool(_BARE_FLAG_CONTEXT_RE.search(prefix))
+
+
+def redact_file_path_literals(path: str) -> str:
+    """Redact answer-like file names while preserving useful extensions."""
+
+    return redact_flag_literals(path, file_path=True)
 
 
 @dataclass(frozen=True)
@@ -58,6 +151,10 @@ class RetrievalHit:
     solution_sketch: str
     files: list[str]
     score: float
+
+    @property
+    def event_key(self) -> str:
+        return event_key(self.year, self.event)
 
     def to_prompt_dict(
         self,
@@ -76,9 +173,9 @@ class RetrievalHit:
             "category": self.category,
             "year": self.year,
             "event": self.event,
-            "description": self.description[:max_description_chars],
-            "files": self.files[:max_files],
-            "solution_sketch": self.solution_sketch[:max_solution_chars],
+            "description": redact_flag_literals(self.description)[:max_description_chars],
+            "files": [redact_file_path_literals(path) for path in self.files[:max_files]],
+            "solution_sketch": redact_flag_literals(self.solution_sketch)[:max_solution_chars],
             "score": round(float(self.score), 4),
         }
 
@@ -101,6 +198,11 @@ class KnowledgeRetriever:
     ) -> None:
         self.entries = list(entries)
         self.embedder = embedder
+        self._by_challenge_id = {
+            entry.challenge_id: entry
+            for entry in self.entries
+            if entry.challenge_id
+        }
         self._by_category: dict[str, list[int]] = {}
         for i, entry in enumerate(self.entries):
             self._by_category.setdefault(entry.category, []).append(i)
@@ -114,6 +216,25 @@ class KnowledgeRetriever:
     def __len__(self) -> int:
         return len(self.entries)
 
+    def hit_by_challenge_id(
+        self,
+        challenge_id: str,
+        *,
+        score: float = 1.0,
+        require_solution_sketch: bool = True,
+    ) -> RetrievalHit | None:
+        """Return a direct corpus hit for *challenge_id* when available."""
+
+        key = str(challenge_id or "").strip()
+        if not key:
+            return None
+        entry = self._by_challenge_id.get(key)
+        if entry is None:
+            return None
+        if require_solution_sketch and not entry.solution_sketch:
+            return None
+        return _entry_to_hit(entry, score)
+
     def retrieve(
         self,
         query: str,
@@ -121,7 +242,7 @@ class KnowledgeRetriever:
         category: str | None = None,
         top_k: int = 3,
         exclude_challenge_ids: Iterable[str] = (),
-        exclude_event_keys: Iterable[tuple[str, str]] = (),
+        exclude_event_keys: Iterable[tuple[str, str] | str] = (),
         require_solution_sketch: bool = True,
     ) -> list[RetrievalHit]:
         """Return up to *top_k* highest-scored entries matching the query.
@@ -132,10 +253,10 @@ class KnowledgeRetriever:
         category labels (e.g. ``stego``, ``ppc``) from silently producing
         empty results.
 
-        ``exclude_challenge_ids`` and ``exclude_event_keys`` (sets of
-        ``(year, event)`` tuples) are applied AFTER ranking, so callers can
-        still get hits when the only category match would have been the
-        current challenge itself.
+        ``exclude_challenge_ids`` and ``exclude_event_keys`` (stable event
+        key strings or ``(year, event)`` tuples) are applied AFTER ranking, so
+        callers can still get hits when the only category match would have
+        been the current challenge itself.
 
         ``require_solution_sketch`` filters out entries without a
         ``## Solution`` block — those are typically infrastructure or
@@ -169,11 +290,8 @@ class KnowledgeRetriever:
         order = np.argsort(-scores)
 
         excluded_ids = {str(c).strip() for c in exclude_challenge_ids if c}
-        excluded_events = {
-            (str(year).strip(), str(event).strip())
-            for year, event in exclude_event_keys
-            if year or event
-        }
+        excluded_events = {_coerce_event_key(item) for item in exclude_event_keys}
+        excluded_events.discard("")
 
         hits: list[RetrievalHit] = []
         for rank in order:
@@ -181,26 +299,34 @@ class KnowledgeRetriever:
             entry = self.entries[idx]
             if entry.challenge_id in excluded_ids:
                 continue
-            if (entry.year, entry.event) in excluded_events:
+            if event_key(entry.year, entry.event) in excluded_events:
                 continue
             if require_solution_sketch and not entry.solution_sketch:
                 continue
-            hits.append(
-                RetrievalHit(
-                    challenge_id=entry.challenge_id,
-                    name=entry.name,
-                    category=entry.category,
-                    year=entry.year,
-                    event=entry.event,
-                    description=entry.description,
-                    solution_sketch=entry.solution_sketch,
-                    files=list(entry.files),
-                    score=float(scores[int(rank)]),
-                )
-            )
+            hits.append(_entry_to_hit(entry, float(scores[int(rank)])))
             if len(hits) >= top_k:
                 break
         return hits
+
+
+def _entry_to_hit(entry: KnowledgeEntry, score: float) -> RetrievalHit:
+    return RetrievalHit(
+        challenge_id=entry.challenge_id,
+        name=entry.name,
+        category=entry.category,
+        year=entry.year,
+        event=entry.event,
+        description=entry.description,
+        solution_sketch=entry.solution_sketch,
+        files=list(entry.files),
+        score=float(score),
+    )
+
+
+def _coerce_event_key(value: tuple[str, str] | list[str] | str) -> str:
+    if isinstance(value, (tuple, list)) and len(value) >= 2:
+        return event_key(value[0], value[1])
+    return str(value or "").strip().lower()
 
 
 # ----------------------------------------------------------------------
@@ -225,6 +351,28 @@ def _env_flag(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def rag_mode(override: str | None = None) -> str:
+    """Return the active RAG policy mode.
+
+    ``oracle`` is the first-round execution benchmark mode: the full
+    configured corpus is available as supplemental technical context.
+    ``strict`` excludes same challenge and same event hits for decontaminated
+    runs. ``disabled`` turns augmentation off entirely.
+    """
+
+    raw = (override if override is not None else os.getenv(RAG_MODE_ENV) or "").strip().lower()
+    if raw in RAG_MODES:
+        return raw
+    if raw:
+        choices = ", ".join(sorted(RAG_MODES))
+        raise ValueError(f"unknown RAG mode {raw!r}; expected one of: {choices}")
+    if _env_flag("AUTOPENTEST_RAG_DISABLED"):
+        return RAG_MODE_DISABLED
+    if _env_flag("AUTOPENTEST_RAG_STRICT_EXCLUDE"):
+        return RAG_MODE_STRICT
+    return RAG_MODE_ORACLE
+
+
 def default_top_k() -> int:
     raw = (os.getenv("AUTOPENTEST_RAG_TOP_K") or "").strip()
     if not raw:
@@ -239,11 +387,82 @@ def default_top_k() -> int:
 def strict_event_exclusion_enabled() -> bool:
     """Honor ``AUTOPENTEST_RAG_STRICT_EXCLUDE`` for callers that want it.
 
-    Off by default per the user's "no self-exclusion" choice.  Callers that
-    need the conservative behaviour can either flip the env var or pass
-    ``exclude_event_keys`` explicitly.
+    Callers that need answer-excluded retrieval can either select strict mode
+    or pass ``exclude_event_keys`` explicitly.
     """
-    return _env_flag("AUTOPENTEST_RAG_STRICT_EXCLUDE")
+    return rag_mode() == RAG_MODE_STRICT
+
+
+def oracle_context_status(
+    challenge_id: str,
+    *,
+    dataset_root: str | None = None,
+) -> dict[str, object]:
+    """Return whether oracle mode has actionable same-challenge context.
+
+    This reads the corpus metadata directly instead of initializing the
+    embedding backend. It is used as a cheap execution-benchmark preflight:
+    oracle runs should only measure execution quality when a concrete
+    solution sketch is actually available.
+    """
+
+    key = str(challenge_id or "").strip()
+    payload: dict[str, object] = {
+        "mode": RAG_MODE_ORACLE,
+        "enabled": False,
+        "status": "unavailable",
+        "policy": "supplemental_context",
+        "hint_count": 0,
+    }
+    if not key:
+        payload["status"] = "empty_query"
+        return payload
+
+    paths = _resolve_dataset_paths(dataset_root)
+    if paths is None:
+        return payload
+
+    root, index_path = paths
+    try:
+        entries = load_corpus(root, index_path)
+    except Exception:
+        LOGGER.exception("RAG oracle preflight failed", extra={"dataset_root": str(root)})
+        payload["status"] = "error"
+        return payload
+
+    payload["enabled"] = True
+    for entry in entries:
+        if entry.challenge_id != key:
+            continue
+        if entry.solution_sketch.strip():
+            payload["status"] = "hit"
+            payload["hint_count"] = 1
+            return payload
+        payload["status"] = "metadata_only"
+        return payload
+
+    payload["status"] = "miss"
+    return payload
+
+
+def actionable_oracle_challenge_ids(*, dataset_root: str | None = None) -> set[str]:
+    """Return challenge ids with a non-empty oracle solution sketch."""
+
+    paths = _resolve_dataset_paths(dataset_root)
+    if paths is None:
+        return set()
+
+    root, index_path = paths
+    try:
+        entries = load_corpus(root, index_path)
+    except Exception:
+        LOGGER.exception("RAG oracle corpus scan failed", extra={"dataset_root": str(root)})
+        return set()
+    return {
+        entry.challenge_id
+        for entry in entries
+        if entry.challenge_id and entry.solution_sketch.strip()
+    }
 
 
 def _resolve_dataset_paths(
@@ -272,10 +491,20 @@ def _resolve_dataset_paths(
             try:
                 from nyuctf.dataset import CTFDataset
             except Exception:
+                LOGGER.debug(
+                    "RAG dataset auto-discovery unavailable",
+                    exc_info=True,
+                    extra={"dataset_root_env": bool(env_root)},
+                )
                 return None
             try:
                 ds = CTFDataset(split="development")
             except Exception:
+                LOGGER.debug(
+                    "RAG dataset auto-discovery failed",
+                    exc_info=True,
+                    extra={"split": "development"},
+                )
                 return None
             root = Path(ds.basedir)
 
@@ -304,6 +533,7 @@ def reset_retriever_cache() -> None:
 def get_retriever(
     *,
     dataset_root: str | None = None,
+    mode: str | None = None,
 ) -> KnowledgeRetriever | None:
     """Return the process-wide retriever, building it on first call.
 
@@ -323,7 +553,8 @@ def get_retriever(
     """
     global _RETRIEVER, _RETRIEVER_KEY, _LOAD_FAILED_PERMANENTLY, _LOAD_FAILED_AT
 
-    if _env_flag("AUTOPENTEST_RAG_DISABLED"):
+    resolved_mode = rag_mode(mode)
+    if resolved_mode == RAG_MODE_DISABLED:
         return None
     if _LOAD_FAILED_PERMANENTLY:
         return None
@@ -338,6 +569,7 @@ def get_retriever(
         # no nyuctf CTFDataset, or root not a directory).  A retry won't
         # help until the operator fixes the install.
         _LOAD_FAILED_PERMANENTLY = True
+        LOGGER.warning("RAG disabled because dataset paths are unavailable")
         return None
     root, idx = paths
 
@@ -351,18 +583,37 @@ def get_retriever(
             entries = load_corpus(root, idx)
             if not entries:
                 _LOAD_FAILED_PERMANENTLY = True
+                LOGGER.warning("RAG disabled because corpus is empty", extra={"dataset_root": str(root)})
                 return None
             embedder = build_default_embedder()
+            _ = embedder.dimension
             _RETRIEVER = KnowledgeRetriever(entries, embedder)
             _RETRIEVER_KEY = key
+            LOGGER.info(
+                "RAG retriever initialized",
+                extra={"dataset_root": str(root), "entries": len(entries), "rag_mode": resolved_mode},
+            )
             return _RETRIEVER
         except EmbeddingUnavailable:
             # Embedding library missing — permanent until pip install.
             _LOAD_FAILED_PERMANENTLY = True
+            LOGGER.warning(
+                "RAG disabled because embedding backend is unavailable",
+                exc_info=True,
+                extra={
+                    "dataset_root": str(root),
+                    "rag_mode": resolved_mode,
+                    "model_id": model_id,
+                },
+            )
             return None
         except Exception:
             # ONNX init, model download race, transient corrupted cache, …
             # Latch with a timestamp so we don't hammer on every cycle, but
             # allow recovery without a restart.
             _LOAD_FAILED_AT = time.monotonic()
+            LOGGER.exception(
+                "RAG retriever initialization failed",
+                extra={"dataset_root": str(root), "rag_mode": resolved_mode},
+            )
             return None

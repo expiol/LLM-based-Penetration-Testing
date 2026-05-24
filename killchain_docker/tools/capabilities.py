@@ -28,6 +28,8 @@ class ToolCapability(StrEnum):
     SQLMAP = "sqlmap"
 
     # Binary / file analysis
+    ARTIFACT_TRIAGE = "artifact.triage"
+    DISK_EXTRACT = "disk.extract"
     FILE_CMD = "file_cmd"
     STRINGS_CMD = "strings_cmd"
     BINWALK = "binwalk"
@@ -40,6 +42,9 @@ class ToolCapability(StrEnum):
 
     # Forensics / stego
     TSHARK = "tshark"
+    OFFICE_INSPECT = "office.inspect"
+    MEDIA_SCAN = "media.scan"
+    PNG_INSPECT = "png.inspect"
     EXIFTOOL = "exiftool"
     STEGHIDE = "steghide"
     FOREMOST = "foremost"
@@ -69,6 +74,27 @@ class ToolSpec:
 DEFAULT_TOOL_SPECS: dict[ToolCapability, ToolSpec] = {
     ToolCapability.SHELL_EXEC: ToolSpec(ToolCapability.SHELL_EXEC, "shell_exec"),
     ToolCapability.SCRIPT_EXEC: ToolSpec(ToolCapability.SCRIPT_EXEC, "script_exec"),
+    ToolCapability.ARTIFACT_TRIAGE: ToolSpec(ToolCapability.ARTIFACT_TRIAGE, "artifact_triage"),
+    ToolCapability.DISK_EXTRACT: ToolSpec(
+        ToolCapability.DISK_EXTRACT,
+        "disk_extract",
+        default_timeout_s=180,
+    ),
+    ToolCapability.OFFICE_INSPECT: ToolSpec(
+        ToolCapability.OFFICE_INSPECT,
+        "office_inspect",
+        default_timeout_s=120,
+    ),
+    ToolCapability.MEDIA_SCAN: ToolSpec(
+        ToolCapability.MEDIA_SCAN,
+        "media_scan",
+        default_timeout_s=120,
+    ),
+    ToolCapability.PNG_INSPECT: ToolSpec(
+        ToolCapability.PNG_INSPECT,
+        "png_inspect",
+        default_timeout_s=120,
+    ),
 }
 for _cap in ToolCapability:
     if _cap not in DEFAULT_TOOL_SPECS:

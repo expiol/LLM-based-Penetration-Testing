@@ -3,7 +3,10 @@
 import json
 import logging
 import random
+import signal
+import threading
 import time
+from contextlib import contextmanager
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
@@ -101,23 +104,46 @@ class TokenLedger:
     """Accumulates token usage across all LLM calls in one session."""
 
     def __init__(self) -> None:
-        self.prompt_tokens: int = 0
-        self.completion_tokens: int = 0
-        self.total_tokens: int = 0
-        self.llm_calls: int = 0
+        self._lock = threading.Lock()
+        self._prompt_tokens: int = 0
+        self._completion_tokens: int = 0
+        self._total_tokens: int = 0
+        self._llm_calls: int = 0
 
-    def record(self, prompt: int, completion: int) -> None:
-        self.prompt_tokens += prompt
-        self.completion_tokens += completion
-        self.total_tokens += prompt + completion
-        self.llm_calls += 1
+    @property
+    def prompt_tokens(self) -> int:
+        return self.to_dict()["prompt_tokens"]
+
+    @property
+    def completion_tokens(self) -> int:
+        return self.to_dict()["completion_tokens"]
+
+    @property
+    def total_tokens(self) -> int:
+        return self.to_dict()["total_tokens"]
+
+    @property
+    def llm_calls(self) -> int:
+        return self.to_dict()["llm_calls"]
+
+    def record(self, prompt: int, completion: int) -> dict[str, int]:
+        with self._lock:
+            self._prompt_tokens += prompt
+            self._completion_tokens += completion
+            self._total_tokens += prompt + completion
+            self._llm_calls += 1
+            return self._snapshot_unlocked()
 
     def to_dict(self) -> dict[str, int]:
+        with self._lock:
+            return self._snapshot_unlocked()
+
+    def _snapshot_unlocked(self) -> dict[str, int]:
         return {
-            "llm_calls": self.llm_calls,
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.total_tokens,
+            "llm_calls": self._llm_calls,
+            "prompt_tokens": self._prompt_tokens,
+            "completion_tokens": self._completion_tokens,
+            "total_tokens": self._total_tokens,
         }
 
 
@@ -181,6 +207,19 @@ def _load_runtime_config_payload(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _config_int(payload: dict[str, Any], key: str, default: int | None) -> int | None:
+    value = payload.get(key, default)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise LLMClientError(
+            f"LLM config field {key!r} must be an integer.",
+            kind=LLMFailureKind.CONFIG,
+        ) from exc
+
+
 class LLMSettings(BaseModel):
     """Gateway settings loaded from configs/llm_gateway.json."""
 
@@ -193,6 +232,7 @@ class LLMSettings(BaseModel):
     schema_models: dict[str, str] = Field(default_factory=dict)
     timeout_s: int = Field(default=60, ge=1)
     max_retries: int = Field(default=4, ge=0)
+    total_deadline_s: int | None = Field(default=None, ge=1)
     max_completion_tokens: int = Field(default=16384, ge=1)
 
     @classmethod
@@ -208,16 +248,23 @@ class LLMSettings(BaseModel):
         _validate_model_names(default_model.strip(), schema_models)
 
         resolved_api_key = str(payload.get("api_key") or "").strip()
-        return cls(
-            provider=str(payload.get("provider") or "openai_compatible").strip().lower(),
-            base_url=payload.get("base_url"),
-            api_key=(resolved_api_key or None),
-            model=default_model.strip(),
-            schema_models=schema_models,
-            timeout_s=int(payload.get("timeout_s", 60)),
-            max_retries=int(payload.get("max_retries", 4)),
-            max_completion_tokens=int(payload.get("max_completion_tokens", 16384)),
-        )
+        try:
+            return cls(
+                provider=str(payload.get("provider") or "openai_compatible").strip().lower(),
+                base_url=payload.get("base_url"),
+                api_key=(resolved_api_key or None),
+                model=default_model.strip(),
+                schema_models=schema_models,
+                timeout_s=_config_int(payload, "timeout_s", 60),
+                max_retries=_config_int(payload, "max_retries", 4),
+                total_deadline_s=_config_int(payload, "total_deadline_s", None),
+                max_completion_tokens=_config_int(payload, "max_completion_tokens", 16384),
+            )
+        except ValidationError as exc:
+            raise LLMClientError(
+                f"LLM config validation failed: {exc}",
+                kind=LLMFailureKind.CONFIG,
+            ) from exc
 
 
 class _LLMPreflightResult(BaseModel):
@@ -300,6 +347,7 @@ class GatewayLLMClient:
         base_url: str | None = None,
         timeout_s: int = 60,
         max_retries: int = 4,
+        total_deadline_s: int | None = None,
         max_completion_tokens: int = 16384,
     ) -> None:
         self.provider = provider.strip().lower()
@@ -309,6 +357,7 @@ class GatewayLLMClient:
         self.base_url = (base_url or _PROVIDER_DEFAULT_BASE_URL.get(self.provider) or "").rstrip("/")
         self.timeout_s = timeout_s
         self.max_retries = max_retries
+        self.total_deadline_s = total_deadline_s
         self.max_completion_tokens = max_completion_tokens
         _validate_model_names(self.default_model, self.schema_models)
         self.token_ledger = TokenLedger()
@@ -382,6 +431,11 @@ class GatewayLLMClient:
             payload = loads_lenient_json_object(content)
             return schema.model_validate(payload), completion
         except Exception:
+            log.debug(
+                "structured output recovery from exception content failed",
+                exc_info=True,
+                extra={"schema": schema.__name__, "content_length": len(content)},
+            )
             return None
 
     def _select_model(self, schema: type[BaseModel]) -> str:
@@ -437,12 +491,20 @@ class GatewayLLMClient:
     def _is_transient(self, exc: Exception) -> bool:
         return self._classify_failure(exc).is_transient
 
-    def _record_usage(self, completion: Any) -> None:
+    def _record_usage(self, completion: Any, *, schema_name: str, model: str) -> None:
         usage = getattr(completion, "usage", None)
         if usage is None and isinstance(completion, dict):
             usage = completion.get("usage")
         if usage is None:
-            self.token_ledger.record(0, 0)
+            token_usage = self.token_ledger.record(0, 0)
+            self._log_usage(
+                schema_name=schema_name,
+                model=model,
+                llm_call=token_usage["llm_calls"],
+                prompt_tokens=0,
+                completion_tokens=0,
+                usage_available=False,
+            )
             return
 
         def _usage_get(name: str) -> int:
@@ -452,15 +514,69 @@ class GatewayLLMClient:
 
         prompt_tokens = _usage_get("prompt_tokens")
         completion_tokens = _usage_get("completion_tokens")
-        self.token_ledger.record(prompt_tokens, completion_tokens)
-        log.info(
-            "LLM call #%d model=%s prompt=%d completion=%d total=%d",
-            self.token_ledger.llm_calls,
-            getattr(completion, "model", "unknown"),
-            prompt_tokens,
-            completion_tokens,
-            prompt_tokens + completion_tokens,
+        token_usage = self.token_ledger.record(prompt_tokens, completion_tokens)
+        completion_model = getattr(completion, "model", None)
+        self._log_usage(
+            schema_name=schema_name,
+            model=str(completion_model or model or "unknown"),
+            llm_call=token_usage["llm_calls"],
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            usage_available=True,
         )
+
+    def _log_usage(
+        self,
+        *,
+        schema_name: str,
+        model: str,
+        llm_call: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+        usage_available: bool,
+    ) -> None:
+        total_tokens = prompt_tokens + completion_tokens
+        log.info(
+            "LLM call completed",
+            extra={
+                "schema": schema_name,
+                "model": model,
+                "llm_call": llm_call,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "usage_available": usage_available,
+            },
+        )
+
+    @contextmanager
+    def _hard_request_deadline(self, timeout_s: float):
+        if (
+            timeout_s <= 0
+            or not hasattr(signal, "SIGALRM")
+            or threading.current_thread() is not threading.main_thread()
+        ):
+            yield
+            return
+
+        prior_handler = signal.getsignal(signal.SIGALRM)
+        prior_timer = signal.getitimer(signal.ITIMER_REAL)
+        prior_delay, _prior_interval = prior_timer
+        if prior_delay > 0:
+            yield
+            return
+        effective_timeout = float(timeout_s)
+
+        def _raise_timeout(_signum: int, _frame: Any) -> None:
+            raise TimeoutError(f"LLM request exceeded {effective_timeout:.1f}s hard deadline")
+
+        signal.signal(signal.SIGALRM, _raise_timeout)
+        signal.setitimer(signal.ITIMER_REAL, effective_timeout)
+        try:
+            yield
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, prior_handler)
 
     def _create_structured(
         self,
@@ -469,6 +585,7 @@ class GatewayLLMClient:
         schema: type[ModelT],
         model: str,
         temperature: float,
+        request_timeout_s: float | None = None,
     ) -> tuple[ModelT, Any | None]:
         endpoint = self._client.chat.completions
         kwargs: dict[str, Any] = {
@@ -478,6 +595,8 @@ class GatewayLLMClient:
             "temperature": temperature,
             "max_tokens": self.max_completion_tokens,
         }
+        if request_timeout_s is not None:
+            kwargs["timeout"] = request_timeout_s
         if hasattr(endpoint, "create_with_completion"):
             try:
                 parsed, completion = endpoint.create_with_completion(**kwargs)
@@ -496,6 +615,12 @@ class GatewayLLMClient:
             raise
         return parsed, None
 
+    def _call_deadline_s(self) -> float:
+        retry_budget = float(self.timeout_s * (1 + self.max_retries))
+        if self.total_deadline_s is None:
+            return retry_budget
+        return min(float(self.total_deadline_s), retry_budget)
+
     def generate_json(
         self,
         *,
@@ -511,18 +636,29 @@ class GatewayLLMClient:
         ]
         # Total deadline across all retry attempts so a single generate_json
         # call never blocks a worker indefinitely.
-        deadline = time.monotonic() + self.timeout_s * (1 + self.max_retries)
+        deadline = time.monotonic() + self._call_deadline_s()
         last_exc: Exception | None = None
         attempts_used = 0
         for attempt in range(1 + self.max_retries):
-            if time.monotonic() >= deadline:
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
                 break
             try:
                 attempts_used += 1
-                parsed, completion = self._create_structured(
-                    messages=messages, schema=schema, model=selected_model, temperature=temperature
+                request_timeout_s = max(0.1, min(float(self.timeout_s), remaining_s))
+                with self._hard_request_deadline(request_timeout_s):
+                    parsed, completion = self._create_structured(
+                        messages=messages,
+                        schema=schema,
+                        model=selected_model,
+                        temperature=temperature,
+                        request_timeout_s=request_timeout_s,
+                    )
+                self._record_usage(
+                    completion,
+                    schema_name=schema.__name__,
+                    model=selected_model,
                 )
-                self._record_usage(completion)
                 return parsed
             except Exception as exc:
                 last_exc = exc
@@ -535,17 +671,34 @@ class GatewayLLMClient:
                 if delay >= deadline - time.monotonic():
                     break
                 log.warning(
-                    "Gateway transient error (attempt %d/%d), retrying in %.1fs: %s",
-                    attempt + 1,
-                    1 + self.max_retries,
-                    delay,
-                    exc,
+                    "gateway transient error; retrying",
+                    exc_info=True,
+                    extra={
+                        "attempt": attempt + 1,
+                        "attempts": 1 + self.max_retries,
+                        "retry_delay_s": round(delay, 3),
+                        "schema": schema.__name__,
+                        "model": selected_model,
+                        "error_type": type(exc).__name__,
+                    },
                 )
                 time.sleep(delay)
 
         if last_exc is None:
             last_exc = TimeoutError("generate_json exceeded deadline")
         kind = self._classify_failure(last_exc)
+        log.error(
+            "gateway structured output failed",
+            exc_info=(type(last_exc), last_exc, last_exc.__traceback__),
+            extra={
+                "schema": schema.__name__,
+                "model": selected_model,
+                "failure_kind": str(kind),
+                "error_type": type(last_exc).__name__,
+                "attempts": attempts_used,
+                "max_retries": self.max_retries,
+            },
+        )
         raise LLMClientError(
             f"Gateway structured output failed for {schema.__name__} (model={selected_model}): {last_exc}",
             kind=kind,
@@ -589,6 +742,7 @@ def build_llm_client_from_env(*, preflight: bool = True) -> LLMClient:
         base_url=settings.base_url,
         timeout_s=settings.timeout_s,
         max_retries=settings.max_retries,
+        total_deadline_s=settings.total_deadline_s,
         max_completion_tokens=settings.max_completion_tokens,
     )
     if preflight:

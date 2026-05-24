@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from killchain_docker.controller import RunConfig, run_assessment
+from killchain_docker.logging_utils import (
+    configure_logging,
+    write_json_file,
+    write_json_stdout,
+    write_jsonl_file,
+)
 from killchain_docker.llm import StaticLLMClient
 from killchain_docker.score import (
     build_validation_payload,
@@ -26,14 +32,11 @@ from killchain_docker.tools.plugins.script import build_output as script_output_
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json_file(path, payload)
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = "".join(json.dumps(row, ensure_ascii=True) + "\n" for row in rows)
-    path.write_text(content, encoding="utf-8")
+    write_jsonl_file(path, rows)
 
 
 class SimulatedShellPlugin:
@@ -267,7 +270,11 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
     events_path = Path(artifacts.events_path)
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    events = events_path.read_text(encoding="utf-8")
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
     if not summary.get("solved"):
         raise AssertionError("selftest runtime did not reach solved state")
@@ -275,7 +282,7 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
         raise AssertionError("selftest runtime did not preserve validated flag in summary")
     if artifacts.status != "solved":
         raise AssertionError(f"unexpected selftest run status: {artifacts.status}")
-    if "solved" not in events:
+    if not any(event.get("event_type") == "solved" for event in events):
         raise AssertionError("events log does not show solved state")
 
     score_root = root / "score"
@@ -362,10 +369,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="selftest_output",
         help="Directory where self-test artifacts are written",
     )
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
+    configure_logging(debug=args.debug, quiet=args.quiet)
 
     payload = run_selftest(args.output_root)
-    print(json.dumps(payload, indent=2, ensure_ascii=True))
+    write_json_stdout(payload)
     return 0
 
 

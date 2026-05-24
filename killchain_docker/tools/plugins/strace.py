@@ -10,6 +10,7 @@ Supports:
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
 
 from killchain_docker.state import Artifact
@@ -27,6 +28,7 @@ from killchain_docker.tools.plugins._base import (
     _run,
     _truncate,
 )
+from killchain_docker.tools.plugins.workspace import protected_shell_command
 
 # Parse strace output: syscall(args) = return_value
 _SYSCALL_RE = re.compile(
@@ -62,26 +64,26 @@ class StracePlugin:
         args = str(request.metadata.get("args") or "")
         filter_expr = str(request.metadata.get("filter") or "")
         input_data = str(request.metadata.get("input_data") or "")
+        files_root = request.metadata.get("files_root")
 
         # Build strace command
         cmd_parts = ["strace", "-f", "-s", "200"]
         if filter_expr:
-            cmd_parts.extend(["-e", filter_expr])
-        cmd_parts.append(path)
+            cmd_parts.extend(["-e", shlex.quote(filter_expr)])
+        cmd_parts.append(shlex.quote(path))
         if args:
             cmd_parts.append(args)
 
         cmd = " ".join(cmd_parts)
         # strace outputs to stderr; merge to stdout for parsing
         if input_data:
-            escaped_input = input_data.replace("'", "'\\''")
-            full_cmd = f"echo '{escaped_input}' | {cmd} 2>&1"
+            full_cmd = f"printf %s {shlex.quote(input_data)} | {cmd} 2>&1"
         else:
             full_cmd = f"{cmd} 2>&1"
 
         return _run(
             self.name,
-            [*self.argv_prefix, "bash", "-c", full_cmd],
+            [*self.argv_prefix, "bash", "-c", protected_shell_command(full_cmd, files_root)],
             request.timeout_s,
         )
 

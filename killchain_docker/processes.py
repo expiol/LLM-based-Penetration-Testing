@@ -65,7 +65,7 @@ def _terminate_process_group(
 def run_bounded_process(
     argv: list[str],
     *,
-    timeout_s: int,
+    timeout_s: int | None,
     cwd: str | None = None,
     input_text: str | None = None,
     max_output_bytes: int = DEFAULT_MAX_CAPTURE_BYTES,
@@ -84,10 +84,14 @@ def run_bounded_process(
 
         timed_out = False
         try:
-            proc.communicate(input=input_bytes, timeout=timeout_s)
+            timeout = timeout_s if timeout_s and timeout_s > 0 else None
+            proc.communicate(input=input_bytes, timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
             _terminate_process_group(proc)
+        except BaseException:
+            _terminate_process_group(proc)
+            raise
 
         stdout = _decode_limited_output(stdout_file, max_bytes=max_output_bytes)
         stderr = _decode_limited_output(stderr_file, max_bytes=max_output_bytes)

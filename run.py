@@ -1,117 +1,144 @@
-"""Thin CLI entrypoint — delegates to killchain_docker.batch for implementation."""
+"""Configured entrypoint for NYUCTF batch runs.
+
+Run with no arguments to use ``RUN_CONFIG`` below, or pass CLI flags to
+override it for benchmark automation.
+"""
 
 from __future__ import annotations
 
 import argparse
 import getpass
-import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Sequence
 
-# Backwards-compatible re-exports; implementation lives in killchain_docker.batch.
 from killchain_docker.batch import (
-    load_challenge,
     run_all_challenges,
-    run_single_challenge,
     run_single_challenge_replicas,
 )
-from killchain_docker.batch.runner import (
-    _load_llm_experiment_config,
-    _run_single_challenge_inner,
-    _save_batch_progress,
-)
+from killchain_docker.logging_utils import configure_logging, get_logger
 
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║                    运行参数配置                                              ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
 
-CHALLENGE       = "__all__"
-DATASET         = None
-SPLIT           = "development"
-CATEGORY        = None
-CONTAINER_IMAGE = "ctfenv:latest"
-CONTAINER_NETWORK = "ctfnet"
-OBJECTIVE       = None
-SCOPE           = None
-MAX_CYCLES      = 25
-QUIET           = False
-DEBUG           = True
-SKIP_EXIST      = False
-LOGDIR          = None
-NAME            = "5.19_development_1"
-INDEX           = None
-OUTPUT_ROOT     = None
-PARALLEL_WORKERS = 5
-REPLICAS        = 1
+LOGGER = get_logger(__name__)
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 DEFAULT_LOGDIR = SCRIPT_DIR / "logs" / getpass.getuser()
 
 
-def _args_from_config() -> argparse.Namespace:
-    return argparse.Namespace(
-        challenge=CHALLENGE,
-        run_all=CHALLENGE == "__all__",
-        category=CATEGORY,
-        dataset=DATASET,
-        split=SPLIT,
-        container_image=CONTAINER_IMAGE,
-        container_network=CONTAINER_NETWORK,
-        objective=OBJECTIVE,
-        scope=SCOPE,
-        max_cycles=MAX_CYCLES,
-        quiet=QUIET,
-        debug=DEBUG,
-        skip_exist=SKIP_EXIST,
-        logdir=LOGDIR or str(DEFAULT_LOGDIR),
-        name=NAME,
-        index=INDEX,
-        output_root=OUTPUT_ROOT,
-        parallel_workers=PARALLEL_WORKERS,
-        replicas=REPLICAS,
-    )
+RUN_CONFIG = {
+    # Use "__all__" for all challenges, "__random__" for one random challenge,
+    # or a concrete challenge name for a single challenge.
+    "challenge": "__all__",
+    # Set to a list of names to run a fixed subset in order, for example:
+    # ["challenge-a", "challenge-b"]
+    "challenges": None,
+    "run_all": True,
+    "category": None,
+    "dataset": None,
+    "split": "development",
+    "container_image": "ctfenv:latest",
+    "container_network": "ctfnet",
+    "objective": None,
+    "scope": None,
+    "max_cycles": 25,
+    "auto_max_cycles": False,
+    "quiet": False,
+    "debug": True,
+    "skip_exist": False,
+    "logdir": str(DEFAULT_LOGDIR),
+    "name": "5.19_development_1",
+    "index": None,
+    "output_root": None,
+    "parallel_workers": 5,
+    "replicas": 1,
+    "rag_mode": None,
+    "sample_size": None,
+    "sample_seed": None,
+    "sample_strategy": "random",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the structured LLM killchain on NYUCTF challenges",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Run NYUCTF benchmark challenges through the autopentest framework."
     )
-    parser.add_argument("--challenge", default=None)
-    parser.add_argument("--run-all", action="store_true")
+    parser.add_argument("--challenge", help="Challenge name, __all__, or __random__")
+    parser.add_argument("--challenges", nargs="+", help="Run a fixed challenge subset in order")
+    parser.add_argument("--run-all", action="store_true", default=None, help="Run all selected challenges")
     parser.add_argument("--category")
     parser.add_argument("--dataset")
-    parser.add_argument("-s", "--split", default="development", choices=["test", "development"])
-    parser.add_argument("-C", "--container-image", default="ctfenv:latest")
-    parser.add_argument("-N", "--container-network", default="ctfnet")
+    parser.add_argument("--split", choices=["test", "development"])
+    parser.add_argument("--container-image")
+    parser.add_argument("--container-network")
     parser.add_argument("--objective")
-    parser.add_argument("--scope", action="append", dest="scope")
-    parser.add_argument("--max-cycles", type=int, default=8)
-    parser.add_argument("-q", "--quiet", action="store_true")
-    parser.add_argument("-d", "--debug", action="store_true")
-    parser.add_argument("--skip-exist", "--skip-existing", dest="skip_exist", action="store_true")
-    parser.add_argument("-L", "--logdir", default=str(DEFAULT_LOGDIR))
-    parser.add_argument("-n", "--name")
-    parser.add_argument("-i", "--index")
+    parser.add_argument("--scope", action="append")
+    parser.add_argument("--max-cycles", type=int)
+    parser.add_argument("--auto-max-cycles", action="store_true", default=None)
+    parser.add_argument("--quiet", action="store_true", default=None)
+    parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--skip-exist", action="store_true", default=None)
+    parser.add_argument("--logdir")
+    parser.add_argument("--name")
+    parser.add_argument("--index", type=int)
     parser.add_argument("--output-root")
-    parser.add_argument("--parallel-workers", type=int, default=1)
-    parser.add_argument("--replicas", type=int, default=1)
+    parser.add_argument("--parallel-workers", type=int)
+    parser.add_argument("--replicas", type=int)
+    parser.add_argument("--rag-mode", choices=["oracle", "strict", "disabled"])
+    parser.add_argument("--sample-size", type=int)
+    parser.add_argument("--sample-seed", type=int)
+    parser.add_argument(
+        "--sample-strategy",
+        choices=["random", "category_round_robin"],
+    )
     return parser
 
 
-def main() -> int:
-    if len(sys.argv) > 1:
-        args = build_parser().parse_args()
+def _args_from_config(argv: Sequence[str] | None = None) -> SimpleNamespace:
+    config = dict(RUN_CONFIG)
+    namespace = build_parser().parse_args(argv)
+    overrides = {
+        key: value
+        for key, value in vars(namespace).items()
+        if value is not None
+    }
+    challenge_selection_overridden = any(
+        key in overrides for key in ("challenge", "challenges", "run_all")
+    )
+    config.update(overrides)
+    config["logdir"] = config.get("logdir") or str(DEFAULT_LOGDIR)
+    if challenge_selection_overridden:
+        explicit_run_all = bool(overrides.get("run_all", False))
+        config["run_all"] = bool(
+            explicit_run_all
+            or config.get("challenges")
+            or config.get("challenge") == "__all__"
+        )
     else:
-        args = _args_from_config()
+        config["run_all"] = bool(
+            config.get("run_all")
+            or config.get("challenges")
+            or config.get("challenge") == "__all__"
+        )
+    return SimpleNamespace(**config)
 
-    is_run_all = getattr(args, "run_all", False) or args.challenge == "__all__"
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _args_from_config(argv)
+
+    configure_logging(
+        debug=bool(getattr(args, "debug", False)),
+        quiet=bool(getattr(args, "quiet", False)),
+    )
+
+    is_subset = bool(getattr(args, "challenges", None))
+    is_run_all = is_subset or getattr(args, "run_all", False) or args.challenge == "__all__"
 
     if is_run_all:
         args.run_all = True
         return run_all_challenges(args)
 
     if not args.challenge:
-        print("Error: --challenge is required (or use --run-all)")
+        LOGGER.error("RUN_CONFIG['challenge'] is required, or set RUN_CONFIG['run_all'] to True")
         return 2
 
     return run_single_challenge_replicas(args)

@@ -7,7 +7,7 @@ import unittest
 
 from killchain_docker.llm import StaticLLMClient
 from killchain_docker.orchestrator.router import RouterAgent, WorkerDirectory
-from killchain_docker.state import RunState, TodoItem, TodoPhase, WorkerResult
+from killchain_docker.state import DispatchIntent, RunState, TodoItem, TodoPhase, WorkerResult
 from killchain_docker.workers.base import WorkerAgent
 
 
@@ -20,11 +20,15 @@ class _DirectoryWorker(WorkerAgent):
         *,
         routing_summary: str = "",
         required_context_keys: tuple[str, ...] = (),
+        allowed_capabilities: tuple[str, ...] = (),
+        supported_dispatch_profiles: tuple[str, ...] = (),
     ) -> None:
         super().__init__()
         self.name = name
         self.routing_summary = routing_summary
         self.required_context_keys = required_context_keys
+        self.allowed_capabilities = allowed_capabilities
+        self.supported_dispatch_profiles = supported_dispatch_profiles
 
     def run(self, task: TodoItem, state: RunState) -> WorkerResult:
         del state
@@ -43,7 +47,7 @@ class RouterAgentTests(unittest.TestCase):
         captured: dict[str, object] = {}
 
         def respond(system_prompt: str, user_prompt: str):
-            del system_prompt
+            captured["system_prompt"] = system_prompt
             snapshot = json.loads(user_prompt)
             captured.update(snapshot)
             return {
@@ -72,6 +76,11 @@ class RouterAgentTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.assignments[0].worker_name, "artifact-worker")
+        system_prompt = str(captured["system_prompt"])
+        self.assertNotIn("nmap", system_prompt)
+        self.assertNotIn("binwalk", system_prompt)
+        self.assertNotIn("curl headers", system_prompt)
+        self.assertNotIn("binary exploitation", system_prompt)
         catalog = captured["worker_catalog"]  # type: ignore[index]
         self.assertEqual(catalog[0]["routing_summary"], "Static file analysis.")
         self.assertEqual(catalog[0]["required_context_keys"], ["files_root"])
@@ -189,8 +198,8 @@ class RouterAgentTests(unittest.TestCase):
 
         self.assertEqual(decision.assignments[0].worker_name, "artifact-worker")
 
-    def test_llm_route_passes_through_without_override(self) -> None:
-        """LLM routing is trusted — no policy override of worker assignments."""
+    def test_structural_scope_route_precedes_llm_fallback(self) -> None:
+        """Grounded routing signals are handled before LLM fallback."""
         state = RunState(objective="Solve.", authorized_scope=[])
         scoped = state.queue_todo(TodoItem(goal="Map scope", phase=TodoPhase.RECON, priority=90))
         generic = state.queue_todo(TodoItem(goal="Review notes", phase=TodoPhase.RECON, priority=80))
@@ -225,7 +234,163 @@ class RouterAgentTests(unittest.TestCase):
 
         self.assertEqual(
             [(item.todo_id, item.worker_name) for item in decision.assignments],
-            [(scoped.todo_id, "artifact-worker"), (generic.todo_id, "artifact-worker")],
+            [(scoped.todo_id, "recon-worker"), (generic.todo_id, "artifact-worker")],
+        )
+
+    def test_capability_hint_routes_without_llm(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Inspect generated artifact.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "capability_hint": "artifact.triage",
+                    "artifact_path": "/home/ctfplayer/ctf_files/out.bin",
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker(
+                    "artifact-worker",
+                    allowed_capabilities=("artifact.triage",),
+                ),
+                _DirectoryWorker("recon-worker", allowed_capabilities=("artifact.triage",)),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "artifact-worker")],
+        )
+        self.assertIn("artifact.triage", decision.assignments[0].rationale)
+
+    def test_dispatch_profile_routes_without_llm(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Inspect generated image.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "dispatch_intent": {
+                        "profile": "image_inspection",
+                        "required_capability": "png.inspect",
+                    },
+                    "artifact_path": "/home/ctfplayer/ctf_files/out.png",
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker(
+                    "artifact-worker",
+                    allowed_capabilities=("png.inspect",),
+                    supported_dispatch_profiles=("image_inspection",),
+                ),
+                _DirectoryWorker(
+                    "recon-worker",
+                    allowed_capabilities=("png.inspect",),
+                    supported_dispatch_profiles=("scope_mapping",),
+                ),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "artifact-worker")],
+        )
+        self.assertIn("dispatch profile image_inspection", decision.assignments[0].rationale)
+
+    def test_required_capability_filters_profile_candidate(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Inspect generated image.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "dispatch_intent": {
+                        "profile": "image_inspection",
+                        "required_capability": "png.inspect",
+                    },
+                    "artifact_path": "/home/ctfplayer/ctf_files/out.png",
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker(
+                    "artifact-worker",
+                    allowed_capabilities=("artifact.triage",),
+                    supported_dispatch_profiles=("image_inspection",),
+                ),
+                _DirectoryWorker(
+                    "recon-worker",
+                    allowed_capabilities=("png.inspect",),
+                    supported_dispatch_profiles=("image_inspection",),
+                ),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "recon-worker")],
+        )
+
+    def test_malformed_dispatch_refs_are_normalized(self) -> None:
+        intent = DispatchIntent.from_context({
+            "dispatch_intent": {
+                "profile": "other",
+                "target_refs": "{'files': ['artifact.bin']}",
+            },
+            "path": "/home/ctfplayer/ctf_files/artifact.bin",
+        })
+
+        self.assertEqual(intent.profile, "open")
+        self.assertEqual(
+            intent.target_refs["path"],
+            "/home/ctfplayer/ctf_files/artifact.bin",
+        )
+
+    def test_unknown_required_capability_does_not_block_generic_file_route(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Inspect generated artifact.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "dispatch_intent": {
+                        "profile": "other",
+                        "required_capability": "forensics.steg",
+                    },
+                    "artifact_path": "/home/ctfplayer/ctf_files/out.bin",
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker("artifact-worker"),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "artifact-worker")],
         )
 
     def test_empty_llm_route_returns_no_valid_assignments(self) -> None:
@@ -345,6 +510,41 @@ class RouterAgentTests(unittest.TestCase):
         )
 
         self.assertEqual([(item.todo_id, item.worker_name) for item in decision.assignments], [(todo.todo_id, "flag-worker")])
+
+    def test_candidate_recovery_routes_to_artifact_worker(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Re-derive a corrected flag candidate from original evidence.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "family": "candidate-recovery",
+                    "dispatch_intent": {"profile": "candidate_recovery"},
+                    "files_root": "/home/ctfplayer/ctf_files",
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker(
+                    "artifact-worker",
+                    supported_dispatch_profiles=("candidate_recovery",),
+                ),
+                _DirectoryWorker(
+                    "flag-worker",
+                    supported_dispatch_profiles=("flag_validation",),
+                ),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "artifact-worker")],
+        )
 
     def test_short_results_are_returned_directly_without_llm_summary(self) -> None:
         state = RunState(objective="Solve.", authorized_scope=[])

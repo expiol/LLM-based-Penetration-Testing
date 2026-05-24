@@ -15,8 +15,12 @@ try:
 except ImportError:  # pragma: no cover - Windows compatibility
     fcntl = None
 
+from killchain_docker.logging_utils import get_logger
 from killchain_docker.processes import run_bounded_process
 from nyuctf.challenge import CTFChallenge
+
+
+LOGGER = get_logger(__name__)
 
 
 _CONTAINER_CONFLICT_RE = re.compile(
@@ -62,9 +66,15 @@ def compose_challenge_run_lock(challenge: CTFChallenge):
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print(f"  [compose-lock] waiting for Docker service slot: {challenge.canonical_name}")
+            LOGGER.info(
+                "waiting for Docker service slot",
+                extra={"challenge": challenge.canonical_name},
+            )
             fcntl.flock(handle, fcntl.LOCK_EX)
-            print(f"  [compose-lock] acquired Docker service slot: {challenge.canonical_name}")
+            LOGGER.info(
+                "acquired Docker service slot",
+                extra={"challenge": challenge.canonical_name},
+            )
         handle.seek(0)
         handle.truncate()
         handle.write(f"{os.getpid()} {challenge.canonical_name}\n")
@@ -81,13 +91,28 @@ def docker_compose_down(challenge: CTFChallenge) -> None:
     if compose is None:
         return
     try:
-        run_bounded_process(
+        result = run_bounded_process(
             ["docker", "compose", "-f", str(compose), "down", "--volumes", "--remove-orphans"],
             timeout_s=120,
             max_output_bytes=20_000,
         )
     except OSError:
+        LOGGER.debug(
+            "Docker compose cleanup could not start",
+            exc_info=True,
+            extra={"challenge": challenge.canonical_name, "compose_path": str(compose)},
+        )
         return
+    if result.exit_code != 0:
+        LOGGER.warning(
+            "Docker compose cleanup failed",
+            extra={
+                "challenge": challenge.canonical_name,
+                "compose_path": str(compose),
+                "exit_code": result.exit_code,
+                "stderr_tail": result.stderr[-600:],
+            },
+        )
 
 
 def start_challenge_with_retry(
@@ -110,12 +135,21 @@ def start_challenge_with_retry(
             stdout_text = _subprocess_stream_text(exc.stdout)
             combined = "\n".join(part for part in (stderr_text, stdout_text) if part)
             conflict = bool(_CONTAINER_CONFLICT_RE.search(combined))
-            print(
-                f"  [start-retry] attempt {attempt}/{attempts} failed: "
-                f"{'port/container conflict' if conflict else 'transient error'}; retrying..."
+            LOGGER.warning(
+                "challenge container start failed; retrying",
+                exc_info=True,
+                extra={
+                    "challenge": challenge.canonical_name,
+                    "attempt": attempt,
+                    "attempts": attempts,
+                    "reason": "port/container conflict" if conflict else "transient error",
+                },
             )
             if debug and combined:
-                print(combined[-600:])
+                LOGGER.debug(
+                    "challenge container start output tail",
+                    extra={"challenge": challenge.canonical_name, "output_tail": combined[-600:]},
+                )
             if conflict:
                 docker_compose_down(challenge)
             else:

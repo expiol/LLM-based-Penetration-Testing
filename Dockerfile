@@ -3,6 +3,11 @@ FROM --platform=linux/amd64 ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+RUN printf '%s\n' \
+    'Acquire::Retries "5";' \
+    'Acquire::http::Timeout "30";' \
+    > /etc/apt/apt.conf.d/80-retries
+
 RUN dpkg --add-architecture i386
 RUN apt-get update && apt-get install -y \
     sudo curl netcat \
@@ -10,7 +15,7 @@ RUN apt-get update && apt-get install -y \
     python3-dev python3-pip python3-venv \
     libssl-dev libffi-dev \
     libtbb2 libtbb-dev libjpeg-dev libpng-dev libtiff-dev \
-    bsdmainutils file \
+    bsdmainutils fdisk file \
     sagemath sqlmap nikto apktool nmap \
     libc6-i386 libc6-dev:i386 gcc-multilib \
     g++-multilib \
@@ -35,7 +40,13 @@ RUN python3 -m pip install --upgrade pip && python3 -m pip install pwntools gmpy
 RUN apt-get update && apt-get install -y \
     ltrace strace upx-ucl binwalk exiftool steghide foremost \
     tshark fcrackzip john openssl \
+    libzxing-core-java libzxing-javase-java zbar-tools python3-pyzbar \
     && rm -rf /var/lib/apt/lists/*
+
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'exec java -cp /usr/share/java/core.jar:/usr/share/java/javase.jar com.google.zxing.client.j2se.CommandLineRunner "$@"' \
+    > /usr/local/bin/zxing && chmod +x /usr/local/bin/zxing
 
 # Radare2 Ghidra decompiler plugin
 RUN r2pm -ci r2ghidra || true
@@ -56,5 +67,5 @@ USER $USERNAME
 WORKDIR /home/$USERNAME
 RUN mkdir ctf_files
 
-COPY docker_entrypoint.sh /home/$USERNAME/.entrypoint.sh
-CMD ["bash", "/home/ctfplayer/.entrypoint.sh"]
+COPY docker_entrypoint.py /home/$USERNAME/.entrypoint.py
+CMD ["python3", "/home/ctfplayer/.entrypoint.py"]

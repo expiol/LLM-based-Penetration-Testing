@@ -74,7 +74,7 @@ class EvidenceContextBuilder:
             if evidence.tool_name == "script_exec":
                 item.update(self._script_context(ctx, tier=tier))
             else:
-                item.update(self._generic_context(ctx))
+                item.update(self._generic_context(ctx, evidence=evidence, tier=tier))
 
             if len(item) > 5:
                 item_chars = len(json.dumps(item, ensure_ascii=True))
@@ -100,7 +100,7 @@ class EvidenceContextBuilder:
             ctx = extracted.get("output_context")
             if not isinstance(ctx, dict):
                 ctx = {}
-            score = self._score_record(evidence.tool_name, evidence.summary, ctx)
+            score = self._score_record(evidence, ctx)
             if score <= 0:
                 continue
             # Stronger recency: 0-8 (was 0-4) so recent evidence can overcome tool-type bias
@@ -126,15 +126,17 @@ class EvidenceContextBuilder:
         selected.extend(item for item in scored if item[2].evidence_id in mandatory_ids)
         return [evidence for _score, _index, evidence in sorted(selected, key=lambda item: item[1])]
 
-    def _score_record(self, tool_name: str, summary: str, ctx: dict[str, object]) -> float:
+    def _score_record(self, evidence: EvidenceRecord, ctx: dict[str, object]) -> float:
+        tool_name = evidence.tool_name
+        summary = evidence.summary
+        stdout = _evidence_text(evidence, ctx, "stdout")
         score = 0.0
         if tool_name == "script_exec":
             score += 2.0
-            if ctx.get("stdout"):
+            if stdout:
                 score += 3.0
             if ctx.get("failure_kind") not in (None, "", "none"):
                 score += 4.0
-            stdout = _string(ctx.get("stdout"))
             # Structural signals: hex data present
             if any(token in stdout.lower() for token in ("0x", "\\x", "hexdump", "xxd")) or _has_hex_block(stdout):
                 score += 6.0
@@ -146,8 +148,24 @@ class EvidenceContextBuilder:
                 score += 5.0
         elif tool_name == "shell_exec":
             score += 4.0
-            if ctx.get("stdout"):
+            if stdout:
                 score += 2.0
+        elif tool_name in {
+            "objdump", "radare2", "strings_cmd", "gdb", "ltrace", "strace",
+            "file_cmd", "checksec", "binwalk", "exiftool", "sqlite3",
+            "tshark", "jadx", "john", "fcrackzip",
+        }:
+            score += 3.0
+            if stdout:
+                score += 2.0
+        if ctx.get("functions") or ctx.get("sections") or ctx.get("binary_info"):
+            score += 3.0
+        if any(token in stdout.lower() for token in ("0x", "\\x", "hexdump", "xxd")) or _has_hex_block(stdout):
+            score += 5.0
+        if any(token in stdout.lower() for token in ("disassembly", "objdump", "instruction", "sym.", "main")):
+            score += 5.0
+        if any(token in stdout.lower() for token in ("uint", "int32", "byte", "bit", "xor", "shift", "lfsr")):
+            score += 4.0
         if ctx.get("flag_candidates"):
             score += 10.0
         return score
@@ -176,8 +194,27 @@ class EvidenceContextBuilder:
                 result[key] = values
         return _compact(result)
 
-    def _generic_context(self, ctx: dict[str, object]) -> dict[str, object]:
+    def _generic_context(
+        self,
+        ctx: dict[str, object],
+        *,
+        evidence: EvidenceRecord,
+        tier: str = "full",
+    ) -> dict[str, object]:
         keep_keys = (
+            "returncode",
+            "path",
+            "commands",
+            "line_count",
+            "function_count",
+            "instruction_count",
+            "file_format",
+            "functions",
+            "sections",
+            "strings",
+            "binary_info",
+            "has_crypto_refs",
+            "has_network_refs",
             "files_root",
             "inspected_files",
             "inspected_sources",
@@ -200,6 +237,15 @@ class EvidenceContextBuilder:
                 out[key] = _trim_list(value, limit=8, width=240)
             elif value not in (None, "", [], {}):
                 out[key] = value
+        preview_width = {"full": 2200, "medium": 1200, "compressed": 500}[tier]
+        stdout = _evidence_text(evidence, ctx, "stdout")
+        stderr = _evidence_text(evidence, ctx, "stderr")
+        if stdout:
+            out["stdout_key_lines"] = self._key_lines(stdout)
+            out["stdout_preview"] = self._trim_text(stdout, width=preview_width)
+        if stderr:
+            out["stderr_key_lines"] = self._key_lines(stderr)
+            out["stderr_preview"] = self._trim_text(stderr, width=min(preview_width, 700))
         return out
 
     def _key_lines(self, text: str) -> list[str]:
@@ -245,6 +291,14 @@ def _compact(values: dict[str, object]) -> dict[str, object]:
 
 def _string(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _evidence_text(evidence: EvidenceRecord, ctx: dict[str, object], key: str) -> str:
+    ctx_value = _string(ctx.get(key))
+    if ctx_value:
+        return ctx_value
+    result = evidence.result if isinstance(evidence.result, dict) else {}
+    return _string(result.get(key))
 
 
 def _as_list(value: object) -> list[object]:

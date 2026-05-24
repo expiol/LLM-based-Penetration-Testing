@@ -38,6 +38,9 @@ class Persona(Protocol):
     @property
     def required_context_keys(self) -> tuple[str, ...]: ...
 
+    @property
+    def supported_dispatch_profiles(self) -> tuple[str, ...]: ...
+
 
 # Universal capabilities available to every persona
 _UNIVERSAL: tuple[ToolCapability, ...] = (
@@ -56,6 +59,7 @@ class PersonaSpec:
     supported_todo_kinds: tuple[str, ...] = ("todo",)
     preferred_challenge_categories: tuple[str, ...] = ()
     required_context_keys: tuple[str, ...] = ()
+    supported_dispatch_profiles: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +72,7 @@ RECON_PERSONA = PersonaSpec(
         ToolCapability.NMAP,
         ToolCapability.CURL,
         ToolCapability.NIKTO,
+        ToolCapability.ARTIFACT_TRIAGE,
         ToolCapability.FILE_CMD,
         ToolCapability.EXIFTOOL,
     ),
@@ -75,12 +80,18 @@ RECON_PERSONA = PersonaSpec(
         "Maps authorized scope: port scans (nmap), HTTP recon (curl, nikto), "
         "file identification (file, exiftool). First-pass discovery only."
     ),
+    supported_dispatch_profiles=("open", "scope_mapping", "recon", "artifact_analysis"),
 )
 
 ARTIFACT_PERSONA = PersonaSpec(
     name="artifact-worker",
     allowed_capabilities=_UNIVERSAL + (
         ToolCapability.FILE_CMD,
+        ToolCapability.ARTIFACT_TRIAGE,
+        ToolCapability.DISK_EXTRACT,
+        ToolCapability.OFFICE_INSPECT,
+        ToolCapability.MEDIA_SCAN,
+        ToolCapability.PNG_INSPECT,
         ToolCapability.STRINGS_CMD,
         ToolCapability.BINWALK,
         ToolCapability.RADARE2,
@@ -98,11 +109,25 @@ ARTIFACT_PERSONA = PersonaSpec(
     ),
     routing_summary=(
         "Static and dynamic file analysis: binaries (r2, objdump, gdb, checksec, strings), "
-        "dynamic tracing (ltrace, strace), firmware (binwalk), "
+        "dynamic tracing (ltrace, strace), firmware (binwalk), Office documents (office.inspect), "
+        "embedded media batches (media.scan), PNG images (png.inspect), "
         "pcaps (tshark), databases (sqlite3), stego (steghide, foremost, exiftool), "
         "APKs (jadx). Supports both offline analysis and local binary execution."
     ),
     preferred_challenge_categories=("crypto", "rev", "forensics", "misc", "pwn", "web"),
+    supported_dispatch_profiles=(
+        "open",
+        "artifact_analysis",
+        "container_extraction",
+        "office_inspection",
+        "media_inspection",
+        "image_inspection",
+        "near_miss_repair",
+        "execution_closure",
+        "algorithm_verification",
+        "binary_analysis",
+        "candidate_recovery",
+    ),
 )
 
 WEB_PERSONA = PersonaSpec(
@@ -119,6 +144,7 @@ WEB_PERSONA = PersonaSpec(
         "Operates within authorized scope."
     ),
     preferred_challenge_categories=("web",),
+    supported_dispatch_profiles=("open", "scope_mapping", "web_analysis", "web_exploitation"),
 )
 
 EXPLOIT_PERSONA = PersonaSpec(
@@ -140,20 +166,28 @@ EXPLOIT_PERSONA = PersonaSpec(
         "binary exploitation (gdb, checksec, ltrace, r2), network probing (nmap, curl). "
         "Runs bounded experiments from accumulated evidence."
     ),
+    supported_dispatch_profiles=(
+        "open",
+        "exploit",
+        "binary_exploitation",
+        "credential_recovery",
+        "execution_closure",
+        "algorithm_verification",
+        "web_exploitation",
+    ),
 )
 
 FLAG_PERSONA = PersonaSpec(
     name="flag-worker",
     allowed_capabilities=_UNIVERSAL + (
         ToolCapability.STRINGS_CMD,
+        ToolCapability.ARTIFACT_TRIAGE,
         ToolCapability.FILE_CMD,
         ToolCapability.CURL,
         ToolCapability.SQLITE3,
     ),
-    routing_summary=(
-        "Flag harvesting: search files (strings, file), query databases (sqlite3), "
-        "submit flags via HTTP (curl). Validates concrete flag candidates."
-    ),
+    routing_summary="Validates concrete flag candidates only.",
+    supported_dispatch_profiles=("flag_validation",),
 )
 
 ALL_PERSONAS: tuple[PersonaSpec, ...] = (

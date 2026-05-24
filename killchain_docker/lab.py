@@ -7,20 +7,44 @@ is explicit, no shell interpolation.
 
 from __future__ import annotations
 
+import logging
 import shutil
-import sys
 from pathlib import Path
 from urllib import error, request
 
+from killchain_docker.logging_utils import get_logger
 from killchain_docker.processes import run_bounded_process
 
+LOGGER = get_logger(__name__)
 DEFAULT_COMPOSE_REL = Path("docker-compose.lab.yml")
 _DOCKER_COMPOSE_TIMEOUT_S = 600
 _DOCKER_COMPOSE_CAPTURE_BYTES = 20_000
+_LOG_TAIL_CHARS = 4_000
 
 
 def _compose_argv(compose_file: Path) -> list[str]:
     return ["docker", "compose", "-f", str(compose_file.resolve())]
+
+
+def _tail_text(value: str, *, limit: int = _LOG_TAIL_CHARS) -> str:
+    text = value.rstrip()
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _log_compose_stream(stream: str, value: str, level: int) -> None:
+    if not value:
+        return
+    LOGGER.log(
+        level,
+        "docker compose output",
+        extra={
+            "stream": stream,
+            "output_tail": _tail_text(value),
+            "output_bytes": len(value.encode("utf-8", errors="replace")),
+        },
+    )
 
 
 def _run_compose_command(cmd: list[str], *, timeout_s: int) -> int:
@@ -29,10 +53,8 @@ def _run_compose_command(cmd: list[str], *, timeout_s: int) -> int:
         timeout_s=timeout_s,
         max_output_bytes=_DOCKER_COMPOSE_CAPTURE_BYTES,
     )
-    if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-    if result.stderr:
-        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+    _log_compose_stream("stdout", result.stdout, logging.INFO)
+    _log_compose_stream("stderr", result.stderr, logging.WARNING)
     return result.exit_code
 
 

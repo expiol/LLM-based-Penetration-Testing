@@ -9,6 +9,7 @@ Supports:
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
 
 from killchain_docker.state import Artifact
@@ -26,6 +27,7 @@ from killchain_docker.tools.plugins._base import (
     _status,
     _truncate,
 )
+from killchain_docker.tools.plugins.workspace import protected_shell_command
 
 # "info functions" output: "0x0804884d  main"
 _FUNC_RE = re.compile(r"(0x[0-9a-fA-F]+)\s+(\S+)")
@@ -47,9 +49,11 @@ class GdbPlugin:
     def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
         path = _require(request.metadata, "path", self.name)
         cmds = str(request.metadata.get("commands") or "info functions")
+        files_root = request.metadata.get("files_root")
+        full_cmd = f"printf '%s\\n' {shlex.quote(cmds)} | gdb -batch -q {shlex.quote(path)}"
         return _run(
             self.name,
-            [*self.argv_prefix, "bash", "-c", f"echo '{cmds}' | gdb -batch -q {path}"],
+            [*self.argv_prefix, "bash", "-c", protected_shell_command(full_cmd, files_root)],
             request.timeout_s,
         )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 
+from killchain_docker.knowledge import KnowledgeAugmenter
 from killchain_docker.llm import LLMClientError, StaticLLMClient
 from killchain_docker.orchestrator.planning import (
     LLMPlanner,
@@ -13,9 +14,12 @@ from killchain_docker.orchestrator.planning import (
     PlannerDecision,
     TodoPhase,
 )
+from killchain_docker.orchestrator.planning.techniques import technique_matrix_for
 from killchain_docker.orchestrator.policy import TodoPolicy
 from killchain_docker.state import (
+    Artifact,
     EvidenceRecord,
+    Endpoint,
     ExecutionRecord,
     Finding,
     FlagCandidate,
@@ -25,6 +29,7 @@ from killchain_docker.state import (
     StateDelta,
     TodoItem,
     Vulnerability,
+    WorkerResult,
 )
 
 
@@ -64,6 +69,1255 @@ class PlanningPipelineSeedTests(unittest.TestCase):
         self.assertEqual(decision.todos[0].phase, TodoPhase.FLAG_VALIDATION)
         self.assertEqual(decision.todos[0].context["candidate_flag"], "flag{okay}")
 
+    def test_seed_validates_one_highest_confidence_candidate_at_a_time(self) -> None:
+        state = _state([])
+        low = FlagCandidate(
+            value="flag{candidate_low}",
+            source="script",
+            confidence=0.2,
+        )
+        high = FlagCandidate(
+            value="flag{candidate_high}",
+            source="script",
+            confidence=0.9,
+        )
+        state.flag_candidates[low.candidate_id] = low
+        state.flag_candidates[high.candidate_id] = high
+
+        decision = PlanningPipeline().plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.FLAG_VALIDATION)
+        self.assertEqual(
+            decision.todos[0].context["candidate_flag"],
+            "flag{candidate_high}",
+        )
+
+    def test_seed_candidate_recovery_from_validator_rejection(self) -> None:
+        state = _state(["cipher.bin"])
+        inventory = state.queue_todo(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                context={"family": "artifact-inventory"},
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        )
+        inventory.mark_completed("done")
+        state.upsert_evidence(
+            EvidenceRecord(
+                evidence_id="evidence-candidate",
+                task_id=inventory.todo_id,
+                capability="script.exec",
+                tool_name="script_exec",
+                mode="local_command",
+                summary="Candidate was derived from local artifact evidence.",
+            )
+        )
+        state.record_rejected_flag_candidate(
+            value="flag{almost}",
+            reason="candidate_mismatch",
+            source="flag-worker",
+            evidence_refs=["evidence-candidate"],
+        )
+
+        decision = PlanningPipeline().plan(state)
+
+        recovery = next(
+            todo for todo in decision.todos
+            if todo.context.get("family") == "candidate-recovery"
+        )
+        self.assertEqual(recovery.phase, TodoPhase.ANALYSIS)
+        self.assertEqual(recovery.context["recovery_trigger"], "validator_rejection")
+        self.assertEqual(recovery.context["evidence_ids"], ["evidence-candidate"])
+        self.assertEqual(recovery.context["flag_format_prefix"], "flag{")
+        self.assertEqual(recovery.context["challenge_files"], ["cipher.bin"])
+        self.assertTrue(str(recovery.dedupe_key).startswith("bootstrap:candidate-recovery:"))
+
+        text = " ".join([
+            recovery.goal,
+            *recovery.success_criteria,
+            *recovery.constraints,
+            json.dumps(recovery.context, sort_keys=True),
+        ]).lower()
+        for disallowed in ("oracle", "rag", "benchmark", "zbar", "sleuth", "foremost"):
+            self.assertNotIn(disallowed, text)
+
+    def test_candidate_recovery_waits_for_ready_validation_candidate(self) -> None:
+        state = _state([])
+        state.record_rejected_flag_candidate(
+            value="flag{almost}",
+            reason="candidate_mismatch",
+            source="flag-worker",
+        )
+        candidate = FlagCandidate(value="flag{fixed}", source="policy")
+        state.flag_candidates[candidate.candidate_id] = candidate
+
+        decision = PlanningPipeline().plan(state)
+
+        self.assertTrue(
+            any(todo.phase == TodoPhase.FLAG_VALIDATION for todo in decision.todos)
+        )
+        self.assertFalse(
+            any(todo.context.get("family") == "candidate-recovery" for todo in decision.todos)
+        )
+
+    def test_seed_execution_closure_after_inventory(self) -> None:
+        state = _state(["capture.bin"])
+        inventory = state.queue_todo(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                context={"family": "artifact-inventory", "files_root": "/home/ctfplayer/ctf_files"},
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        )
+        inventory.mark_completed("done")
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(summary="no extra todos", todos=[]),
+        )
+
+        self.assertEqual(len(decision.todos), 1)
+        todo = decision.todos[0]
+        self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
+        self.assertEqual(todo.context["family"], "algorithm-verification")
+        self.assertEqual(todo.context["capability_hint"], "script.exec")
+        self.assertIs(todo.context["execution_closure"], True)
+        self.assertEqual(
+            todo.context["dispatch_intent"]["profile"],
+            "execution_closure",
+        )
+        self.assertNotIn("knowledge_hint_ranks", todo.context)
+        text = " ".join([todo.goal, *todo.success_criteria, *todo.constraints]).lower()
+        self.assertNotIn("oracle", text)
+        self.assertNotIn("rag", text)
+
+    def test_execution_closure_seed_waits_for_artifact_inventory(self) -> None:
+        state = _state(["capture.bin"])
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(summary="no extra todos", todos=[]),
+        )
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].dedupe_key, "bootstrap:artifact-inventory")
+        self.assertNotIn("execution_closure", decision.todos[0].context)
+
+    def test_execution_closure_seed_does_not_mask_llm_analysis_todo(self) -> None:
+        state = _state(["capture.bin"])
+        inventory = state.queue_todo(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                context={"family": "artifact-inventory"},
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        )
+        inventory.mark_completed("done")
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(
+                summary="inspect bytes",
+                todos=[
+                    PlannedTodo(
+                        goal="Review file metadata and note next leads.",
+                        phase=TodoPhase.ANALYSIS,
+                        context={"family": "artifact-followup"},
+                        success_criteria=["Produce a concrete diagnostic."],
+                    )
+                ],
+            ),
+        )
+
+        keys = {todo.dedupe_key for todo in decision.todos}
+        self.assertNotIn("bootstrap:evidence-execution-closure", keys)
+        self.assertTrue(all(todo.phase == TodoPhase.ANALYSIS for todo in decision.todos))
+
+    def test_seed_generated_unclassified_png_artifact_followup_uses_triage_hint(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/scratch/out.png",
+            kind="script_artifact_png",
+            source="script_exec",
+            size=4096,
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        followup = next(
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        )
+        self.assertEqual(followup.phase, TodoPhase.ANALYSIS)
+        self.assertEqual(followup.context["capability_hint"], "artifact.triage")
+        self.assertEqual(followup.context["path"], artifact.path)
+        self.assertTrue(str(followup.dedupe_key).startswith("bootstrap:artifact-followup:"))
+
+    def test_seed_generated_confirmed_png_artifact_followup_uses_png_inspect_hint(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/work/out.png",
+            kind="script_artifact_png",
+            source="script_exec",
+            size=4096,
+            digest="a" * 64,
+            metadata={
+                "file_type": "PNG image data, 1 x 1, 8-bit/color RGBA",
+                "mime_type": "image/png",
+                "origin": "work",
+            },
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        followup = next(
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        )
+        self.assertEqual(followup.phase, TodoPhase.ANALYSIS)
+        self.assertEqual(followup.context["capability_hint"], "png.inspect")
+        self.assertEqual(followup.context["path"], artifact.path)
+
+    def test_ooxml_child_artifact_seeds_office_inspect_hint(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk_extract/offset_0/deck.pptx",
+            kind="disk_extract_document",
+            source="disk_extract",
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        followup = next(
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        )
+        self.assertEqual(followup.context["capability_hint"], "office.inspect")
+        self.assertEqual(followup.context["path"], artifact.path)
+
+    def test_office_media_artifact_seeds_media_scan_hint(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/office/ppt/media/image28.png",
+            kind="office_media_image",
+            source="office_inspect",
+            metadata={"mime_type": "image/png"},
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        followup = next(
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        )
+        self.assertEqual(followup.context["capability_hint"], "media.scan")
+        self.assertEqual(followup.context["path"], artifact.path)
+        self.assertEqual(followup.context["paths"], [artifact.path])
+        self.assertEqual(followup.priority, 90)
+
+    def test_suspicious_media_scan_png_seeds_png_inspect(self) -> None:
+        state = _state([])
+        path = "/home/ctfplayer/ctf_files/.autopentest_artifacts/office/ppt/media/image28.png"
+        artifact = Artifact(
+            path=path,
+            kind="office_media_image",
+            source="office_inspect",
+            digest="d" * 64,
+            metadata={"mime_type": "image/png"},
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+        media_todo = state.queue_todo(
+            TodoItem(
+                goal="Batch-scan embedded media artifacts deterministically.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "family": "artifact-followup",
+                    "capability_hint": "media.scan",
+                    "path": path,
+                },
+                dedupe_key="media-scan-once",
+            )
+        )
+        media_todo.mark_running("artifact-worker")
+        media_todo.mark_completed("media.scan: 1 file(s) inspected, 1 suspicious")
+        evidence = EvidenceRecord(
+            task_id=media_todo.todo_id,
+            capability="media.scan",
+            tool_name="media_scan",
+            mode="local_command",
+            summary="media.scan: 1 file(s) inspected, 1 suspicious",
+            extracted={
+                "output_context": {
+                    "media": [
+                        {
+                            "path": path,
+                            "kind": "png",
+                            "suspicious": True,
+                            "strings": "key fragment",
+                        }
+                    ]
+                }
+            },
+        )
+        state.evidence[evidence.evidence_id] = evidence
+
+        decision = PlanningPipeline().plan(state)
+
+        followups = [
+            todo for todo in decision.todos
+            if todo.context.get("capability_hint") == "png.inspect"
+        ]
+        self.assertEqual(len(followups), 1)
+        followup = followups[0]
+        self.assertEqual(followup.context["path"], path)
+        self.assertEqual(followup.context["artifact_id"], artifact.artifact_id)
+        self.assertEqual(followup.context["evidence_ids"], [evidence.evidence_id])
+        self.assertEqual(followup.dedupe_key, f"bootstrap:suspicious-png-inspect:{'d' * 64}")
+
+    def test_suspicious_media_scan_skips_png_already_inspected(self) -> None:
+        state = _state([])
+        path = "/home/ctfplayer/ctf_files/.autopentest_artifacts/office/ppt/media/image28.png"
+        state.queue_todo(
+            TodoItem(
+                goal="Inspect suspicious PNG media artifact deterministically.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "family": "artifact-followup",
+                    "capability_hint": "png.inspect",
+                    "path": path,
+                },
+                dedupe_key="png-inspect-once",
+            )
+        ).mark_completed("png.inspect: done")
+        evidence = EvidenceRecord(
+            task_id="todo-media",
+            capability="media.scan",
+            tool_name="media_scan",
+            mode="local_command",
+            summary="media.scan: 1 file(s) inspected, 1 suspicious",
+            extracted={
+                "output_context": {
+                    "media": [{"path": path, "kind": "png", "suspicious": True}]
+                }
+            },
+        )
+        state.evidence[evidence.evidence_id] = evidence
+
+        decision = PlanningPipeline().plan(state)
+
+        self.assertFalse(
+            any(
+                todo.context.get("capability_hint") == "png.inspect"
+                and todo.context.get("path") == path
+                for todo in decision.todos
+            )
+        )
+
+    def test_suspicious_png_followup_can_pass_artifact_family_hard_cap(self) -> None:
+        state = _state([])
+        for index in range(10):
+            todo = state.queue_todo(
+                TodoItem(
+                    goal=f"Prior artifact follow-up {index}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={
+                        "family": "artifact-followup",
+                        "capability_hint": "artifact.triage",
+                        "path": (
+                            "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                            f"prior/{index}.bin"
+                        ),
+                    },
+                    dedupe_key=f"prior-artifact-followup-{index}",
+                )
+            )
+            todo.mark_completed("artifact.triage done")
+        path = "/home/ctfplayer/ctf_files/.autopentest_artifacts/office/ppt/media/image28.png"
+        artifact = Artifact(
+            path=path,
+            kind="office_media_image",
+            source="office_inspect",
+            digest="9" * 64,
+            metadata={"mime_type": "image/png"},
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+        evidence = EvidenceRecord(
+            task_id="todo-media",
+            capability="media.scan",
+            tool_name="media_scan",
+            mode="local_command",
+            summary="media.scan: 1 file(s) inspected, 1 suspicious",
+            extracted={
+                "output_context": {
+                    "media": [{"path": path, "kind": "png", "suspicious": True}]
+                }
+            },
+        )
+        state.evidence[evidence.evidence_id] = evidence
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(summary="backlog seed refresh", todos=[]),
+        )
+
+        self.assertTrue(
+            any(
+                todo.context.get("capability_hint") == "png.inspect"
+                and todo.context.get("path") == path
+                for todo in decision.todos
+            )
+        )
+
+    def test_generated_artifact_followup_with_evidence_passes_family_hard_cap(self) -> None:
+        state = _state([])
+        for index in range(12):
+            todo = state.queue_todo(
+                TodoItem(
+                    goal=f"Prior artifact follow-up {index}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={
+                        "family": "artifact-followup",
+                        "capability_hint": "artifact.triage",
+                        "path": (
+                            "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                            f"prior/{index}.bin"
+                        ),
+                    },
+                    dedupe_key=f"prior-artifact-followup-{index}",
+                )
+            )
+            todo.mark_completed("artifact.triage done")
+        evidence = EvidenceRecord(
+            task_id="todo-png",
+            capability="png.inspect",
+            tool_name="png_inspect",
+            mode="local_command",
+            summary="png.inspect generated LSB artifacts",
+        )
+        state.evidence[evidence.evidence_id] = evidence
+        artifact = Artifact(
+            path=(
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                "png_inspect_image/lsb_all_2_msb.bin"
+            ),
+            kind="png_inspect_lsb",
+            source="png_inspect",
+            digest="lsb-digest",
+            metadata={"evidence_ids": [evidence.evidence_id]},
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(summary="final seed refresh", todos=[]),
+        )
+
+        followup = next(
+            todo for todo in decision.todos
+            if todo.context.get("capability_hint") == "artifact.triage"
+            and todo.context.get("path") == artifact.path
+        )
+        self.assertEqual(followup.context["evidence_ids"], [evidence.evidence_id])
+
+    def test_llm_abstract_media_analyze_for_png_dedupes_to_png_inspect(self) -> None:
+        state = _state([])
+        path = "/home/ctfplayer/ctf_files/.autopentest_artifacts/office/ppt/media/image19.png"
+        artifact = Artifact(
+            path=path,
+            kind="office_media_image",
+            source="office_inspect",
+            digest="f" * 64,
+            metadata={"mime_type": "image/png"},
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+        media_todo = state.queue_todo(
+            TodoItem(
+                goal="Batch-scan embedded media artifacts deterministically.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "family": "artifact-followup",
+                    "capability_hint": "media.scan",
+                    "path": path,
+                },
+                dedupe_key="media-scan-once",
+            )
+        )
+        media_todo.mark_completed("media.scan: suspicious PNG")
+        evidence = EvidenceRecord(
+            task_id=media_todo.todo_id,
+            capability="media.scan",
+            tool_name="media_scan",
+            mode="local_command",
+            summary="media.scan: 1 file(s) inspected, 1 suspicious",
+            extracted={
+                "output_context": {
+                    "media": [{"path": path, "kind": "png", "suspicious": True}]
+                }
+            },
+        )
+        state.evidence[evidence.evidence_id] = evidence
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(
+                summary="deep image analysis",
+                todos=[
+                    PlannedTodo(
+                        goal="Perform detailed steganography analysis on image19.png.",
+                        phase=TodoPhase.ANALYSIS,
+                        priority=95,
+                        context={
+                            "family": "forensics-extract",
+                            "capability_hint": "media.analyze",
+                            "path": path,
+                        },
+                        dedupe_key="stego-image19-analysis",
+                    )
+                ],
+            ),
+        )
+
+        png_todos = [
+            todo for todo in decision.todos
+            if todo.context.get("path") == path
+            and todo.context.get("capability_hint") == "png.inspect"
+        ]
+        self.assertEqual(len(png_todos), 1)
+        self.assertEqual(png_todos[0].dedupe_key, f"bootstrap:artifact-followup:{path}")
+        self.assertFalse(any(todo.context.get("capability_hint") == "media.analyze" for todo in decision.todos))
+
+    def test_generated_binary_artifact_followup_does_not_crowd_analysis(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path=(
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                "png_inspect_image6_1050/lsb_all_2_msb.bin"
+            ),
+            kind="png_inspect_lsb",
+            source="png_inspect",
+            digest="b" * 64,
+            metadata={"png_role": "lsb", "source_entry": "all:2:msb"},
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        followup = next(
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        )
+        self.assertEqual(followup.context["capability_hint"], "artifact.triage")
+        self.assertLess(followup.priority, 90)
+
+    def test_generated_binary_artifact_followups_are_batched(self) -> None:
+        state = _state([])
+        for index in range(10):
+            artifact = Artifact(
+                path=(
+                    "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                    f"png_inspect_image6_1050/lsb_all_{index}_msb.bin"
+                ),
+                kind="png_inspect_lsb",
+                source="png_inspect",
+                digest=f"batch-{index}",
+                metadata={"png_role": "lsb", "source_entry": f"all:{index}:msb"},
+            )
+            state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        followups = [
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        ]
+        self.assertEqual(len(followups), 2)
+        self.assertEqual(followups[0].context["capability_hint"], "artifact.triage")
+        self.assertEqual(len(followups[0].context["paths"]), 8)
+        self.assertEqual(len(followups[1].context["paths"]), 2)
+        self.assertTrue(
+            all(str(todo.dedupe_key).startswith("bootstrap:artifact-followup-batch:") for todo in followups)
+        )
+
+    def test_artifact_followup_seed_fanout_is_bounded(self) -> None:
+        state = _state([])
+        for index in range(20):
+            artifact = Artifact(
+                path=(
+                    "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                    f"office_inspect_deck/ppt/media/image{index}.png"
+                ),
+                kind="office_media_image",
+                source="office_inspect",
+                digest=f"sha256-{index}",
+            )
+            state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        followups = [
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        ]
+        self.assertEqual(len(followups), 2)
+        self.assertTrue(all(todo.context["capability_hint"] == "media.scan" for todo in followups))
+        self.assertEqual(len(followups[0].context["paths"]), 12)
+        self.assertEqual(len(followups[1].context["paths"]), 8)
+        self.assertTrue(
+            any("batched media scan" in note for note in decision.notes)
+        )
+
+    def test_candidate_recovery_outranks_generated_artifact_followup(self) -> None:
+        state = _state(["out.img"])
+        artifact = Artifact(
+            path=(
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                "png_inspect_image6_1050/lsb_all_2_msb.bin"
+            ),
+            kind="png_inspect_lsb",
+            source="png_inspect",
+            digest="c" * 64,
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+        state.record_rejected_flag_candidate(
+            value="flag{wrong}",
+            reason="candidate_mismatch",
+            source="validator",
+        )
+
+        decision = PlanningPipeline().plan(state)
+
+        recovery = next(
+            todo for todo in decision.todos
+            if todo.context.get("family") == "candidate-recovery"
+        )
+        followup = next(
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        )
+        self.assertGreater(recovery.priority, followup.priority)
+
+    def test_artifact_triage_source_does_not_seed_followup_loop(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/scratch/out.png",
+            kind="image",
+            source="artifact_triage",
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        self.assertFalse(
+            any(todo.context.get("family") == "artifact-followup" for todo in decision.todos)
+        )
+
+    def test_disk_image_artifact_seeds_disk_extract_hint(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/out.img",
+            kind="unknown",
+            source="artifact_triage",
+            metadata={"file_type": "DOS/MBR boot sector"},
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        disk_extract = next(
+            todo for todo in decision.todos
+            if todo.context.get("capability_hint") == "disk.extract"
+        )
+        self.assertEqual(disk_extract.phase, TodoPhase.ANALYSIS)
+        self.assertEqual(disk_extract.context["family"], "forensics-extract")
+        self.assertEqual(disk_extract.context["path"], artifact.path)
+        self.assertTrue(str(disk_extract.dedupe_key).startswith("bootstrap:disk-extract:"))
+
+    def test_llm_disk_extract_duplicate_dedupes_against_seed(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/out.img",
+            kind="unknown",
+            source="artifact_triage",
+            metadata={"file_type": "DOS/MBR boot sector"},
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(
+                summary="extract disk",
+                todos=[
+                    PlannedTodo(
+                        goal="Extract files from the detected disk image.",
+                        phase=TodoPhase.ANALYSIS,
+                        priority=90,
+                        context={
+                            "family": "forensics-extract",
+                            "capability_hint": "disk.extract",
+                            "path": artifact.path,
+                        },
+                    )
+                ],
+            ),
+        )
+
+        disk_extracts = [
+            todo for todo in decision.todos
+            if todo.context.get("capability_hint") == "disk.extract"
+        ]
+        self.assertEqual(len(disk_extracts), 1)
+        self.assertTrue(any("duplicate" in note for note in decision.notes))
+
+    def test_llm_disk_extract_without_context_resolves_unique_disk_artifact(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/out.img",
+            kind="unknown",
+            source="artifact_triage",
+            metadata={"file_type": "DOS/MBR boot sector"},
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+        existing = state.queue_todo(
+            TodoItem(
+                goal="Extract files from the detected disk image.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "family": "forensics-extract",
+                    "capability_hint": "disk.extract",
+                    "path": artifact.path,
+                },
+                dedupe_key=f"bootstrap:disk-extract:{artifact.path}",
+            )
+        )
+        existing.mark_running("artifact-worker")
+        existing.mark_completed("disk.extract done")
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(
+                summary="extract embedded zip",
+                todos=[
+                    PlannedTodo(
+                        goal="Analyze the disk image structure and extract embedded ZIP archive at offset 0x4A400.",
+                        phase=TodoPhase.RECON,
+                        priority=90,
+                        context={"family": "other"},
+                        dedupe_key="extract-embedded-zip",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(decision.todos, [])
+        self.assertTrue(any("duplicate" in note for note in decision.notes))
+
+    def test_png_triage_child_artifact_seeds_followup(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/png_triage/out.png/001_qfme.bin",
+            kind="png_chunk_qfme",
+            source="artifact_triage_png",
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        followups = [
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        ]
+        self.assertEqual(len(followups), 1)
+        self.assertEqual(followups[0].context["path"], artifact.path)
+
+    def test_disk_extract_followup_skips_low_signal_os_metadata(self) -> None:
+        state = _state([])
+        doc = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk_extract/offset_0/clam.pptx",
+            kind="disk_extract_document",
+            source="disk_extract",
+        )
+        index = Artifact(
+            path=(
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/disk_extract/"
+                "offset_0/Spotlight-V100/Store-V2/0.indexHead"
+            ),
+            kind="disk_extract_indexhead",
+            source="disk_extract",
+        )
+        state.artifacts[doc.artifact_id] = doc
+        state.artifacts[index.artifact_id] = index
+
+        decision = PlanningPipeline().plan(state)
+
+        paths = [
+            todo.context.get("path")
+            for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        ]
+        self.assertEqual(paths, [doc.path])
+        self.assertEqual(
+            next(
+                todo.context.get("capability_hint")
+                for todo in decision.todos
+                if todo.context.get("family") == "artifact-followup"
+            ),
+            "office.inspect",
+        )
+
+    def test_artifact_followup_skips_path_already_executed_by_llm_tool(self) -> None:
+        state = _state([])
+        doc = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk_extract/offset_0/clam.pptx",
+            kind="disk_extract_document",
+            source="disk_extract",
+            digest="e" * 64,
+        )
+        state.artifacts[doc.artifact_id] = doc
+        prior = state.queue_todo(
+            TodoItem(
+                goal="Examine the PowerPoint file for hidden objects.",
+                phase=TodoPhase.ANALYSIS,
+                context={"family": "forensics-extract"},
+                dedupe_key="llm-office-inspect",
+            )
+        )
+        prior.context["executed_capability"] = "office.inspect"
+        prior.context["executed_path"] = doc.path
+        prior.mark_completed("office.inspect done")
+
+        decision = PlanningPipeline().plan(state)
+
+        self.assertFalse(
+            any(
+                todo.context.get("path") == doc.path
+                and todo.context.get("capability_hint") == "office.inspect"
+                for todo in decision.todos
+            )
+        )
+
+    def test_llm_office_extract_alias_dedupes_against_artifact_followup(self) -> None:
+        state = _state([])
+        doc = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk_extract/embedded/zip_4f7c00.pptx",
+            kind="disk_extract_document",
+            source="disk_extract",
+            digest="4" * 64,
+        )
+        state.artifacts[doc.artifact_id] = doc
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(
+                summary="inspect extracted presentation",
+                todos=[
+                    PlannedTodo(
+                        goal="Analyze the extracted PowerPoint file for hidden content.",
+                        phase=TodoPhase.ANALYSIS,
+                        priority=50,
+                        context={
+                            "family": "source-review",
+                            "capability_hint": "office.extract",
+                            "artifact_id": doc.artifact_id,
+                            "artifact_path": doc.path,
+                            "files_root": "/home/ctfplayer/ctf_files",
+                        },
+                        dedupe_key=f"pptx-analysis:{doc.artifact_id}",
+                    )
+                ],
+            ),
+        )
+
+        office_todos = [
+            todo for todo in decision.todos
+            if todo.context.get("path") == doc.path
+            and todo.context.get("capability_hint") == "office.inspect"
+        ]
+        self.assertEqual(len(office_todos), 1)
+        self.assertEqual(office_todos[0].context["family"], "artifact-followup")
+        self.assertEqual(office_todos[0].dedupe_key, f"bootstrap:artifact-followup:{doc.path}")
+        self.assertTrue(any("duplicate" in note for note in decision.notes))
+
+    def test_worker_result_records_executed_tool_target_for_dedupe(self) -> None:
+        state = _state([])
+        path = "/home/ctfplayer/ctf_files/.autopentest_artifacts/disk_extract/offset_0/clam.pptx"
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Examine the PowerPoint file for hidden objects.",
+                phase=TodoPhase.ANALYSIS,
+                context={"family": "forensics-extract"},
+                dedupe_key="llm-office-inspect",
+            )
+        )
+        todo.mark_running("artifact-worker")
+
+        state.apply_worker_result(
+            WorkerResult(
+                todo_id=todo.todo_id,
+                worker_name="artifact-worker",
+                success=True,
+                summary="office.inspect done",
+                output_context={"capability": "office.inspect", "path": path},
+            )
+        )
+
+        self.assertEqual(todo.context["executed_capability"], "office.inspect")
+        self.assertEqual(todo.context["executed_path"], path)
+
+    def test_worker_result_annotates_generated_artifact_with_evidence_refs(self) -> None:
+        state = _state([])
+        path = (
+            "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+            "png_inspect_image/lsb_all_2_msb.bin"
+        )
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Inspect PNG",
+                phase=TodoPhase.ANALYSIS,
+                context={"family": "artifact-followup"},
+                dedupe_key="png-inspect",
+            )
+        )
+        todo.mark_running("artifact-worker")
+        evidence = EvidenceRecord(
+            task_id=todo.todo_id,
+            capability="png.inspect",
+            tool_name="png_inspect",
+            mode="local_command",
+            summary="png.inspect generated LSB artifacts",
+        )
+
+        state.apply_worker_result(
+            WorkerResult(
+                todo_id=todo.todo_id,
+                worker_name="artifact-worker",
+                success=True,
+                summary="png.inspect done",
+                output_context={"capability": "png.inspect", "path": "/tmp/source.png"},
+                evidence_updates=[evidence],
+                state_delta=StateDelta(
+                    artifacts=[
+                        Artifact(
+                            path=path,
+                            kind="png_inspect_lsb",
+                            source="png_inspect",
+                        )
+                    ]
+                ),
+            )
+        )
+
+        artifact = next(iter(state.artifacts.values()))
+        self.assertEqual(artifact.metadata["evidence_ids"], [evidence.evidence_id])
+        self.assertEqual(artifact.metadata["source_task_id"], todo.todo_id)
+        self.assertEqual(artifact.metadata["source_worker"], "artifact-worker")
+        self.assertEqual(artifact.metadata["source_capability"], "png.inspect")
+
+    def test_scope_gate_drops_loopback_todo_when_scope_is_remote(self) -> None:
+        state = _state([], ["tcp://remote.example:8000"])
+        seed = state.queue_todo(
+            TodoItem(
+                goal="Map authorized scope entry 1.",
+                phase=TodoPhase.RECON,
+                context={"scope": "tcp://remote.example:8000", "family": "recon"},
+                dedupe_key="bootstrap:scope:tcp://remote.example:8000",
+            )
+        )
+        seed.mark_completed("done")
+        llm_decision = PlannerDecision(
+            summary="Try the local listener.",
+            todos=[
+                PlannedTodo(
+                    goal="Connect to localhost:8000 and solve the protocol.",
+                    phase=TodoPhase.ANALYSIS,
+                    priority=90,
+                    context={"scope": "tcp://localhost:8000", "family": "network-protocol"},
+                    success_criteria=["Capture service prompt."],
+                    constraints=["Stay in scope."],
+                )
+            ],
+        )
+
+        decision = PlanningPipeline().merge(state, llm_decision=llm_decision)
+
+        self.assertFalse(
+            any("decrypted_flag.png" in todo.goal for todo in decision.todos)
+        )
+        self.assertTrue(any("scope gate dropped" in note for note in decision.notes))
+
+    def test_scope_gate_allows_loopback_when_explicitly_authorized(self) -> None:
+        state = _state([], ["tcp://localhost:8000"])
+        seed = state.queue_todo(
+            TodoItem(
+                goal="Map authorized scope entry 1.",
+                phase=TodoPhase.RECON,
+                context={"scope": "tcp://localhost:8000", "family": "recon"},
+                dedupe_key="bootstrap:scope:tcp://localhost:8000",
+            )
+        )
+        seed.mark_completed("done")
+        llm_decision = PlannerDecision(
+            summary="Use authorized local listener.",
+            todos=[
+                PlannedTodo(
+                    goal="Connect to localhost:8000 and solve the protocol.",
+                    phase=TodoPhase.ANALYSIS,
+                    priority=90,
+                    context={"scope": "tcp://localhost:8000", "family": "network-protocol"},
+                    success_criteria=["Capture service prompt."],
+                    constraints=["Stay in scope."],
+                )
+            ],
+        )
+
+        decision = PlanningPipeline().merge(state, llm_decision=llm_decision)
+
+        self.assertEqual(len(decision.todos), 1)
+
+    def test_scope_gate_drops_scratch_path_dependency(self) -> None:
+        state = _state([])
+        llm_decision = PlannerDecision(
+            summary="Continue from temporary output.",
+            todos=[
+                PlannedTodo(
+                    goal="Parse /tmp/tcp_stream_7179.raw and recover the embedded artifact.",
+                    phase=TodoPhase.ANALYSIS,
+                    priority=90,
+                    context={"family": "forensics-extract"},
+                    success_criteria=["Recover a complete candidate from the extracted artifact."],
+                )
+            ],
+        )
+
+        decision = PlanningPipeline().merge(state, llm_decision=llm_decision)
+
+        self.assertFalse(
+            any("decrypted_flag.png" in todo.goal for todo in decision.todos)
+        )
+        self.assertTrue(any("scope gate dropped" in note for note in decision.notes))
+
+    def test_scope_gate_allows_registered_tmp_artifact(self) -> None:
+        state = _state([])
+        artifact = Artifact(
+            path="/tmp/foremost_out/zip/00010174.zip",
+            kind="foremost_zip",
+            source="foremost",
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+        todo = PlannedTodo(
+            goal="Inspect registered carved artifact /tmp/foremost_out/zip/00010174.zip.",
+            phase=TodoPhase.ANALYSIS,
+            priority=90,
+            context={
+                "family": "artifact-followup",
+                "path": "/tmp/foremost_out/zip/00010174.zip",
+            },
+            success_criteria=["Extract grounded evidence from the registered artifact."],
+        )
+
+        kept, notes = PlanningPipeline()._scope_gate([todo], state)
+
+        self.assertEqual(kept, [todo])
+        self.assertEqual(notes, [])
+
+    def test_scope_gate_drops_unregistered_tmp_artifact(self) -> None:
+        state = _state([])
+        todo = PlannedTodo(
+            goal="Inspect carved artifact /tmp/foremost_out/zip/00010174.zip.",
+            phase=TodoPhase.ANALYSIS,
+            priority=90,
+            context={
+                "family": "artifact-followup",
+                "path": "/tmp/foremost_out/zip/00010174.zip",
+            },
+            success_criteria=["Extract grounded evidence from the temporary artifact."],
+        )
+
+        kept, notes = PlanningPipeline()._scope_gate([todo], state)
+
+        self.assertEqual(kept, [])
+        self.assertTrue(any("scope gate dropped" in note for note in notes))
+
+    def test_scope_gate_allows_in_step_temporary_workspace(self) -> None:
+        state = _state([])
+        llm_decision = PlannerDecision(
+            summary="Use bounded local scratch space.",
+            todos=[
+                PlannedTodo(
+                    goal="Build a bounded extraction script that creates its own temporary workspace.",
+                    phase=TodoPhase.ANALYSIS,
+                    priority=90,
+                    context={"family": "forensics-extract"},
+                    success_criteria=["Recover a complete candidate from local challenge artifacts."],
+                    constraints=["Do not depend on files written by earlier todos."],
+                )
+            ],
+        )
+
+        decision = PlanningPipeline().merge(state, llm_decision=llm_decision)
+
+        self.assertEqual(len(decision.todos), 1)
+
+    def test_scope_gate_drops_prior_generated_files_root_artifact(self) -> None:
+        state = _state([], ["tcp://example:31337"])
+        state.metadata["challenge"]["files"] = ["sleeping_dist.py"]
+        todo = PlannedTodo(
+            goal=(
+                "Open the already-saved decrypted PNG at "
+                "/home/ctfplayer/ctf_files/decrypted_flag.png and parse chunks."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            priority=90,
+            context={
+                "family": "flag-recovery",
+                "files_root": "/home/ctfplayer/ctf_files",
+                "known_facts": (
+                    "evidence-deadbeef saved decrypted_flag.png in the previous script."
+                ),
+            },
+            success_criteria=["Extract a flag candidate from the PNG."],
+        )
+
+        kept, notes = PlanningPipeline()._scope_gate([todo], state)
+
+        self.assertEqual(kept, [])
+        self.assertTrue(any("scope gate dropped" in note for note in notes))
+
+    def test_scope_gate_allows_durable_autopentest_artifact(self) -> None:
+        state = _state([], ["tcp://example:31337"])
+        state.metadata["challenge"]["files"] = ["sleeping_dist.py"]
+        todo = PlannedTodo(
+            goal=(
+                "Open the generated artifact at "
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/scratch/decrypted.png "
+                "and parse chunks."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            priority=90,
+            context={
+                "family": "artifact-followup",
+                "files_root": "/home/ctfplayer/ctf_files",
+                "path": "/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/scratch/decrypted.png",
+            },
+            success_criteria=["Extract grounded evidence from the durable artifact."],
+        )
+
+        kept, notes = PlanningPipeline()._scope_gate([todo], state)
+
+        self.assertEqual(kept, [todo])
+        self.assertEqual(notes, [])
+
+    def test_scope_gate_allows_original_challenge_file_under_files_root(self) -> None:
+        state = _state([], ["tcp://example:31337"])
+        state.metadata["challenge"]["files"] = ["sleeping_dist.py"]
+        todo = PlannedTodo(
+            goal=(
+                "Open the provided challenge file at "
+                "/home/ctfplayer/ctf_files/sleeping_dist.py and inspect it."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            priority=90,
+            context={
+                "family": "source-review",
+                "files_root": "/home/ctfplayer/ctf_files",
+            },
+            success_criteria=["Recover algorithm facts from source."],
+        )
+
+        kept, notes = PlanningPipeline()._scope_gate([todo], state)
+
+        self.assertEqual(kept, [todo])
+        self.assertEqual(notes, [])
+
+    def test_forensics_planning_profile_is_prompt_safe(self) -> None:
+        matrix = technique_matrix_for("forensics")
+        forensics = next(item for item in matrix if item["family"] == "forensics-extract")
+
+        self.assertEqual(forensics["phase"], "analysis")
+        self.assertIn("pcap streams", forensics["evidence_facets"])
+        self.assertNotIn("objective", forensics)
+        self.assertNotIn("failure_escape", forensics)
+
+    def test_protocol_near_miss_does_not_seed_crypto_refinement(self) -> None:
+        state = _state([])
+        state.metadata["challenge"]["category"] = "misc"
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Build a bounded TCP protocol solver and parse service prompts.",
+                phase=TodoPhase.EXPLOIT,
+                context={"family": "network-protocol"},
+                dedupe_key="protocol-solver",
+            )
+        )
+        todo.mark_running("exploit-worker")
+        todo.mark_partial("Service interaction captured prompts.", "no flag candidate")
+        state.upsert_evidence(
+            EvidenceRecord(
+                task_id=todo.todo_id,
+                capability="script.exec",
+                tool_name="script_exec",
+                mode="local_command",
+                summary="script (python) - readable near-miss output",
+                extracted={
+                    "output_context": {
+                        "near_miss_candidates": [
+                            "readable/plaintext-or-ascii-art preview:\namount prompt accepted"
+                        ],
+                        "stdout": "connected to raw tcp service\nround 1 amount prompt\nhex dump: 616d6f756e74\n",
+                        "result_quality": "partial_no_candidate",
+                    }
+                },
+            )
+        )
+
+        decision = PlanningPipeline().plan(state)
+
+        self.assertFalse(
+            any(todo.context.get("family") == "crypto-decrypt" for todo in decision.todos)
+        )
+
+    def test_decode_near_miss_seeds_crypto_refinement(self) -> None:
+        state = _state([])
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Decrypt the ciphertext and recover the plaintext flag.",
+                phase=TodoPhase.ANALYSIS,
+                context={"family": "crypto-decrypt"},
+                dedupe_key="decrypt-attempt",
+            )
+        )
+        todo.mark_running("artifact-worker")
+        todo.mark_partial("Decoder produced garbled plaintext.", "encoding mismatch")
+        state.upsert_evidence(
+            EvidenceRecord(
+                task_id=todo.todo_id,
+                capability="script.exec",
+                tool_name="script_exec",
+                mode="local_command",
+                summary="script produced near-miss decrypted plaintext",
+                extracted={
+                    "output_context": {
+                        "near_miss_candidates": ["flag{almost_readable}"],
+                        "stdout": "garbled plaintext from xor decode",
+                        "result_quality": "partial_no_candidate",
+                    }
+                },
+            )
+        )
+
+        decision = PlanningPipeline().plan(state)
+
+        self.assertTrue(
+            any(todo.context.get("family") == "crypto-decrypt" for todo in decision.todos)
+        )
+
 
 class TodoPolicyNormalizationTests(unittest.TestCase):
     def test_file_goal_gets_canonical_files_context(self) -> None:
@@ -90,12 +1344,26 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
         self.assertEqual(todo.context["challenge_files"], ["cipher.mpeg"])
         self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
 
-    def test_candidate_flag_context_promotes_validation(self) -> None:
+    def test_ungrounded_candidate_flag_context_stays_analysis(self) -> None:
+        todo = PlannedTodo(
+            goal="Validate recovered candidate.",
+            phase=TodoPhase.FLAG_VALIDATION,
+            context={"candidate_flag": "flag{okay}"},
+        )
+        TodoPolicy.normalize(todo, _state([]))
+
+        self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
+
+    def test_state_candidate_flag_context_promotes_validation(self) -> None:
+        state = _state([])
+        candidate = FlagCandidate(value="flag{okay}", source="artifact.triage")
+        state.flag_candidates[candidate.candidate_id] = candidate
         todo = PlannedTodo(
             goal="Validate recovered candidate.",
             context={"candidate_flag": "flag{okay}"},
         )
-        TodoPolicy.normalize(todo, _state([]))
+
+        TodoPolicy.normalize(todo, state)
 
         self.assertEqual(todo.phase, TodoPhase.FLAG_VALIDATION)
 
@@ -117,6 +1385,107 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
         TodoPolicy.normalize(todo, state)
 
         self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
+
+    def test_local_artifact_recovery_exploit_todo_becomes_analysis(self) -> None:
+        state = _state(["cipher.bin", "cipher.c"])
+        todo = PlannedTodo(
+            goal="Write a minimal C decryption program that ports the source cipher and recovers plaintext.",
+            phase=TodoPhase.EXPLOIT,
+            context={
+                "files_root": "/home/ctfplayer/ctf_files",
+                "data_file": "/home/ctfplayer/ctf_files/cipher.bin",
+                "family": "flag-recovery",
+            },
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
+        self.assertIs(todo.context["execution_closure"], True)
+        self.assertEqual(todo.context["dispatch_intent"]["profile"], "execution_closure")
+
+    def test_remote_exploit_todo_stays_exploit(self) -> None:
+        state = _state(["server.py"])
+        todo = PlannedTodo(
+            goal="Exploit the remote HTTP service with the recovered token.",
+            phase=TodoPhase.EXPLOIT,
+            context={
+                "base_url": "http://target:8080",
+                "family": "flag-recovery",
+            },
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.phase, TodoPhase.EXPLOIT)
+
+    def test_recovery_todo_gets_execution_closure_context(self) -> None:
+        state = _state(["cipher.bin", "decoder.c"])
+        todo = PlannedTodo(
+            goal="Port the source cipher and recover the plaintext flag.",
+            phase=TodoPhase.ANALYSIS,
+            context={},
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.context["family"], "crypto-decrypt")
+        self.assertIs(todo.context["execution_closure"], True)
+        self.assertEqual(todo.context["dispatch_intent"]["required_capability"], "script.exec")
+        self.assertIn("candidate_provenance", todo.context["dispatch_intent"]["completion_contract"])
+
+    def test_algorithm_verification_gets_execution_closure_context(self) -> None:
+        state = _state(["cipher.py", "capture.bin"])
+        todo = PlannedTodo(
+            goal="Apply the reference algorithm to local bytes and recover a candidate.",
+            phase=TodoPhase.ANALYSIS,
+            context={"family": "algorithm-verification"},
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.context["family"], "algorithm-verification")
+        self.assertIs(todo.context["execution_closure"], True)
+        self.assertEqual(todo.context["dispatch_intent"]["profile"], "execution_closure")
+
+    def test_crypto_model_todo_preserves_structured_dispatch_intent(self) -> None:
+        state = _state(["cipher.py", "capture.bin"])
+        todo = PlannedTodo(
+            goal="XOR-decrypt the recovered ciphertext bytes and extract the flag.",
+            phase=TodoPhase.ANALYSIS,
+            context={
+                "family": "crypto-model",
+                "dispatch_intent": {
+                    "profile": "crypto_model",
+                    "required_capability": None,
+                    "evidence_ids": ["evidence-old"],
+                },
+            },
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertNotIn("execution_closure", todo.context)
+        self.assertNotIn("capability_hint", todo.context)
+        self.assertIsNone(todo.context["dispatch_intent"]["required_capability"])
+        self.assertEqual(todo.context["dispatch_intent"]["evidence_ids"], ["evidence-old"])
+
+    def test_execution_continuation_todo_stays_open_dispatch(self) -> None:
+        state = _state(["solve.py"])
+        todo = PlannedTodo(
+            goal=(
+                "Continue from the latest grounded evidence and execute the "
+                "next bounded step toward recovering a flag candidate."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            context={"family": "execution-continuation"},
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertNotIn("execution_closure", todo.context)
+        self.assertEqual(todo.context["dispatch_intent"]["profile"], "execution_continuation")
+        self.assertIsNone(todo.context["dispatch_intent"]["required_capability"])
 
     def test_flag_format_template_is_not_a_concrete_candidate(self) -> None:
         state = _state(["stfu", "flag.stfu"])
@@ -202,6 +1571,30 @@ class PlanningPipelineDedupTests(unittest.TestCase):
         self.assertEqual(len(inventory_todos), 1)
         self.assertTrue(any("dropped" in note for note in decision.notes))
 
+    def test_collapses_duplicate_flag_validation_for_same_candidate(self) -> None:
+        state = _state([])
+        candidate = FlagCandidate(value="flag{okay}", source="script")
+        state.flag_candidates[candidate.candidate_id] = candidate
+        llm_todo = PlannedTodo(
+            goal="Validate candidate flag{okay}.",
+            phase=TodoPhase.FLAG_VALIDATION,
+            context={"candidate_flag": "flag{okay}"},
+            dedupe_key="llm-validation",
+        )
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(summary="validate", todos=[llm_todo]),
+        )
+
+        validation_todos = [
+            todo for todo in decision.todos
+            if todo.phase == TodoPhase.FLAG_VALIDATION
+        ]
+        self.assertEqual(len(validation_todos), 1)
+        self.assertEqual(validation_todos[0].context["candidate_flag"], "flag{okay}")
+        self.assertTrue(any("dropped" in note for note in decision.notes))
+
     def test_partial_todo_blocks_same_dedupe_key_but_allows_new_key(self) -> None:
         state = _state([])
         partial = state.queue_todo(
@@ -241,6 +1634,68 @@ class PlanningPipelineDedupTests(unittest.TestCase):
 
 
 class LLMPlannerTests(unittest.TestCase):
+    def test_planner_summary_sanitizes_source_identity_terms(self) -> None:
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "The RAG retrieval result is a self-hit. The knowledge hints confirm the related writeup for the 'stfu' challenge is highly similar (score 0.879) and source identity labels describe an LFSR cipher from the exact same CSAW challenge in oracle mode.",
+                    "todos": [
+                        {
+                            "goal": "Use the RAG retrieval result from oracle mode to port the solver.",
+                            "phase": "recon",
+                            "context": {"family": "solver-port"},
+                            "success_criteria": ["Do not rely on the self-hit label."],
+                            "constraints": ["Treat oracle source identity labels as provenance only."],
+                            "dedupe_key": "solver-port",
+                        },
+                        {
+                            "goal": "Assess whether the service exposes a padding oracle.",
+                            "phase": "recon",
+                            "context": {"family": "padding-oracle-assessment"},
+                            "dedupe_key": "padding-oracle-assessment",
+                        },
+                    ],
+                    "notes": [
+                        "RAG retrieval hits and oracle source identity labels were used for planning."
+                    ],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(_state([]))
+        note_text = "\n".join(decision.notes).lower()
+        todo_text = "\n".join(
+            text
+            for todo in decision.todos
+            for text in [todo.goal, *todo.success_criteria, *todo.constraints]
+        ).lower()
+
+        self.assertIn("closely related challenge", decision.summary)
+        self.assertIn("technical context", decision.summary)
+        self.assertIn("technical evidence suggests", decision.summary.lower())
+        self.assertNotIn("technical context confirm", decision.summary.lower())
+        self.assertNotIn("exact same", decision.summary.lower())
+        self.assertNotIn("oracle", decision.summary.lower())
+        self.assertNotIn("rag", decision.summary.lower())
+        self.assertNotIn("retrieval", decision.summary.lower())
+        self.assertNotIn("self-hit", decision.summary.lower())
+        self.assertNotIn("writeup", decision.summary.lower())
+        self.assertNotIn("source identity", decision.summary.lower())
+        self.assertNotIn("score", decision.summary.lower())
+        self.assertNotIn("knowledge hints", decision.summary.lower())
+        self.assertNotIn("rag", note_text)
+        self.assertNotIn("retrieval", note_text)
+        self.assertNotIn("oracle", note_text)
+        self.assertNotIn("source identity", note_text)
+        self.assertIn("port the solver", todo_text)
+        self.assertIn("padding oracle", todo_text)
+        self.assertNotIn("rag", todo_text)
+        self.assertNotIn("retrieval", todo_text)
+        self.assertNotIn("oracle mode", todo_text)
+        self.assertNotIn("self-hit", todo_text)
+        self.assertNotIn("source identity", todo_text)
+
     def test_planner_combines_bootstrap_and_llm_todos(self) -> None:
         state = _state(["solve.py"])
         planner = LLMPlanner(
@@ -383,7 +1838,8 @@ class LLMPlannerTests(unittest.TestCase):
                     ],
                     "notes": [],
                     "stop_run": False,
-                }
+                },
+                {"summary": "exhausted", "todos": [], "notes": [], "stop_run": True},
             ])
         )
 
@@ -427,6 +1883,107 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(len(decision.todos), 1)
         self.assertEqual(decision.todos[0].phase, TodoPhase.EXPLOIT)
 
+    def test_planner_allows_exploit_with_existing_endpoint_id(self) -> None:
+        state = _state([])
+        endpoint = Endpoint(hostname="example.test", port=8000, protocol="tcp")
+        state.apply_state_delta(StateDelta(endpoints=[endpoint]))
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "endpoint-driven exploit",
+                    "todos": [
+                        {
+                            "goal": "Run the solver against the observed TCP service.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {"endpoint_id": endpoint.endpoint_id},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.EXPLOIT)
+
+    def test_planner_allows_exploit_with_observed_endpoint_url(self) -> None:
+        state = _state([])
+        state.apply_state_delta(
+            StateDelta(
+                endpoints=[
+                    Endpoint(
+                        hostname="example.test",
+                        port=8000,
+                        protocol="tcp",
+                        metadata={"service": "raw-tcp"},
+                    )
+                ]
+            )
+        )
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "observed service exploit",
+                    "todos": [
+                        {
+                            "goal": "Run the verified solver against the observed service.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {"base_url": "http://example.test:8000"},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.EXPLOIT)
+
+    def test_planner_drops_exploit_with_unobserved_endpoint_url(self) -> None:
+        state = _state([])
+        state.apply_state_delta(
+            StateDelta(
+                endpoints=[
+                    Endpoint(
+                        url="http://example.test:8000",
+                        hostname="example.test",
+                        port=8000,
+                        protocol="http",
+                    )
+                ]
+            )
+        )
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {
+                    "summary": "unobserved service exploit",
+                    "todos": [
+                        {
+                            "goal": "Run the solver against a URL that has not returned service evidence.",
+                            "phase": "exploit",
+                            "priority": 90,
+                            "context": {"base_url": "http://example.test:8000"},
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(decision.todos, [])
+        self.assertTrue(any("ungrounded exploit" in note for note in decision.notes))
+
     def test_planner_drops_exploit_with_unknown_evidence_id(self) -> None:
         state = _state([])
         state.upsert_evidence(
@@ -452,7 +2009,8 @@ class LLMPlannerTests(unittest.TestCase):
                     ],
                     "notes": [],
                     "stop_run": False,
-                }
+                },
+                {"summary": "exhausted", "todos": [], "notes": [], "stop_run": True},
             ])
         )
 
@@ -576,6 +2134,219 @@ class LLMPlannerTests(unittest.TestCase):
         )
         self.assertTrue(planner.plan(_state([])).stop_run)
 
+    def test_planner_retries_empty_non_terminal_decision(self) -> None:
+        captured: list[dict[str, object]] = []
+
+        def responder(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured.append(json.loads(user_prompt))
+            if len(captured) == 1:
+                return {"summary": "observed but no action", "todos": [], "notes": [], "stop_run": False}
+            return {
+                "summary": "continue from evidence",
+                "todos": [
+                    {
+                        "goal": "Analyze the latest service evidence and derive the next executable exploit step.",
+                        "phase": "analysis",
+                        "priority": 85,
+                        "context": {"evidence_id": "evidence-service"},
+                        "success_criteria": ["Produce a concrete executable next step."],
+                    }
+                ],
+                "notes": [],
+                "stop_run": False,
+            }
+
+        state = _state([])
+        prior = state.queue_todo(TodoItem(goal="Probe service.", phase=TodoPhase.RECON, dedupe_key="probe"))
+        prior.mark_completed("service banner captured")
+        state.upsert_evidence(
+            EvidenceRecord(
+                evidence_id="evidence-service",
+                task_id=prior.todo_id,
+                capability="shell.exec",
+                tool_name="shell_exec",
+                mode="local_command",
+                summary="raw TCP service banner captured",
+                extracted={"output_context": {"stdout": "ready for commands"}},
+            )
+        )
+
+        decision = LLMPlanner(
+            StaticLLMClient(responder),
+            augmenter=KnowledgeAugmenter(None),
+        ).plan(state)
+
+        self.assertEqual(len(captured), 2)
+        self.assertNotIn("planner_retry_instruction", captured[0])
+        self.assertIn("planner_retry_instruction", captured[1])
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.ANALYSIS)
+        self.assertTrue(any("retried after empty" in note for note in decision.notes))
+
+    def test_planner_retries_when_only_proposed_todo_is_deduped(self) -> None:
+        captured: list[dict[str, object]] = []
+
+        def responder(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured.append(json.loads(user_prompt))
+            if len(captured) == 1:
+                return {
+                    "summary": "repeat inventory",
+                    "todos": [
+                        {
+                            "goal": "Inventory and classify bundled challenge files.",
+                            "phase": "recon",
+                            "priority": 95,
+                            "context": {"family": "artifact-inventory"},
+                            "success_criteria": ["Classify files."],
+                            "dedupe_key": "bootstrap:artifact-inventory",
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            return {
+                "summary": "execute from technical context",
+                "todos": [
+                    {
+                        "goal": "Build a bounded solver harness from the latest technical context and local artifacts.",
+                        "phase": "analysis",
+                        "priority": 90,
+                        "context": {
+                            "family": "algorithm-verification",
+                            "capability_hint": "script.exec",
+                        },
+                        "success_criteria": ["Print candidate provenance."],
+                    }
+                ],
+                "notes": [],
+                "stop_run": False,
+            }
+
+        state = _state(["capture.bin"])
+        inventory = state.queue_todo(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                context={"family": "artifact-inventory"},
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        )
+        inventory.mark_completed("done")
+
+        decision = LLMPlanner(
+            StaticLLMClient(responder),
+            augmenter=KnowledgeAugmenter(None),
+        ).plan(state)
+
+        self.assertEqual(len(captured), 2)
+        self.assertNotIn("planner_retry_instruction", captured[0])
+        self.assertIn("planner_retry_instruction", captured[1])
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.ANALYSIS)
+        self.assertTrue(any("retried after empty" in note for note in decision.notes))
+
+    def test_planner_retries_when_gate_drops_all_llm_todos(self) -> None:
+        captured: list[dict[str, object]] = []
+
+        def responder(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured.append(json.loads(user_prompt))
+            if len(captured) == 1:
+                return {
+                    "summary": "bad local pivot",
+                    "todos": [
+                        {
+                            "goal": "Connect to localhost:9999 and inspect the service.",
+                            "phase": "analysis",
+                            "priority": 80,
+                            "context": {"scope": "http://127.0.0.1:9999"},
+                            "success_criteria": ["Capture a banner."],
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            return {
+                "summary": "use local artifacts",
+                "todos": [
+                    {
+                        "goal": "Analyze bundled files and produce a bounded diagnostic.",
+                        "phase": "analysis",
+                        "priority": 80,
+                        "context": {
+                            "files_root": "/home/ctfplayer/ctf_files",
+                            "challenge_files": ["capture.bin"],
+                        },
+                        "success_criteria": ["Use only bundled artifacts."],
+                    }
+                ],
+                "notes": [],
+                "stop_run": False,
+            }
+
+        state = _state(["capture.bin"], ["tcp://remote.example:9000"])
+        prior = state.queue_todo(
+            TodoItem(
+                goal="Map authorized scope entry 1.",
+                phase=TodoPhase.RECON,
+                context={"scope": "tcp://remote.example:9000", "family": "recon"},
+                dedupe_key="bootstrap:scope:tcp://remote.example:9000",
+            )
+        )
+        prior.mark_completed("remote service unavailable; use bundled files")
+        inventory = state.queue_todo(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                context={"family": "artifact-inventory"},
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        )
+        inventory.mark_completed("capture.bin")
+
+        decision = LLMPlanner(
+            StaticLLMClient(responder),
+            augmenter=KnowledgeAugmenter(None),
+        ).plan(state)
+
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.ANALYSIS)
+        self.assertTrue(any("retried after empty" in note for note in decision.notes))
+
+    def test_planner_synthesizes_grounded_continuation_after_repeated_empty_plans(self) -> None:
+        state = _state([])
+        prior = state.queue_todo(
+            TodoItem(goal="Probe raw TCP service.", phase=TodoPhase.RECON, dedupe_key="probe")
+        )
+        prior.mark_completed("captured first prompt")
+        state.upsert_evidence(
+            EvidenceRecord(
+                evidence_id="evidence-service",
+                task_id=prior.todo_id,
+                capability="script.exec",
+                tool_name="script_exec",
+                mode="local_command",
+                summary="connected and captured first protocol prompt",
+                extracted={"output_context": {"stdout": "amount prompt captured"}},
+            )
+        )
+
+        planner = LLMPlanner(
+            StaticLLMClient([
+                {"summary": "observed but no action", "todos": [], "notes": [], "stop_run": False},
+                {"summary": "still no action", "todos": [], "notes": [], "stop_run": False},
+            ])
+        )
+
+        decision = planner.plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        todo = decision.todos[0]
+        self.assertEqual(todo.phase, TodoPhase.EXPLOIT)
+        self.assertEqual(todo.context["family"], "execution-continuation")
+        self.assertEqual(todo.context["evidence_ids"], ["evidence-service"])
+        self.assertTrue(any("repeated empty plans" in note for note in decision.notes))
+
     def test_planner_raises_when_llm_fails(self) -> None:
         planner = LLMPlanner(StaticLLMClient([]))
 
@@ -644,6 +2415,23 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(len(decision.todos), 1)
         self.assertEqual(decision.todos[0].phase, TodoPhase.FLAG_VALIDATION)
         self.assertEqual(decision.todos[0].context["candidate_flag"], "flag{okay}")
+
+    def test_planner_skips_llm_when_grounded_candidate_is_ready(self) -> None:
+        state = _state([])
+        candidate = FlagCandidate(value="flag{okay}", source="artifact.triage")
+        state.flag_candidates[candidate.candidate_id] = candidate
+
+        def fail_if_called(_system_prompt: str, _user_prompt: str) -> dict[str, object]:
+            raise AssertionError(
+                "LLM should not be called for deterministic validation"
+            )
+
+        decision = LLMPlanner(StaticLLMClient(fail_if_called)).plan(state)
+
+        self.assertEqual(len(decision.todos), 1)
+        self.assertEqual(decision.todos[0].phase, TodoPhase.FLAG_VALIDATION)
+        self.assertEqual(decision.todos[0].context["candidate_flag"], "flag{okay}")
+        self.assertIn("Skipped LLM planning", " ".join(decision.notes))
 
     def test_planner_keeps_flag_format_decryption_todo_as_analysis(self) -> None:
         def responder(_system_prompt: str, _user_prompt: str) -> dict[str, object]:
@@ -788,6 +2576,19 @@ class LLMPlannerTests(unittest.TestCase):
                 },
             )
         )
+        state.apply_state_delta(
+            StateDelta(
+                endpoints=[
+                    Endpoint(
+                        endpoint_id="endpoint-observed-tcp",
+                        hostname="example.test",
+                        port=8000,
+                        protocol="tcp",
+                        metadata={"service": "raw-tcp"},
+                    )
+                ]
+            )
+        )
 
         LLMPlanner(StaticLLMClient(responder)).plan(state)
 
@@ -800,8 +2601,67 @@ class LLMPlannerTests(unittest.TestCase):
         # Shell evidence goes through generic context; verify top-level keys kept
         self.assertIn("inspected_binaries", rendered)
         self.assertIn("stfu", rendered)
+        self.assertIn("endpoint-observed-tcp", json.dumps(captured["snapshot"]["endpoints"]))  # type: ignore[index]
         contract = captured["snapshot"]["planning_contract"]  # type: ignore[index]
         self.assertIn("/tmp files", contract["evidence_context_rule"])  # type: ignore[index]
+        self.assertIn("partial_no_candidate", contract["evidence_quality_rule"])  # type: ignore[index]
+        self.assertIn("diagnostic only", contract["evidence_quality_rule"])  # type: ignore[index]
+        self.assertIn("open_todos is 0", contract["no_empty_noop_rule"])  # type: ignore[index]
+
+    def test_planner_prompt_includes_structured_planning_profiles(self) -> None:
+        captured: dict[str, object] = {}
+
+        def responder(system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["system_prompt"] = system_prompt
+            captured["snapshot"] = json.loads(user_prompt)
+            return {"summary": "matrix", "todos": [], "notes": [], "stop_run": True}
+
+        LLMPlanner(StaticLLMClient(responder)).plan(_state(["chall.py"]))
+
+        prompt = captured["system_prompt"]
+        self.assertNotIn("CTF technique matrix", prompt)
+        matrix = captured["snapshot"]["planning_profiles"]  # type: ignore[index]
+        families = {item["family"] for item in matrix}
+        self.assertIn("artifact-inventory", families)
+        self.assertIn("crypto-model", families)
+        self.assertIn("algorithm-verification", families)
+        self.assertNotIn("web-exploit", families)
+        self.assertTrue(all("objective" not in item for item in matrix))
+        self.assertTrue(all("failure_escape" not in item for item in matrix))
+        self.assertNotIn("ctf_technique_matrix", captured["snapshot"])
+        self.assertNotIn("analysis_strategy", captured["snapshot"])
+        self.assertNotIn("exploit_strategy", captured["snapshot"])
+        self.assertNotIn("flag_recovery_hints", captured["snapshot"])
+
+    def test_planner_prompt_includes_tracked_artifacts(self) -> None:
+        captured: dict[str, object] = {}
+
+        def responder(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {"summary": "artifacts", "todos": [], "notes": [], "stop_run": True}
+
+        state = _state(["out.img"])
+        state.apply_state_delta(
+            StateDelta(
+                artifacts=[
+                    Artifact(
+                        path="/home/ctfplayer/ctf_files/.autopentest_artifacts/foremost_out/gif/00000000.gif",
+                        kind="foremost_gif",
+                        source="foremost",
+                        size=1234,
+                        metadata={"source_file": "/home/ctfplayer/ctf_files/out.img"},
+                    )
+                ]
+            )
+        )
+
+        LLMPlanner(StaticLLMClient(responder)).plan(state)
+
+        artifacts = captured["snapshot"]["artifacts"]  # type: ignore[index]
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0]["kind"], "foremost_gif")
+        self.assertIn(".autopentest_artifacts", artifacts[0]["path"])
+        self.assertEqual(artifacts[0]["size"], 1234)
 
     def test_planner_prompt_includes_structured_rejected_candidates(self) -> None:
         captured: dict[str, object] = {}

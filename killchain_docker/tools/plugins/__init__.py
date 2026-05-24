@@ -6,6 +6,11 @@ from killchain_docker.tools.plugins.nmap import NmapPlugin
 from killchain_docker.tools.plugins.curl import CurlPlugin
 from killchain_docker.tools.plugins.sqlmap import SqlmapPlugin
 from killchain_docker.tools.plugins.nikto import NiktoPlugin
+from killchain_docker.tools.plugins.artifact_triage import ArtifactTriagePlugin
+from killchain_docker.tools.plugins.disk_extract import DiskExtractPlugin
+from killchain_docker.tools.plugins.office_inspect import OfficeInspectPlugin
+from killchain_docker.tools.plugins.media_scan import MediaScanPlugin
+from killchain_docker.tools.plugins.png_inspect import PngInspectPlugin
 from killchain_docker.tools.plugins.file_cmd import FilePlugin
 from killchain_docker.tools.plugins.strings_cmd import StringsPlugin
 from killchain_docker.tools.plugins.binwalk import BinwalkPlugin
@@ -25,7 +30,7 @@ from killchain_docker.tools.plugins.ltrace import LtracePlugin
 from killchain_docker.tools.plugins.strace import StracePlugin
 
 from killchain_docker.tools.plugins import (
-    shell, script, nmap, curl, sqlmap, nikto, file_cmd, strings_cmd,
+    shell, script, nmap, curl, sqlmap, nikto, artifact_triage, disk_extract, office_inspect, media_scan, png_inspect, file_cmd, strings_cmd,
     binwalk, radare2, objdump, gdb, tshark, exiftool, steghide,
     foremost, sqlite3_cmd, john, fcrackzip, jadx,
     checksec, ltrace, strace,
@@ -39,6 +44,11 @@ ALL_PLUGINS = [
     (CurlPlugin, curl.build_output),
     (SqlmapPlugin, sqlmap.build_output),
     (NiktoPlugin, nikto.build_output),
+    (ArtifactTriagePlugin, artifact_triage.build_output),
+    (DiskExtractPlugin, disk_extract.build_output),
+    (OfficeInspectPlugin, office_inspect.build_output),
+    (MediaScanPlugin, media_scan.build_output),
+    (PngInspectPlugin, png_inspect.build_output),
     (FilePlugin, file_cmd.build_output),
     (StringsPlugin, strings_cmd.build_output),
     (BinwalkPlugin, binwalk.build_output),
@@ -61,7 +71,7 @@ ALL_PLUGINS = [
 __all__ = [
     "ALL_PLUGINS",
     "BinwalkPlugin", "ChecksecPlugin", "CurlPlugin", "ExiftoolPlugin",
-    "FcrackzipPlugin", "FilePlugin", "ForemostPlugin", "GdbPlugin",
+    "ArtifactTriagePlugin", "DiskExtractPlugin", "OfficeInspectPlugin", "MediaScanPlugin", "PngInspectPlugin", "FcrackzipPlugin", "FilePlugin", "ForemostPlugin", "GdbPlugin",
     "JadxPlugin", "JohnPlugin", "LtracePlugin",
     "NiktoPlugin", "NmapPlugin", "ObjdumpPlugin", "RadarePlugin",
     "ScriptPlugin", "ShellPlugin", "SqlmapPlugin", "Sqlite3Plugin",

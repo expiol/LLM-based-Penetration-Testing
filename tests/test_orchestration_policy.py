@@ -20,6 +20,7 @@ from killchain_docker.state import (
     StateDelta,
     TodoItem,
     TodoPhase,
+    TodoStatus,
     WorkerResult,
 )
 
@@ -67,6 +68,43 @@ class CandidatePolicyTests(unittest.TestCase):
         self.assertFalse(CandidatePolicy.accepts_for_state(state, "flag{correct_length_body}"))
         self.assertTrue(CandidatePolicy.accepts_for_state(state, "key{correct_length_body}"))
 
+    def test_wrong_prefix_candidate_derives_expected_prefix_variant(self) -> None:
+        state = _state("flag{...}")
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value="ctf{correct_length_body}", source="script.exec")
+                ]
+            )
+        )
+
+        self.assertEqual(len(state.rejected_flag_candidates), 1)
+        self.assertEqual(state.rejected_flag_candidates[0].reason, "wrong_flag_prefix")
+        active_values = [candidate.value for candidate in state.flag_candidates.values()]
+        self.assertEqual(active_values, ["flag{correct_length_body}"])
+        active = next(iter(state.flag_candidates.values()))
+        self.assertIn("policy-derived", active.source or "")
+        self.assertEqual(
+            active.metadata["derived_from_rejected_candidate"],
+            "ctf{correct_length_body}",
+        )
+
+    def test_bare_candidate_derives_expected_prefix_variant(self) -> None:
+        state = _state("flag{...}")
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value="STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME", source="script.exec")
+                ]
+            )
+        )
+
+        self.assertEqual(len(state.rejected_flag_candidates), 1)
+        self.assertEqual(
+            [candidate.value for candidate in state.flag_candidates.values()],
+            ["flag{STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME}"],
+        )
+
     def test_rejected_candidate_does_not_trigger_validation_seed(self) -> None:
         state = _state("")
         state.apply_state_delta(
@@ -91,8 +129,150 @@ class CandidatePolicyTests(unittest.TestCase):
         self.assertEqual(len(state.rejected_flag_candidates), 1)
         self.assertEqual(state.rejected_flag_candidates[0].reason, "invalid_candidate_shape")
 
+    def test_goal_text_does_not_promote_bare_debug_words_to_flag_validation(self) -> None:
+        state = _state("")
+        context = {"candidate_flag": None}
+        candidate = CandidatePolicy.first_candidate_from_context(
+            state,
+            context,
+            "Fix the implementation and scan full plaintext for a flag.",
+        )
+
+        self.assertIsNone(candidate)
+
+    def test_descriptor_bare_candidate_is_rejected_at_state_boundary(self) -> None:
+        state = _state("")
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value="brace-enclosed", source="script.exec")
+                ]
+            )
+        )
+
+        self.assertEqual(state.flag_candidates, {})
+        self.assertEqual(len(state.rejected_flag_candidates), 1)
+        self.assertEqual(state.rejected_flag_candidates[0].reason, "invalid_candidate_shape")
+
+    def test_validation_failed_candidate_moves_to_rejected_state(self) -> None:
+        state = _state("flag{...}")
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value="flag{candidate_a}", source="script.exec")
+                ]
+            )
+        )
+
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(
+                        value="flag{candidate_a}",
+                        source="flag-validation",
+                        validated=False,
+                        rejected_reason="candidate mismatch",
+                    )
+                ]
+            )
+        )
+
+        self.assertEqual(state.flag_candidates, {})
+        self.assertEqual(len(state.rejected_flag_candidates), 1)
+        self.assertEqual(state.rejected_flag_candidates[0].reason, "candidate mismatch")
+
+    def test_previously_rejected_candidate_does_not_reenter_active_state(self) -> None:
+        state = _state("flag{...}")
+        candidate = "flag{candidate_a}"
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value=candidate, source="script.exec")
+                ]
+            )
+        )
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(
+                        value=candidate,
+                        source="flag-validation",
+                        validated=False,
+                        rejected_reason="candidate mismatch",
+                    )
+                ]
+            )
+        )
+
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(value=candidate, source="script.exec")
+                ]
+            )
+        )
+
+        self.assertEqual(state.flag_candidates, {})
+        self.assertEqual(len(state.rejected_flag_candidates), 1)
+        self.assertEqual(state.rejected_flag_candidates[0].reason, "candidate mismatch")
+
+    def test_validated_candidate_can_override_prior_rejection(self) -> None:
+        state = _state("flag{...}")
+        candidate = "flag{candidate_a}"
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(
+                        value=candidate,
+                        source="flag-validation",
+                        validated=False,
+                        rejected_reason="candidate mismatch",
+                    )
+                ]
+            )
+        )
+
+        state.apply_state_delta(
+            StateDelta(
+                flag_candidates=[
+                    FlagCandidate(
+                        value=candidate,
+                        source="flag-validation",
+                        validated=True,
+                    )
+                ]
+            )
+        )
+
+        self.assertEqual([item.value for item in state.flag_candidates.values()], [candidate])
+        self.assertTrue(next(iter(state.flag_candidates.values())).validated)
+
 
 class TodoProgressPolicyTests(unittest.TestCase):
+    def test_unknown_flag_format_removes_planner_invented_prefix(self) -> None:
+        state = _state("")
+        todo = PlannedTodo(
+            goal="Decrypt and scan plaintext for a flag.",
+            phase=TodoPhase.ANALYSIS,
+            context={"flag_format_prefix": "nyu{"},
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertNotIn("flag_format_prefix", todo.context)
+
+    def test_known_flag_format_sets_prefix_context(self) -> None:
+        state = _state("key{...}")
+        todo = PlannedTodo(
+            goal="Decrypt and scan plaintext for a flag.",
+            phase=TodoPhase.ANALYSIS,
+            context={"flag_format_prefix": "nyu{"},
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.context["flag_format_prefix"], "key{")
+
     def test_compound_binary_then_script_todo_becomes_analysis_only(self) -> None:
         state = _state()
         todo = PlannedTodo(
@@ -300,6 +480,37 @@ class TodoProgressPolicyTests(unittest.TestCase):
 
 
 class RoundOutcomePolicyTests(unittest.TestCase):
+    def test_failed_result_with_diagnostic_evidence_becomes_partial(self) -> None:
+        state = _state()
+        todo = state.queue_todo(TodoItem(goal="Inspect archive and recover evidence."))
+        result = WorkerResult(
+            todo_id=todo.todo_id,
+            worker_name="artifact-worker",
+            success=False,
+            summary="archive parser failed after listing entries",
+            error="unsupported compression method",
+            retryable=False,
+            output_context={
+                "failure_kind": "parse_error",
+                "stderr": "unsupported compression method after 12 entries",
+            },
+            evidence_updates=[
+                EvidenceRecord(
+                    task_id=todo.todo_id,
+                    tool_name="script.exec",
+                    mode="local",
+                    summary="listed archive entries before failure",
+                    result={"stderr": "unsupported compression method after 12 entries"},
+                )
+            ],
+        )
+
+        state.apply_worker_result(result)
+
+        self.assertTrue(result.partial)
+        self.assertEqual(state.todos[0].status, TodoStatus.PARTIAL)
+        self.assertTrue(RoundOutcomePolicy.had_meaningful_progress([result]))
+
     def test_round_progress_includes_near_miss_candidates(self) -> None:
         results = [
             WorkerResult(
@@ -348,6 +559,23 @@ class RoundOutcomePolicyTests(unittest.TestCase):
         self.assertEqual(directive["triggered_at_cycle"], 9)
         self.assertEqual(directive["banned_families"], ["repeated-decrypt"])
         self.assertIn("FORCED PIVOT #2", str(directive["instruction"]))
+
+    def test_forced_pivot_blocks_goal_derived_banned_family(self) -> None:
+        state = _state()
+        state.metadata["forced_pivot"] = {
+            "pivot_number": 1,
+            "banned_families": ["binary-analysis"],
+        }
+        todo = PlannedTodo(
+            goal="Use radare2 to recover the binary algorithm.",
+            phase=TodoPhase.ANALYSIS,
+            context={"family": "alternative-path"},
+        )
+
+        allowed, reason = ProgressPolicy.allows(todo, state)
+
+        self.assertFalse(allowed)
+        self.assertIn("binary-analysis", reason)
 
 
 class FlagValidationCapTests(unittest.TestCase):
