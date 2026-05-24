@@ -200,6 +200,8 @@ def _looks_like_bare_flag_token(token: str, context: str) -> bool:
         return False
     if looks_like_escaped_byte_candidate(token):
         return False
+    if CODE_STATEMENT_BODY_RE.search(context) or PYTHON_REPR_BODY_RE.search(context):
+        return False
     if _NEGATIVE_BARE_CONTEXT_RE.search(context):
         return False
     if (

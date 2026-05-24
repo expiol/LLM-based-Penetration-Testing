@@ -954,6 +954,17 @@ class TestFlagRecoveryTaskDetection(unittest.TestCase):
             [],
         )
 
+    def test_does_not_lift_source_code_identifier_tokens_from_key_context(self) -> None:
+        text = (
+            "IV/nonce references: ['private $CIPHER = MCRYPT_RIJNDAEL_128;', "
+            "\"private $key =  '13somerandomkey2';\", "
+            "'private $MODE = MCRYPT_MODE_ECB;']\n"
+            "Key management references: ['$plaintext = "
+            "mcrypt_decrypt($this->CIPHER, $this->key, $ciphertext, $this->MODE);']\n"
+        )
+
+        self.assertEqual(extract_flag_candidates(text), [])
+
     def test_key_label_can_still_lift_bare_candidate(self) -> None:
         self.assertEqual(
             extract_flag_candidates("KEY: STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME"),
@@ -1984,6 +1995,29 @@ class TestScriptExecutionRuntime(unittest.TestCase):
             [candidate.value for candidate in output.flag_candidates],
             ["STFU_THIS_CHALLENGE_WAS_TOTALLY_NOT_LAME"],
         )
+
+    def test_source_identifier_tokens_do_not_survive_script_context_filter(self) -> None:
+        stdout = (
+            "Key management references: [\"private $key =  '13somerandomkey2';\", "
+            "'$plaintext = mcrypt_decrypt($this->CIPHER, $this->key, $ciphertext, "
+            "$this->MODE);']\n"
+            "IV/nonce references: ['private $CIPHER = MCRYPT_RIJNDAEL_128;', "
+            "'private $MODE = MCRYPT_MODE_ECB;']\n"
+        )
+        output = build_script_output(
+            ToolExecutionRequest(tool_name="script_exec", metadata={"script_language": "python"}),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout=stdout,
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+
+        self.assertEqual([candidate.value for candidate in output.flag_candidates], [])
+        self.assertEqual(output.output_context["failure_kind"], "no_candidate")
 
     def test_derived_ascii_art_candidate_survives_script_context_filter(self) -> None:
         line = (
