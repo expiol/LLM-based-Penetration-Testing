@@ -7,10 +7,10 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from killchain_docker.llm import LLMClient, LLMClientError
+from killchain_docker.orchestrator.dispatch import DispatchRoutePolicy
 from killchain_docker.prompt_bounds import bounded_value
 from killchain_docker.prompt_projection import router_todo as prompt_router_todo
 from killchain_docker.state import (
-    DispatchIntent,
     RouterDecision,
     RouterRoundSummary,
     RunState,
@@ -30,114 +30,6 @@ Assign each ready todo to one eligible persona worker from worker_catalog.
 Use the catalog entries and todo context only; do not invent worker names.
 Return only JSON matching RouterDecision.
 """
-
-_UNIVERSAL_CAPABILITY_HINTS = frozenset({"shell.exec", "script.exec"})
-
-_CAPABILITY_WORKER_PREFERENCES: dict[str, tuple[str, ...]] = {
-    "artifact.triage": ("artifact-worker", "recon-worker", "flag-worker"),
-    "disk.extract": ("artifact-worker",),
-    "office.inspect": ("artifact-worker",),
-    "media.scan": ("artifact-worker",),
-    "png.inspect": ("artifact-worker",),
-    "file_cmd": ("artifact-worker", "recon-worker", "flag-worker"),
-    "strings_cmd": ("artifact-worker", "flag-worker", "exploit-worker"),
-    "binwalk": ("artifact-worker",),
-    "radare2": ("artifact-worker", "exploit-worker"),
-    "objdump": ("artifact-worker",),
-    "gdb": ("exploit-worker", "artifact-worker"),
-    "checksec": ("artifact-worker", "exploit-worker"),
-    "ltrace": ("artifact-worker", "exploit-worker"),
-    "strace": ("artifact-worker",),
-    "tshark": ("artifact-worker",),
-    "exiftool": ("artifact-worker", "recon-worker"),
-    "steghide": ("artifact-worker",),
-    "foremost": ("artifact-worker",),
-    "sqlite3": ("artifact-worker", "web-worker", "flag-worker"),
-    "jadx": ("artifact-worker",),
-    "nmap": ("recon-worker", "exploit-worker"),
-    "curl": ("web-worker", "recon-worker", "exploit-worker", "flag-worker"),
-    "nikto": ("web-worker", "recon-worker"),
-    "sqlmap": ("web-worker", "exploit-worker"),
-    "john": ("exploit-worker",),
-    "fcrackzip": ("exploit-worker",),
-}
-
-_PROFILE_WORKER_PREFERENCES: dict[str, tuple[str, ...]] = {
-    "scope_mapping": ("recon-worker", "web-worker"),
-    "recon": ("recon-worker", "artifact-worker"),
-    "artifact_analysis": ("artifact-worker", "recon-worker", "flag-worker"),
-    "container_extraction": ("artifact-worker",),
-    "office_inspection": ("artifact-worker",),
-    "media_inspection": ("artifact-worker",),
-    "image_inspection": ("artifact-worker",),
-    "near_miss_repair": ("artifact-worker", "exploit-worker"),
-    "execution_closure": ("artifact-worker", "exploit-worker"),
-    "algorithm_verification": ("artifact-worker", "exploit-worker"),
-    "binary_analysis": ("artifact-worker", "exploit-worker"),
-    "web_analysis": ("web-worker", "recon-worker"),
-    "web_exploitation": ("web-worker", "exploit-worker"),
-    "exploit": ("exploit-worker",),
-    "credential_recovery": ("exploit-worker",),
-    "candidate_recovery": ("artifact-worker", "exploit-worker"),
-    "flag_validation": ("flag-worker",),
-}
-
-_FILE_CONTEXT_KEYS = frozenset({
-    "artifact_id",
-    "artifact_path",
-    "binary_files",
-    "challenge_files",
-    "file_path",
-    "files_root",
-    "path",
-    "paths",
-    "source_files",
-})
-_WEB_CONTEXT_KEYS = frozenset({
-    "base_url",
-    "endpoint_id",
-    "endpoint_ids",
-    "hostname",
-    "port",
-    "scope",
-    "url",
-})
-_FILE_TERMS = (
-    "artifact", "binary", "bundle", "challenge file", "document", "file",
-    "image", "pcap", "source", "zip",
-)
-_SCOPE_TERMS = ("authorized scope", "host", "http", "map scope", "port", "service", "url")
-
-
-def _todo_has_context_key(todo: TodoItem, keys: frozenset[str]) -> bool:
-    for key in keys:
-        value = todo.context.get(key)
-        if value not in (None, "", [], {}, ()):
-            return True
-    return False
-
-
-def _todo_text(todo: TodoItem) -> str:
-    return " ".join([
-        todo.goal,
-        " ".join(todo.success_criteria),
-        " ".join(todo.constraints),
-    ]).lower()
-
-
-def _todo_has_file_signal(todo: TodoItem) -> bool:
-    if _todo_has_context_key(todo, _FILE_CONTEXT_KEYS):
-        return True
-    text = _todo_text(todo)
-    return any(term in text for term in _FILE_TERMS)
-
-
-def _todo_has_web_signal(todo: TodoItem) -> bool:
-    if _todo_has_context_key(todo, _WEB_CONTEXT_KEYS):
-        return True
-    text = _todo_text(todo)
-    return any(term in text for term in _SCOPE_TERMS)
-
 
 class WorkerDirectory:
     """Typed view over Persona Workers used by Router and Orchestrator."""
@@ -295,68 +187,7 @@ class RouterAgent:
         todo: TodoItem,
         worker_directory: WorkerDirectory,
     ) -> list[tuple[str, str]]:
-        candidates: list[tuple[str, str]] = []
-        intent = DispatchIntent.from_context(todo.context)
-        if intent.profile and intent.profile != "open":
-            indexed = worker_directory.workers_for_profile(intent.profile)
-            preferred = _PROFILE_WORKER_PREFERENCES.get(intent.profile, ())
-            ordered = [
-                name for name in preferred if name in indexed
-            ] + [
-                name for name in indexed if name not in preferred
-            ]
-            candidates.extend(
-                (name, f"Structural: dispatch profile {intent.profile}.")
-                for name in ordered
-            )
-
-        capability = str(intent.required_capability or "").strip()
-        if capability and capability not in _UNIVERSAL_CAPABILITY_HINTS:
-            indexed = worker_directory.workers_for_capability(capability)
-            preferred = _CAPABILITY_WORKER_PREFERENCES.get(capability, ())
-            ordered = [
-                name for name in preferred if name in indexed
-            ] + [
-                name for name in indexed if name not in preferred
-            ]
-            candidates.extend(
-                (name, f"Structural: required capability {capability}.")
-                for name in ordered
-            )
-
-        for capability in intent.allowed_capabilities:
-            if capability in _UNIVERSAL_CAPABILITY_HINTS:
-                continue
-            indexed = worker_directory.workers_for_capability(capability)
-            preferred = _CAPABILITY_WORKER_PREFERENCES.get(capability, ())
-            ordered = [
-                name for name in preferred if name in indexed
-            ] + [
-                name for name in indexed if name not in preferred
-            ]
-            candidates.extend(
-                (name, f"Structural: allowed capability {capability}.")
-                for name in ordered
-            )
-
-        if _todo_has_file_signal(todo):
-            candidates.append(("artifact-worker", "Structural: file/artifact context."))
-        if todo.phase == TodoPhase.EXPLOIT:
-            candidates.append(("exploit-worker", "Structural: exploit phase."))
-        if _todo_has_web_signal(todo):
-            if todo.phase == TodoPhase.RECON:
-                candidates.append(("recon-worker", "Structural: scope or service discovery context."))
-            else:
-                candidates.append(("web-worker", "Structural: web/service context."))
-
-        seen: set[str] = set()
-        unique: list[tuple[str, str]] = []
-        for worker_name, rationale in candidates:
-            if worker_name in seen or worker_name not in worker_directory.worker_names:
-                continue
-            seen.add(worker_name)
-            unique.append((worker_name, rationale))
-        return unique
+        return DispatchRoutePolicy.worker_candidates(todo, worker_directory)
 
     def _llm_route(
         self,

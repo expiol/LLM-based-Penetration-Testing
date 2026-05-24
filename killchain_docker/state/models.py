@@ -864,66 +864,6 @@ class WorkerResult(BaseModel):
     memory_updates: dict[str, str] = Field(default_factory=dict)
 
 
-_NON_DIAGNOSTIC_FAILURE_QUALITIES = frozenset({
-    "infrastructure_error",
-    "llm_error",
-    "llm_schema_validation",
-    "metadata_validation",
-    "scope_violation_blocked",
-})
-
-
-def _state_delta_has_signal(delta: StateDelta | None) -> bool:
-    if delta is None:
-        return False
-    return bool(
-        delta.artifacts
-        or delta.endpoints
-        or delta.routes
-        or delta.flag_candidates
-        or delta.hypotheses
-        or delta.vulnerabilities
-        or delta.exploit_attempts
-        or delta.sessions
-    )
-
-
-def _payload_has_observation(payload: object) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    for key in ("stdout", "stderr", "output_text", "raw_log", "stdout_preview", "stderr_preview"):
-        if str(payload.get(key) or "").strip():
-            return True
-    return False
-
-
-def _failed_result_has_diagnostic_signal(result: WorkerResult) -> bool:
-    if result.success or result.partial or result.retryable:
-        return False
-    quality = str(result.result_quality or result.output_context.get("failure_kind") or "").strip()
-    if quality in _NON_DIAGNOSTIC_FAILURE_QUALITIES:
-        return False
-    if _state_delta_has_signal(result.state_delta):
-        return True
-    if result.asset_updates or result.finding_updates or result.credential_updates or result.network_updates:
-        return True
-    ctx = result.output_context or {}
-    if ctx.get("flag_candidates") or ctx.get("near_miss_candidates"):
-        return True
-    if _payload_has_observation(ctx):
-        return True
-    for evidence in result.evidence_updates:
-        if _payload_has_observation(evidence.result):
-            return True
-        extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
-        if _payload_has_observation(extracted):
-            return True
-        evidence_ctx = extracted.get("output_context")
-        if _payload_has_observation(evidence_ctx):
-            return True
-    return False
-
-
 class RouterRoundSummary(BaseModel):
     """Router synthesis for one execution round."""
 
@@ -1123,92 +1063,9 @@ class RunState(BaseModel):
         return None
 
     def apply_state_delta(self, delta: StateDelta) -> None:
-        for artifact in delta.artifacts:
-            key = artifact.digest or artifact.path
-            existing_id = next(
-                (
-                    current_id for current_id, current in self.artifacts.items()
-                    if (artifact.digest and current.digest == artifact.digest)
-                    or current.path == artifact.path
-                ),
-                None,
-            )
-            if existing_id is not None:
-                self.artifacts[existing_id].merge(artifact)
-            else:
-                artifact.artifact_id = artifact.artifact_id or key
-                self.artifacts[artifact.artifact_id] = artifact
-        for endpoint in delta.endpoints:
-            self.endpoints[endpoint.endpoint_id] = endpoint
-        for route in delta.routes:
-            self.routes[route.route_id] = route
-        for candidate in delta.flag_candidates:
-            from killchain_docker.orchestrator.policy import CandidatePolicy
+        from killchain_docker.state.transitions import apply_state_delta_to_state
 
-            derived_values: list[str] = []
-            decision = CandidatePolicy.decision_for_state(self, candidate.value)
-            rejection_reason = candidate.rejected_reason
-            if not decision.accepted:
-                rejection_reason = decision.reason
-                derived_values = CandidatePolicy.derived_candidates_for_state(
-                    self,
-                    candidate.value,
-                )
-            elif candidate.validated is not True and not rejection_reason:
-                rejection_reason = self._rejected_flag_reason(candidate.value)
-            if candidate.validated is False and not rejection_reason:
-                rejection_reason = "candidate_validation_failed"
-            if rejection_reason:
-                self._reject_flag_candidate(candidate, rejection_reason)
-                for derived_value in derived_values:
-                    if self._rejected_flag_reason(derived_value):
-                        continue
-                    derived = FlagCandidate(
-                        value=derived_value,
-                        source=f"{candidate.source or 'unknown'}:policy-derived",
-                        confidence=max(0.1, min(candidate.confidence, 0.45)),
-                        evidence_refs=list(candidate.evidence_refs),
-                        metadata={
-                            **dict(candidate.metadata),
-                            "derived_from_rejected_candidate": candidate.value,
-                            "derivation": "expected_prefix_rewrite",
-                        },
-                    )
-                    if CandidatePolicy.decision_for_state(self, derived.value).accepted:
-                        existing_id = next(
-                            (
-                                current_id
-                                for current_id, current in self.flag_candidates.items()
-                                if current.value == derived.value
-                            ),
-                            None,
-                        )
-                        if existing_id is not None:
-                            self.flag_candidates[existing_id].merge(derived)
-                        else:
-                            self.flag_candidates[derived.candidate_id] = derived
-                continue
-            existing_id = next(
-                (
-                    current_id for current_id, current in self.flag_candidates.items()
-                    if current.value == candidate.value
-                ),
-                None,
-            )
-            if existing_id is not None:
-                self.flag_candidates[existing_id].merge(candidate)
-            else:
-                self.flag_candidates[candidate.candidate_id] = candidate
-        for hypothesis in delta.hypotheses:
-            self.hypotheses[hypothesis.hypothesis_id] = hypothesis
-        for vulnerability in delta.vulnerabilities:
-            self.vulnerabilities[vulnerability.vulnerability_id] = vulnerability
-        for attempt in delta.exploit_attempts:
-            attempt.task_id = attempt.task_id or ""
-            self.exploit_attempts[attempt.attempt_id] = attempt
-        for session in delta.sessions:
-            self.sessions[session.session_id] = session
-        self.touch()
+        apply_state_delta_to_state(self, delta)
 
     def _reject_flag_candidate(self, candidate: FlagCandidate, reason: str) -> None:
         self.record_rejected_flag_candidate(
@@ -1229,11 +1086,17 @@ class RunState(BaseModel):
         )
 
     def apply_worker_result(self, result: WorkerResult) -> None:
+        from killchain_docker.state.transitions import (
+            annotate_result_artifacts,
+            failed_result_has_diagnostic_signal,
+            record_todo_execution_context,
+        )
+
         todo = self.get_todo(result.todo_id)
         if todo is None:
             raise KeyError(f"Unknown todo id: {result.todo_id}")
-        self._record_todo_execution_context(todo, result)
-        if _failed_result_has_diagnostic_signal(result):
+        record_todo_execution_context(todo, result)
+        if failed_result_has_diagnostic_signal(result):
             result.partial = True
             result.partial_reason = (
                 result.partial_reason
@@ -1260,7 +1123,7 @@ class RunState(BaseModel):
         for evidence in result.evidence_updates:
             self.upsert_evidence(evidence)
         self.network_edges.extend(result.network_updates)
-        self._annotate_result_artifacts(result)
+        annotate_result_artifacts(result)
         self.apply_state_delta(result.state_delta)
 
         if result.memory_updates:
@@ -1287,49 +1150,6 @@ class RunState(BaseModel):
         )
         self.notes.extend(result.notes)
         self.touch()
-
-    @staticmethod
-    def _annotate_result_artifacts(result: WorkerResult) -> None:
-        evidence_ids = [
-            evidence.evidence_id
-            for evidence in result.evidence_updates
-            if getattr(evidence, "evidence_id", "")
-        ]
-        capability = str(result.output_context.get("capability") or "").strip()
-        for artifact in result.state_delta.artifacts:
-            if evidence_ids:
-                existing = artifact.metadata.get("evidence_ids")
-                if isinstance(existing, list):
-                    merged = [str(item) for item in existing if str(item).strip()]
-                else:
-                    merged = []
-                for evidence_id in evidence_ids:
-                    if evidence_id not in merged:
-                        merged.append(evidence_id)
-                artifact.metadata["evidence_ids"] = merged
-            artifact.metadata.setdefault("source_task_id", result.todo_id)
-            artifact.metadata.setdefault("source_worker", result.worker_name)
-            if capability:
-                artifact.metadata.setdefault("source_capability", capability)
-
-    @staticmethod
-    def _record_todo_execution_context(todo: TodoItem, result: WorkerResult) -> None:
-        ctx = result.output_context if isinstance(result.output_context, dict) else {}
-        capability = str(ctx.get("capability") or "").strip()
-        if capability:
-            todo.context.setdefault("executed_capability", capability)
-
-        for key in ("path", "artifact_path", "file_path"):
-            value = str(ctx.get(key) or "").strip()
-            if value:
-                todo.context.setdefault("executed_path", value)
-                break
-
-        paths = ctx.get("paths")
-        if isinstance(paths, list):
-            clean_paths = [str(item).strip() for item in paths if str(item).strip()]
-            if clean_paths:
-                todo.context.setdefault("executed_paths", clean_paths)
 
     def record_round(self, round_record: RouterRound) -> None:
         self.rounds.append(round_record)

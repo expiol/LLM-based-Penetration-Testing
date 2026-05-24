@@ -7,7 +7,6 @@ and a normalize function that validates & cleans metadata before dispatch.
 from __future__ import annotations
 
 import ast
-import re
 import sys
 
 from killchain_docker.state import RunState, TodoItem
@@ -18,35 +17,14 @@ from killchain_docker.scope_guard import (
 )
 from killchain_docker.tools import ToolCapability, ToolExecutionError
 from killchain_docker.tools.core import _first_string
+from killchain_docker.tools.guard_policy import ToolGuardPolicy
 from killchain_docker.tools.plugins.curl import unsupported_url_scheme_reason
-from killchain_docker.tools.plugins.shell import (
-    http_client_non_http_url_block_reason,
-    package_install_block_reason,
-    stderr_suppression_block_reason,
-    unbounded_extraction_block_reason,
-)
 
 _SAFE_CLI_PATH_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "0123456789"
     "/._-:@%+=,"
-)
-_SHELL_HEREDOC_RE = re.compile(r"<<\s*['\"]?[A-Za-z0-9_.'-]+['\"]?")
-_PYTHON_C_RE = re.compile(r"\bpython(?:3(?:\.\d+)?)?\s+-c\s+", re.IGNORECASE)
-_PYTHON_C_CONTROL_FLOW_RE = re.compile(
-    r"\b(?:with|if|for|while|try|except|finally|def|class)\b"
-)
-_SOURCE_BUILD_RE = re.compile(
-    r"\b(?:gcc|g\+\+|clang|clang\+\+|cc|make|cmake|rustc|javac|go\s+build)\b"
-)
-_SOURCE_TEXT_MARKERS = (
-    "#include",
-    "int main(",
-    "def main(",
-    "import ",
-    "class ",
-    "function ",
 )
 
 
@@ -383,47 +361,9 @@ def _normalize_shell(raw: dict[str, object], state: RunState) -> dict[str, objec
 
 
 def _validate_shell_command(command: str) -> None:
-    install_reason = package_install_block_reason(command)
-    if install_reason:
-        raise ToolExecutionError(
-            f"shell.exec blocked: {install_reason}; use installed tools or pivot"
-        )
-    extraction_reason = unbounded_extraction_block_reason(command)
-    if extraction_reason:
-        raise ToolExecutionError(
-            f"shell.exec blocked: {extraction_reason}; keep extraction bounded"
-        )
-    http_client_reason = http_client_non_http_url_block_reason(command)
-    if http_client_reason:
-        raise ToolExecutionError(
-            f"shell.exec blocked: {http_client_reason}"
-        )
-    stderr_reason = stderr_suppression_block_reason(command)
-    if stderr_reason:
-        raise ToolExecutionError(
-            f"shell.exec blocked: {stderr_reason}"
-        )
-    program_reason = _shell_program_block_reason(command)
-    if program_reason:
-        raise ToolExecutionError(program_reason)
-
-
-def _shell_program_block_reason(command: str) -> str | None:
-    lowered = command.lower()
-    if _PYTHON_C_RE.search(command) and _PYTHON_C_CONTROL_FLOW_RE.search(command):
-        return (
-            "shell.exec command embeds complex Python in python -c; "
-            "use script.exec with complete script_code instead"
-        )
-    has_source_text = any(marker in lowered for marker in _SOURCE_TEXT_MARKERS)
-    if _SHELL_HEREDOC_RE.search(command) and (
-        has_source_text or _SOURCE_BUILD_RE.search(command)
-    ):
-        return (
-            "shell.exec command appears to create or compile multi-line source; "
-            "use script.exec with complete script_code instead"
-        )
-    return None
+    reason = ToolGuardPolicy.shell_command_block_reason(command)
+    if reason:
+        raise ToolExecutionError(reason)
 
 
 def _normalize_curl(raw: dict[str, object], contract: dict[str, object]) -> dict[str, object]:

@@ -22,7 +22,7 @@ from killchain_docker.prompt_projection import (
     working_memory as prompt_working_memory,
 )
 from killchain_docker.reasoning import ToolUseDecision
-from killchain_docker.state import DispatchIntent, FlagCandidate, RunState, TodoItem, WorkerResult
+from killchain_docker.state import FlagCandidate, RunState, TodoItem, WorkerResult
 from killchain_docker.tools import (
     ExecutionPlane,
     ToolCapability,
@@ -31,6 +31,7 @@ from killchain_docker.tools import (
     ToolGateway,
 )
 from killchain_docker.workers.tool_metadata import tool_metadata_contract
+from killchain_docker.workers.routing import PersonaRoutingPolicy
 
 
 # ===========================================================================
@@ -87,35 +88,7 @@ class WorkerAgent(ABC):
     def can_route_task(self, todo: TodoItem, state: RunState) -> tuple[bool, str | None]:
         """Return whether the worker is eligible for a routed dispatch."""
 
-        del state
-        if not self.supports(todo):
-            return False, "todo not supported"
-
-        context = todo.context
-        excluded = {
-            str(value) for value in (context.get("exclude_workers") or [])
-        }
-        if self.name in excluded:
-            return False, "worker explicitly excluded by task metadata"
-
-        intent = DispatchIntent.from_context(context)
-        if (
-            intent.required_capability
-            and intent.required_capability not in {"shell.exec", "script.exec"}
-        ):
-            known_capabilities = {capability.value for capability in ToolCapability}
-            allowed = {
-                capability.value if hasattr(capability, "value") else str(capability)
-                for capability in getattr(self, "allowed_capabilities", ()) or ()
-            }
-            if intent.required_capability in known_capabilities and intent.required_capability not in allowed:
-                return False, f"missing required capability: {intent.required_capability}"
-
-        for key in self.required_context_keys:
-            value = context.get(key)
-            if value in (None, "", [], {}, ()):
-                return False, f"missing required context key: {key}"
-        return True, None
+        return PersonaRoutingPolicy.can_route_task(self, todo, state)
 
     def run_capability(
         self,

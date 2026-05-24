@@ -8,6 +8,7 @@ and clean temporary files.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import shlex
 
 from killchain_docker.state.constants import DEFAULT_FILES_ROOT
@@ -16,6 +17,50 @@ from killchain_docker.state.constants import DEFAULT_FILES_ROOT
 _DEFAULT_WORKSPACE_MAX_MB = 512
 _DEFAULT_MEMORY_MAX_MB = 3072
 _DEFAULT_CPU_MAX_S = 0
+
+
+@dataclass(frozen=True)
+class WorkspacePolicy:
+    """Execution policy for a protected Tool Workspace."""
+
+    files_root: str = DEFAULT_FILES_ROOT
+    max_workspace_mb: object | None = None
+    max_memory_mb: object | None = None
+    max_cpu_s: object | None = None
+    preserve_relative_paths: tuple[str, ...] = ()
+    durable_script_artifacts: bool = False
+
+    @classmethod
+    def from_values(
+        cls,
+        *,
+        files_root: object,
+        max_workspace_mb: object | None = None,
+        max_memory_mb: object | None = None,
+        max_cpu_s: object | None = None,
+        preserve_relative_paths: tuple[str, ...] | list[str] | None = None,
+        durable_script_artifacts: bool = False,
+    ) -> "WorkspacePolicy":
+        return cls(
+            files_root=str(files_root or DEFAULT_FILES_ROOT),
+            max_workspace_mb=max_workspace_mb,
+            max_memory_mb=max_memory_mb,
+            max_cpu_s=max_cpu_s,
+            preserve_relative_paths=tuple(preserve_relative_paths or ()),
+            durable_script_artifacts=durable_script_artifacts,
+        )
+
+    @property
+    def workspace_limit_kb(self) -> int:
+        return _workspace_limit_kb(self.max_workspace_mb)
+
+    @property
+    def memory_limit_kb(self) -> int:
+        return _memory_limit_kb(self.max_memory_mb)
+
+    @property
+    def cpu_limit_s(self) -> int:
+        return _cpu_limit_s(self.max_cpu_s)
 
 
 def protected_shell_command(
@@ -29,18 +74,22 @@ def protected_shell_command(
 ) -> str:
     """Return a ``bash -c`` command that restores ``files_root`` on exit."""
 
-    root = shlex.quote(str(files_root or DEFAULT_FILES_ROOT))
+    policy = WorkspacePolicy.from_values(
+        files_root=files_root,
+        max_workspace_mb=max_workspace_mb,
+        max_memory_mb=max_memory_mb,
+        max_cpu_s=max_cpu_s,
+        preserve_relative_paths=preserve_relative_paths,
+    )
+    root = shlex.quote(policy.files_root)
     user_command = shlex.quote(command)
-    max_kb = _workspace_limit_kb(max_workspace_mb)
-    memory_kb = _memory_limit_kb(max_memory_mb)
-    cpu_s = _cpu_limit_s(max_cpu_s)
-    preserve_exports = _preserve_exports(preserve_relative_paths)
+    preserve_exports = _preserve_exports(policy.preserve_relative_paths)
     return _join_shell(
         f"_kc_root={root};",
         f"_kc_user_command={user_command};",
-        f"_kc_workspace_limit_kb={max_kb};",
-        f"_kc_memory_limit_kb={memory_kb};",
-        f"_kc_cpu_limit_s={cpu_s};",
+        f"_kc_workspace_limit_kb={policy.workspace_limit_kb};",
+        f"_kc_memory_limit_kb={policy.memory_limit_kb};",
+        f"_kc_cpu_limit_s={policy.cpu_limit_s};",
         preserve_exports,
         _stale_workspace_cleanup(),
         '_kc_tmp=$(mktemp -d /tmp/_shell_exec_XXXXXX) || exit 1;',
@@ -88,10 +137,15 @@ def disposable_script_command(
     that directory with ``CTF_FILES_ROOT`` pointing to the copy.
     """
 
-    root = shlex.quote(str(files_root or DEFAULT_FILES_ROOT))
-    max_kb = _workspace_limit_kb(max_workspace_mb)
-    memory_kb = _memory_limit_kb(max_memory_mb)
-    cpu_s = _cpu_limit_s(max_cpu_s)
+    policy = WorkspacePolicy.from_values(
+        files_root=files_root,
+        max_workspace_mb=max_workspace_mb,
+        max_memory_mb=max_memory_mb,
+        max_cpu_s=max_cpu_s,
+        preserve_relative_paths=(".autopentest_artifacts",),
+        durable_script_artifacts=True,
+    )
+    root = shlex.quote(policy.files_root)
     runner = f"{interpreter_cmd} \"$_kc_script\""
     if guard_source is not None:
         runner = _join_shell(
@@ -101,9 +155,9 @@ def disposable_script_command(
 
     return _join_shell(
         f"_kc_root={root};",
-        f"_kc_workspace_limit_kb={max_kb};",
-        f"_kc_memory_limit_kb={memory_kb};",
-        f"_kc_cpu_limit_s={cpu_s};",
+        f"_kc_workspace_limit_kb={policy.workspace_limit_kb};",
+        f"_kc_memory_limit_kb={policy.memory_limit_kb};",
+        f"_kc_cpu_limit_s={policy.cpu_limit_s};",
         _stale_workspace_cleanup(),
         '_kc_tmp=$(mktemp -d /tmp/_script_exec_XXXXXX) || exit 1;',
         '_kc_budget_flag="$_kc_tmp/workspace_budget_exceeded";',

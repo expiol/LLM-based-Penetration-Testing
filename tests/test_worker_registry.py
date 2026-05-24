@@ -6,6 +6,7 @@ import unittest
 
 from killchain_docker.llm import StaticLLMClient
 from killchain_docker.tools import ExecutionPlane
+from killchain_docker.state import RunState, TodoItem, TodoPhase
 from killchain_docker.workers import (
     BUILTIN_WORKER_SPECS,
     WorkerBuildContext,
@@ -44,6 +45,57 @@ class WorkerRegistryTests(unittest.TestCase):
             {spec.group for spec in BUILTIN_WORKER_SPECS},
             {"persona"},
         )
+
+    def test_real_flag_worker_eligibility_uses_flag_validation_phase(self) -> None:
+        context = WorkerBuildContext(
+            llm_client=StaticLLMClient([]),
+            execution_plane=ExecutionPlane(),
+            expected_flag="flag{ok}",
+        )
+        workers = {worker.name: worker for worker in build_builtin_workers(context)}
+
+        allowed, reason = workers["flag-worker"].can_route_task(
+            TodoItem(goal="Validate candidate.", phase=TodoPhase.FLAG_VALIDATION),
+            RunState(objective="Solve."),
+        )
+
+        self.assertTrue(allowed, reason)
+
+    def test_worker_eligibility_honors_required_capability(self) -> None:
+        context = WorkerBuildContext(
+            llm_client=StaticLLMClient([]),
+            execution_plane=ExecutionPlane(),
+        )
+        workers = {worker.name: worker for worker in build_builtin_workers(context)}
+
+        allowed, reason = workers["web-worker"].can_route_task(
+            TodoItem(
+                goal="Inspect the binary.",
+                context={"dispatch_intent": {"required_capability": "gdb"}},
+            ),
+            RunState(objective="Solve."),
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "missing required capability: gdb")
+
+    def test_worker_eligibility_honors_excluded_workers(self) -> None:
+        context = WorkerBuildContext(
+            llm_client=StaticLLMClient([]),
+            execution_plane=ExecutionPlane(),
+        )
+        workers = {worker.name: worker for worker in build_builtin_workers(context)}
+
+        allowed, reason = workers["artifact-worker"].can_route_task(
+            TodoItem(
+                goal="Inspect file.",
+                context={"exclude_workers": ["artifact-worker"]},
+            ),
+            RunState(objective="Solve."),
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "worker explicitly excluded by task metadata")
 
 
 if __name__ == "__main__":

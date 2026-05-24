@@ -6,7 +6,6 @@ from killchain_docker.knowledge.augmenter import (
     MAX_HITS,
     KnowledgeAugmenter,
     RagContext,
-    public_rag_payload,
 )
 from killchain_docker.knowledge.retriever import (
     KnowledgeRetriever,
@@ -17,6 +16,7 @@ from killchain_docker.knowledge.retriever import (
     rag_mode,
     reset_retriever_cache,
 )
+from killchain_docker.knowledge.status import public_rag_payload
 
 __all__ = [
     "MAX_HITS",

@@ -22,11 +22,13 @@ from killchain_docker.state import (
     Service,
     StateDelta,
     TodoItem,
+    TodoPhase,
     WorkerResult,
 )
 from killchain_docker.tools import ToolCapability, ToolExecutionError
 from killchain_docker.tools import ToolOutputStatus
 from killchain_docker.tools.core import _strings
+from killchain_docker.tools.guard_policy import ToolGuardPolicy
 from killchain_docker.workers.base import WorkerAgent
 from killchain_docker.workers.protocols import Persona, PersonaSpec
 from killchain_docker.workers.tool_metadata import normalize_tool_metadata
@@ -568,38 +570,7 @@ class Worker(WorkerAgent):
         message: str,
         capability: ToolCapability | None = None,
     ) -> str:
-        lowered = message.lower()
-        if "python syntax invalid" in lowered or "syntaxerror" in lowered:
-            return "syntax_error"
-        if "package installation" in lowered or "package-manager" in lowered:
-            return "package_install_blocked"
-        if (
-            "raw binwalk extraction" in lowered
-            or "byte-by-byte extraction" in lowered
-            or "unboundedly" in lowered
-        ):
-            return "unbounded_extraction_blocked"
-        if "curl supports only http/https" in lowered or "non-http url" in lowered:
-            return "non_http_url_blocked"
-        if "scratch files must use ctf_temp_dir" in lowered or "hard-code /tmp" in lowered:
-            return "scope_violation_blocked"
-        if (
-            "outside authorized_scope" in lowered
-            or "ambient filesystem" in lowered
-            or (
-                "blocked:" in lowered
-                and any(token in lowered for token in ("/home", "/root", "/etc", "/tmp", "/var", "/opt", "files_root"))
-            )
-        ):
-            return "scope_violation_blocked"
-        if "complex python" in lowered or "python -c" in lowered:
-            return "shell_python_complexity"
-        if "missing required metadata" in lowered:
-            cap = capability.value if capability is not None else "tool"
-            return f"{cap}_metadata_missing"
-        if "unguarded third-party import" in lowered:
-            return "missing_tool"
-        return "metadata_validation"
+        return ToolGuardPolicy.metadata_failure_kind(message, capability)
 
     def _result_from_bundle(
         self, *, todo: TodoItem, capability: ToolCapability,
