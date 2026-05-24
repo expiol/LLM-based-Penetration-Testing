@@ -70,6 +70,19 @@ class ArtifactFactsTests(unittest.TestCase):
         self.assertTrue(facts.is_low_signal)
         self.assertEqual(artifact_followup_priority(artifact), 0)
 
+    def test_tool_source_prefix_does_not_make_child_artifact_a_disk_image(self) -> None:
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk/offset_0/store",
+            kind="disk_extract_database",
+            source="disk_extract",
+            metadata={"file_type": "data"},
+        )
+
+        facts = facts_from_artifact(artifact)
+
+        self.assertFalse(facts.is_disk_image)
+        self.assertNotEqual(artifact_followup_capability(artifact), "disk.extract")
+
 
 if __name__ == "__main__":
     unittest.main()

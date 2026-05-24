@@ -70,12 +70,13 @@ def facts_from_artifact(artifact: Any) -> ArtifactFacts:
     path = str(getattr(artifact, "path", "") or "").strip()
     source = _normalized(getattr(artifact, "source", ""))
     kind = _normalized(getattr(artifact, "kind", ""))
+    kind_signal = _producer_neutral_kind(kind, source)
     file_type = _metadata_text(metadata, "file_type", "detected_type", "type")
     mime_type = _metadata_text(metadata, "mime_type", "content_type", "media_type")
     role = _metadata_text(metadata, "office_role", "role", "artifact_role")
 
     content_text = " ".join(part for part in (file_type, mime_type) if part)
-    semantic_text = " ".join(part for part in (content_text, role, kind) if part)
+    semantic_text = " ".join(part for part in (content_text, role, kind_signal) if part)
     mime = mime_type.strip()
     has_content_identity = bool(file_type or mime_type or metadata.get("magic"))
 
@@ -104,7 +105,7 @@ def facts_from_artifact(artifact: Any) -> ArtifactFacts:
                 "wave audio",
             )
         )
-        or any(token in kind for token in ("image", "media", "video", "audio"))
+        or any(token in kind_signal for token in ("image", "media", "video", "audio"))
     )
     is_office_document = (
         "officedocument" in mime
@@ -153,7 +154,7 @@ def facts_from_artifact(artifact: Any) -> ArtifactFacts:
                 "zip archive",
             )
         )
-        or any(token in kind for token in ("archive", "compressed", "container"))
+        or any(token in kind_signal for token in ("archive", "compressed", "container"))
     )
     is_disk_image = (
         any(
@@ -171,12 +172,12 @@ def facts_from_artifact(artifact: Any) -> ArtifactFacts:
                 "udf filesystem",
             )
         )
-        or any(token in kind for token in ("disk", "filesystem", "partition"))
+        or _kind_indicates_disk_image(kind_signal)
     )
     is_database = (
         mime in {"application/vnd.sqlite3", "application/x-sqlite3"}
         or any(token in content_text for token in ("database", "sqlite"))
-        or "database" in kind
+        or "database" in kind_signal
     )
     is_text = (
         mime.startswith("text/")
@@ -191,7 +192,7 @@ def facts_from_artifact(artifact: Any) -> ArtifactFacts:
                 "xml",
             )
         )
-        or kind == "text"
+        or kind_signal == "text"
     )
     is_embedded_media = source == "office_inspect" and (
         role == "media" or is_media
@@ -302,6 +303,40 @@ def _metadata_text(metadata: dict[str, Any], *keys: str) -> str:
 
 def _normalized(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _producer_neutral_kind(kind: str, source: str) -> str:
+    """Return kind text without the producing tool prefix."""
+
+    text = str(kind or "").strip().lower()
+    producer = str(source or "").strip().lower()
+    if producer:
+        prefixes = {
+            producer,
+            producer.replace("-", "_").replace(" ", "_"),
+            producer.replace("_", "-").replace(" ", "-"),
+        }
+        for prefix in sorted(prefixes, key=len, reverse=True):
+            if text == prefix:
+                text = ""
+                break
+            if text.startswith(f"{prefix}_") or text.startswith(f"{prefix}-"):
+                text = text[len(prefix) + 1 :]
+                break
+    return text.replace("_", " ").replace("-", " ").strip()
+
+
+def _kind_indicates_disk_image(kind_signal: str) -> bool:
+    text = str(kind_signal or "").strip().lower()
+    if not text:
+        return False
+    tokens = set(text.split())
+    return (
+        text in {"disk image", "diskimage", "filesystem image", "partition image"}
+        or {"disk", "image"}.issubset(tokens)
+        or {"filesystem", "image"}.issubset(tokens)
+        or {"partition", "image"}.issubset(tokens)
+    )
 
 
 def _signals_from_metadata(metadata: dict[str, Any]) -> frozenset[str]:

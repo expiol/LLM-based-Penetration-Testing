@@ -88,6 +88,17 @@ def file_digest(path):
             h.update(chunk)
     return h.hexdigest()
 
+def file_metadata(path):
+    file_type = ""
+    mime_type = ""
+    rc, out, _err = run_text(["file", "-b", str(path)], timeout=8)
+    if rc == 0 and out.strip():
+        file_type = clean(out.strip())
+    rc, out, _err = run_text(["file", "-b", "--mime-type", str(path)], timeout=8)
+    if rc == 0 and out.strip():
+        mime_type = clean(out.strip())
+    return file_type, mime_type
+
 def mmls_offsets(src):
     offsets = [(0, "offset_0")]
     rc, out, err = run_text(["mmls", str(src)], timeout=20)
@@ -230,7 +241,8 @@ def carve_embedded_zips(src, out_root, remaining_bytes, max_files):
                         dest = typed
                     file_size = dest.stat().st_size
                     digest = file_digest(dest)
-                    print(f"{FILE}\t{dest}\t{file_size}\tembedded_zip\t{start}\tembedded_zip@{start}\t{start}\t{digest}")
+                    file_type, mime_type = file_metadata(dest)
+                    print(f"{FILE}\t{dest}\t{file_size}\tembedded_zip\t{start}\tembedded_zip@{start}\t{start}\t{digest}\t{file_type}\t{mime_type}")
                     written += file_size
                     count += 1
                     covered_until = end
@@ -288,7 +300,8 @@ def main():
                 digest = file_digest(dest)
             except OSError:
                 digest = ""
-            print(f"{FILE}\t{dest}\t{size}\tfilesystem\t{offset}\t{clean(entry['inode'])}\t{clean(entry['raw_name'])}\t{digest}")
+            file_type, mime_type = file_metadata(dest)
+            print(f"{FILE}\t{dest}\t{size}\tfilesystem\t{offset}\t{clean(entry['inode'])}\t{clean(entry['raw_name'])}\t{digest}\t{file_type}\t{mime_type}")
 
     remaining_files = max(0, max_files - extracted)
     count, written = carve_embedded_zips(src, out_root, max_bytes - total, remaining_files)
@@ -369,6 +382,8 @@ def build_output(
                 "offset": record.get("offset"),
                 "inode": record.get("inode"),
                 "source_name": record.get("source_name"),
+                **({"file_type": record["file_type"]} if record.get("file_type") else {}),
+                **({"mime_type": record["mime_type"]} if record.get("mime_type") else {}),
             },
         )
         for record in records["files"][:120]
@@ -496,6 +511,8 @@ def _parse_records(stdout: str) -> dict[str, list[dict[str, Any]]]:
                 "inode": parts[5],
                 "source_name": parts[6],
                 "digest": parts[7] if len(parts) >= 8 and parts[7] else None,
+                "file_type": parts[8] if len(parts) >= 9 and parts[8] else None,
+                "mime_type": parts[9] if len(parts) >= 10 and parts[9] else None,
             })
         elif marker == _SKIP_MARKER and len(parts) >= 5:
             records["skipped"].append({

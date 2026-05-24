@@ -34,8 +34,16 @@ class DiskExtractTests(unittest.TestCase):
             [
                 f"{_PARTITION_MARKER}\t0\toffset_0",
                 f"{_ENTRY_MARKER}\t0\tr/r\t12\tSLIDES.PPTX",
-                f"{_FILE_MARKER}\t{ppt}\t4096\tfilesystem\t0\t12\tSLIDES.PPTX\t{'a' * 64}",
-                f"{_FILE_MARKER}\t{image}\t512\tembedded_zip\t304128\tembedded_zip@304128\t304128\t{'b' * 64}",
+                (
+                    f"{_FILE_MARKER}\t{ppt}\t4096\tfilesystem\t0\t12\t"
+                    f"SLIDES.PPTX\t{'a' * 64}\tMicrosoft PowerPoint 2007+\t"
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                ),
+                (
+                    f"{_FILE_MARKER}\t{image}\t512\tembedded_zip\t304128\t"
+                    f"embedded_zip@304128\t304128\t{'b' * 64}\tPNG image data\t"
+                    "image/png"
+                ),
                 f"{_SKIP_MARKER}\tbudget\t0\tlarge.bin\t104857600",
                 "FLAG FOUND: flag{from_disk_extract}",
                 f"{_SUMMARY_MARKER}\t2\t4608\t1",
@@ -62,6 +70,11 @@ class DiskExtractTests(unittest.TestCase):
         self.assertEqual(output.artifacts[0].kind, "disk_extract_document")
         self.assertEqual(output.artifacts[0].source, "disk_extract")
         self.assertEqual(output.artifacts[0].digest, "a" * 64)
+        self.assertEqual(
+            output.artifacts[0].metadata["mime_type"],
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        )
+        self.assertEqual(output.artifacts[1].metadata["file_type"], "PNG image data")
         self.assertEqual(output.artifacts[1].kind, "disk_extract_image")
         self.assertEqual(output.output_context["extracted_file_records"][1]["digest"], "b" * 64)
         self.assertEqual(output.flag_candidates[0].value, "flag{from_disk_extract}")

@@ -1064,6 +1064,43 @@ class PlanningPipelineSeedTests(unittest.TestCase):
             "office.inspect",
         )
 
+    def test_disk_extract_children_do_not_seed_recursive_disk_extract_from_kind_prefix(
+        self,
+    ) -> None:
+        state = _state([])
+        artifacts = [
+            Artifact(
+                path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk/offset_0/store",
+                kind="disk_extract_database",
+                source="disk_extract",
+                metadata={"file_type": "data"},
+            ),
+            Artifact(
+                path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk/offset_0/index",
+                kind="disk_extract_indexhead",
+                source="disk_extract",
+                metadata={"file_type": "data"},
+            ),
+            Artifact(
+                path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk/offset_0/notes",
+                kind="disk_extract_file",
+                source="disk_extract",
+                metadata={"file_type": "ASCII text"},
+            ),
+        ]
+        for artifact in artifacts:
+            state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        self.assertFalse(
+            any(
+                todo.context.get("capability_hint") == "disk.extract"
+                and todo.context.get("path") in {artifact.path for artifact in artifacts}
+                for todo in decision.todos
+            )
+        )
+
     def test_artifact_followup_skips_path_already_executed_by_llm_tool(self) -> None:
         state = _state([])
         doc = Artifact(
