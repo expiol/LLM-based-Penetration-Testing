@@ -284,6 +284,76 @@ class PlanningPipelineSeedTests(unittest.TestCase):
         self.assertEqual(followup.context["capability_hint"], "png.inspect")
         self.assertEqual(followup.context["path"], artifact.path)
 
+    def test_script_generated_media_artifact_followups_are_batched(self) -> None:
+        state = _state([])
+        artifacts = [
+            Artifact(
+                path=f"/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/out{index}",
+                kind="script_artifact",
+                source="script_exec",
+                size=4096,
+                digest=f"media-{index}",
+                metadata={"mime_type": mime_type},
+            )
+            for index, mime_type in enumerate(
+                ("image/jpeg", "image/gif", "image/bmp")
+            )
+        ]
+        for artifact in artifacts:
+            state.artifacts[artifact.artifact_id] = artifact
+
+        decision = PlanningPipeline().plan(state)
+
+        followups = [
+            todo for todo in decision.todos
+            if todo.context.get("family") == "artifact-followup"
+        ]
+        self.assertEqual(len(followups), 1)
+        followup = followups[0]
+        self.assertEqual(followup.context["capability_hint"], "media.scan")
+        self.assertEqual(
+            followup.context["paths"],
+            [artifact.path for artifact in artifacts],
+        )
+        self.assertNotIn("path", followup.context)
+
+    def test_script_generated_png_keeps_png_inspect_when_other_media_are_batched(
+        self,
+    ) -> None:
+        state = _state([])
+        png = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/out0",
+            kind="script_artifact",
+            source="script_exec",
+            size=4096,
+            digest="png-digest",
+            metadata={"mime_type": "image/png"},
+        )
+        jpeg = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/out1",
+            kind="script_artifact",
+            source="script_exec",
+            size=4096,
+            digest="jpeg-digest",
+            metadata={"mime_type": "image/jpeg"},
+        )
+        state.artifacts[png.artifact_id] = png
+        state.artifacts[jpeg.artifact_id] = jpeg
+
+        decision = PlanningPipeline().plan(state)
+
+        png_followup = next(
+            todo for todo in decision.todos
+            if todo.context.get("capability_hint") == "png.inspect"
+        )
+        media_followup = next(
+            todo for todo in decision.todos
+            if todo.context.get("capability_hint") == "media.scan"
+        )
+        self.assertEqual(png_followup.context["path"], png.path)
+        self.assertEqual(media_followup.context["path"], jpeg.path)
+        self.assertEqual(media_followup.context["paths"], [jpeg.path])
+
     def test_generated_source_tree_docs_png_uses_content_followup(self) -> None:
         state = _state([])
         artifact = Artifact(

@@ -364,7 +364,7 @@ class PlanningPipeline(PlannerAgent):
                         todos.append(batch)
                         notes.append(
                             "Seeded batched media scan todo for "
-                            f"{len(media_batch)} embedded media artifact(s)."
+                            f"{len(media_batch)} media artifact(s)."
                         )
                     media_batch = []
                 continue
@@ -419,7 +419,7 @@ class PlanningPipeline(PlannerAgent):
                 todos.append(batch)
                 notes.append(
                     "Seeded batched media scan todo for "
-                    f"{len(media_batch)} embedded media artifact(s)."
+                    f"{len(media_batch)} media artifact(s)."
                 )
         if triage_batch and len(todos) < _MAX_ARTIFACT_FOLLOWUP_SEEDS:
             batch = cls._artifact_triage_batch_todo(triage_batch)
@@ -467,7 +467,7 @@ class PlanningPipeline(PlannerAgent):
             context["novelty_key"] = f"media-scan:{key_parts[0] if key_parts else paths[0]}"
             dedupe_key = f"bootstrap:media-scan:{key_parts[0] if key_parts else paths[0]}"
         return PlannedTodo(
-            goal="Batch-scan embedded media artifacts deterministically.",
+            goal="Batch-scan media artifacts deterministically.",
             phase=TodoPhase.ANALYSIS,
             priority=90,
             context=context,
@@ -689,7 +689,7 @@ class PlanningPipeline(PlannerAgent):
             )
         if capability == "media.scan":
             return (
-                "Batch-scan embedded media artifacts deterministically.",
+                "Batch-scan media artifacts deterministically.",
                 [
                     "Detect appended payloads and media metadata with source provenance.",
                     "Surface only literal flag-like evidence from media strings.",
@@ -710,8 +710,7 @@ class PlanningPipeline(PlannerAgent):
 
     @staticmethod
     def _artifact_should_batch_media(artifact) -> bool:
-        facts = facts_from_artifact(artifact)
-        return facts.is_embedded_media and facts.is_media
+        return artifact_followup_capability(artifact) == "media.scan"
 
     @classmethod
     def _disk_extract_seeds(
