@@ -440,6 +440,20 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
 
         self.assertTrue(Worker._should_continue_after_step(task, prior_steps))
 
+    def test_first_path_resolution_script_failure_allows_one_repair(self) -> None:
+        task = TodoItem(goal="Recover the flag from computed plaintext.")
+        prior_steps = [
+            {
+                "capability": "script.exec",
+                "returncode": 1,
+                "flag_candidates": [],
+                "failure_kind": "path_resolution_error",
+                "executed": True,
+            },
+        ]
+
+        self.assertTrue(Worker._should_continue_after_step(task, prior_steps))
+
     def test_successful_no_candidate_script_returns_to_planner_by_default(self) -> None:
         task = TodoItem(goal="Recover the flag from computed plaintext.")
         prior_steps = [
@@ -1157,10 +1171,28 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
 
         self.assertEqual(ctx["failure_kind"], "path_type_mismatch")
 
+    def test_classifies_missing_path_as_path_resolution_error(self) -> None:
+        ctx = self._output_context(
+            "Traceback (most recent call last):\n"
+            "  File \"/tmp/runner.py\", line 37, in <module>\n"
+            "FileNotFoundError: [Errno 2] No such file or directory: '/tmp/work/output'\n"
+        )
+
+        self.assertEqual(ctx["failure_kind"], "path_resolution_error")
+
     def test_classifies_odd_length_hex_decode_as_parse_error(self) -> None:
         ctx = self._output_context(
             "Traceback (most recent call last):\n"
             "binascii.Error: Odd-length string\n"
+        )
+
+        self.assertEqual(ctx["failure_kind"], "parse_error")
+
+    def test_classifies_fromhex_value_error_as_parse_error(self) -> None:
+        ctx = self._output_context(
+            "Traceback (most recent call last):\n"
+            "  File \"/tmp/runner.py\", line 42, in <module>\n"
+            "ValueError: non-hexadecimal number found in fromhex() arg at position 187\n"
         )
 
         self.assertEqual(ctx["failure_kind"], "parse_error")

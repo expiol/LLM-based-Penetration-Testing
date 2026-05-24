@@ -618,8 +618,14 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         or "invalid literal for int" in text
         or "binascii.error: odd-length string" in text
         or "binascii.error: non-hexadecimal digit found" in text
+        or ("fromhex()" in text and "non-hexadecimal" in text)
     ):
         return "parse_error", "script parsing logic rejected tool or service output; validate delimiters and exact field shape"
+    if "filenotfounderror" in text or "no such file or directory" in text:
+        return (
+            "path_resolution_error",
+            "script referenced a path that was not present in the execution workspace",
+        )
     if (
         ("struct.error" in text and "buffer" in text)
         or "unpack requires a buffer" in text

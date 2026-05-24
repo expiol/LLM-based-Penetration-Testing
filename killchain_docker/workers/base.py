@@ -761,6 +761,13 @@ class WorkerAgent(ABC):
                 + "Use the traceback line to identify the incompatible path values and "
                 "convert types deliberately at that boundary."
             )
+        if str(failure_kind or "") == "path_resolution_error":
+            return (
+                base
+                + "Use the traceback line to identify the missing path. Recompute paths "
+                "from CTF_FILES_ROOT, task metadata, generated artifact paths, or the "
+                "current working directory, and verify existence before opening files."
+            )
         if str(failure_kind or "") == "undefined_name":
             return (
                 base

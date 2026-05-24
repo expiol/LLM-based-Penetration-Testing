@@ -27,6 +27,7 @@ from killchain_docker.llm.structured_output import (
 from killchain_docker.orchestrator.planning.schemas import PlannerDecision
 from killchain_docker.reasoning.coercion import coerce_llm_bool
 from killchain_docker.reasoning.schemas import ToolUseDecision
+from killchain_docker.state import RunState, TodoItem, WorkerResult
 
 
 class _RequiredPayload(BaseModel):
@@ -137,6 +138,51 @@ class TestCoerceLlmBool(unittest.TestCase):
 
     def test_none_is_false(self) -> None:
         self.assertIs(coerce_llm_bool(None), False)
+
+
+class TestMemoryUpdateCoercion(unittest.TestCase):
+    def test_tool_use_decision_accepts_json_memory_values(self) -> None:
+        decision = ToolUseDecision.model_validate(
+            {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('ok')"},
+                "rationale": "run",
+                "memory_updates": {
+                    "expected_key_length": 256,
+                    "header_known": True,
+                    "offsets": [0, 4, 8],
+                    "evidence": {"source": "tool", "confidence": 0.75},
+                },
+            }
+        )
+
+        self.assertEqual(
+            decision.memory_updates,
+            {
+                "expected_key_length": "256",
+                "header_known": "true",
+                "offsets": "[0,4,8]",
+                "evidence": '{"confidence":0.75,"source":"tool"}',
+            },
+        )
+
+    def test_worker_result_and_run_state_normalize_memory_values(self) -> None:
+        result = WorkerResult.model_validate(
+            {
+                "todo_id": "todo-1",
+                "worker_name": "artifact-worker",
+                "success": True,
+                "summary": "captured grounded facts",
+                "memory_updates": {"expected_key_length": 256},
+            }
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        state.queue_todo(TodoItem(todo_id="todo-1", goal="Capture grounded facts."))
+
+        state.apply_worker_result(result)
+
+        self.assertEqual(result.memory_updates, {"expected_key_length": "256"})
+        self.assertEqual(state.working_memory, {"expected_key_length": "256"})
 
 
 class TestGatewayTransientClassification(unittest.TestCase):

@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from killchain_docker.value_coercion import coerce_string_mapping
+
 
 def utc_now() -> datetime:
     """Return a timezone-aware UTC timestamp."""
@@ -863,6 +865,11 @@ class WorkerResult(BaseModel):
     generated_at: datetime = Field(default_factory=utc_now)
     memory_updates: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("memory_updates", mode="before")
+    @classmethod
+    def _coerce_memory_updates(cls, value: Any) -> Any:
+        return coerce_string_mapping(value)
+
 
 class RouterRoundSummary(BaseModel):
     """Router synthesis for one execution round."""
@@ -922,6 +929,11 @@ class RunState(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     last_cycle_at: datetime | None = None
+
+    @field_validator("working_memory", mode="before")
+    @classmethod
+    def _coerce_working_memory(cls, value: Any) -> Any:
+        return coerce_string_mapping(value)
 
     def touch(self) -> None:
         self.updated_at = utc_now()

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator
 
 from killchain_docker.tools import ToolCapability
+from killchain_docker.value_coercion import coerce_string_mapping
 
 
 class ToolUseDecision(BaseModel):
@@ -16,3 +19,8 @@ class ToolUseDecision(BaseModel):
     expected_signal: str = ""
     hypothesis: str | None = None
     memory_updates: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("memory_updates", mode="before")
+    @classmethod
+    def _coerce_memory_updates(cls, value: Any) -> Any:
+        return coerce_string_mapping(value)
