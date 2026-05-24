@@ -502,6 +502,11 @@ class Worker(WorkerAgent):
             capability = ToolCapability(hint)
         except ValueError:
             return None
+        if (
+            capability == ToolCapability.ARTIFACT_TRIAGE
+            and not self._artifact_triage_hint_is_direct(task)
+        ):
+            return None
         if intent.required_capability and intent.required_capability != capability.value:
             return None
         if capability not in direct_capabilities:
@@ -572,6 +577,35 @@ class Worker(WorkerAgent):
             success=success,
             bundle=bundle,
             rationale=rationale,
+        )
+
+    @staticmethod
+    def _artifact_triage_hint_is_direct(task: TodoItem) -> bool:
+        context = task.context or {}
+        family = str(context.get("family") or "").strip()
+        text = " ".join(
+            [
+                task.goal,
+                " ".join(task.success_criteria),
+                " ".join(task.constraints),
+            ]
+        ).lower()
+        if family == "artifact-inventory":
+            return True
+        if family != "artifact-followup":
+            return False
+        return any(
+            token in text
+            for token in (
+                "artifact follow-up",
+                "classify",
+                "deterministic",
+                "first-pass",
+                "inspect",
+                "inventory",
+                "scan",
+                "triage",
+            )
         )
 
     def _prepare_metadata(

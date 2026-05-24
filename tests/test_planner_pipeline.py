@@ -1599,6 +1599,47 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
         self.assertIs(todo.context["execution_closure"], True)
         self.assertEqual(todo.context["dispatch_intent"]["profile"], "execution_closure")
 
+    def test_binary_static_closure_overrides_stale_artifact_triage_hint(self) -> None:
+        state = _state(["program"])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/program",
+            kind="binary",
+            source="artifact_triage",
+            size=4096,
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+        todo = PlannedTodo(
+            goal=(
+                "Reverse engineer the binary authentication transform and "
+                "derive the password candidate."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            context={
+                "family": "binary-static",
+                "artifact_path": artifact.path,
+                "path": artifact.path,
+                "capability_hint": "artifact.triage",
+                "dispatch_intent": {
+                    "profile": "binary_static",
+                    "required_capability": "artifact.triage",
+                },
+            },
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.context["family"], "binary-static")
+        self.assertIs(todo.context["execution_closure"], True)
+        self.assertEqual(todo.context["capability_hint"], "script.exec")
+        self.assertEqual(
+            todo.context["dispatch_intent"]["required_capability"],
+            "script.exec",
+        )
+        self.assertEqual(
+            todo.context["dispatch_intent"]["profile"],
+            "execution_closure",
+        )
+
     def test_crypto_model_todo_preserves_structured_dispatch_intent(self) -> None:
         state = _state(["cipher.py", "capture.bin"])
         todo = PlannedTodo(

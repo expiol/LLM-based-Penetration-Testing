@@ -417,7 +417,7 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertIsNotNone(artifact_plugin.last_request)
         self.assertNotIn("user", captured)
 
-    def test_source_code_review_todo_obeys_artifact_triage_hint(self) -> None:
+    def test_source_code_review_todo_does_not_fast_path_artifact_triage_hint(self) -> None:
         captured: dict[str, str] = {}
 
         def response(system_prompt: str, user_prompt: str) -> dict[str, object]:
@@ -467,9 +467,64 @@ class CapabilityGatewayTests(unittest.TestCase):
         result = worker.run(todo, state)
 
         self.assertTrue(result.success)
-        self.assertIsNone(script_plugin.last_request)
-        self.assertIsNotNone(artifact_plugin.last_request)
-        self.assertNotIn("user", captured)
+        self.assertIsNotNone(script_plugin.last_request)
+        self.assertIsNone(artifact_plugin.last_request)
+        self.assertIn("user", captured)
+
+    def test_binary_static_todo_does_not_fast_path_stale_artifact_hint(self) -> None:
+        captured: dict[str, str] = {}
+
+        def response(system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["system"] = system_prompt
+            captured["user"] = user_prompt
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('flag{script_test}')"},
+                "rationale": "binary authentication analysis needs executable logic",
+            }
+
+        plane = ExecutionPlane()
+        script_plugin = _StaticScriptPlugin()
+        artifact_plugin = _StaticArtifactPlugin()
+        plane.register(script_plugin, script_output_builder)
+        plane.register(
+            artifact_plugin,
+            lambda _request, _result, _parsed: ToolOutput(
+                summary="artifact.triage: static",
+                output_context={},
+            ),
+        )
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(
+                    ToolCapability.SCRIPT_EXEC,
+                    ToolCapability.ARTIFACT_TRIAGE,
+                ),
+            ),
+            llm_client=StaticLLMClient(response),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = TodoItem(
+            goal=(
+                "Reverse engineer the binary authentication transform and "
+                "derive the password candidate."
+            ),
+            context={
+                "capability_hint": "artifact.triage",
+                "dispatch_intent": {"required_capability": "artifact.triage"},
+                "path": "/home/ctfplayer/ctf_files/program",
+                "family": "binary-static",
+            },
+        )
+
+        result = worker.run(todo, state)
+
+        self.assertTrue(result.success)
+        self.assertIsNotNone(script_plugin.last_request)
+        self.assertIsNone(artifact_plugin.last_request)
+        self.assertIn("user", captured)
 
     def test_worker_retries_metadata_validation_error_once(self) -> None:
         captured: list[str] = []

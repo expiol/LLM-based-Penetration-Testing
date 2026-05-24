@@ -623,6 +623,8 @@ class TodoPolicy:
             return
         if family not in {
             "algorithm-verification",
+            "binary-dynamic",
+            "binary-static",
             "crypto-decrypt",
             "flag-recovery",
             "binary-analysis",
@@ -640,29 +642,33 @@ class TodoPolicy:
             token in text
             for token in (
                 "algorithm",
+                "auth",
                 "cipher",
+                "compare",
+                "credential",
                 "decode",
                 "decrypt",
                 "derive",
+                "disassembl",
                 "flag",
                 "keystream",
                 "lfsr",
+                "password",
                 "recover",
                 "reference",
+                "reverse",
                 "source",
+                "transform",
             )
         ):
             return
 
-        context.setdefault(
-            "execution_closure",
-            True,
-        )
-        context.setdefault("capability_hint", "script.exec")
+        context["execution_closure"] = True
+        context["capability_hint"] = "script.exec"
         raw_intent = context.get("dispatch_intent")
         intent = dict(raw_intent) if isinstance(raw_intent, dict) else {}
-        intent["profile"] = intent.get("profile") or "execution_closure"
-        intent["required_capability"] = intent.get("required_capability") or "script.exec"
+        intent["profile"] = "execution_closure"
+        intent["required_capability"] = "script.exec"
         intent.pop("completion_contract", None)
         intent.pop("repair_policy_id", None)
         context["dispatch_intent"] = intent

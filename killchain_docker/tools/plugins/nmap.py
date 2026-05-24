@@ -36,6 +36,8 @@ _PORT_RE = re.compile(r"(\d+)/(\w+)\s+open\s+(\S+)(?:\s+(.*))?")
 _OS_RE = re.compile(r"OS details?:\s*(.+)", re.IGNORECASE)
 _HOSTNAME_RE = re.compile(r"Nmap scan report for\s+(\S+?)(?:\s+\((\d+\.\d+\.\d+\.\d+)\))?$", re.MULTILINE)
 _MAC_RE = re.compile(r"MAC Address:\s*([0-9A-Fa-f:]+)(?:\s+\((.+?)\))?")
+_DEFAULT_HOST_TIMEOUT_CAP_S = 45
+_DEFAULT_NMAP_TIMEOUT_SLACK_S = 15
 
 
 # ---------------------------------------------------------------------------
@@ -55,12 +57,30 @@ class NmapPlugin:
         scan_type = str(request.metadata.get("scan_type") or "-sV")
         extra = str(request.metadata.get("extra_args") or "")
         cmd = f"nmap {scan_type}"
+        timeout_s = request.timeout_s
+        timing_args, bounded_timeout = _default_timing_args(
+            scan_type=scan_type,
+            extra=extra,
+            timeout_s=request.timeout_s,
+        )
+        if timing_args:
+            cmd += f" {timing_args}"
+            timeout_s = bounded_timeout
         if ports:
             cmd += f" -p {ports}"
         if extra:
             cmd += f" {extra}"
         cmd += f" {target}"
-        return _run(self.name, [*self.argv_prefix, "bash", "-c", cmd], request.timeout_s)
+        return _run(self.name, [*self.argv_prefix, "bash", "-c", cmd], timeout_s)
+
+
+def _default_timing_args(*, scan_type: str, extra: str, timeout_s: int) -> tuple[str, int]:
+    existing = f"{scan_type} {extra}".lower()
+    if "--host-timeout" in existing or "--max-retries" in existing:
+        return "", timeout_s
+    host_timeout = max(5, min(_DEFAULT_HOST_TIMEOUT_CAP_S, max(1, timeout_s - 5)))
+    bounded_timeout = min(timeout_s, host_timeout + _DEFAULT_NMAP_TIMEOUT_SLACK_S)
+    return f"--host-timeout {host_timeout}s --max-retries 1", bounded_timeout
 
 
 # ---------------------------------------------------------------------------

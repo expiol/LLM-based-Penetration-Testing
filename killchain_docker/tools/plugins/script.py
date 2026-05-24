@@ -47,7 +47,8 @@ _NETWORK_SCRIPT_RE = re.compile(
     re.IGNORECASE,
 )
 _PLAINTEXT_LABEL_RE = re.compile(
-    r"\b(?:best\s+result|plaintext|plain\s+text|decrypted|decoded|preview|"
+    r"^\s*(?:\[[^\]\n]{1,24}\]\s*|[>*+-]\s*)*"
+    r"(?:best\s+result|plaintext|plain\s+text|decrypted|decoded|preview|"
     r"first\s+\d+\s+(?:bytes|chars)|output)\b\s*:?",
     re.IGNORECASE,
 )
@@ -58,11 +59,13 @@ _DIAGNOSTIC_LINE_RE = re.compile(
     r"|=+\s*(?:top|best|testing)"
     r"|analyzing|attempting|checking|connecting|connected|connection\s+closed"
     r"|banner|context\s+around|ciphertexts?\s+found"
+    r"|decoded\s+preview|hex\s+dump"
     r"|disassembl|dynamic\s+symbols|extract(?:ed|ing)?|file\s+not\s+found"
     r"|file\s+size|file\s+type|found|header|initial\s+response|magic"
     r"|interesting\s+strings|line\s+\d+|looking\s+for"
+    r"|no\s+flag|flag\s+pattern"
     r"|received|reading|running|saved|scanner|search(?:ed|ing)?|sent"
-    r"|source|symbol\s+table|target|total|warning|welcome|wrote|writing"
+    r"|source|string\s+dump|symbol\s+table|target|total|warning|welcome|wrote|writing"
     r"|ct\s+size|raw\s+tap|seed|skip|tap"
     r"|ciphertext|printable|ratio|score|braces|flags|first\s+bytes"
     r"|case\s+\d+|trying|testing|using|skipping|candidate"
@@ -85,6 +88,12 @@ _SYMBOL_TABLE_ENTRY_RE = re.compile(
 _BYTES_REPR_LINE_RE = re.compile(r"^\s*b[\"'].{40,}[\"']\s*$")
 _PATH_LISTING_LINE_RE = re.compile(r"^\s*(?:\.{0,2}/)?(?:[\w.+@-]+/){1,}\S+\s*$")
 _INDEXED_HEX_VALUE_RE = re.compile(r"^\s*\w+\[\d+\]:\s*[0-9a-fA-F]{24,}\b")
+_LONG_HEX_LINE_RE = re.compile(r"^\s*[0-9a-fA-F]{64,}\s*$")
+_PROTOCOL_DUMP_TOKEN_RE = re.compile(
+    r"\b(?:banner|command|connect(?:ion|ed)?|error|listen|login|pass(?:word)?|"
+    r"port|request|response|retr|socket|stor|tcp|transfer|udp|user)\b",
+    re.IGNORECASE,
+)
 _DIAGNOSTIC_REPORT_RE = re.compile(
     r"(?im)^\s*(?:\[[^\]]+\]\s*)?"
     r"(?:=+\s*top\s+|=+\s*local\s+self-test|=+\s*differential\s+test|"
@@ -337,6 +346,7 @@ def _is_diagnostic_line(line: str) -> bool:
     if not normalized:
         return True
 
+    protocol_dump_tokens = _PROTOCOL_DUMP_TOKEN_RE.findall(normalized)
     return bool(
         _DIAGNOSTIC_LINE_RE.match(normalized)
         or _HEXDUMP_LINE_RE.match(stripped)
@@ -348,6 +358,8 @@ def _is_diagnostic_line(line: str) -> bool:
         or _BYTES_REPR_LINE_RE.match(stripped)
         or _PATH_LISTING_LINE_RE.match(stripped)
         or _INDEXED_HEX_VALUE_RE.match(stripped)
+        or _LONG_HEX_LINE_RE.match(stripped)
+        or len(protocol_dump_tokens) >= 2
     )
 
 
@@ -402,7 +414,7 @@ def _plaintext_blocks(stdout: str) -> list[str]:
     blocks: list[str] = []
 
     for index, line in enumerate(lines):
-        match = _PLAINTEXT_LABEL_RE.search(line)
+        match = _PLAINTEXT_LABEL_RE.match(line)
         if not match:
             continue
 
@@ -420,7 +432,7 @@ def _plaintext_blocks(stdout: str) -> list[str]:
                     break
                 continue
             if (
-                _PLAINTEXT_LABEL_RE.search(next_line)
+                _PLAINTEXT_LABEL_RE.match(next_line)
                 or _is_diagnostic_line(stripped)
             ):
                 if following:

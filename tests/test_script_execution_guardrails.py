@@ -1620,6 +1620,39 @@ class TestScriptExecutionRuntime(unittest.TestCase):
         self.assertNotIn("near_miss_candidates", output.output_context)
         self.assertEqual(output.output_context["result_quality"], "partial_no_candidate")
 
+    def test_hex_and_string_dump_report_is_not_near_miss(self) -> None:
+        stdout = (
+            "Context around offset 0x3460:\n"
+            "Hex dump (first 128 bytes):\n"
+            "3432362054435020636f6e6e656374696f6e207761732065737461626c697368656420627574207468656e2062726f6b656e210d0a005573657220257320646f776e6c6f616465642066696c65202573\n"
+            "\n"
+            "String dump:\n"
+            "426 TCP connection was established but then broken!.User %s downloaded file %s.\n"
+            "226 Transfer complete.sorry port isnt working.FTP listen_fd == %d.\n"
+            "error opening socket.error binding socket.(SOCKET ERROR).PASV successful.\n"
+            "recovered_name.txt.Error reading result please contact an organizer.\n"
+            "\n"
+            "--- XOR with candidate key ---\n"
+            "No flag pattern found in XOR result\n"
+            "Decoded preview: V^WN?41L\\x0f\\r\\x02\\x0f\\x0b\\x08\\x03\\x08\\x03\\x02B\n"
+            "=== No flag found with simple approaches ===\n"
+        )
+
+        output = build_script_output(
+            ToolExecutionRequest(tool_name="script_exec", metadata={"script_language": "python"}),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout=stdout,
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+
+        self.assertNotIn("near_miss_candidates", output.output_context)
+        self.assertEqual(output.output_context["result_quality"], "partial_no_candidate")
+
     def test_candidate_score_report_is_not_near_miss(self) -> None:
         report = "\n".join(
             [
