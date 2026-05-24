@@ -113,6 +113,24 @@ class BatchDatasetTests(unittest.TestCase):
                 ["gamma"],
             )
 
+    def test_oracle_full_selection_keeps_unavailable_entries_for_skip_accounting(self) -> None:
+        args = argparse.Namespace(
+            rag_mode="oracle",
+            split="development",
+            category=None,
+            sample_size=None,
+            sample_seed=0,
+            sample_strategy="random",
+        )
+
+        with patch("killchain_docker.batch.dataset.actionable_oracle_challenge_ids") as scan:
+            self.assertEqual(
+                sample_challenge_names(_Dataset(), args, ["alpha", "beta", "gamma"]),
+                ["alpha", "beta", "gamma"],
+            )
+
+        scan.assert_not_called()
+
     def test_oracle_sample_skips_placeholder_expected_flags(self) -> None:
         args = argparse.Namespace(
             rag_mode="oracle",

@@ -454,13 +454,19 @@ class BatchSummaryTests(unittest.TestCase):
 
             payload = json.loads(logfile.read_text(encoding="utf-8"))
             self.assertEqual(result["run_id"], "run-attached")
+            self.assertFalse(result["api_error"])
+            self.assertTrue(result["llm_error"])
             self.assertEqual(result["token_usage"]["total_tokens"], 9)
             self.assertEqual(payload["artifacts"]["run_id"], "run-attached")
+            self.assertFalse(payload["api_error"])
+            self.assertTrue(payload["llm_error"])
             self.assertEqual(payload["state_metrics"]["todo_count"], 1)
             self.assertEqual(payload["rag"]["mode"], "strict")
             self.assertEqual(result["rag"]["policy"], "filtered_context")
             self.assertNotIn("mode", result["rag"])
             status_payload = json.loads((root / "fake-attached-artifacts.status.json").read_text(encoding="utf-8"))
+            self.assertFalse(status_payload["api_error"])
+            self.assertTrue(status_payload["llm_error"])
             self.assertEqual(status_payload["rag"]["policy"], "filtered_context")
             self.assertEqual(status_payload["token_usage"]["total_tokens"], 9)
             self.assertNotIn("mode", status_payload["rag"])
@@ -969,6 +975,89 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(payload["failure_buckets"]["runtime_error"], 1)
             self.assertIn("script_missing_code", payload["details"][0]["failure_buckets"])
             self.assertIn("runtime_error", payload["details"][0]["failure_buckets"])
+
+    def test_summary_ignores_policy_rejections_that_are_expected_filtering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = _args(root)
+            log_path = root / "filtered_candidate.json"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "solved": False,
+                        "status": "failed",
+                        "state": {
+                            "orchestration_notes": [
+                                "Rejected flag candidate from script: bare_token_for_prefix_challenge",
+                            ],
+                            "rejected_flag_candidates": [
+                                {
+                                    "value": "CHANGELOG.md",
+                                    "reason": "bare_token_for_prefix_challenge",
+                                    "source": "script",
+                                }
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = {
+                "challenge": "filtered-candidate",
+                "solved": False,
+                "status": "failed",
+                "runtime_sec": 3,
+                "logfile": str(log_path),
+            }
+
+            with patch("killchain_docker.batch.runner._load_llm_experiment_config", return_value={"available": False}):
+                path = _save_batch_progress(args, [result], time.time() - 5, finished=True)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("candidate_rejected", payload["failure_buckets"])
+            self.assertNotIn("candidate_mismatch", payload["failure_buckets"])
+            self.assertEqual(payload["details"][0]["failure_buckets"], [])
+
+    def test_summary_uses_structured_event_types_for_failure_buckets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = _args(root)
+            events_path = root / "artifacts" / "failed-event" / "run-1" / "events.log"
+            events_path.parent.mkdir(parents=True)
+            events_path.write_text(
+                "\n".join(
+                    [
+                        "legacy token usage line",
+                        json.dumps({"event_type": "llm_transient_error", "message": "retryable gateway failure"}),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            log_path = root / "failed_event.json"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "solved": False,
+                        "status": "failed",
+                        "artifacts": {"events_path": str(events_path)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = {
+                "challenge": "failed-event",
+                "solved": False,
+                "status": "failed",
+                "runtime_sec": 3,
+                "logfile": str(log_path),
+            }
+
+            with patch("killchain_docker.batch.runner._load_llm_experiment_config", return_value={"available": False}):
+                path = _save_batch_progress(args, [result], time.time() - 5, finished=True)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["failure_buckets"]["llm_transient_error"], 1)
+            self.assertIn("llm_transient_error", payload["details"][0]["failure_buckets"])
 
     def test_summary_buckets_unsolved_exhausted_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

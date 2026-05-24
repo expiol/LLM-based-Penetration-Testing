@@ -63,6 +63,7 @@ _TOKEN_USAGE_KEYS = ("llm_calls", "prompt_tokens", "completion_tokens", "total_t
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _LLM_GATEWAY_CONFIG = _PROJECT_ROOT / "configs" / "llm_gateway.json"
 _BATCH_MONITOR_REFRESH_SEC = 3.0
+_FAILURE_EVENT_SCAN_LIMIT_BYTES = 5_000_000
 _LEGACY_LLM_ENV_KEYS = (
     "AUTOPENTEST_LLM_MODE", "AUTOPENTEST_LLM_CONFIG_PATH", "AUTOPENTEST_LLM_PROVIDER",
     "AUTOPENTEST_LLM_BASE_URL", "AUTOPENTEST_LLM_MODEL", "AUTOPENTEST_LLM_API_KEY",
@@ -132,6 +133,36 @@ def _safe_read_json(path: str | Path | None) -> dict[str, Any] | None:
         return None
 
 
+def _event_types_from_artifacts(*sources: dict[str, Any]) -> set[str]:
+    event_types: set[str] = set()
+    for source in sources:
+        artifacts = source.get("artifacts") if isinstance(source, dict) else None
+        if not isinstance(artifacts, dict):
+            continue
+        events_path = artifacts.get("events_path")
+        if not events_path:
+            continue
+        path = Path(str(events_path))
+        try:
+            if not path.exists() or path.stat().st_size > _FAILURE_EVENT_SCAN_LIMIT_BYTES:
+                continue
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line.startswith("{"):
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    event_type = str(payload.get("event_type") or "").strip()
+                    if event_type:
+                        event_types.add(event_type)
+        except OSError:
+            continue
+    return event_types
+
+
 def _utc_timestamp(ts: float | None = None) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts if ts is not None else time.time()))
 
@@ -196,6 +227,14 @@ def _is_api_balance_error(exc: Exception) -> bool:
     if "RateLimit" in exc_type or "AuthenticationError" in exc_type:
         return True
     return any(p.lower() in exc_str for p in _API_BALANCE_PATTERNS)
+
+
+def _is_batch_fatal_api_error(exc: Exception, *, has_run_artifacts: bool = False) -> bool:
+    if _is_api_balance_error(exc):
+        return True
+    if not isinstance(exc, LLMClientError):
+        return False
+    return not has_run_artifacts
 
 
 class _BatchMonitorHeartbeat:
@@ -355,6 +394,7 @@ def _failure_buckets(log_payload: dict[str, Any], result: dict[str, Any]) -> lis
             haystack_parts.extend(str(value) for value in runtime_error.values() if value)
 
     state_payload = log_payload.get("state") if isinstance(log_payload, dict) else None
+    rejected_flag_reasons: set[str] = set()
     if isinstance(state_payload, dict):
         metadata = state_payload.get("metadata")
         runtime_error = metadata.get("runtime_error") if isinstance(metadata, dict) else None
@@ -366,6 +406,11 @@ def _failure_buckets(log_payload: dict[str, Any], result: dict[str, Any]) -> lis
             kind = str(last_llm_error.get("kind") or "").strip()
             if kind:
                 buckets.add(f"llm_{kind}")
+        for rejected in state_payload.get("rejected_flag_candidates") or []:
+            if isinstance(rejected, dict):
+                reason = str(rejected.get("reason") or "").strip().lower()
+                if reason:
+                    rejected_flag_reasons.add(reason)
         haystack_parts.extend(str(note) for note in state_payload.get("orchestration_notes") or [])
         for todo in state_payload.get("todos") or []:
             if isinstance(todo, dict):
@@ -392,6 +437,8 @@ def _failure_buckets(log_payload: dict[str, Any], result: dict[str, Any]) -> lis
             if isinstance(record, dict):
                 haystack_parts.extend(str(record.get(key) or "") for key in ("summary", "error"))
 
+    event_types = _event_types_from_artifacts(log_payload, result)
+    haystack_parts.extend(event_types)
     haystack = "\n".join(haystack_parts).lower()
 
     if (
@@ -459,9 +506,9 @@ def _failure_buckets(log_payload: dict[str, Any], result: dict[str, Any]) -> lis
         or "source review failed" in haystack
     ):
         buckets.add("source_target_unresolved")
-    if "candidate mismatch" in haystack:
+    if "candidate mismatch" in haystack or "candidate mismatch" in rejected_flag_reasons:
         buckets.add("candidate_mismatch")
-    if "rejected flag candidate" in haystack or "escaped_byte_candidate" in haystack:
+    if "escaped_byte_candidate" in haystack or "escaped_byte_candidate" in rejected_flag_reasons:
         buckets.add("candidate_rejected")
     if "empty_result" in haystack or "0 packet(s)" in haystack:
         buckets.add("empty_tool_result")
@@ -475,6 +522,8 @@ def _failure_buckets(log_payload: dict[str, Any], result: dict[str, Any]) -> lis
         buckets.add("runtime_error")
     if result.get("llm_error") or log_payload.get("llm_error") or "llm_error" in haystack:
         buckets.add("llm_error")
+    if "llm_transient_error" in event_types or "transient llm error" in haystack:
+        buckets.add("llm_transient_error")
     if (
         "docker compose" in haystack
         or "ports are not available" in haystack
@@ -656,7 +705,7 @@ def _worker_failure_result(args: argparse.Namespace, name: str, exc: Exception) 
         "solved": False,
         "status": "worker_error",
         "error": {"type": type(exc).__name__, "message": str(exc)},
-        "api_error": isinstance(exc, LLMClientError),
+        "api_error": _is_batch_fatal_api_error(exc),
         "llm_error": isinstance(exc, LLMClientError),
         "traceback": traceback.format_exc(),
         "status_file": str(status_file),
@@ -1041,7 +1090,10 @@ def _run_single_challenge_inner(
             })
         traceback_text = traceback.format_exc() or f"{type(exc).__name__}: {exc}"
         is_llm_error = isinstance(exc, LLMClientError)
-        is_api_error = is_llm_error or _is_api_balance_error(exc)
+        is_api_error = _is_batch_fatal_api_error(
+            exc,
+            has_run_artifacts=artifacts is not None,
+        )
         LOGGER.exception(
             "single challenge run failed",
             extra={
@@ -1146,6 +1198,7 @@ def _run_single_challenge_inner(
         "state_metrics": state_metrics,
         "state": state_payload,
         "error": error_payload,
+        "api_error": is_api_error,
         "llm_error": is_llm_error,
         "traceback": traceback_text,
         "start_time": started_at, "end_time": ended_at,
@@ -1826,7 +1879,7 @@ def run_single_challenge_replicas(args: argparse.Namespace) -> int:
                         "solved": False,
                         "status": "worker_error",
                         "error": {"type": type(exc).__name__, "message": str(exc)},
-                        "api_error": isinstance(exc, LLMClientError),
+                        "api_error": _is_batch_fatal_api_error(exc),
                         "llm_error": isinstance(exc, LLMClientError),
                         "traceback": traceback.format_exc(),
                         "status_file": replica_status_files.get(monitor_challenge),

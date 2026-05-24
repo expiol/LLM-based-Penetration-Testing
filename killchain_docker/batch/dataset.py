@@ -159,10 +159,11 @@ def sample_challenge_names(
 ) -> list[str]:
     """Return a deterministic benchmark sample when ``--sample-size`` is set."""
 
-    candidates = oracle_actionable_names(args, dataset, list(names))
     raw_size = getattr(args, "sample_size", None)
     if raw_size is None:
-        return candidates
+        return list(names)
+
+    candidates = oracle_actionable_names(args, dataset, list(names))
 
     sample_size = int(raw_size)
     if sample_size <= 0:

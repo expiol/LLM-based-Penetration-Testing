@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -31,6 +32,23 @@ class _RetryChallenge(_FakeChallenge):
                 cmd=["docker", "run"],
                 stderr="temporary registry failure",
             )
+
+
+class _PortConflictChallenge(_FakeChallenge):
+    def __init__(self, challenge_dir: Path) -> None:
+        super().__init__(challenge_dir)
+        self.starts = 0
+
+    def start_challenge_container(self) -> None:
+        self.starts += 1
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["docker", "compose", "up"],
+            stderr=(
+                "Error response from daemon: ports are not available: "
+                "listen tcp 0.0.0.0:5000: bind: address already in use"
+            ),
+        )
 
 
 class DockerLifecycleTests(unittest.TestCase):
@@ -99,6 +117,51 @@ class DockerLifecycleTests(unittest.TestCase):
             self.assertEqual(record.attempts, 2)
             self.assertEqual(record.reason, "transient error")
             self.assertTrue(any("Traceback" in message for message in captured.output))
+
+    def test_host_port_conflict_retries_compose_without_host_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            compose = Path(tmp) / "docker-compose.yml"
+            compose.write_text("services: {}\n", encoding="utf-8")
+            challenge = _PortConflictChallenge(Path(tmp))
+            compose_config = {
+                "name": "demo",
+                "services": {
+                    "server": {
+                        "image": "example/service",
+                        "ports": [
+                            {
+                                "target": 5000,
+                                "published": "5000",
+                                "protocol": "tcp",
+                            }
+                        ],
+                    }
+                },
+            }
+            generated_configs: list[dict] = []
+
+            def fake_run(command: list[str], **_kwargs) -> BoundedProcessResult:
+                if "down" in command:
+                    return BoundedProcessResult(exit_code=0, stdout="", stderr="")
+                if "config" in command:
+                    return BoundedProcessResult(
+                        exit_code=0,
+                        stdout=json.dumps(compose_config),
+                        stderr="",
+                    )
+                if "up" in command:
+                    generated_configs.append(json.loads(Path(command[3]).read_text(encoding="utf-8")))
+                    return BoundedProcessResult(exit_code=0, stdout="", stderr="")
+                raise AssertionError(f"unexpected command: {command}")
+
+            with patch("killchain_docker.batch.docker.run_bounded_process", side_effect=fake_run):
+                start_challenge_with_retry(challenge, attempts=2)  # type: ignore[arg-type]
+
+            self.assertEqual(challenge.starts, 1)
+            self.assertEqual(len(generated_configs), 1)
+            service = generated_configs[0]["services"]["server"]
+            self.assertNotIn("ports", service)
+            self.assertEqual(service["expose"], ["5000"])
 
 
 if __name__ == "__main__":
