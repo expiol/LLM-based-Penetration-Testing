@@ -214,6 +214,66 @@ def _object_field_follows(text: str, index: int) -> bool:
     return index < len(text) and text[index] == ":"
 
 
+def escape_unescaped_inner_quotes_in_json_strings(text: str) -> str:
+    """Escape quote characters that are clearly part of a JSON string value.
+
+    Models sometimes emit prose or source code containing quotes inside a JSON
+    string without escaping them.  A quote can end a JSON string only when the
+    following non-space character is a structural delimiter.  When a quote is
+    followed by ordinary text, keep the surrounding JSON string open and escape
+    that quote instead.
+    """
+
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                out.append(char)
+                escaped = False
+                continue
+            if char == "\\":
+                out.append(char)
+                escaped = True
+                continue
+            if char == '"':
+                if _quote_can_end_json_string(text, index):
+                    out.append(char)
+                    in_string = False
+                else:
+                    out.append('\\"')
+                continue
+            out.append(char)
+            continue
+
+        out.append(char)
+        if char == '"':
+            in_string = True
+            escaped = False
+    return "".join(out)
+
+
+def _quote_can_end_json_string(text: str, quote_index: int) -> bool:
+    index = quote_index + 1
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text):
+        return True
+    char = text[index]
+    if char in ":}]":
+        return True
+    if char != ",":
+        return False
+
+    index += 1
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text):
+        return True
+    return text[index] in '"{[-0123456789tfn'
+
+
 def loads_lenient_json_object(text: str) -> Any:
     """Load model JSON, repairing the common bare-newline-in-string failure."""
 
@@ -223,6 +283,7 @@ def loads_lenient_json_object(text: str) -> Any:
     except json.JSONDecodeError:
         repaired = candidate
         repaired = escape_source_backslashes_in_json_strings(repaired)
+        repaired = escape_unescaped_inner_quotes_in_json_strings(repaired)
         repaired = close_array_before_object_field(repaired)
         repaired = escape_control_chars_in_json_strings(repaired)
         return json.loads(repaired)

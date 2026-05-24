@@ -531,6 +531,41 @@ class RoundOutcomePolicyTests(unittest.TestCase):
 
         self.assertTrue(RoundOutcomePolicy.had_meaningful_progress(results))
 
+    def test_round_progress_ignores_no_candidate_observation_text(self) -> None:
+        result = WorkerResult(
+            todo_id="todo-1",
+            worker_name="artifact-worker",
+            success=True,
+            summary="script (python)",
+            partial=True,
+            result_quality="partial_no_candidate",
+            partial_reason="script exited successfully but no flag candidate was recovered",
+            output_context={
+                "failure_kind": "no_candidate",
+                "result_quality": "partial_no_candidate",
+                "stdout": "checked 100 bounded variants without a candidate",
+            },
+        )
+
+        self.assertFalse(RoundOutcomePolicy.had_meaningful_progress([result]))
+
+    def test_round_progress_ignores_timeout_observation_text(self) -> None:
+        result = WorkerResult(
+            todo_id="todo-1",
+            worker_name="artifact-worker",
+            success=False,
+            summary="script failed: timeout",
+            partial=True,
+            result_quality="timeout",
+            partial_reason="script exceeded its execution or socket timeout",
+            output_context={
+                "failure_kind": "timeout",
+                "stderr": "[timeout after 45s]",
+            },
+        )
+
+        self.assertFalse(RoundOutcomePolicy.had_meaningful_progress([result]))
+
     def test_hollow_success_has_no_output_or_state_signal(self) -> None:
         result = WorkerResult(
             todo_id="todo-1",

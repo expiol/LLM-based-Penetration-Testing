@@ -923,12 +923,67 @@ class ProgressPolicy:
 class RoundOutcomePolicy:
     """Classify worker round results before the orchestrator mutates control flow."""
 
+    NO_PROGRESS_QUALITIES = frozenset({
+        "connection_refused",
+        "connection_reset",
+        "empty_result",
+        "metadata_validation",
+        "network_pipe_closed",
+        "no_candidate",
+        "package_install_blocked",
+        "partial_no_candidate",
+        "scope_violation_blocked",
+        "timeout",
+        "unbounded_loop_guard",
+    })
+    NEAR_MISS_QUALITIES = frozenset({"near_miss"})
+
     @staticmethod
     def has_observation_text(payload: dict[str, object]) -> bool:
         for key in ("stdout", "stderr", "output_text", "raw_log"):
             if str(payload.get(key) or "").strip():
                 return True
         return False
+
+    @classmethod
+    def quality_tokens(cls, result: WorkerResult) -> set[str]:
+        tokens = {str(result.result_quality or "").strip().lower()}
+        ctx = result.output_context or {}
+        for key in ("failure_kind", "partial_reason", "result_quality"):
+            value = ctx.get(key)
+            if value:
+                tokens.add(str(value).strip().lower())
+        for evidence in result.evidence_updates:
+            extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
+            evidence_ctx = extracted.get("output_context")
+            if isinstance(evidence_ctx, dict):
+                for key in ("failure_kind", "partial_reason", "result_quality"):
+                    value = evidence_ctx.get(key)
+                    if value:
+                        tokens.add(str(value).strip().lower())
+        tokens.discard("")
+        return tokens
+
+    @classmethod
+    def has_near_miss_signal(cls, result: WorkerResult) -> bool:
+        ctx = result.output_context or {}
+        if ctx.get("near_miss_candidates") or ctx.get("flag_candidates"):
+            return True
+        if cls.quality_tokens(result) & cls.NEAR_MISS_QUALITIES:
+            return True
+        for evidence in result.evidence_updates:
+            extracted = evidence.extracted if isinstance(evidence.extracted, dict) else {}
+            evidence_ctx = extracted.get("output_context")
+            if isinstance(evidence_ctx, dict) and (
+                evidence_ctx.get("near_miss_candidates")
+                or evidence_ctx.get("flag_candidates")
+            ):
+                return True
+        return False
+
+    @classmethod
+    def is_no_progress_result(cls, result: WorkerResult) -> bool:
+        return bool(cls.quality_tokens(result) & cls.NO_PROGRESS_QUALITIES)
 
     @classmethod
     def is_hollow_result(cls, result: WorkerResult) -> bool:
@@ -986,8 +1041,10 @@ class RoundOutcomePolicy:
                 if result.finding_updates or result.credential_updates:
                     return True
                 ctx = result.output_context or {}
-                if ctx.get("near_miss_candidates") or ctx.get("flag_candidates"):
+                if RoundOutcomePolicy.has_near_miss_signal(result):
                     return True
+                if RoundOutcomePolicy.is_no_progress_result(result):
+                    return False
                 if RoundOutcomePolicy.has_observation_text(ctx):
                     return True
                 for evidence in result.evidence_updates:
@@ -1010,7 +1067,7 @@ class RoundOutcomePolicy:
             if result.finding_updates or result.credential_updates:
                 return True
             ctx = result.output_context or {}
-            if ctx.get("near_miss_candidates"):
+            if RoundOutcomePolicy.has_near_miss_signal(result):
                 return True
         return False
 

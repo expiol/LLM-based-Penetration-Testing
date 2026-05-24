@@ -20,6 +20,7 @@ from killchain_docker.llm.gateway import (
 )
 from killchain_docker.llm.structured_output import (
     close_array_before_object_field,
+    escape_unescaped_inner_quotes_in_json_strings,
     loads_lenient_json_object,
     python_string_literal_after,
 )
@@ -477,6 +478,24 @@ beta')"
         payload = '{"items": ["alpha", "beta"]}'
 
         self.assertEqual(close_array_before_object_field(payload), payload)
+
+    def test_decoder_repairs_unescaped_quotes_inside_string_values(self) -> None:
+        payload = """{
+  "items": [
+    "Identify offsets for system, "/bin/sh", and dup2"
+  ],
+  "stop": false
+}"""
+
+        decoded = loads_lenient_json_object(payload)
+
+        self.assertEqual(decoded["items"], ['Identify offsets for system, "/bin/sh", and dup2'])
+        self.assertFalse(decoded["stop"])
+
+    def test_inner_quote_repair_preserves_valid_structural_quotes(self) -> None:
+        payload = '{"items": ["alpha", "beta"], "stop": false}'
+
+        self.assertEqual(escape_unescaped_inner_quotes_in_json_strings(payload), payload)
 
     def test_gateway_recovers_completion_embedded_in_instructor_error(self) -> None:
         client = object.__new__(GatewayLLMClient)
