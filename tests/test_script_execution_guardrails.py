@@ -412,6 +412,34 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
 
         self.assertTrue(Worker._should_continue_after_step(task, prior_steps))
 
+    def test_first_unbounded_script_guard_allows_one_repair(self) -> None:
+        task = TodoItem(goal="Recover the flag from computed plaintext.")
+        prior_steps = [
+            {
+                "capability": "script.exec",
+                "returncode": 1,
+                "flag_candidates": [],
+                "failure_kind": "unbounded_loop_guard",
+                "executed": True,
+            },
+        ]
+
+        self.assertTrue(Worker._should_continue_after_step(task, prior_steps))
+
+    def test_first_scope_violation_script_guard_allows_one_repair(self) -> None:
+        task = TodoItem(goal="Recover the flag from computed plaintext.")
+        prior_steps = [
+            {
+                "capability": "script.exec",
+                "returncode": 126,
+                "flag_candidates": [],
+                "failure_kind": "scope_violation_blocked",
+                "executed": True,
+            },
+        ]
+
+        self.assertTrue(Worker._should_continue_after_step(task, prior_steps))
+
     def test_successful_no_candidate_script_returns_to_planner_by_default(self) -> None:
         task = TodoItem(goal="Recover the flag from computed plaintext.")
         prior_steps = [
@@ -1741,6 +1769,22 @@ class TestScriptExecutionRuntime(unittest.TestCase):
                 mode=ExecutionMode.LOCAL_COMMAND,
                 exit_code=0,
                 stdout="Connected.\nSocket timeout after receiving data\nDone.\n",
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+
+        self.assertEqual(output.output_context["failure_kind"], "no_candidate")
+        self.assertNotEqual(output.output_context["partial_reason"], "script exceeded its execution or socket timeout")
+
+    def test_successful_subdiagnostic_timeout_phrase_is_not_tool_timeout(self) -> None:
+        output = build_script_output(
+            ToolExecutionRequest(tool_name="script_exec", metadata={"script_language": "python"}),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout="Running bounded subprocess...\nProcess timed out\nContinuing with fallback.\n",
                 stderr="",
             ),
             ParsedToolOutput(summary="raw"),

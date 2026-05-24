@@ -173,6 +173,32 @@ class _RepairableScriptPlugin:
         )
 
 
+class _GuardFailureThenCandidateScriptPlugin:
+    mode = ExecutionMode.SIMULATED
+    name = "script_exec"
+
+    def __init__(self, *, stderr: str) -> None:
+        self.calls = 0
+        self.stderr = stderr
+
+    def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
+        self.calls += 1
+        if self.calls == 1:
+            return ToolExecutionResult(
+                tool_name=self.name,
+                mode=self.mode,
+                exit_code=126 if "scope_violation_blocked" in self.stderr else 1,
+                stdout="Skip after SWAP: 1082458112\n",
+                stderr=self.stderr,
+            )
+        return ToolExecutionResult(
+            tool_name=self.name,
+            mode=self.mode,
+            exit_code=0,
+            stdout="FLAG FOUND: flag{guard_repaired}\n",
+        )
+
+
 class _NearMissThenCandidateScriptPlugin:
     mode = ExecutionMode.SIMULATED
     name = "script_exec"
@@ -825,6 +851,90 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertIn("Traceback (most recent call last):", captured[1])
         self.assertIn("bytes_text_mismatch", captured[1])
 
+    def test_unbounded_script_guard_retries_once_with_execution_constraints(self) -> None:
+        captured: list[str] = []
+        plugin = _GuardFailureThenCandidateScriptPlugin(
+            stderr=(
+                "RuntimeError: product too large for script.exec: "
+                "1082458112 > 5000000; use fast-forward math or bounded sampling"
+            )
+        )
+        plane = ExecutionPlane()
+        plane.register(plugin, script_output_builder)
+
+        def response(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured.append(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('solver attempt')"},
+                "rationale": "repair bounded search",
+            }
+
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(ToolCapability.SCRIPT_EXEC,),
+            ),
+            llm_client=StaticLLMClient(response),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(TodoItem(goal="Derive the key and recover the flag."))
+
+        result = worker.run(todo, state)
+
+        self.assertEqual(plugin.calls, 2)
+        self.assertTrue(result.success)
+        self.assertEqual(result.output_context["react_steps"], 2)
+        self.assertIn("unbounded_loop_guard", captured[1])
+        self.assertIn("do_not_iterate_values", captured[1])
+        self.assertIn("1082458112", captured[1])
+        self.assertEqual(
+            [candidate.value for candidate in result.state_delta.flag_candidates],
+            ["flag{guard_repaired}"],
+        )
+
+    def test_scope_violation_script_guard_retries_once_with_scope_context(self) -> None:
+        captured: list[str] = []
+        plugin = _GuardFailureThenCandidateScriptPlugin(
+            stderr=(
+                "scope_violation_blocked: filesystem exploration must stay under "
+                "files_root or explicit challenge files"
+            )
+        )
+        plane = ExecutionPlane()
+        plane.register(plugin, script_output_builder)
+
+        def response(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured.append(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('solver attempt')"},
+                "rationale": "repair scoped path access",
+            }
+
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(ToolCapability.SCRIPT_EXEC,),
+            ),
+            llm_client=StaticLLMClient(response),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(TodoItem(goal="Read the challenge artifact and recover the flag."))
+
+        result = worker.run(todo, state)
+
+        self.assertEqual(plugin.calls, 2)
+        self.assertTrue(result.success)
+        self.assertIn("scope_violation_blocked", captured[1])
+        self.assertIn("CTF_FILES_ROOT", captured[1])
+        self.assertEqual(
+            [candidate.value for candidate in result.state_delta.flag_candidates],
+            ["flag{guard_repaired}"],
+        )
+
     def test_artifact_closure_task_hands_near_miss_back_to_planner(self) -> None:
         plugin = _NearMissThenCandidateScriptPlugin()
         plane = ExecutionPlane()
@@ -1233,6 +1343,51 @@ class ShellPluginGuardrailTests(unittest.TestCase):
                 "script_code": (
                     "import socket\n"
                     "socket.create_connection(('localhost', 8000), timeout=2)\n"
+                ),
+                "authorized_scope": ["tcp://remote.example:8000"],
+            },
+            timeout_s=20,
+        )
+
+        result = plugin.execute(request)
+        output = script_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(result.exit_code, 126)
+        self.assertIn("scope_violation_blocked", result.stderr)
+        self.assertEqual(output.output_context["failure_kind"], "scope_violation_blocked")
+
+    def test_script_ignores_loopback_mentions_in_python_comments(self) -> None:
+        plugin = ScriptPlugin()
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SCRIPT_EXEC.value,
+            tool_name="script_exec",
+            metadata={
+                "script_language": "python",
+                "script_code": (
+                    "# Previous run could not connect to localhost; do offline work.\n"
+                    "print('offline-ok')\n"
+                ),
+                "authorized_scope": ["tcp://remote.example:8000"],
+            },
+            timeout_s=20,
+        )
+
+        result = plugin.execute(request)
+
+        self.assertEqual(result.exit_code, 0, result.stderr)
+        self.assertIn("offline-ok", result.stdout)
+
+    def test_script_blocks_actual_loopback_target_despite_comment_filter(self) -> None:
+        plugin = ScriptPlugin(argv_prefix=["definitely-not-a-real-runner"])
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SCRIPT_EXEC.value,
+            tool_name="script_exec",
+            metadata={
+                "script_language": "python",
+                "script_code": (
+                    "# Comment-only loopback mentions are ignored.\n"
+                    "import socket\n"
+                    "socket.create_connection(('127.0.0.1', 8000), timeout=2)\n"
                 ),
                 "authorized_scope": ["tcp://remote.example:8000"],
             },

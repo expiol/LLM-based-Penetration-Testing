@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ast
+import io
 import re
 import shlex
+import tokenize
 
 from killchain_docker.state.constants import DEFAULT_FILES_ROOT, bare_token_shape
 from killchain_docker.state import Artifact, ExploitAttempt
@@ -46,6 +48,23 @@ _NETWORK_SCRIPT_RE = re.compile(
     r"pwn|remote|create_connection|connect|nc|netcat|socat)\b",
     re.IGNORECASE,
 )
+_PYTHON_NETWORK_IMPORTS = {
+    "http.client",
+    "pexpect",
+    "pwn",
+    "pwntools",
+    "requests",
+    "socket",
+    "telnetlib",
+    "urllib",
+    "urllib.request",
+}
+_PYTHON_NETWORK_CALLS = {
+    "connect",
+    "create_connection",
+    "remote",
+    "urlopen",
+}
 _PLAINTEXT_LABEL_RE = re.compile(
     r"^\s*(?:\[[^\]\n]{1,24}\]\s*|[>*+-]\s*)*"
     r"(?:best\s+result|plaintext|plain\s+text|decrypted|decoded|preview|"
@@ -108,8 +127,56 @@ _SCRIPT_ARTIFACTS_END = "__KILLCHAIN_SCRIPT_ARTIFACTS_END__"
 
 
 def _script_uses_network_io(code: str, language: str) -> bool:
-    if language in {"python", "bash", "sh"}:
+    if language == "python":
+        return _python_script_uses_network_io(code)
+    if language in {"bash", "sh"}:
         return bool(_NETWORK_SCRIPT_RE.search(code))
+    return False
+
+
+def _python_scope_scan_text(code: str) -> str:
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
+        kept: list[str] = []
+        for token in tokens:
+            if token.type == tokenize.COMMENT:
+                continue
+            kept.append(token.string)
+        return " ".join(kept)
+    except tokenize.TokenError:
+        return code
+
+
+def _python_script_uses_network_io(code: str) -> bool:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return bool(_NETWORK_SCRIPT_RE.search(_python_scope_scan_text(code)))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.name.lower()
+                if (
+                    name in _PYTHON_NETWORK_IMPORTS
+                    or name.split(".", 1)[0] in _PYTHON_NETWORK_IMPORTS
+                ):
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            module = (node.module or "").lower()
+            if (
+                module in _PYTHON_NETWORK_IMPORTS
+                or module.split(".", 1)[0] in _PYTHON_NETWORK_IMPORTS
+            ):
+                return True
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id.lower() in _PYTHON_NETWORK_CALLS:
+                return True
+            if isinstance(func, ast.Attribute):
+                attr = func.attr.lower()
+                if attr in _PYTHON_NETWORK_CALLS:
+                    return True
     return False
 
 
@@ -532,9 +599,10 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         return "unbounded_loop_guard", "script attempted an oversized range/search; use fast-forward math or bounded sampling"
     if "script.exec python time limit exceeded" in text:
         return "unbounded_loop_guard", "script exceeded Python runtime guard; use bounded loops or fast-forward math"
-    hard_timeout = "[timeout after" in text or "timed out" in text
+    hard_timeout = "[timeout after" in text
     runtime_timeout = (
-        "timeouterror" in text
+        "timed out" in text
+        or "timeouterror" in text
         or "socket timeout" in text
         or "timeout during" in text
     )
@@ -761,9 +829,14 @@ class ScriptPlugin:
 
         files_root = request.metadata.get("files_root") or DEFAULT_FILES_ROOT
         scope_reason = scratch_path_reference_block_reason(script_code)
+        scope_scan_text = (
+            _python_scope_scan_text(script_code)
+            if language == "python"
+            else script_code
+        )
         if _script_uses_network_io(script_code, language):
             scope_reason = scope_reason or loopback_reference_block_reason(
-                script_code,
+                scope_scan_text,
                 request.metadata.get("authorized_scope"),
             )
         scope_reason = scope_reason or ambient_filesystem_block_reason(

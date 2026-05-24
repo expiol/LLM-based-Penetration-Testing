@@ -39,8 +39,11 @@ _SCRIPT_REPAIRABLE_FAILURE_KINDS = frozenset({
     "bytes_text_mismatch",
     "parse_error",
     "path_type_mismatch",
+    "scope_violation_blocked",
     "syntax_error",
+    "timeout",
     "type_error",
+    "unbounded_loop_guard",
     "undefined_name",
 })
 
