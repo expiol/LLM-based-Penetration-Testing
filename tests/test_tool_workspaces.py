@@ -47,7 +47,7 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
 
             self.assertEqual(result.exit_code, 0)
-            self.assertEqual(result.stdout, "done")
+            self.assertTrue(result.stdout.startswith("done"))
             self.assertEqual(data.read_text(encoding="utf-8"), "original")
             self.assertFalse((root / "extra.txt").exists())
 
@@ -111,7 +111,7 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
 
             self.assertEqual(result.exit_code, 0)
-            self.assertEqual(result.stdout, "done")
+            self.assertTrue(result.stdout.startswith("done"))
             self.assertEqual(data.read_text(encoding="utf-8"), "original")
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
 
@@ -163,8 +163,95 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
 
             self.assertEqual(result.exit_code, 0)
-            self.assertEqual(result.stdout, "shell-temp")
+            self.assertTrue(result.stdout.startswith("shell-temp"))
             self.assertFalse(marker_file.exists())
+
+    def test_shell_exec_persists_generated_artifacts_under_files_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = ToolExecutionRequest(
+                tool_name="shell_exec",
+                timeout_s=5,
+                metadata={
+                    "files_root": str(root),
+                    "command": "mkdir -p generated && printf durable > generated/result.txt && printf done",
+                },
+            )
+
+            result = ShellPlugin().execute(request)
+            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertTrue(result.stdout.startswith("done"))
+            self.assertIn("__KILLCHAIN_SCRIPT_ARTIFACTS__", result.stdout)
+            self.assertFalse((root / "generated" / "result.txt").exists())
+            records = output.output_context["generated_artifact_records"]
+            record = next(item for item in records if item["relative_path"] == "generated/result.txt")
+            artifact_path = Path(str(record["path"]))
+            self.assertEqual(record["origin"], "work")
+            self.assertEqual(artifact_path.read_text(encoding="utf-8"), "durable")
+            self.assertTrue(str(artifact_path).startswith(str(root / ".autopentest_artifacts")))
+            self.assertEqual(output.output_context["generated_artifacts_durable"], True)
+            self.assertEqual(output.artifacts[0].source, "shell_exec")
+            self.assertRegex(str(record["digest"]), r"^[0-9a-f]{64}$")
+
+    def test_shell_exec_prioritizes_readable_generated_artifacts_before_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = ToolExecutionRequest(
+                tool_name="shell_exec",
+                timeout_s=10,
+                metadata={
+                    "files_root": str(root),
+                    "command": (
+                        "mkdir -p blobs; "
+                        "for i in $(seq -w 1 45); do "
+                        "  printf '\\000\\001\\002\\003' > \"blobs/blob_$i\"; "
+                        "done; "
+                        "printf 'plain searchable configuration text\\n' > readable_target; "
+                        "printf done"
+                    ),
+                },
+            )
+
+            result = ShellPlugin().execute(request)
+            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+            self.assertEqual(result.exit_code, 0, result.stderr)
+            records = output.output_context["generated_artifact_records"]
+            relative_paths = {str(record["relative_path"]) for record in records}
+            self.assertLessEqual(len(records), 40)
+            self.assertIn("readable_target", relative_paths)
+            self.assertEqual(output.artifacts[0].metadata["relative_path"], "readable_target")
+
+    def test_shell_exec_prioritizes_source_like_artifacts_over_html_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = ToolExecutionRequest(
+                tool_name="shell_exec",
+                timeout_s=10,
+                metadata={
+                    "files_root": str(root),
+                    "command": (
+                        "mkdir -p docs; "
+                        "for i in $(seq -w 1 45); do "
+                        "  printf '<html><body>reference document</body></html>\\n' > \"docs/doc_$i\"; "
+                        "done; "
+                        "printf '#!/bin/sh\\necho important\\n' > source_like; "
+                        "chmod +x source_like; "
+                        "printf done"
+                    ),
+                },
+            )
+
+            result = ShellPlugin().execute(request)
+            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+            self.assertEqual(result.exit_code, 0, result.stderr)
+            records = output.output_context["generated_artifact_records"]
+            relative_paths = [str(record["relative_path"]) for record in records]
+            self.assertIn("source_like", relative_paths)
+            self.assertEqual(relative_paths[0], "source_like")
 
     def test_shell_exec_enforces_workspace_growth_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,6 +272,23 @@ class ToolWorkspaceTests(unittest.TestCase):
 
             self.assertEqual(result.exit_code, 125)
             self.assertIn("workspace budget exceeded", result.stderr)
+
+    def test_shell_exec_uses_pipefail_for_pipeline_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            request = ToolExecutionRequest(
+                tool_name="shell_exec",
+                timeout_s=5,
+                metadata={
+                    "files_root": tmp,
+                    "command": "python3 -c 'import sys; sys.exit(7)' | head -1",
+                },
+            )
+
+            result = ShellPlugin().execute(request)
+            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+            self.assertEqual(result.exit_code, 7)
+            self.assertEqual(output.status, ToolOutputStatus.FAILURE)
 
     def test_shell_exec_wraps_user_command_with_resource_limits(self) -> None:
         captured: dict[str, object] = {}

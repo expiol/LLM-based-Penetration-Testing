@@ -17,6 +17,7 @@ from killchain_docker.tools.core import (
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
+    ToolOutputStatus,
     ParsedToolOutput,
 )
 from killchain_docker.tools.plugins._base import (
@@ -26,6 +27,10 @@ from killchain_docker.tools.plugins._base import (
     _truncate,
     _infrastructure_failure_signal,
     ToolExecutionError,
+)
+from killchain_docker.tools.plugins.generated_artifacts import (
+    artifact_records_from_stdout,
+    artifacts_from_records,
 )
 from killchain_docker.tools.plugins.workspace import protected_shell_command
 
@@ -65,6 +70,24 @@ _STDERR_SUPPRESSION_RE = re.compile(
 _MISSING_COMMAND_RE = re.compile(
     r"(?:^|\n)(?:bash|sh|/bin/sh):(?: line \d+:)?\s*([^:\s]+): command not found\b",
     re.IGNORECASE,
+)
+_MASKED_COMMAND_ERROR_RE = re.compile(
+    r"(?im)^(?P<line>.{0,240}\b(?:"
+    r"No such file or directory"
+    r"|cannot access"
+    r"|cannot stat"
+    r"|cannot open"
+    r"|cannot read"
+    r"|Permission denied"
+    r"|Operation not permitted"
+    r"|Input/output error"
+    r"|Is a directory"
+    r"|Not a directory"
+    r"|command not found"
+    r"|syntax error near unexpected token"
+    r"|invalid option"
+    r"|unrecognized option"
+    r")\b.{0,240})$"
 )
 
 
@@ -222,6 +245,16 @@ def _missing_command_name(stdout: str, stderr: str) -> str | None:
     return command or None
 
 
+def _masked_command_error_detail(stdout: str, stderr: str, exit_code: int | None) -> str | None:
+    if exit_code not in (0, None):
+        return None
+    combined = "\n".join(part for part in (stderr, stdout) if part)
+    match = _MASKED_COMMAND_ERROR_RE.search(combined)
+    if not match:
+        return None
+    return match.group("line").strip()[:300]
+
+
 class ShellPlugin:
     """Execute an arbitrary shell command via ``bash -c``."""
 
@@ -299,6 +332,7 @@ class ShellPlugin:
                 max_workspace_mb=request.metadata.get("max_workspace_mb"),
                 max_memory_mb=request.metadata.get("max_memory_mb"),
                 max_cpu_s=request.metadata.get("max_cpu_s"),
+                publish_generated_artifacts=True,
             ),
         ]
         return _run(self.name, argv, request.timeout_s)
@@ -312,6 +346,7 @@ def build_output(
     command = str(request.metadata.get("command") or "")[:200]
     status = _status(result)
     stdout, stderr = result.stdout or "", result.stderr or ""
+    artifact_records = artifact_records_from_stdout(stdout)
 
     summary = f"shell: {command}"
     if status.value == "failure":
@@ -320,6 +355,18 @@ def build_output(
     flags = _flag_candidates_from(stdout, source=f"shell:{command[:80]}")
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
+    elif artifact_records:
+        summary += f" — {len(artifact_records)} generated artifact(s)"
+    masked_error_detail = None
+    if status == ToolOutputStatus.SUCCESS and not flags:
+        masked_error_detail = _masked_command_error_detail(
+            stdout,
+            stderr,
+            result.exit_code,
+        )
+        if masked_error_detail:
+            status = ToolOutputStatus.FAILURE
+            summary = f"shell failed (masked error): {command}"
 
     output_context: dict = {
         "stdout": _truncate(stdout, 4000),
@@ -327,6 +374,14 @@ def build_output(
         "returncode": result.exit_code,
         "flag_candidates": [fc.value for fc in flags],
     }
+    artifacts = artifacts_from_records(
+        artifact_records,
+        source="shell_exec",
+        kind_prefix="shell_artifact",
+    )
+    if artifact_records:
+        output_context["generated_artifact_records"] = artifact_records[:40]
+        output_context["generated_artifacts_durable"] = True
     stderr_l = stderr.lower()
     infrastructure = _infrastructure_failure_signal(stdout, stderr, result.exit_code)
     if infrastructure is not None:
@@ -336,6 +391,7 @@ def build_output(
             output_text=_truncate(stdout, 4000),
             raw_log=_truncate(stdout + stderr, 6000),
             output_context=output_context,
+            artifacts=artifacts,
             flag_candidates=flags,
         )
     missing_command = _missing_command_name(stdout, stderr)
@@ -344,6 +400,12 @@ def build_output(
         output_context["failure_detail"] = (
             f"required shell command not found: {missing_command}; "
             "check command availability and pivot to installed tools or script.exec"
+        )
+    if masked_error_detail:
+        output_context["failure_kind"] = "masked_shell_error"
+        output_context["failure_detail"] = (
+            "shell command emitted a fatal diagnostic even though the final "
+            f"pipeline exit code was 0: {masked_error_detail}"
         )
     if result.exit_code == 126 and (
         "package installation" in stderr_l
@@ -388,5 +450,6 @@ def build_output(
         output_text=_truncate(stdout, 4000),
         raw_log=_truncate(stdout + stderr, 6000),
         output_context=output_context,
+        artifacts=artifacts,
         flag_candidates=flags,
     )

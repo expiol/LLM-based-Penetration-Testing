@@ -9,7 +9,7 @@ import shlex
 import tokenize
 
 from killchain_docker.state.constants import DEFAULT_FILES_ROOT, bare_token_shape
-from killchain_docker.state import Artifact, ExploitAttempt
+from killchain_docker.state import ExploitAttempt
 from killchain_docker.scope_guard import (
     ambient_filesystem_block_reason,
     loopback_reference_block_reason,
@@ -30,6 +30,12 @@ from killchain_docker.tools.plugins._base import (
     _err_tail,
     _infrastructure_failure_signal,
     ToolExecutionError,
+)
+from killchain_docker.tools.plugins.generated_artifacts import (
+    ARTIFACTS_END,
+    ARTIFACTS_START,
+    artifact_records_from_stdout,
+    artifacts_from_records,
 )
 from killchain_docker.tools.plugins.workspace import disposable_script_command
 
@@ -122,9 +128,6 @@ _DIAGNOSTIC_REPORT_RE = re.compile(
     r"chunk\s+'(?:ihdr|idat|iend|itxt|text|ztxt)'|found\s+\d+\s+printable\s+strings|"
     r"offset\s+\d+\s*:)"
 )
-_SCRIPT_ARTIFACTS_START = "__KILLCHAIN_SCRIPT_ARTIFACTS__"
-_SCRIPT_ARTIFACTS_END = "__KILLCHAIN_SCRIPT_ARTIFACTS_END__"
-
 
 def _script_uses_network_io(code: str, language: str) -> bool:
     if language == "python":
@@ -406,7 +409,7 @@ def _is_diagnostic_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
-    if stripped in {_SCRIPT_ARTIFACTS_START, _SCRIPT_ARTIFACTS_END}:
+    if stripped in {ARTIFACTS_START, ARTIFACTS_END}:
         return True
 
     normalized = _STATUS_PREFIX_RE.sub("", stripped).strip().strip("=- ")
@@ -436,11 +439,11 @@ def _strip_script_artifact_manifest(stdout: str) -> str:
     in_manifest = False
     for line in lines:
         stripped = line.strip()
-        if stripped == _SCRIPT_ARTIFACTS_START:
+        if stripped == ARTIFACTS_START:
             in_manifest = True
             continue
         if in_manifest:
-            if stripped == _SCRIPT_ARTIFACTS_END:
+            if stripped == ARTIFACTS_END:
                 in_manifest = False
             continue
         kept.append(line)
@@ -906,7 +909,7 @@ def build_output(
     language = str(request.metadata.get("script_language") or "python")
     status = _status(result)
     stdout, stderr = result.stdout or "", result.stderr or ""
-    artifact_records = _script_artifact_records(stdout)
+    artifact_records = artifact_records_from_stdout(stdout)
 
     summary = f"script ({language})"
     if status.value == "failure":
@@ -928,7 +931,11 @@ def build_output(
     traceback = _traceback_excerpt("\n".join(part for part in (stderr, stdout) if part))
     if traceback:
         output_context["traceback"] = traceback
-    artifacts = _script_artifacts(artifact_records)
+    artifacts = artifacts_from_records(
+        artifact_records,
+        source="script_exec",
+        kind_prefix="script_artifact",
+    )
     if artifact_records:
         output_context["generated_artifact_records"] = artifact_records[:40]
         output_context["generated_artifacts_durable"] = True
@@ -973,89 +980,3 @@ def build_output(
         flag_candidates=flags,
         exploit_attempts=exploit_attempts,
     )
-
-
-def _script_artifact_records(stdout: str) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    in_section = False
-    for line in stdout.splitlines():
-        if line.strip() == _SCRIPT_ARTIFACTS_START:
-            in_section = True
-            continue
-        if line.strip() == _SCRIPT_ARTIFACTS_END:
-            break
-        if not in_section:
-            continue
-        parts = line.split("\t")
-        if len(parts) < 4:
-            continue
-        path, size_text, origin, relative_path = parts[:4]
-        if not path.startswith("/"):
-            continue
-        try:
-            size = int(size_text)
-        except ValueError:
-            size = None
-        digest = parts[4].strip() if len(parts) >= 5 else ""
-        file_type = parts[5].strip() if len(parts) >= 6 else ""
-        mime_type = parts[6].strip() if len(parts) >= 7 else ""
-        records.append(
-            {
-                "path": path,
-                "size": size,
-                "origin": origin,
-                "relative_path": relative_path,
-                "digest": digest or None,
-                "file_type": file_type or None,
-                "mime_type": mime_type or None,
-            }
-        )
-        if len(records) >= 40:
-            break
-    return records
-
-
-def _script_artifacts(records: list[dict[str, object]]) -> list[Artifact]:
-    artifacts: list[Artifact] = []
-    for record in records[:40]:
-        path = str(record.get("path") or "")
-        if not path:
-            continue
-        size = record.get("size")
-        file_type = str(record.get("file_type") or "")
-        mime_type = str(record.get("mime_type") or "")
-        kind = _script_artifact_kind(file_type=file_type, mime_type=mime_type)
-        digest = record.get("digest")
-        artifacts.append(
-            Artifact(
-                path=path,
-                kind=kind,
-                source="script_exec",
-                size=size if isinstance(size, int) else None,
-                digest=str(digest) if digest else None,
-                metadata={
-                    "origin": record.get("origin"),
-                    "relative_path": record.get("relative_path"),
-                    "file_type": file_type or None,
-                    "mime_type": mime_type or None,
-                },
-            )
-        )
-    return artifacts
-
-
-def _script_artifact_kind(*, file_type: str = "", mime_type: str = "") -> str:
-    text = " ".join([file_type.lower(), mime_type.lower()])
-    if "image/png" in text or "png image" in text:
-        return "script_artifact_png"
-    if "image/jpeg" in text or "jpeg image" in text:
-        return "script_artifact_jpeg"
-    if "image/gif" in text or "gif image" in text:
-        return "script_artifact_gif"
-    if "zip" in text or "archive" in text:
-        return "script_artifact_archive"
-    if "sqlite" in text or "database" in text:
-        return "script_artifact_database"
-    if "text/" in text or "ascii text" in text or "unicode text" in text:
-        return "script_artifact_text"
-    return "script_artifact"

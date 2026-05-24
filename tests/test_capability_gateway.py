@@ -1181,6 +1181,48 @@ class ShellPluginGuardrailTests(unittest.TestCase):
         self.assertEqual(output.output_context["failure_kind"], "missing_tool")
         self.assertIn("fdisk", str(output.output_context["failure_detail"]))
 
+    def test_classifies_masked_shell_error_from_pipeline_stderr(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={"command": "find /work/missing -type f | head -50"},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=0,
+            stdout="",
+            stderr="find: '/work/missing': No such file or directory\n",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.status, ToolOutputStatus.FAILURE)
+        self.assertEqual(output.output_context["failure_kind"], "masked_shell_error")
+        self.assertIn("No such file", str(output.output_context["failure_detail"]))
+
+    def test_classifies_masked_shell_error_from_redirected_stdout(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={"command": "cat /work/missing 2>&1 | head -50"},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=0,
+            stdout="cat: /work/missing: No such file or directory\n",
+            stderr="",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.status, ToolOutputStatus.FAILURE)
+        self.assertEqual(output.output_context["failure_kind"], "masked_shell_error")
+        self.assertIn("No such file", str(output.output_context["failure_detail"]))
+
     def test_classifies_docker_container_error_as_infrastructure(self) -> None:
         request = ToolExecutionRequest(
             capability=ToolCapability.SHELL_EXEC.value,
@@ -1312,7 +1354,7 @@ class ShellPluginGuardrailTests(unittest.TestCase):
             )
 
             self.assertEqual(result.exit_code, 0, result.stderr)
-            self.assertEqual(result.stdout, "done")
+            self.assertTrue(result.stdout.startswith("done"))
             self.assertEqual(target.read_text(encoding="utf-8"), "original")
             self.assertFalse((Path(tmp) / "derived.txt").exists())
 

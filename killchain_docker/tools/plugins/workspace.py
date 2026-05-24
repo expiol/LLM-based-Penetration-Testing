@@ -71,19 +71,37 @@ def protected_shell_command(
     max_memory_mb: object | None = None,
     max_cpu_s: object | None = None,
     preserve_relative_paths: tuple[str, ...] | list[str] | None = None,
+    publish_generated_artifacts: bool = False,
 ) -> str:
     """Return a ``bash -c`` command that restores ``files_root`` on exit."""
 
+    preserve_paths = tuple(preserve_relative_paths or ())
+    if publish_generated_artifacts and ".autopentest_artifacts" not in preserve_paths:
+        preserve_paths = (*preserve_paths, ".autopentest_artifacts")
     policy = WorkspacePolicy.from_values(
         files_root=files_root,
         max_workspace_mb=max_workspace_mb,
         max_memory_mb=max_memory_mb,
         max_cpu_s=max_cpu_s,
-        preserve_relative_paths=preserve_relative_paths,
+        preserve_relative_paths=preserve_paths,
     )
     root = shlex.quote(policy.files_root)
     user_command = shlex.quote(command)
     preserve_exports = _preserve_exports(policy.preserve_relative_paths)
+    artifact_setup = ""
+    artifact_publish = ""
+    if publish_generated_artifacts:
+        artifact_setup = _join_shell(
+            '_kc_artifacts="$_kc_root/.autopentest_artifacts";',
+            '_kc_art_dir="$_kc_artifacts/shell_$$_$(date +%s)";',
+            'export CTF_ARTIFACTS_DIR="$_kc_art_dir/manual";',
+            'export _kc_artifacts _kc_art_dir;',
+        )
+        artifact_publish = _join_shell(
+            '_kc_work="$_kc_root";',
+            'export _kc_work;',
+            '_kc_publish_generated_artifacts;',
+        )
     return _join_shell(
         f"_kc_root={root};",
         f"_kc_user_command={user_command};",
@@ -98,8 +116,10 @@ def protected_shell_command(
         '_kc_original="$_kc_tmp/original_ro";',
         '_kc_preserve="$_kc_tmp/preserve";',
         '_kc_scratch="$_kc_tmp/scratch";',
+        artifact_setup,
         'mkdir -p "$_kc_backup" "$_kc_original" "$_kc_preserve" "$_kc_scratch" || exit 1;',
         _restore_function(),
+        _generated_artifact_publish_function(),
         _workspace_budget_functions(),
         '_kc_cleanup() { _kc_rc=$?; _kc_stop_workspace_monitor; _kc_restore; rm -rf "$_kc_tmp"; exit $_kc_rc; };',
         'trap _kc_cleanup EXIT INT TERM;',
@@ -117,7 +137,10 @@ def protected_shell_command(
         'export TMPDIR="$_kc_scratch";',
         'export TMP="$_kc_scratch";',
         'export TEMP="$_kc_scratch";',
-        '_kc_run_monitored "$_kc_root" "$_kc_scratch" -- bash -c "$_kc_user_command"',
+        '_kc_run_monitored "$_kc_root" "$_kc_scratch" -- bash -o pipefail -c "$_kc_user_command";',
+        '_kc_rc=$?;',
+        artifact_publish,
+        'exit "$_kc_rc";',
     )
 
 
@@ -174,7 +197,7 @@ def disposable_script_command(
         'mkdir -p "$_kc_work" "$_kc_backup" "$_kc_original" "$_kc_preserve" "$_kc_scratch" || exit 1;',
         'cat > "$_kc_script" || exit 1;',
         _restore_function(),
-        _script_artifact_publish_function(),
+        _generated_artifact_publish_function(),
         _workspace_budget_functions(),
         '_kc_cleanup() { _kc_rc=$?; _kc_stop_workspace_monitor; _kc_restore; rm -rf "$_kc_tmp"; exit $_kc_rc; };',
         'trap _kc_cleanup EXIT INT TERM;',
@@ -197,7 +220,7 @@ def disposable_script_command(
         'export _kc_script _kc_guard _kc_work _kc_backup _kc_original _kc_scratch _kc_root _kc_tmp _kc_budget_flag _kc_workspace_limit_kb _kc_artifacts _kc_art_dir;',
         f'_kc_run_monitored "$_kc_work" "$_kc_scratch" -- sh -c {shlex.quote(runner)};',
         '_kc_rc=$?;',
-        '_kc_publish_script_artifacts;',
+        '_kc_publish_generated_artifacts;',
         'exit "$_kc_rc";',
     )
 
@@ -244,7 +267,7 @@ def _stale_workspace_cleanup() -> str:
     )
 
 
-def _script_artifact_publish_function() -> str:
+def _generated_artifact_publish_function() -> str:
     return _join_shell(
         '_kc_publish_one_artifact() {',
         '  _kc_src="$1"; _kc_origin="$2"; _kc_rel="$3";',
@@ -266,21 +289,53 @@ def _script_artifact_publish_function() -> str:
         '  _kc_art_count=$((_kc_art_count + 1));',
         '  _kc_art_total_kb=$((_kc_art_total_kb + _kc_size_kb));',
         '};',
-        '_kc_publish_script_artifacts() {',
+        '_kc_artifact_priority() {',
+        '  _kc_src="$1";',
+        '  if [ ! -f "$_kc_src" ]; then echo 0; return 0; fi;',
+        '  _kc_size=$(stat -c%s "$_kc_src" 2>/dev/null || stat -f%z "$_kc_src" 2>/dev/null || echo 0);',
+        '  _kc_size_kb=$(((_kc_size + 1023) / 1024));',
+        '  if [ "$_kc_size_kb" -gt 32768 ]; then echo 0; return 0; fi;',
+        '  _kc_desc=$( (file -b --mime-type "$_kc_src" 2>/dev/null; file -b "$_kc_src" 2>/dev/null) | tr "[:upper:]" "[:lower:]" | tr "\\t\\r\\n" "   ");',
+        '  case "$_kc_desc" in',
+        '    *inode/x-empty*|*empty*) _kc_priority=0 ;;',
+        '    *font*|*opentype*|*truetype*|*"web open font"*|*typeface*) _kc_priority=5 ;;',
+        '    *script*|*source*) _kc_priority=100 ;;',
+        '    *"json data"*|*xml*|*configuration*) _kc_priority=95 ;;',
+        '    *text/html*|*"html document"*) _kc_priority=65 ;;',
+        '    *text/*|*"ascii text"*|*"unicode text"*) _kc_priority=80 ;;',
+        '    *database*|*sqlite*) _kc_priority=85 ;;',
+        '    *archive*|*compressed*|*zip*|*tar*|*gzip*) _kc_priority=80 ;;',
+        '    *image*|*audio*|*video*|*media*) _kc_priority=70 ;;',
+        '    *) _kc_priority=40 ;;',
+        '  esac;',
+        '  case "$_kc_desc" in *"very long lines"*|*"no line terminators"*) if [ "$_kc_priority" -gt 30 ]; then _kc_priority=$((_kc_priority - 20)); fi ;; esac;',
+        '  if [ "$_kc_size_kb" -gt 8192 ] && [ "$_kc_priority" -gt 10 ]; then _kc_priority=$((_kc_priority - 10)); fi;',
+        '  echo "$_kc_priority";',
+        '};',
+        '_kc_queue_artifact_candidate() {',
+        '  _kc_src="$1"; _kc_origin="$2"; _kc_rel="$3";',
+        '  case "$_kc_rel" in ""|/*|*..*) return 0 ;; esac;',
+        '  _kc_priority=$(_kc_artifact_priority "$_kc_src");',
+        '  if [ "$_kc_priority" -le 0 ]; then return 0; fi;',
+        '  printf "%03d\\t%s\\t%s\\t%s\\n" "$_kc_priority" "$_kc_src" "$_kc_origin" "$_kc_rel" >> "$_kc_candidates";',
+        '};',
+        '_kc_publish_generated_artifacts() {',
         '  if [ "${_kc_had_root:-0}" != 1 ]; then return 0; fi;',
         '  _kc_manifest="$_kc_tmp/script_artifacts.tsv";',
+        '  _kc_candidates="$_kc_tmp/artifact_candidates.tsv";',
         '  _kc_art_count=0; _kc_art_total_kb=0;',
+        '  : > "$_kc_candidates";',
         '  mkdir -p "$_kc_art_dir/scratch" "$_kc_art_dir/manual" 2>/dev/null || return 0;',
         '  if [ -d "$_kc_scratch" ]; then',
         '    while IFS= read -r -d "" _kc_src; do',
         '      _kc_rel="${_kc_src#$_kc_scratch/}";',
-        '      _kc_publish_one_artifact "$_kc_src" "scratch" "$_kc_rel";',
+        '      _kc_queue_artifact_candidate "$_kc_src" "scratch" "$_kc_rel";',
         '    done < <(find "$_kc_scratch" -type f -print0 2>/dev/null);',
         '  fi;',
         '  if [ -d "$_kc_art_dir/manual" ]; then',
         '    while IFS= read -r -d "" _kc_src; do',
         '      _kc_rel="${_kc_src#$_kc_art_dir/manual/}";',
-        '      _kc_publish_one_artifact "$_kc_src" "manual" "$_kc_rel";',
+        '      _kc_queue_artifact_candidate "$_kc_src" "manual" "$_kc_rel";',
         '    done < <(find "$_kc_art_dir/manual" -type f -print0 2>/dev/null);',
         '  fi;',
         '  if [ -d "$_kc_work" ]; then',
@@ -289,9 +344,13 @@ def _script_artifact_publish_function() -> str:
         '      case "$_kc_rel" in .autopentest_artifacts/*) continue ;; esac;',
         '      _kc_orig="$_kc_original/$_kc_rel";',
         '      if [ -f "$_kc_orig" ] && cmp -s "$_kc_src" "$_kc_orig"; then continue; fi;',
-        '      _kc_publish_one_artifact "$_kc_src" "work" "$_kc_rel";',
+        '      _kc_queue_artifact_candidate "$_kc_src" "work" "$_kc_rel";',
         '    done < <(find "$_kc_work" -type f -print0 2>/dev/null);',
         '  fi;',
+        "  while IFS=$'\\t' read -r _kc_priority _kc_src _kc_origin _kc_rel; do",
+        '    [ -n "$_kc_src" ] || continue;',
+        '    _kc_publish_one_artifact "$_kc_src" "$_kc_origin" "$_kc_rel";',
+        '  done < <(sort -rn -k1,1 "$_kc_candidates" 2>/dev/null);',
         '  if [ -s "$_kc_manifest" ]; then',
         '    printf "\\n__KILLCHAIN_SCRIPT_ARTIFACTS__\\n";',
         '    cat "$_kc_manifest";',
