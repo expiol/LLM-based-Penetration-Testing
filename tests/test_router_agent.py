@@ -9,7 +9,7 @@ from killchain_docker.llm import StaticLLMClient
 from killchain_docker.orchestrator.router import RouterAgent, WorkerDirectory
 from killchain_docker.state import DispatchIntent, RunState, TodoItem, TodoPhase, WorkerResult
 from killchain_docker.workers.base import WorkerAgent
-from killchain_docker.workers.protocols import ARTIFACT_PERSONA, EXPLOIT_PERSONA
+from killchain_docker.workers.protocols import ARTIFACT_PERSONA, EXPLOIT_PERSONA, RECON_PERSONA
 from killchain_docker.workers.worker import Worker
 
 
@@ -513,6 +513,76 @@ class RouterAgentTests(unittest.TestCase):
                     "binary_path": "/home/ctfplayer/ctf_files/target",
                     "endpoint": "tcp://service.example:31337",
                     "dispatch_intent": {"profile": "pwn_exploit"},
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                Worker(persona=ARTIFACT_PERSONA),
+                Worker(persona=EXPLOIT_PERSONA),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "exploit-worker")],
+        )
+
+    def test_exploit_phase_overrides_stale_recon_profile(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=["tcp://service.example:31337"])
+        todo = state.queue_todo(
+            TodoItem(
+                goal=(
+                    "Construct and execute an exploit against the authorized "
+                    "service, then recover a flag candidate."
+                ),
+                phase=TodoPhase.EXPLOIT,
+                context={
+                    "scope": "tcp://service.example:31337",
+                    "target_host": "service.example",
+                    "target_port": 31337,
+                    "files_root": "/home/ctfplayer/ctf_files",
+                    "dispatch_intent": {
+                        "profile": "scope_mapping",
+                        "target_refs": {
+                            "scope": "tcp://service.example:31337",
+                            "files_root": "/home/ctfplayer/ctf_files",
+                        },
+                    },
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                Worker(persona=RECON_PERSONA),
+                Worker(persona=ARTIFACT_PERSONA),
+                Worker(persona=EXPLOIT_PERSONA),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "exploit-worker")],
+        )
+
+    def test_exploit_phase_prefers_exploit_worker_over_file_context(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=["tcp://service.example:31337"])
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Execute the next grounded exploit step against the authorized service.",
+                phase=TodoPhase.EXPLOIT,
+                context={
+                    "files_root": "/home/ctfplayer/ctf_files",
+                    "binary_path": "/home/ctfplayer/ctf_files/target",
+                    "endpoint": "tcp://service.example:31337",
                 },
             )
         )

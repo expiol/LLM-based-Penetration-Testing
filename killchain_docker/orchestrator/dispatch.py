@@ -75,6 +75,15 @@ _PROFILE_WORKER_PREFERENCES: dict[str, tuple[str, ...]] = {
     "flag_validation": ("flag-worker",),
 }
 
+_ACTIVE_EXPLOIT_PROFILES = frozenset({
+    "execution_closure",
+    "execution_continuation",
+    "exploit",
+    "pwn_exploit",
+    "web_exploitation",
+    "credential_recovery",
+})
+
 _FILE_CONTEXT_KEYS = frozenset({
     "artifact_id",
     "artifact_path",
@@ -134,10 +143,10 @@ class DispatchRoutePolicy:
         has_file_signal = cls.todo_has_file_signal(todo)
         if has_web_signal and todo.phase == TodoPhase.RECON:
             candidates.append(("recon-worker", "Structural: scope or service discovery context."))
-        if has_file_signal:
-            candidates.append(("artifact-worker", "Structural: file/artifact context."))
         if todo.phase == TodoPhase.EXPLOIT:
             candidates.append(("exploit-worker", "Structural: exploit phase."))
+        if has_file_signal:
+            candidates.append(("artifact-worker", "Structural: file/artifact context."))
         if has_web_signal and todo.phase != TodoPhase.RECON:
             candidates.append(("web-worker", "Structural: web/service context."))
 
@@ -170,6 +179,14 @@ class DispatchRoutePolicy:
             return [
                 (name, f"Structural: active execution closure profile {profile}.")
                 for name in ordered
+            ]
+        if todo.phase == TodoPhase.EXPLOIT and profile not in _ACTIVE_EXPLOIT_PROFILES:
+            return [
+                (
+                    "exploit-worker",
+                    f"Structural: exploit phase overrides passive dispatch profile {profile}.",
+                ),
+                *DispatchRoutePolicy._ordered_profile_candidates(profile, worker_directory),
             ]
         return DispatchRoutePolicy._ordered_profile_candidates(profile, worker_directory)
 
