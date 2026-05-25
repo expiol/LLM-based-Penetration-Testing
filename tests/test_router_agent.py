@@ -656,6 +656,33 @@ class RouterAgentTests(unittest.TestCase):
             "/home/ctfplayer/ctf_files/artifact.bin",
         )
 
+    def test_stringified_dispatch_evidence_ids_are_normalized(self) -> None:
+        intent = DispatchIntent.from_context({
+            "dispatch_intent": {
+                "evidence_ids": "['evidence-a', 'evidence-b']",
+            },
+        })
+
+        self.assertEqual(intent.evidence_ids, ["evidence-a", "evidence-b"])
+
+    def test_json_dispatch_evidence_ids_are_normalized(self) -> None:
+        intent = DispatchIntent.from_context({
+            "dispatch_intent": {
+                "evidence_ids": '["evidence-a", "evidence-b"]',
+            },
+        })
+
+        self.assertEqual(intent.evidence_ids, ["evidence-a", "evidence-b"])
+
+    def test_scalar_dispatch_evidence_id_remains_single_reference(self) -> None:
+        intent = DispatchIntent.from_context({
+            "dispatch_intent": {
+                "evidence_ids": "evidence-a",
+            },
+        })
+
+        self.assertEqual(intent.evidence_ids, ["evidence-a"])
+
     def test_unknown_required_capability_does_not_block_generic_file_route(self) -> None:
         state = RunState(objective="Solve.", authorized_scope=[])
         todo = state.queue_todo(

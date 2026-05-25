@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timezone
 from killchain_docker._compat import StrEnum
 from typing import Any
@@ -76,6 +77,39 @@ def _severity_rank(value: "Severity") -> int:
     return order[value]
 
 
+def _parse_text_sequence(text: str) -> Any | None:
+    if not text:
+        return None
+    if text[0] not in "[(" or text[-1] not in "])":
+        return None
+    try:
+        parsed = ast.literal_eval(text)
+    except (SyntaxError, ValueError):
+        return None
+    if isinstance(parsed, (list, tuple, set)):
+        return parsed
+    return None
+
+
+def _coerce_text_items(values: Any) -> list[str]:
+    items: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in (None, "", [], {}, ()):
+            continue
+        if isinstance(value, (list, tuple, set)):
+            nested = _coerce_text_items(value)
+        else:
+            text = str(value).strip()
+            parsed = _parse_text_sequence(text)
+            nested = _coerce_text_items(parsed) if parsed is not None else ([text] if text else [])
+        for item in nested:
+            if item not in seen:
+                items.append(item)
+                seen.add(item)
+    return items
+
+
 class RunStatus(StrEnum):
     IDLE = "idle"
     RUNNING = "running"
@@ -131,8 +165,11 @@ class DispatchIntent(BaseModel):
         if value in (None, "", {}, ()):
             return []
         if isinstance(value, (list, tuple, set)):
-            return [str(item).strip() for item in value if str(item).strip()]
+            return _coerce_text_items(value)
         text = str(value).strip()
+        parsed = _parse_text_sequence(text)
+        if parsed is not None:
+            return _coerce_text_items(parsed)
         return [text] if text else []
 
     @classmethod
