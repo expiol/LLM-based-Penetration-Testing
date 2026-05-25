@@ -598,6 +598,15 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         or "workspace budget exceeded" in text
     ):
         return "scratch_space_exhausted", "script scratch workspace could not be created or filled the container overlay"
+    if (
+        "modulenotfounderror:" in text
+        or "importerror:" in text
+        or "no module named" in text
+    ):
+        return (
+            "missing_tool",
+            "script imported a Python module unavailable in the execution environment; use stdlib or guard optional imports",
+        )
     if "range too large for script.exec" in text or "product too large for script.exec" in text:
         return "unbounded_loop_guard", "script attempted an oversized range/search; use fast-forward math or bounded sampling"
     if "script.exec python time limit exceeded" in text:

@@ -375,16 +375,17 @@ class ToolMetadataContractTests(unittest.TestCase):
                 {"script_code": "print('unterminated"},
             )
 
-    def test_script_exec_rejects_unguarded_third_party_imports(self) -> None:
+    def test_script_exec_allows_unguarded_third_party_imports_until_runtime(self) -> None:
         state = RunState(objective="solve")
         todo = TodoItem(goal="test")
-        with self.assertRaisesRegex(ToolExecutionError, "unguarded third-party import"):
-            normalize_tool_metadata(
-                ToolCapability.SCRIPT_EXEC,
-                todo,
-                state,
-                {"script_code": "import pytesseract\nprint('ocr')\n"},
-            )
+        result = normalize_tool_metadata(
+            ToolCapability.SCRIPT_EXEC,
+            todo,
+            state,
+            {"script_code": "import pytesseract\nprint('ocr')\n"},
+        )
+
+        self.assertIn("import pytesseract", result["script_code"])
 
     def test_script_exec_allows_guarded_optional_imports(self) -> None:
         state = RunState(objective="solve")

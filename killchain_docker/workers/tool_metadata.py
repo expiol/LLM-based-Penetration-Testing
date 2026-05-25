@@ -7,7 +7,6 @@ and a normalize function that validates & cleans metadata before dispatch.
 from __future__ import annotations
 
 import ast
-import sys
 
 from killchain_docker.state import RunState, TodoItem
 from killchain_docker.state.constants import DEFAULT_FILES_ROOT
@@ -540,48 +539,12 @@ def _normalize_script(raw: dict[str, object], state: RunState) -> dict[str, obje
 
 def _validate_python_script(script_code: str) -> None:
     try:
-        tree = ast.parse(script_code)
+        ast.parse(script_code)
     except SyntaxError as exc:
         line = f" line {exc.lineno}" if exc.lineno else ""
         raise ToolExecutionError(
             f"script.exec Python syntax invalid{line}: {exc.msg}"
         ) from exc
-    _validate_python_imports(tree)
-
-
-def _validate_python_imports(tree: ast.AST) -> None:
-    violations: list[str] = []
-
-    def visit(node: ast.AST, guarded: bool = False) -> None:
-        current_guarded = guarded or isinstance(node, ast.Try)
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                root = str(alias.name or "").partition(".")[0]
-                if root and not current_guarded and not _is_stdlib_module(root):
-                    violations.append(root)
-        elif isinstance(node, ast.ImportFrom):
-            root = str(node.module or "").partition(".")[0]
-            if root and not current_guarded and not _is_stdlib_module(root):
-                violations.append(root)
-        for child in ast.iter_child_nodes(node):
-            visit(child, current_guarded)
-
-    visit(tree)
-    unique = sorted(set(violations))
-    if unique:
-        names = ", ".join(unique[:6])
-        raise ToolExecutionError(
-            "script.exec blocked: unguarded third-party import(s): "
-            f"{names}; catch ImportError and include a stdlib fallback"
-        )
-
-
-def _is_stdlib_module(root: str) -> bool:
-    return (
-        root == "__future__"
-        or root in sys.builtin_module_names
-        or root in getattr(sys, "stdlib_module_names", frozenset())
-    )
 
 
 def _rewrite_python_scratch_literals(script_code: str) -> str:

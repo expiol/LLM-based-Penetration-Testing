@@ -1180,6 +1180,17 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
 
         self.assertEqual(ctx["failure_kind"], "path_resolution_error")
 
+    def test_classifies_missing_python_module_as_missing_tool(self) -> None:
+        ctx = self._output_context(
+            "Traceback (most recent call last):\n"
+            "  File \"/tmp/runner.py\", line 1, in <module>\n"
+            "ModuleNotFoundError: No module named 'pytesseract'\n"
+        )
+
+        self.assertEqual(ctx["failure_kind"], "missing_tool")
+        self.assertIn("module", str(ctx["failure_detail"]))
+        self.assertIn("stdlib", str(ctx["failure_detail"]))
+
     def test_classifies_odd_length_hex_decode_as_parse_error(self) -> None:
         ctx = self._output_context(
             "Traceback (most recent call last):\n"
