@@ -1008,6 +1008,14 @@ class TodoPolicy:
                 capability="shell.exec",
             )
             return
+        if TodoPolicy._goal_requires_binary_static_analysis(goal_l):
+            context["capability_hint"] = "shell.exec"
+            TodoPolicy._set_required_capability(
+                context,
+                profile="binary_analysis",
+                capability="shell.exec",
+            )
+            return
         if TodoPolicy._goal_requires_artifact_extraction(goal_l):
             context["capability_hint"] = "shell.exec"
             TodoPolicy._set_required_capability(
@@ -1064,6 +1072,43 @@ class TodoPolicy:
                 "run",
                 "send",
                 "service",
+            )
+        )
+
+    @staticmethod
+    def _goal_requires_binary_static_analysis(goal_l: str) -> bool:
+        binary_terms = (
+            "binary",
+            "elf",
+            "executable",
+            "program",
+        )
+        analysis_terms = (
+            "checksec",
+            "control-flow",
+            "control flow",
+            "decompile",
+            "disassembl",
+            "entry function",
+            "function",
+            "gadget",
+            "mitigation",
+            "objdump",
+            "radare",
+            "reverse engineer",
+            "rop",
+            "section",
+            "symbol",
+        )
+        if any(term in goal_l for term in analysis_terms):
+            return True
+        return any(term in goal_l for term in binary_terms) and any(
+            term in goal_l
+            for term in (
+                "analy",
+                "inspect",
+                "locate",
+                "static",
             )
         )
 

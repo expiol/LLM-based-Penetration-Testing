@@ -1970,6 +1970,47 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
             "execution_closure",
         )
 
+    def test_binary_static_deep_analysis_overrides_stale_artifact_triage_hint(self) -> None:
+        state = _state(["program"])
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/program",
+            kind="binary",
+            source="artifact_triage",
+            size=4096,
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+        todo = PlannedTodo(
+            goal=(
+                "Run comprehensive static analysis on the binary: check mitigations, "
+                "disassemble entry functions, locate useful gadgets, and confirm "
+                "control-flow evidence."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            context={
+                "family": "binary-static",
+                "artifact_path": artifact.path,
+                "path": artifact.path,
+                "capability_hint": "artifact.triage",
+                "dispatch_intent": {
+                    "profile": "binary_static",
+                    "required_capability": "artifact.triage",
+                },
+            },
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.context["family"], "binary-static")
+        self.assertEqual(todo.context["capability_hint"], "shell.exec")
+        self.assertEqual(
+            todo.context["dispatch_intent"]["required_capability"],
+            "shell.exec",
+        )
+        self.assertEqual(
+            todo.context["dispatch_intent"]["profile"],
+            "binary_analysis",
+        )
+
     def test_raw_content_goal_overrides_stale_artifact_triage_hint(self) -> None:
         state = _state(["source.txt"])
         todo = PlannedTodo(
