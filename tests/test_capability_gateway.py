@@ -384,7 +384,7 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertIsNone(artifact_plugin.last_request)
         self.assertIn('"fixed_capability": "script.exec"', captured["user"])
 
-    def test_archive_extraction_todo_obeys_artifact_triage_hint(self) -> None:
+    def test_archive_extraction_todo_does_not_fast_path_artifact_triage_hint(self) -> None:
         captured: dict[str, str] = {}
 
         def response(system_prompt: str, user_prompt: str) -> dict[str, object]:
@@ -439,9 +439,9 @@ class CapabilityGatewayTests(unittest.TestCase):
         result = worker.run(todo, state)
 
         self.assertTrue(result.success)
-        self.assertIsNone(shell_plugin.last_request)
-        self.assertIsNotNone(artifact_plugin.last_request)
-        self.assertNotIn("user", captured)
+        self.assertIsNotNone(shell_plugin.last_request)
+        self.assertIsNone(artifact_plugin.last_request)
+        self.assertIn("user", captured)
 
     def test_source_code_review_todo_does_not_fast_path_artifact_triage_hint(self) -> None:
         captured: dict[str, str] = {}

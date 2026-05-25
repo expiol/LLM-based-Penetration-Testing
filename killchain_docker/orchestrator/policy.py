@@ -242,6 +242,8 @@ class TodoPolicy:
                 "Capture the exact algorithm or loop evidence needed for a later script.",
             ]
 
+        cls._apply_actionable_tool_context(todo, context)
+
         intent_payload = DispatchIntent.from_context(context).model_dump(
             mode="json",
             exclude_defaults=True,
@@ -701,13 +703,107 @@ class TodoPolicy:
 
         context["execution_closure"] = True
         context["capability_hint"] = "script.exec"
+        TodoPolicy._set_required_capability(
+            context,
+            profile="execution_closure",
+            capability="script.exec",
+        )
+
+    @staticmethod
+    def _apply_actionable_tool_context(
+        todo: "PlannedTodo",
+        context: dict[str, Any],
+    ) -> None:
+        if not TodoPolicy._has_artifact_triage_intent(context):
+            return
+        goal_l = todo.goal.lower()
+        if todo.phase == TodoPhase.EXPLOIT and TodoPolicy._goal_requires_executable_interaction(goal_l):
+            context["execution_closure"] = True
+            context["capability_hint"] = "script.exec"
+            TodoPolicy._set_required_capability(
+                context,
+                profile="execution_closure",
+                capability="script.exec",
+            )
+            return
+        if TodoPolicy._goal_requires_artifact_extraction(goal_l):
+            context["capability_hint"] = "shell.exec"
+            TodoPolicy._set_required_capability(
+                context,
+                profile="container_extraction",
+                capability="shell.exec",
+            )
+
+    @staticmethod
+    def _has_artifact_triage_intent(context: dict[str, Any]) -> bool:
+        hint = str(context.get("capability_hint") or "").strip().lower()
+        raw_intent = context.get("dispatch_intent")
+        required = ""
+        if isinstance(raw_intent, dict):
+            required = str(raw_intent.get("required_capability") or "").strip().lower()
+        return hint == "artifact.triage" or required == "artifact.triage"
+
+    @staticmethod
+    def _set_required_capability(
+        context: dict[str, Any],
+        *,
+        profile: str,
+        capability: str,
+    ) -> None:
         raw_intent = context.get("dispatch_intent")
         intent = dict(raw_intent) if isinstance(raw_intent, dict) else {}
-        intent["profile"] = "execution_closure"
-        intent["required_capability"] = "script.exec"
+        intent["profile"] = profile
+        intent["required_capability"] = capability
         intent.pop("completion_contract", None)
         intent.pop("repair_policy_id", None)
         context["dispatch_intent"] = intent
+
+    @staticmethod
+    def _goal_requires_executable_interaction(goal_l: str) -> bool:
+        return any(
+            token in goal_l
+            for token in (
+                "authenticate",
+                "connect",
+                "deliver",
+                "execute",
+                "exploit",
+                "interact",
+                "payload",
+                "run",
+                "send",
+                "service",
+            )
+        )
+
+    @staticmethod
+    def _goal_requires_artifact_extraction(goal_l: str) -> bool:
+        has_extraction_action = any(
+            token in goal_l
+            for token in (
+                "carve",
+                "decompress",
+                "expand",
+                "extract",
+                "unarchive",
+                "unpack",
+            )
+        )
+        if not has_extraction_action:
+            return False
+        return any(
+            token in goal_l
+            for token in (
+                "archive",
+                "container",
+                "directory",
+                "embedded",
+                "file",
+                "payload",
+                "source tree",
+                "working directory",
+            )
+        )
 
     @staticmethod
     def _goal_needs_files(goal_l: str) -> bool:

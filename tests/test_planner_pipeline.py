@@ -1723,7 +1723,7 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
         self.assertNotIn("completion_contract", todo.context["dispatch_intent"])
         self.assertNotIn("repair_policy_id", todo.context["dispatch_intent"])
 
-    def test_archive_extraction_todo_is_not_filename_rewritten(self) -> None:
+    def test_archive_extraction_todo_uses_executable_extraction_capability(self) -> None:
         state = _state(["bundle.random"])
         todo = PlannedTodo(
             goal=(
@@ -1737,10 +1737,34 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
         TodoPolicy.normalize(todo, state)
 
         self.assertNotIn("archive_extraction", todo.context)
-        self.assertEqual(todo.context["capability_hint"], "artifact.triage")
+        self.assertEqual(todo.context["capability_hint"], "shell.exec")
         self.assertEqual(
             todo.context["dispatch_intent"]["required_capability"],
-            "artifact.triage",
+            "shell.exec",
+        )
+
+    def test_exploit_todo_with_stale_artifact_triage_hint_gets_execution_closure(self) -> None:
+        state = _state(["target.bin"], ["tcp://service.example:31337"])
+        todo = PlannedTodo(
+            goal=(
+                "Execute the full exploit chain against the authorized service: "
+                "authenticate, send the crafted payload, and recover the flag."
+            ),
+            phase=TodoPhase.EXPLOIT,
+            context={
+                "family": "exploit-execution",
+                "capability_hint": "artifact.triage",
+                "path": "/home/ctfplayer/ctf_files/target.bin",
+            },
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.context["capability_hint"], "script.exec")
+        self.assertIs(todo.context["execution_closure"], True)
+        self.assertEqual(
+            todo.context["dispatch_intent"]["required_capability"],
+            "script.exec",
         )
 
     def test_algorithm_verification_gets_execution_closure_context(self) -> None:

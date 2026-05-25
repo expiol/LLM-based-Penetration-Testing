@@ -10,7 +10,7 @@ import re
 from urllib.parse import urlparse
 
 from killchain_docker.llm import LLMClient
-from killchain_docker.orchestrator.policy import CandidatePolicy
+from killchain_docker.orchestrator.policy import CandidatePolicy, TodoPolicy
 from killchain_docker.reasoning.flag import encoding_cascade
 from killchain_docker.state import (
     Asset,
@@ -595,8 +595,10 @@ class Worker(WorkerAgent):
             ]
         ).lower()
         if family == "artifact-inventory":
-            return True
+            return not TodoPolicy._goal_requires_artifact_extraction(text)
         if family != "artifact-followup":
+            return False
+        if TodoPolicy._goal_requires_artifact_extraction(text):
             return False
         return any(
             token in text
