@@ -813,6 +813,43 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertEqual(result.memory_updates, {})
         self.assertEqual(state.working_memory, {})
 
+    def test_analysis_script_without_candidate_completes_when_not_execution_closure(self) -> None:
+        plane = ExecutionPlane()
+        plane.register(_NoCandidateScriptPlugin(), script_output_builder)
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(ToolCapability.SCRIPT_EXEC,),
+            ),
+            llm_client=StaticLLMClient([
+                {
+                    "capability": "script.exec",
+                    "metadata": {"script_code": "print('analysis facts but no flag')"},
+                    "rationale": "inspect source facts",
+                }
+            ]),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(
+            TodoItem(
+                goal=(
+                    "Analyze extracted source code to identify session token "
+                    "serialization and access-control logic."
+                ),
+                context={"family": "source-review"},
+                success_criteria=["Summarize grounded implementation facts."],
+                constraints=["Work only with extracted source files."],
+            )
+        )
+
+        result = worker.run(todo, state)
+        state.apply_worker_result(result)
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual(state.todos[0].status.value, "completed")
+
     def test_script_execution_error_retries_once_with_traceback_context(self) -> None:
         captured: list[str] = []
         plugin = _RepairableScriptPlugin()

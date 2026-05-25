@@ -84,14 +84,18 @@ def _is_flag_recovery_task(todo: TodoItem) -> bool:
 def _is_execution_closure_task(todo: TodoItem) -> bool:
     """Return true for CTF tasks expected to close artifact-to-answer gaps."""
 
+    context = todo.context or {}
+    if context.get("execution_closure") is True:
+        return True
+    intent = DispatchIntent.from_context(context)
+    if intent.profile == "execution_closure":
+        return True
     if _is_flag_recovery_task(todo):
         return True
-    context_text = " ".join(str(value) for value in (todo.context or {}).values())
     text = " ".join([
         todo.goal,
         " ".join(todo.success_criteria),
         " ".join(todo.constraints),
-        context_text,
     ]).lower()
     action_terms = (
         "carve", "decode", "decrypt", "derive", "extract", "find", "inspect",
@@ -102,9 +106,14 @@ def _is_execution_closure_task(todo: TodoItem) -> bool:
         "jpg", "jpeg", "key", "password", "plaintext", "png", "qr", "secret",
         "stego", "token", "transferred file",
     )
-    return any(term in text for term in action_terms) and any(
-        term in text for term in target_terms
-    )
+    return _contains_any_term(text, action_terms) and _contains_any_term(text, target_terms)
+
+
+def _contains_any_term(text: str, terms: tuple[str, ...]) -> bool:
+    for term in terms:
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])", text):
+            return True
+    return False
 
 
 def _returncode_failed(value: object) -> bool:
