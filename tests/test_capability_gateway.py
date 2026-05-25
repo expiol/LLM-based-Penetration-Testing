@@ -1181,6 +1181,114 @@ class ShellPluginGuardrailTests(unittest.TestCase):
         self.assertEqual(output.output_context["failure_kind"], "missing_tool")
         self.assertIn("fdisk", str(output.output_context["failure_detail"]))
 
+    def test_classifies_shell_timeout_with_partial_stdout(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={"command": "find . -type f | head -50"},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=-1,
+            stdout="./first\n./second\n",
+            stderr="\n[timeout after 5s]\n",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.output_context["failure_kind"], "timeout")
+        self.assertIn("timeout", str(output.output_context["failure_detail"]))
+        self.assertIn("./first", output.output_context["stdout"])
+
+    def test_classifies_shell_workspace_budget_exit(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={"command": "generate-large-scratch-output"},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=125,
+            stdout="partial useful output\n",
+            stderr="xargs: grep: terminated by signal 13\n",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.output_context["failure_kind"], "scratch_space_exhausted")
+        self.assertIn("workspace", str(output.output_context["failure_detail"]))
+
+    def test_classifies_shell_missing_path_on_nonzero_exit(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={"command": "cat generated/result.txt"},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=1,
+            stdout="cat: generated/result.txt: No such file or directory\n",
+            stderr="",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.output_context["failure_kind"], "path_resolution_error")
+        self.assertIn("path", str(output.output_context["failure_detail"]))
+
+    def test_classifies_shell_http_client_error_page_as_failure(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={"command": "curl -s -X POST http://target/register | head -100"},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=0,
+            stdout=(
+                '<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">\n'
+                "<html><head><title>404 Not Found</title></head>\n"
+                "<body><h1>Not Found</h1></body></html>\n"
+            ),
+            stderr="",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.status, ToolOutputStatus.FAILURE)
+        self.assertEqual(output.output_context["failure_kind"], "http_error_response")
+        self.assertIn("404", str(output.output_context["failure_detail"]))
+
+    def test_treats_bounded_head_sigpipe_as_successful_observation(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={"command": "find . -type f | head -2"},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=141,
+            stdout="./a\n./b\n",
+            stderr="",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.status, ToolOutputStatus.SUCCESS)
+        self.assertNotIn("failure_kind", output.output_context)
+        self.assertEqual(output.output_context["returncode"], 141)
+        self.assertEqual(output.output_context["result_quality"], "bounded_pipe_closed")
+
     def test_classifies_masked_shell_error_from_pipeline_stderr(self) -> None:
         request = ToolExecutionRequest(
             capability=ToolCapability.SHELL_EXEC.value,

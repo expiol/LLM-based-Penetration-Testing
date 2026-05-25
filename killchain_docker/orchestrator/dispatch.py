@@ -7,6 +7,7 @@ that asks an LLM only when these rules do not decide the assignment.
 
 from __future__ import annotations
 
+import re
 from typing import Protocol
 
 from killchain_docker.state import DispatchIntent, TodoItem, TodoPhase
@@ -90,6 +91,7 @@ _WEB_CONTEXT_KEYS = frozenset({
     "hostname",
     "port",
     "scope",
+    "target_base_url",
     "url",
 })
 _FILE_TERMS = (
@@ -128,15 +130,16 @@ class DispatchRoutePolicy:
                 cls._ordered_capability_candidates(allowed, worker_directory, allowed=True)
             )
 
-        if cls.todo_has_file_signal(todo):
+        has_web_signal = cls.todo_has_web_signal(todo)
+        has_file_signal = cls.todo_has_file_signal(todo)
+        if has_web_signal and todo.phase == TodoPhase.RECON:
+            candidates.append(("recon-worker", "Structural: scope or service discovery context."))
+        if has_file_signal:
             candidates.append(("artifact-worker", "Structural: file/artifact context."))
         if todo.phase == TodoPhase.EXPLOIT:
             candidates.append(("exploit-worker", "Structural: exploit phase."))
-        if cls.todo_has_web_signal(todo):
-            if todo.phase == TodoPhase.RECON:
-                candidates.append(("recon-worker", "Structural: scope or service discovery context."))
-            else:
-                candidates.append(("web-worker", "Structural: web/service context."))
+        if has_web_signal and todo.phase != TodoPhase.RECON:
+            candidates.append(("web-worker", "Structural: web/service context."))
 
         return cls._unique_available(candidates, worker_directory.worker_names)
 
@@ -145,14 +148,14 @@ class DispatchRoutePolicy:
         if _todo_has_context_key(todo, _FILE_CONTEXT_KEYS):
             return True
         text = _todo_text(todo)
-        return any(term in text for term in _FILE_TERMS)
+        return any(_contains_term(text, term) for term in _FILE_TERMS)
 
     @staticmethod
     def todo_has_web_signal(todo: TodoItem) -> bool:
         if _todo_has_context_key(todo, _WEB_CONTEXT_KEYS):
             return True
         text = _todo_text(todo)
-        return any(term in text for term in _SCOPE_TERMS)
+        return any(_contains_term(text, term) for term in _SCOPE_TERMS)
 
     @staticmethod
     def _ordered_profile_candidates(
@@ -216,3 +219,8 @@ def _todo_text(todo: TodoItem) -> str:
         " ".join(todo.success_criteria),
         " ".join(todo.constraints),
     ]).lower()
+
+
+def _contains_term(text: str, term: str) -> bool:
+    pattern = r"(?<![a-z0-9_])" + re.escape(term.lower()) + r"(?![a-z0-9_])"
+    return re.search(pattern, text) is not None

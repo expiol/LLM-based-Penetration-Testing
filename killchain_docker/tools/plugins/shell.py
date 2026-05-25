@@ -89,6 +89,22 @@ _MASKED_COMMAND_ERROR_RE = re.compile(
     r"|unrecognized option"
     r")\b.{0,240})$"
 )
+_PATH_RESOLUTION_ERROR_RE = re.compile(
+    r"(?im)^(?P<line>.{0,240}\b(?:"
+    r"No such file or directory"
+    r"|cannot access"
+    r"|cannot stat"
+    r"|cannot open"
+    r"|cannot read"
+    r"|Is a directory"
+    r"|Not a directory"
+    r")\b.{0,240})$"
+)
+_HTTP_STATUS_ERROR_RE = re.compile(r"(?im)^HTTP/[\d.]+\s+(?P<status>[45]\d\d)\b(?P<reason>[^\r\n]{0,120})")
+_HTML_STATUS_ERROR_RE = re.compile(
+    r"(?is)<(?:title|h1)>\s*(?P<status>[45]\d\d)\b(?P<reason>[^<]{0,120})</(?:title|h1)>"
+)
+_BOUNDED_PIPE_CONSUMER_RE = re.compile(r"(?:^|[|;&]\s*)(?:head|tail)\b")
 
 
 def package_install_block_reason(command: str) -> str | None:
@@ -255,6 +271,141 @@ def _masked_command_error_detail(stdout: str, stderr: str, exit_code: int | None
     return match.group("line").strip()[:300]
 
 
+def _path_resolution_error_detail(stdout: str, stderr: str, exit_code: int | None) -> str | None:
+    if exit_code in (0, None):
+        return None
+    combined = "\n".join(part for part in (stderr, stdout) if part)
+    match = _PATH_RESOLUTION_ERROR_RE.search(combined)
+    if not match:
+        return None
+    return match.group("line").strip()[:300]
+
+
+def _uses_http_client(command: str) -> bool:
+    for tokens in _iter_simple_command_tokens(command):
+        if not tokens:
+            continue
+        executable = tokens[0].rsplit("/", 1)[-1].lower()
+        if executable in _HTTP_CLIENT_EXECUTABLES:
+            return True
+    return False
+
+
+def _http_client_error_detail(command: str, stdout: str, stderr: str) -> str | None:
+    if not _uses_http_client(command):
+        return None
+    combined = "\n".join(part for part in (stdout, stderr) if part)
+    for pattern in (_HTTP_STATUS_ERROR_RE, _HTML_STATUS_ERROR_RE):
+        match = pattern.search(combined)
+        if not match:
+            continue
+        status = match.group("status").strip()
+        reason = " ".join(str(match.group("reason") or "").split())
+        return f"HTTP {status}{(' ' + reason) if reason else ''}".strip()
+    return None
+
+
+def _bounded_sigpipe_observation(
+    command: str,
+    stdout: str,
+    stderr: str,
+    exit_code: int | None,
+    *,
+    has_artifacts: bool,
+) -> bool:
+    if exit_code != 141:
+        return False
+    if not stdout.strip() and not has_artifacts:
+        return False
+    if "error" in stderr.lower() and "broken pipe" not in stderr.lower():
+        return False
+    return _BOUNDED_PIPE_CONSUMER_RE.search(command) is not None
+
+
+def _shell_failure_signal(
+    stdout: str,
+    stderr: str,
+    exit_code: int | None,
+    *,
+    masked_error_detail: str | None = None,
+    http_error_detail: str | None = None,
+) -> tuple[str, str] | None:
+    infrastructure = _infrastructure_failure_signal(stdout, stderr, exit_code)
+    if infrastructure is not None:
+        return infrastructure
+
+    combined_l = "\n".join(part for part in (stderr, stdout) if part).lower()
+    missing_command = _missing_command_name(stdout, stderr)
+    if exit_code == 127 and missing_command:
+        return (
+            "missing_tool",
+            f"required shell command not found: {missing_command}; "
+            "check command availability and pivot to installed tools or script.exec",
+        )
+    if masked_error_detail:
+        return (
+            "masked_shell_error",
+            "shell command emitted a fatal diagnostic even though the final "
+            f"pipeline exit code was 0: {masked_error_detail}",
+        )
+    if http_error_detail:
+        return (
+            "http_error_response",
+            "shell HTTP client returned an HTTP error response: "
+            f"{http_error_detail}; retry the correct route, method, redirects, or session handling",
+        )
+    if exit_code == 126 and (
+        "package installation" in combined_l
+        or "installer scripts" in combined_l
+        or "not permitted in shell.exec" in combined_l
+    ):
+        return "package_install_blocked", "use installed tools or pivot to another approach"
+    if exit_code == 126 and (
+        "raw binwalk extraction" in combined_l
+        or "byte-by-byte extraction" in combined_l
+        or "unboundedly" in combined_l
+    ):
+        return (
+            "unbounded_extraction_blocked",
+            "use bounded extraction, dedicated binwalk metadata, or Python seek/read",
+        )
+    if exit_code == 126 and "non-http url" in combined_l:
+        return (
+            "non_http_url_blocked",
+            "use script.exec with bounded socket timeouts for raw TCP/custom services",
+        )
+    if exit_code == 126 and "suppressed stderr diagnostics" in combined_l:
+        return "stderr_suppression_blocked", "keep stderr visible or redirect stderr to stdout with 2>&1"
+    if exit_code == 126 and (
+        "outside authorized_scope" in combined_l
+        or "outside the challenge scope" in combined_l
+        or "outside files_root" in combined_l
+        or "stay within authorized_scope" in combined_l
+    ):
+        return "scope_violation_blocked", "stay within authorized_scope and files_root"
+    if "[timeout after" in combined_l or (
+        exit_code == -1 and "timeout" in combined_l
+    ):
+        return (
+            "timeout",
+            "shell command exceeded its execution timeout; keep useful stdout and reduce or bound the command",
+        )
+    if (
+        exit_code == 125
+        or "workspace budget exceeded" in combined_l
+        or "no space left on device" in combined_l
+    ):
+        return "scratch_space_exhausted", "reduce generated workspace data and keep outputs bounded"
+    path_detail = _path_resolution_error_detail(stdout, stderr, exit_code)
+    if path_detail:
+        return (
+            "path_resolution_error",
+            "shell command referenced a path that was not present in the execution workspace: "
+            f"{path_detail}",
+        )
+    return None
+
+
 class ShellPlugin:
     """Execute an arbitrary shell command via ``bash -c``."""
 
@@ -347,6 +498,15 @@ def build_output(
     status = _status(result)
     stdout, stderr = result.stdout or "", result.stderr or ""
     artifact_records = artifact_records_from_stdout(stdout)
+    bounded_sigpipe = _bounded_sigpipe_observation(
+        command,
+        stdout,
+        stderr,
+        result.exit_code,
+        has_artifacts=bool(artifact_records),
+    )
+    if bounded_sigpipe:
+        status = ToolOutputStatus.SUCCESS
 
     summary = f"shell: {command}"
     if status.value == "failure":
@@ -358,6 +518,7 @@ def build_output(
     elif artifact_records:
         summary += f" — {len(artifact_records)} generated artifact(s)"
     masked_error_detail = None
+    http_error_detail = None
     if status == ToolOutputStatus.SUCCESS and not flags:
         masked_error_detail = _masked_command_error_detail(
             stdout,
@@ -367,6 +528,11 @@ def build_output(
         if masked_error_detail:
             status = ToolOutputStatus.FAILURE
             summary = f"shell failed (masked error): {command}"
+        else:
+            http_error_detail = _http_client_error_detail(command, stdout, stderr)
+            if http_error_detail:
+                status = ToolOutputStatus.FAILURE
+                summary = f"shell failed (http error response): {command}"
 
     output_context: dict = {
         "stdout": _truncate(stdout, 4000),
@@ -382,68 +548,20 @@ def build_output(
     if artifact_records:
         output_context["generated_artifact_records"] = artifact_records[:40]
         output_context["generated_artifacts_durable"] = True
-    stderr_l = stderr.lower()
-    infrastructure = _infrastructure_failure_signal(stdout, stderr, result.exit_code)
-    if infrastructure is not None:
-        output_context["failure_kind"], output_context["failure_detail"] = infrastructure
-        return ToolOutput(
-            status=status, summary=summary,
-            output_text=_truncate(stdout, 4000),
-            raw_log=_truncate(stdout + stderr, 6000),
-            output_context=output_context,
-            artifacts=artifacts,
-            flag_candidates=flags,
+    if bounded_sigpipe:
+        output_context["result_quality"] = "bounded_pipe_closed"
+        output_context["partial_reason"] = (
+            "bounded pipeline consumer closed after useful output was captured"
         )
-    missing_command = _missing_command_name(stdout, stderr)
-    if result.exit_code == 127 and missing_command:
-        output_context["failure_kind"] = "missing_tool"
-        output_context["failure_detail"] = (
-            f"required shell command not found: {missing_command}; "
-            "check command availability and pivot to installed tools or script.exec"
-        )
-    if masked_error_detail:
-        output_context["failure_kind"] = "masked_shell_error"
-        output_context["failure_detail"] = (
-            "shell command emitted a fatal diagnostic even though the final "
-            f"pipeline exit code was 0: {masked_error_detail}"
-        )
-    if result.exit_code == 126 and (
-        "package installation" in stderr_l
-        or "installer scripts" in stderr_l
-        or "not permitted in shell.exec" in stderr_l
-    ):
-        output_context["failure_kind"] = "package_install_blocked"
-        output_context["failure_detail"] = "use installed tools or pivot to another approach"
-    if result.exit_code == 126 and (
-        "raw binwalk extraction" in stderr_l
-        or "byte-by-byte extraction" in stderr_l
-        or "unboundedly" in stderr_l
-    ):
-        output_context["failure_kind"] = "unbounded_extraction_blocked"
-        output_context["failure_detail"] = (
-            "use bounded extraction, dedicated binwalk metadata, or Python seek/read"
-        )
-    if result.exit_code == 126 and "non-http url" in stderr_l:
-        output_context["failure_kind"] = "non_http_url_blocked"
-        output_context["failure_detail"] = (
-            "use script.exec with bounded socket timeouts for raw TCP/custom services"
-        )
-    if result.exit_code == 126 and "suppressed stderr diagnostics" in stderr_l:
-        output_context["failure_kind"] = "stderr_suppression_blocked"
-        output_context["failure_detail"] = (
-            "keep stderr visible or redirect stderr to stdout with 2>&1"
-        )
-    if result.exit_code == 126 and (
-        "outside authorized_scope" in stderr_l
-        or "outside the challenge scope" in stderr_l
-        or "outside files_root" in stderr_l
-        or "stay within authorized_scope" in stderr_l
-    ):
-        output_context["failure_kind"] = "scope_violation_blocked"
-        output_context["failure_detail"] = "stay within authorized_scope and files_root"
-    if "workspace budget exceeded" in stderr_l or "no space left on device" in stderr_l:
-        output_context["failure_kind"] = "scratch_space_exhausted"
-        output_context["failure_detail"] = "reduce generated scratch data and keep outputs bounded"
+    failure = _shell_failure_signal(
+        stdout,
+        stderr,
+        result.exit_code,
+        masked_error_detail=masked_error_detail,
+        http_error_detail=http_error_detail,
+    )
+    if failure is not None:
+        output_context["failure_kind"], output_context["failure_detail"] = failure
 
     return ToolOutput(
         status=status, summary=summary,

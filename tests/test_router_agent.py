@@ -237,6 +237,38 @@ class RouterAgentTests(unittest.TestCase):
             [(scoped.todo_id, "recon-worker"), (generic.todo_id, "artifact-worker")],
         )
 
+    def test_web_recon_profile_text_does_not_route_as_file_context(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(
+            TodoItem(
+                goal=(
+                    "Perform web reconnaissance on the live service, register a "
+                    "test user, and inspect the profile workflow."
+                ),
+                phase=TodoPhase.RECON,
+                context={
+                    "endpoint_id": "endpoint-1",
+                    "target_base_url": "http://target.test",
+                    "archive_path": "/workspace/bundle.tar",
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker("artifact-worker"),
+                _DirectoryWorker("recon-worker"),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "recon-worker")],
+        )
+
     def test_capability_hint_routes_without_llm(self) -> None:
         state = RunState(objective="Solve.", authorized_scope=[])
         todo = state.queue_todo(
