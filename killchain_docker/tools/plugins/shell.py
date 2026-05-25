@@ -116,6 +116,9 @@ _STRUCTURED_PROBE_OUTPUT_RE = re.compile(
     r"DECIMAL\s+HEXADECIMAL|File Type|MIME Type"
     r")"
 )
+_FILE_LISTING_OUTPUT_RE = re.compile(
+    r"(?m)^(?:\./|/home/ctfplayer/ctf_files/|[A-Za-z0-9_. -]+/)[^\r\n]*$"
+)
 
 
 def package_install_block_reason(command: str) -> str | None:
@@ -478,7 +481,18 @@ def _partial_probe_observation(
         return False
     if not (_OPTIONAL_PROBE_RE.search(command) or _BOUNDED_PIPE_CONSUMER_RE.search(command)):
         return False
-    return _STRUCTURED_PROBE_OUTPUT_RE.search(stdout) is not None
+    return (
+        _STRUCTURED_PROBE_OUTPUT_RE.search(stdout) is not None
+        or _file_listing_output(stdout)
+    )
+
+
+def _file_listing_output(stdout: str) -> bool:
+    lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    matches = sum(1 for line in lines if _FILE_LISTING_OUTPUT_RE.match(line))
+    return matches >= 2 or matches == len(lines)
 
 
 def _shell_failure_signal(

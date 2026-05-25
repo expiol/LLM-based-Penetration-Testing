@@ -1510,6 +1510,33 @@ class ShellPluginGuardrailTests(unittest.TestCase):
         self.assertEqual(output.output_context["failure_kind"], "partial_probe_miss")
         self.assertEqual(output.output_context["result_quality"], "partial_probe_output")
 
+    def test_shell_file_listing_survives_late_grep_miss(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={
+                "command": (
+                    "find . -type f -o -type d | sort && "
+                    "grep -r 'flag{' . && grep -r 'secret' ."
+                )
+            },
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=1,
+            stdout="./\n./src\n./src/main.c\n./Makefile\n",
+            stderr="",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.status, ToolOutputStatus.SUCCESS)
+        self.assertEqual(output.output_context["failure_kind"], "partial_probe_miss")
+        self.assertEqual(output.output_context["result_quality"], "partial_probe_output")
+        self.assertIn("./src/main.c", output.output_context["stdout"])
+
     def test_treats_long_bounded_head_sigpipe_as_successful_observation(self) -> None:
         long_prefix = " && ".join(f"printf prefix_{i} >/dev/null" for i in range(12))
         command = f"{long_prefix} && find . -type f | head -2"
