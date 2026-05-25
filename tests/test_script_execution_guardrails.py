@@ -1218,6 +1218,17 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
         self.assertEqual(ctx["failure_kind"], "undefined_name")
         self.assertIn("before assignment", str(ctx["failure_detail"]))
 
+    def test_classifies_unbound_local_runtime_error(self) -> None:
+        ctx = self._output_context(
+            "Traceback (most recent call last):\n"
+            "  File \"/tmp/runner.py\", line 14, in main\n"
+            "    root = os.environ.get('CTF_TEMP_DIR', tempfile.mkdtemp())\n"
+            "UnboundLocalError: local variable 'tempfile' referenced before assignment\n"
+        )
+
+        self.assertEqual(ctx["failure_kind"], "undefined_name")
+        self.assertIn("before assignment", str(ctx["failure_detail"]))
+
     def test_classifies_generic_type_error_after_specific_type_checks(self) -> None:
         ctx = self._output_context(
             "Traceback (most recent call last):\n"

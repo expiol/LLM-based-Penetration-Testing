@@ -666,7 +666,10 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         or "'str' object has no attribute 'iterdir'" in text
     ):
         return "path_type_mismatch", "script mixed string paths with pathlib operations"
-    if "nameerror:" in text and "is not defined" in text:
+    if (
+        ("nameerror:" in text and "is not defined" in text)
+        or ("unboundlocalerror:" in text and "referenced before assignment" in text)
+    ):
         return (
             "undefined_name",
             "script referenced a variable, function, or module before assignment",

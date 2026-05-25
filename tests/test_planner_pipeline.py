@@ -1524,6 +1524,86 @@ class PlanningPipelineSeedTests(unittest.TestCase):
         self.assertEqual(kept, [todo])
         self.assertEqual(notes, [])
 
+    def test_normalize_rewrites_files_root_artifact_path_to_durable_path(self) -> None:
+        state = _state(["bundle.tar"], ["http://example.test"])
+        artifact = Artifact(
+            path=(
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                "shell_1/work/generated/app/config.txt"
+            ),
+            kind="shell_artifact_text",
+            source="shell_exec",
+            metadata={"relative_path": "generated/app/config.txt", "origin": "work"},
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+        todo = PlannedTodo(
+            goal=(
+                "Read /home/ctfplayer/ctf_files/generated/app/config.txt "
+                "from the prior generated output."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            priority=80,
+            context={
+                "family": "source-review",
+                "files_root": "/home/ctfplayer/ctf_files",
+                "path": "/home/ctfplayer/ctf_files/generated/app/config.txt",
+            },
+            success_criteria=["Inspect the generated config."],
+        )
+
+        normalized = TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(normalized.context["path"], artifact.path)
+        self.assertEqual(normalized.context["artifact_path"], artifact.path)
+        self.assertIn(artifact.path, normalized.goal)
+        self.assertEqual(normalized.context["family"], "artifact-followup")
+
+    def test_normalize_adds_durable_artifact_paths_for_files_root_directory_prefix(self) -> None:
+        state = _state(["bundle.tar"], ["http://example.test"])
+        first = Artifact(
+            path=(
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                "shell_1/work/generated/app/views/login.txt"
+            ),
+            kind="shell_artifact_text",
+            source="shell_exec",
+            metadata={"relative_path": "generated/app/views/login.txt", "origin": "work"},
+        )
+        second = Artifact(
+            path=(
+                "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                "shell_1/work/generated/app/views/profile.txt"
+            ),
+            kind="shell_artifact_text",
+            source="shell_exec",
+            metadata={"relative_path": "generated/app/views/profile.txt", "origin": "work"},
+        )
+        state.artifacts[first.artifact_id] = first
+        state.artifacts[second.artifact_id] = second
+        todo = PlannedTodo(
+            goal="Read generated application views from the extracted workspace.",
+            phase=TodoPhase.ANALYSIS,
+            priority=80,
+            context={
+                "family": "source-review",
+                "files_root": "/home/ctfplayer/ctf_files",
+                "extracted_root": "/home/ctfplayer/ctf_files/generated/app",
+                "candidate_paths": [
+                    "views/login.txt",
+                    "views/profile.txt",
+                ],
+            },
+            constraints=["Read only from /home/ctfplayer/ctf_files/generated/app."],
+            success_criteria=["Inspect the generated views."],
+        )
+
+        normalized = TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(normalized.context["durable_artifact_paths"], [first.path, second.path])
+        self.assertEqual(normalized.context["paths"], [first.path, second.path])
+        self.assertIn(".autopentest_artifacts", normalized.context["extracted_root"])
+        self.assertIn(".autopentest_artifacts", normalized.constraints[0])
+
     def test_forensics_planning_profile_is_prompt_safe(self) -> None:
         matrix = technique_matrix_for("forensics")
         forensics = next(item for item in matrix if item["family"] == "forensics-extract")

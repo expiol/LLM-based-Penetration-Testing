@@ -1242,6 +1242,33 @@ class ShellPluginGuardrailTests(unittest.TestCase):
         self.assertEqual(output.output_context["failure_kind"], "path_resolution_error")
         self.assertIn("path", str(output.output_context["failure_detail"]))
 
+    def test_classifies_files_root_non_durable_path_with_workspace_hint(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={
+                "files_root": "/home/ctfplayer/ctf_files",
+                "command": "cat /home/ctfplayer/ctf_files/generated/result.txt",
+            },
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=1,
+            stdout=(
+                "cat: /home/ctfplayer/ctf_files/generated/result.txt: "
+                "No such file or directory\n"
+            ),
+            stderr="",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.output_context["failure_kind"], "non_durable_workspace_path")
+        self.assertEqual(output.output_context["workspace_restored"], True)
+        self.assertIn("durable generated artifact", str(output.output_context["failure_detail"]))
+
     def test_classifies_shell_http_client_error_page_as_failure(self) -> None:
         request = ToolExecutionRequest(
             capability=ToolCapability.SHELL_EXEC.value,
@@ -1287,6 +1314,30 @@ class ShellPluginGuardrailTests(unittest.TestCase):
         self.assertEqual(output.status, ToolOutputStatus.SUCCESS)
         self.assertNotIn("failure_kind", output.output_context)
         self.assertEqual(output.output_context["returncode"], 141)
+        self.assertEqual(output.output_context["result_quality"], "bounded_pipe_closed")
+
+    def test_treats_long_bounded_head_sigpipe_as_successful_observation(self) -> None:
+        long_prefix = " && ".join(f"printf prefix_{i} >/dev/null" for i in range(12))
+        command = f"{long_prefix} && find . -type f | head -2"
+        self.assertGreater(command.find("head"), 200)
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={"command": command},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=141,
+            stdout="./a\n./b\n",
+            stderr="",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.status, ToolOutputStatus.SUCCESS)
+        self.assertNotIn("failure_kind", output.output_context)
         self.assertEqual(output.output_context["result_quality"], "bounded_pipe_closed")
 
     def test_classifies_masked_shell_error_from_pipeline_stderr(self) -> None:

@@ -281,6 +281,35 @@ def _path_resolution_error_detail(stdout: str, stderr: str, exit_code: int | Non
     return match.group("line").strip()[:300]
 
 
+def _files_root_missing_path(path_detail: str, files_root: object) -> str | None:
+    root = str(files_root or DEFAULT_FILES_ROOT).rstrip("/")
+    if not root:
+        return None
+    pattern = re.compile(re.escape(root) + r"/[^\s'\"`<>|&;]+")
+    match = pattern.search(path_detail)
+    if not match:
+        return None
+    path = match.group(0).rstrip(".,:)]}")
+    if path == root or path.startswith(root + "/.autopentest_artifacts/"):
+        return None
+    return path
+
+
+def _is_known_challenge_file_path(path: str, challenge_files: object, files_root: object) -> bool:
+    if not isinstance(challenge_files, (list, tuple, set, frozenset)):
+        return False
+    root = str(files_root or DEFAULT_FILES_ROOT).rstrip("/")
+    if not root or not path.startswith(root + "/"):
+        return False
+    rel = path[len(root) + 1 :].strip("/")
+    basename = rel.rsplit("/", 1)[-1]
+    for raw in challenge_files:
+        candidate = str(raw or "").strip().strip("/")
+        if candidate and (candidate == rel or candidate.rsplit("/", 1)[-1] == basename):
+            return True
+    return False
+
+
 def _uses_http_client(command: str) -> bool:
     for tokens in _iter_simple_command_tokens(command):
         if not tokens:
@@ -327,6 +356,8 @@ def _shell_failure_signal(
     stderr: str,
     exit_code: int | None,
     *,
+    files_root: object = DEFAULT_FILES_ROOT,
+    challenge_files: object = None,
     masked_error_detail: str | None = None,
     http_error_detail: str | None = None,
 ) -> tuple[str, str] | None:
@@ -398,6 +429,20 @@ def _shell_failure_signal(
         return "scratch_space_exhausted", "reduce generated workspace data and keep outputs bounded"
     path_detail = _path_resolution_error_detail(stdout, stderr, exit_code)
     if path_detail:
+        missing_path = _files_root_missing_path(path_detail, files_root)
+        if missing_path and not _is_known_challenge_file_path(
+            missing_path,
+            challenge_files,
+            files_root,
+        ):
+            return (
+                "non_durable_workspace_path",
+                "shell.exec restores the files_root workspace after each call; "
+                "paths produced by prior tool calls are not durable at their "
+                f"original location ({missing_path}). Use registered durable "
+                "generated artifact paths under .autopentest_artifacts, or "
+                "create and read the path within the same tool call.",
+            )
         return (
             "path_resolution_error",
             "shell command referenced a path that was not present in the execution workspace: "
@@ -494,12 +539,13 @@ def build_output(
     result: ToolExecutionResult,
     _parsed: ParsedToolOutput,
 ) -> ToolOutput:
-    command = str(request.metadata.get("command") or "")[:200]
+    full_command = str(request.metadata.get("command") or "")
+    command = full_command[:200]
     status = _status(result)
     stdout, stderr = result.stdout or "", result.stderr or ""
     artifact_records = artifact_records_from_stdout(stdout)
     bounded_sigpipe = _bounded_sigpipe_observation(
-        command,
+        full_command,
         stdout,
         stderr,
         result.exit_code,
@@ -539,6 +585,7 @@ def build_output(
         "stderr": _truncate(stderr, 1500),
         "returncode": result.exit_code,
         "flag_candidates": [fc.value for fc in flags],
+        "workspace_restored": True,
     }
     artifacts = artifacts_from_records(
         artifact_records,
@@ -557,6 +604,8 @@ def build_output(
         stdout,
         stderr,
         result.exit_code,
+        files_root=request.metadata.get("files_root") or DEFAULT_FILES_ROOT,
+        challenge_files=request.metadata.get("challenge_files"),
         masked_error_detail=masked_error_detail,
         http_error_detail=http_error_detail,
     )
