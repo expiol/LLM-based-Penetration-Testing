@@ -624,12 +624,13 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         "failed to parse" in text
         or "could not parse" in text
         or "parse error" in text
+        or "re.error:" in text
         or "invalid literal for int" in text
         or "binascii.error: odd-length string" in text
         or "binascii.error: non-hexadecimal digit found" in text
         or ("fromhex()" in text and "non-hexadecimal" in text)
     ):
-        return "parse_error", "script parsing logic rejected tool or service output; validate delimiters and exact field shape"
+        return "parse_error", "script parsing logic rejected tool or service output; validate delimiters, regex quoting, and exact field shape"
     if "filenotfounderror" in text or "no such file or directory" in text:
         return (
             "path_resolution_error",

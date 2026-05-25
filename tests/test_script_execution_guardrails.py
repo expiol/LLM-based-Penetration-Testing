@@ -1267,6 +1267,17 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
 
         self.assertEqual(ctx["failure_kind"], "parse_error")
 
+    def test_classifies_python_regex_error_as_parse_error(self) -> None:
+        ctx = self._output_context(
+            "Traceback (most recent call last):\n"
+            "  File \"/tmp/script.py\", line 3, in <module>\n"
+            "    re.findall(r\"['\\\"]salt['\\\"]\", text)\n"
+            "re.error: unterminated character set at position 36\n"
+        )
+
+        self.assertEqual(ctx["failure_kind"], "parse_error")
+        self.assertIn("regex", str(ctx["failure_detail"]))
+
 
 class TestScriptExecutionRuntime(unittest.TestCase):
     def test_python_runtime_guard_tracks_request_timeout_by_default(self) -> None:

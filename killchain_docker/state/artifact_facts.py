@@ -13,6 +13,7 @@ from typing import Any
 
 
 _GENERATED_SOURCES = frozenset({
+    "artifact_triage_archive",
     "artifact_triage_png",
     "disk_extract",
     "foremost",

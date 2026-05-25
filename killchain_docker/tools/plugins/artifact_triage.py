@@ -31,9 +31,185 @@ _EXIF_MARKER = "__KILLCHAIN_ARTIFACT_TRIAGE_EXIF__"
 _STRINGS_MARKER = "__KILLCHAIN_ARTIFACT_TRIAGE_STRINGS__"
 _BINWALK_MARKER = "__KILLCHAIN_ARTIFACT_TRIAGE_BINWALK__"
 _PNG_MARKER = "__KILLCHAIN_ARTIFACT_TRIAGE_PNG__"
+_ARCHIVE_MARKER = "__KILLCHAIN_ARTIFACT_TRIAGE_ARCHIVE__"
 _END_MARKER = "__KILLCHAIN_ARTIFACT_TRIAGE_END__"
 _PATH_LINE_RE = re.compile(r"^" + re.escape(_FILE_MARKER) + r"\t([^\t]+)\t([0-9]*)$")
 _DEFAULT_MAX_STRINGS = 200
+_ARCHIVE_PROBE_PY = r'''
+import hashlib
+import os
+import posixpath
+import re
+import sys
+import tarfile
+import zipfile
+from pathlib import Path
+
+MARKER = "__KILLCHAIN_ARTIFACT_TRIAGE_ARCHIVE__"
+MAX_MEMBERS = 1000
+MAX_LISTED = 200
+MAX_EXTRACTED = 40
+MAX_MEMBER_BYTES = 256 * 1024
+MAX_TOTAL_BYTES = 4 * 1024 * 1024
+SIGNAL_TERMS = (
+    "auth", "credential", "decrypt", "encrypt", "flag", "key", "password",
+    "secret", "session", "token",
+)
+
+def clean(value, limit=240):
+    return str(value).replace("\t", " ").replace("\n", " ")[:limit]
+
+def safe_name(value):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")[:80] or "artifact"
+
+def safe_member_name(name):
+    raw = str(name or "").replace("\\", "/")
+    raw = raw.split(":", 1)[-1] if re.match(r"^[A-Za-z]:", raw) else raw
+    norm = posixpath.normpath(raw).lstrip("/")
+    if norm in {"", "."}:
+        return ""
+    if norm.startswith("../") or "/../" in f"/{norm}/":
+        return ""
+    return norm
+
+def textlike(data):
+    if not data:
+        return False
+    sample = data[:4096]
+    if b"\x00" in sample:
+        return False
+    printable = sum(1 for byte in sample if byte in b"\n\r\t" or 32 <= byte < 127)
+    return printable / max(1, len(sample)) >= 0.85
+
+def preview(data):
+    sample = data[:220]
+    return clean("".join(chr(byte) if byte in b"\n\r\t" or 32 <= byte < 127 else "." for byte in sample))
+
+def member_score(name, size, data):
+    score = 1
+    if size <= MAX_MEMBER_BYTES:
+        score += 10
+    if textlike(data):
+        score += 50
+    lowered = data[:8192].decode("latin1", "ignore").lower()
+    score += min(40, 8 * sum(1 for term in SIGNAL_TERMS if term in lowered))
+    depth = safe_member_name(name).count("/")
+    score += max(0, 12 - depth)
+    return score
+
+def archive_root(path):
+    root = Path(os.environ.get("CTF_FILES_ROOT") or "/home/ctfplayer/ctf_files")
+    digest = hashlib.sha256(str(path).encode("utf-8", "ignore")).hexdigest()[:12]
+    return root / ".autopentest_artifacts" / "archive_triage" / f"{safe_name(Path(path).name)}_{digest}"
+
+def read_tar_member(archive, member):
+    handle = archive.extractfile(member)
+    if handle is None:
+        return b""
+    try:
+        return handle.read(MAX_MEMBER_BYTES + 1)
+    finally:
+        handle.close()
+
+def tar_entries(path):
+    with tarfile.open(path, "r:*") as archive:
+        for member in archive:
+            if not member.isfile():
+                continue
+            safe = safe_member_name(member.name)
+            if not safe:
+                continue
+            data = b""
+            if int(member.size or 0) <= MAX_MEMBER_BYTES:
+                try:
+                    data = read_tar_member(archive, member)
+                except Exception:
+                    data = b""
+            yield {
+                "name": safe,
+                "size": int(member.size or 0),
+                "data": data,
+            }
+
+def zip_entries(path):
+    with zipfile.ZipFile(path) as archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            safe = safe_member_name(info.filename)
+            if not safe:
+                continue
+            data = b""
+            if int(info.file_size or 0) <= MAX_MEMBER_BYTES:
+                try:
+                    with archive.open(info) as handle:
+                        data = handle.read(MAX_MEMBER_BYTES + 1)
+                except Exception:
+                    data = b""
+            yield {
+                "name": safe,
+                "size": int(info.file_size or 0),
+                "data": data,
+            }
+
+def main():
+    path = Path(sys.argv[1])
+    print(MARKER)
+    try:
+        if zipfile.is_zipfile(path):
+            entries = list(zip_entries(path))
+            archive_type = "zip"
+        elif tarfile.is_tarfile(path):
+            entries = list(tar_entries(path))
+            archive_type = "tar"
+        else:
+            return
+    except Exception as exc:
+        print(f"error\t{clean(type(exc).__name__)}\t{clean(exc)}")
+        return
+    entries = entries[:MAX_MEMBERS]
+    print(f"archive\t{archive_type}\t{len(entries)}")
+    for index, entry in enumerate(entries[:MAX_LISTED]):
+        print(f"member\t{index}\t{entry['size']}\t{clean(entry['name'], 500)}")
+    candidates = []
+    for entry in entries:
+        if entry["size"] > MAX_MEMBER_BYTES:
+            continue
+        data = entry.get("data", b"")
+        if len(data) > MAX_MEMBER_BYTES:
+            continue
+        candidates.append((member_score(entry["name"], entry["size"], data), entry, data))
+    candidates.sort(key=lambda item: (-item[0], item[1]["size"], item[1]["name"]))
+    out_root = archive_root(path)
+    total = 0
+    extracted = 0
+    for score, entry, data in candidates:
+        if extracted >= MAX_EXTRACTED:
+            break
+        if total + len(data) > MAX_TOTAL_BYTES:
+            break
+        dest = out_root / entry["name"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        total += len(data)
+        extracted += 1
+        kind = "text" if textlike(data) else "data"
+        print(
+            "artifact\t{}\t{}\t{}\t{}\t{}\t{}\t{}".format(
+                dest,
+                len(data),
+                clean(entry["name"], 500),
+                digest,
+                score,
+                kind,
+                preview(data),
+            )
+        )
+
+if __name__ == "__main__":
+    main()
+'''
 _PNG_PROBE_PY = r'''
 import binascii
 import os
@@ -203,6 +379,7 @@ def _triage_command(paths: list[str], *, max_strings: int) -> str:
             ");"
         )
     png_probe = f"python3 -c {shlex.quote(_PNG_PROBE_PY)} \"$_kc_path\" 2>/dev/null || true;"
+    archive_probe = f"python3 -c {shlex.quote(_ARCHIVE_PROBE_PY)} \"$_kc_path\" 2>/dev/null || true;"
     return " ".join(
         part.strip()
         for part in (
@@ -226,6 +403,7 @@ def _triage_command(paths: list[str], *, max_strings: int) -> str:
             '    timeout 25s binwalk "$_kc_path" 2>/dev/null | sed -n "1,100p" || true;',
             "  fi;",
             png_probe,
+            archive_probe,
             f'  printf "%s\\n" "{_END_MARKER}";',
             "done;",
         )
@@ -258,6 +436,8 @@ def build_output(
             metadata["signature_count"] = record["signature_count"]
         if record.get("png"):
             metadata["png"] = record["png"]
+        if record.get("archive"):
+            metadata["archive"] = record["archive"]
         artifacts.append(
             Artifact(
                 path=path,
@@ -284,6 +464,28 @@ def build_output(
                     },
                 )
             )
+        for artifact_record in record.get("archive_artifacts") or []:
+            artifact_path = str(artifact_record.get("path") or "")
+            if not artifact_path:
+                continue
+            kind = str(artifact_record.get("kind") or "data")
+            artifacts.append(
+                Artifact(
+                    path=artifact_path,
+                    kind=f"archive_member_{kind}",
+                    source="artifact_triage_archive",
+                    size=artifact_record.get("size"),
+                    digest=str(artifact_record.get("digest") or "") or None,
+                    metadata={
+                        "source_file": path,
+                        "relative_path": artifact_record.get("member"),
+                        "file_type": "ASCII text" if kind == "text" else "data",
+                        "mime_type": "text/plain" if kind == "text" else "application/octet-stream",
+                        "archive_member_score": artifact_record.get("score"),
+                        "content_signals": ["archive_member", kind],
+                    },
+                )
+            )
 
     flags = _flag_candidates_from(
         _candidate_text_from_records(records),
@@ -297,12 +499,17 @@ def build_output(
     png_artifact_count = sum(
         len(record.get("png_artifacts") or []) for record in records
     )
+    archive_artifact_count = sum(
+        len(record.get("archive_artifacts") or []) for record in records
+    )
     if interesting_count:
         summary += f", {interesting_count} interesting string(s)"
     if signature_count:
         summary += f", {signature_count} binwalk signature(s)"
     if png_artifact_count:
         summary += f", {png_artifact_count} png payload artifact(s)"
+    if archive_artifact_count:
+        summary += f", {archive_artifact_count} archive member artifact(s)"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
 
@@ -361,6 +568,9 @@ def _parse_records(stdout: str) -> list[dict[str, Any]]:
         if line == _PNG_MARKER:
             section = "png"
             continue
+        if line == _ARCHIVE_MARKER:
+            section = "archive"
+            continue
         if not section:
             continue
         bucket = current.setdefault("raw_sections", {}).setdefault(section, [])
@@ -401,6 +611,12 @@ def _finalize_record(record: dict[str, Any]) -> None:
         artifacts = _png_artifacts(png)
         if artifacts:
             record["png_artifacts"] = artifacts
+    archive = _parse_archive_section(list(sections.get("archive") or []))
+    if archive:
+        record["archive"] = archive
+        artifacts = _archive_artifacts(archive)
+        if artifacts:
+            record["archive_artifacts"] = artifacts
     record.pop("raw_sections", None)
 
 
@@ -478,6 +694,13 @@ def _candidate_text_from_records(records: list[dict[str, Any]]) -> str:
                 preview = str(chunk.get("ascii_preview") or "")
                 if preview:
                     lines.append(preview)
+        archive = record.get("archive")
+        if isinstance(archive, dict):
+            for artifact in archive.get("artifacts") or []:
+                if isinstance(artifact, dict):
+                    preview = str(artifact.get("preview") or "")
+                    if preview:
+                        lines.append(preview)
     return "\n".join(lines)
 
 
@@ -506,6 +729,60 @@ def _png_artifacts(png: dict[str, Any]) -> list[dict[str, Any]]:
                 "size": trailing.get("size"),
             })
     return artifacts
+
+
+def _parse_archive_section(lines: list[str]) -> dict[str, Any]:
+    archive_type = ""
+    member_count: int | None = None
+    members: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for line in lines:
+        parts = line.split("\t")
+        if not parts:
+            continue
+        if parts[0] == "archive" and len(parts) >= 3:
+            archive_type = parts[1]
+            member_count = _int_or_none(parts[2])
+        elif parts[0] == "member" and len(parts) >= 4:
+            members.append({
+                "index": _int_or_none(parts[1]),
+                "size": _int_or_none(parts[2]),
+                "name": parts[3],
+            })
+        elif parts[0] == "artifact" and len(parts) >= 8:
+            artifacts.append({
+                "path": parts[1],
+                "size": _int_or_none(parts[2]),
+                "member": parts[3],
+                "digest": parts[4],
+                "score": _int_or_none(parts[5]),
+                "kind": parts[6],
+                "preview": parts[7],
+            })
+        elif parts[0] == "error" and len(parts) >= 3:
+            errors.append(f"{parts[1]}: {parts[2]}")
+    if not archive_type and not members and not artifacts and not errors:
+        return {}
+    out: dict[str, Any] = {}
+    if archive_type:
+        out["type"] = archive_type
+    if member_count is not None:
+        out["member_count"] = member_count
+    if members:
+        out["members"] = members[:200]
+    if artifacts:
+        out["artifacts"] = artifacts[:40]
+    if errors:
+        out["errors"] = errors[:5]
+    return out
+
+
+def _archive_artifacts(archive: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        artifact for artifact in archive.get("artifacts") or []
+        if isinstance(artifact, dict) and artifact.get("path")
+    ]
 
 
 def _int_or_none(value: object) -> int | None:

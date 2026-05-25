@@ -6,6 +6,7 @@ import sys
 import shlex
 import tempfile
 import time
+import tarfile
 import unittest
 from pathlib import Path
 
@@ -30,6 +31,10 @@ from killchain_docker.tools.plugins.shell import (
 from killchain_docker.tools.plugins._base import _run
 from killchain_docker.tools.plugins.script import build_output as script_output_builder
 from killchain_docker.tools.plugins.script import ScriptPlugin
+from killchain_docker.tools.plugins.artifact_triage import (
+    ArtifactTriagePlugin,
+    build_output as artifact_triage_output_builder,
+)
 from killchain_docker.tools.plugins.foremost import build_output as foremost_output_builder
 from killchain_docker.tools.plugins.tshark import build_output as tshark_output_builder
 from killchain_docker.workers.protocols import PersonaSpec
@@ -850,6 +855,50 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertFalse(result.partial)
         self.assertEqual(state.todos[0].status.value, "completed")
 
+    def test_source_analysis_with_key_extraction_criteria_completes_without_candidate(self) -> None:
+        plane = ExecutionPlane()
+        plane.register(_NoCandidateScriptPlugin(), script_output_builder)
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(ToolCapability.SCRIPT_EXEC,),
+            ),
+            llm_client=StaticLLMClient([
+                {
+                    "capability": "script.exec",
+                    "metadata": {"script_code": "print('algorithm and key facts')"},
+                    "rationale": "inspect source facts",
+                }
+            ]),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(
+            TodoItem(
+                goal=(
+                    "Analyze the cryptographic implementation to understand "
+                    "the token format and key management."
+                ),
+                context={
+                    "family": "source-review",
+                    "dispatch_intent": {"profile": "source_review"},
+                },
+                success_criteria=[
+                    "Find the serialization format used in the token.",
+                    "Extract any hardcoded keys or initialization values.",
+                    "Summarize the relevant implementation facts.",
+                ],
+                constraints=["Only analyze local source files."],
+            )
+        )
+
+        result = worker.run(todo, state)
+        state.apply_worker_result(result)
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual(state.todos[0].status.value, "completed")
+
     def test_script_execution_error_retries_once_with_traceback_context(self) -> None:
         captured: list[str] = []
         plugin = _RepairableScriptPlugin()
@@ -1140,6 +1189,55 @@ class CapabilityGatewayTests(unittest.TestCase):
 
 
 class ForensicsToolOutputTests(unittest.TestCase):
+    def test_artifact_triage_registers_bounded_archive_member_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            member = root / "member_without_suffix"
+            member.write_text(
+                "session token key material and authentication facts\n",
+                encoding="utf-8",
+            )
+            archive = root / "bundle"
+            with tarfile.open(archive, "w") as tar:
+                tar.add(member, arcname="nested/member_without_suffix")
+            member.unlink()
+            request = ToolExecutionRequest(
+                capability=ToolCapability.ARTIFACT_TRIAGE.value,
+                tool_name="artifact_triage",
+                metadata={"files_root": tmp, "paths": [str(archive)]},
+                timeout_s=20,
+            )
+
+            result = ArtifactTriagePlugin().execute(request)
+            output = artifact_triage_output_builder(
+                request,
+                result,
+                ParsedToolOutput(summary="raw"),
+            )
+
+            self.assertEqual(result.exit_code, 0, result.stderr)
+            archive_records = [
+                record for record in output.output_context["records"]
+                if record.get("archive")
+            ]
+            self.assertTrue(archive_records)
+            archive_info = archive_records[0]["archive"]
+            self.assertEqual(archive_info["member_count"], 1)
+            self.assertEqual(
+                archive_info["members"][0]["name"],
+                "nested/member_without_suffix",
+            )
+            member_artifacts = [
+                artifact for artifact in output.artifacts
+                if artifact.source == "artifact_triage_archive"
+            ]
+            self.assertEqual(len(member_artifacts), 1)
+            self.assertIn(".autopentest_artifacts", member_artifacts[0].path)
+            self.assertEqual(
+                member_artifacts[0].metadata["relative_path"],
+                "nested/member_without_suffix",
+            )
+
     def test_foremost_registers_durable_carved_file_paths(self) -> None:
         request = ToolExecutionRequest(
             capability=ToolCapability.FOREMOST.value,

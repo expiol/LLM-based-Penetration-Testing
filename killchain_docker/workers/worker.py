@@ -92,6 +92,8 @@ def _is_execution_closure_task(todo: TodoItem) -> bool:
         return True
     if _is_flag_recovery_task(todo):
         return True
+    if _is_analysis_only_task(todo, intent):
+        return False
     text = " ".join([
         todo.goal,
         " ".join(todo.success_criteria),
@@ -114,6 +116,37 @@ def _contains_any_term(text: str, terms: tuple[str, ...]) -> bool:
         if re.search(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])", text):
             return True
     return False
+
+
+def _is_analysis_only_task(todo: TodoItem, intent: DispatchIntent) -> bool:
+    context = todo.context or {}
+    family = str(context.get("family") or "").strip().lower()
+    profile = str(intent.profile or "").strip().lower()
+    if family in {"source-review", "artifact-inventory", "artifact-followup"}:
+        return True
+    if profile in {
+        "artifact_analysis",
+        "binary_analysis",
+        "media_inspection",
+        "source_review",
+    }:
+        return True
+    text = " ".join([
+        todo.goal,
+        " ".join(todo.success_criteria),
+        " ".join(todo.constraints),
+    ]).lower()
+    analysis_terms = (
+        "analyze", "classify", "determine", "document", "identify", "inventory",
+        "locate", "map", "summarize", "understand",
+    )
+    closure_outcome_terms = (
+        "candidate", "flag", "hidden", "payload", "recover", "recovered",
+    )
+    return (
+        _contains_any_term(text, analysis_terms)
+        and not _contains_any_term(text, closure_outcome_terms)
+    )
 
 
 def _returncode_failed(value: object) -> bool:
