@@ -253,6 +253,37 @@ class ToolWorkspaceTests(unittest.TestCase):
             self.assertIn("source_like", relative_paths)
             self.assertEqual(relative_paths[0], "source_like")
 
+    def test_shell_exec_prioritizes_shallow_source_artifacts_before_deep_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = ToolExecutionRequest(
+                tool_name="shell_exec",
+                timeout_s=10,
+                metadata={
+                    "files_root": str(root),
+                    "command": (
+                        "mkdir -p zz/deep/nested/tree; "
+                        "for i in $(seq -w 1 45); do "
+                        "  printf '#!/bin/sh\\necho deep\\n' > \"zz/deep/nested/tree/source_$i\"; "
+                        "  chmod +x \"zz/deep/nested/tree/source_$i\"; "
+                        "done; "
+                        "printf '#!/bin/sh\\necho entry\\n' > aa_entry; "
+                        "chmod +x aa_entry; "
+                        "printf done"
+                    ),
+                },
+            )
+
+            result = ShellPlugin().execute(request)
+            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+            self.assertEqual(result.exit_code, 0, result.stderr)
+            records = output.output_context["generated_artifact_records"]
+            relative_paths = [str(record["relative_path"]) for record in records]
+            self.assertLessEqual(len(records), 40)
+            self.assertIn("aa_entry", relative_paths)
+            self.assertEqual(relative_paths[0], "aa_entry")
+
     def test_shell_exec_enforces_workspace_growth_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = ShellPlugin().execute(
