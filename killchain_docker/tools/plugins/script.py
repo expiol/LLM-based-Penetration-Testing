@@ -591,6 +591,11 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         return "connection_reset", "remote endpoint reset the connection"
     if "connectionrefusederror" in text or "connection refused" in text:
         return "connection_refused", "remote endpoint refused the connection"
+    if _network_incomplete_read_signal(text):
+        return (
+            "network_incomplete_read",
+            "remote endpoint closed or stopped sending before the script received expected data",
+        )
     if (
         "socket.gaierror" in text
         or "name or service not known" in text
@@ -633,6 +638,7 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         return "timeout", "script exceeded its execution or socket timeout"
     if (
         "failed to parse" in text
+        or "cannot parse" in text
         or "could not parse" in text
         or "parse error" in text
         or "re.error:" in text
@@ -709,6 +715,36 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
     if diagnostic:
         return "nonzero_exit", f"script exited with status {exit_code}: {diagnostic}"
     return "nonzero_exit", f"script exited with status {exit_code}"
+
+
+def _network_incomplete_read_signal(text: str) -> bool:
+    if not text:
+        return False
+    missing_expected_data = bool(re.search(
+        r"\b(?:no|missing|failed\s+to\s+receive|unable\s+to\s+receive|"
+        r"did\s+not\s+receive|could\s+not\s+read|unexpected\s+eof|eof)\b"
+        r".{0,80}\b(?:data|response|banner|header|line|prompt|message|"
+        r"round|payload|final|bytes?)\b",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ))
+    if not missing_expected_data:
+        missing_expected_data = bool(re.search(
+            r"\b(?:connection|socket|server|remote|endpoint)\b"
+            r".{0,80}\b(?:closed|disconnected|dropped)\b"
+            r".{0,80}\b(?:before|while|during|expected|missing|no\s+data)\b",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        ))
+    if not missing_expected_data:
+        return False
+    return bool(re.search(
+        r"\b(?:connect(?:ed|ing|ion)?|socket|tcp|server|remote|endpoint|"
+        r"send(?:ing)?|sent|recv|receive(?:d|ing)?|read(?:ing)?|"
+        r"response|banner|header|prompt|round)\b",
+        text,
+        re.IGNORECASE,
+    ))
 
 
 def _script_reported_error_line(output_text: str) -> str:

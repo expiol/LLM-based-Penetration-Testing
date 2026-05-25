@@ -462,7 +462,8 @@ def _failure_buckets(log_payload: dict[str, Any], result: dict[str, Any]) -> lis
     ):
         buckets.add("scratch_space_exhausted")
     if (
-        "network_pipe_closed" in haystack
+        "network_incomplete_read" in haystack
+        or "network_pipe_closed" in haystack
         or "connection_refused" in haystack
         or "connection_reset" in haystack
         or "connection refused" in haystack

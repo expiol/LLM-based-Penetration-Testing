@@ -1393,6 +1393,7 @@ class RoundOutcomePolicy:
         "connection_reset",
         "empty_result",
         "metadata_validation",
+        "network_incomplete_read",
         "network_pipe_closed",
         "no_candidate",
         "package_install_blocked",

@@ -742,7 +742,12 @@ class WorkerAgent(ABC):
             "execution feedback. Write a corrected, complete script and print the "
             "resulting diagnostics/results to stdout. "
         )
-        if str(failure_kind or "") in {"network_pipe_closed", "connection_reset", "connection_refused"}:
+        if str(failure_kind or "") in {
+            "connection_refused",
+            "connection_reset",
+            "network_incomplete_read",
+            "network_pipe_closed",
+        }:
             return (
                 base
                 + "Correct the script around the observed connection failure without "

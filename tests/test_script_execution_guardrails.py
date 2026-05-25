@@ -1158,6 +1158,49 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
 
         self.assertEqual(ctx["failure_kind"], "network_pipe_closed")
 
+    def test_classifies_zero_exit_network_incomplete_read(self) -> None:
+        ctx = self._output_context(
+            stdout=(
+                "Connecting to target:31337...\n"
+                "Connected!\n"
+                "Round 2: No header received\n"
+                "No final data received\n"
+                "Connection closed\n"
+            ),
+            exit_code=0,
+        )
+
+        self.assertEqual(ctx["failure_kind"], "network_incomplete_read")
+        self.assertIn("expected data", str(ctx["failure_detail"]))
+        self.assertEqual(ctx["result_quality"], "partial_no_candidate")
+
+    def test_plain_connection_close_is_not_network_incomplete_read(self) -> None:
+        ctx = self._output_context(
+            stdout=(
+                "Connected\n"
+                "Received banner\n"
+                "Connection closed by server\n"
+                "Done\n"
+            ),
+            exit_code=0,
+        )
+
+        self.assertEqual(ctx["failure_kind"], "no_candidate")
+
+    def test_classifies_zero_exit_reported_parse_failure(self) -> None:
+        ctx = self._output_context(
+            stdout=(
+                "Connected!\n"
+                "Received header: ''\n"
+                "Cannot parse header: \n"
+                "Done.\n"
+            ),
+            exit_code=0,
+        )
+
+        self.assertEqual(ctx["failure_kind"], "parse_error")
+        self.assertEqual(ctx["result_quality"], "partial_no_candidate")
+
     def test_classifies_runtime_guard_reported_on_stdout(self) -> None:
         ctx = self._output_context(
             stdout=(
