@@ -336,44 +336,80 @@ class TodoPolicy:
     ) -> str:
         context = todo.context or {}
         goal_l = todo.goal.lower()
-        if cls._looks_like_disk_extraction(goal_l):
+        if todo.phase not in {TodoPhase.ANALYSIS, TodoPhase.EXPLOIT}:
+            if not cls._looks_like_disk_extraction(goal_l):
+                return family
             if todo.phase == TodoPhase.RECON:
                 todo.phase = TodoPhase.ANALYSIS
-            disk_artifacts = [
-                artifact
-                for artifact in state.artifacts.values()
-                if cls._artifact_is_disk_image_like(artifact)
-            ]
-            if not cls._context_path(context) and len(disk_artifacts) == 1:
-                cls._bind_artifact_target(context, disk_artifacts[0])
-            if cls._context_path(context):
-                context["capability_hint"] = "disk.extract"
-            return "forensics-extract"
-
-        if todo.phase not in {TodoPhase.ANALYSIS, TodoPhase.EXPLOIT}:
-            return family
         path = cls._context_path(context)
         if path:
             artifact = cls._artifact_by_path(state, path)
-            if artifact is not None and cls._capability_hint_targets_artifact(
-                context.get("capability_hint"),
-                artifact,
-            ):
-                context["capability_hint"] = cls._capability_for_artifact(artifact)
-                if family in {"other", "source-review", "forensics-extract"}:
-                    return "artifact-followup"
+            if artifact is not None:
+                return cls._normalize_bound_artifact_context(
+                    todo,
+                    context,
+                    artifact,
+                    family,
+                    goal_l,
+                )
             return family
 
         mentioned = cls._unique_artifact_mentioned(goal_l, state)
         if mentioned is not None:
             cls._bind_artifact_target(context, mentioned)
-            if cls._capability_hint_targets_artifact(
-                context.get("capability_hint"),
+            return cls._normalize_bound_artifact_context(
+                todo,
+                context,
                 mentioned,
-            ):
-                context["capability_hint"] = cls._capability_for_artifact(mentioned)
-            else:
-                context.setdefault("capability_hint", cls._capability_for_artifact(mentioned))
+                family,
+                goal_l,
+                default_when_unhinted=True,
+            )
+        if cls._looks_like_disk_extraction(goal_l):
+            disk_artifacts = [
+                artifact
+                for artifact in state.artifacts.values()
+                if cls._artifact_is_disk_image_like(artifact)
+            ]
+            if len(disk_artifacts) == 1:
+                cls._bind_artifact_target(context, disk_artifacts[0])
+                context["capability_hint"] = "disk.extract"
+            return "forensics-extract"
+        return family
+
+    @classmethod
+    def _normalize_bound_artifact_context(
+        cls,
+        todo: "PlannedTodo",
+        context: dict[str, Any],
+        artifact: Any,
+        family: str,
+        goal_l: str,
+        *,
+        default_when_unhinted: bool = False,
+    ) -> str:
+        if cls._artifact_is_disk_image_like(artifact) and cls._looks_like_disk_extraction(goal_l):
+            if todo.phase == TodoPhase.RECON:
+                todo.phase = TodoPhase.ANALYSIS
+            context["capability_hint"] = "disk.extract"
+            return "forensics-extract"
+
+        capability = cls._capability_for_artifact(artifact)
+        hinted = cls._capability_hint_targets_artifact(
+            context.get("capability_hint"),
+            artifact,
+        )
+        should_use_artifact_capability = (
+            hinted
+            or cls._looks_like_disk_extraction(goal_l)
+            or default_when_unhinted
+            or (
+                family in {"other", "source-review", "forensics-extract"}
+                and capability != "artifact.triage"
+            )
+        )
+        if should_use_artifact_capability:
+            context["capability_hint"] = capability
             if family in {"other", "source-review", "forensics-extract"}:
                 return "artifact-followup"
         return family

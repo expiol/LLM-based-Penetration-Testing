@@ -1182,6 +1182,57 @@ class PlanningPipelineSeedTests(unittest.TestCase):
         self.assertEqual(office_todos[0].dedupe_key, f"bootstrap:artifact-followup:{doc.path}")
         self.assertTrue(any("duplicate" in note for note in decision.notes))
 
+    def test_bound_office_artifact_extract_goal_is_not_rewritten_to_disk_extract(
+        self,
+    ) -> None:
+        state = _state([])
+        doc = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk_extract/embedded/payload",
+            kind="disk_extract_document",
+            source="disk_extract",
+            digest="5" * 64,
+            metadata={
+                "file_type": "Microsoft PowerPoint 2007+",
+                "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            },
+        )
+        state.artifacts[doc.artifact_id] = doc
+
+        decision = PlanningPipeline().merge(
+            state,
+            llm_decision=PlannerDecision(
+                summary="extract embedded document text",
+                todos=[
+                    PlannedTodo(
+                        goal=(
+                            "Extract all text and metadata from the embedded zip "
+                            "to recover readable evidence."
+                        ),
+                        phase=TodoPhase.ANALYSIS,
+                        priority=80,
+                        context={
+                            "family": "forensics-extract",
+                            "artifact_id": doc.artifact_id,
+                            "artifact_path": doc.path,
+                            "files_root": "/home/ctfplayer/ctf_files",
+                        },
+                    )
+                ],
+            ),
+        )
+
+        matching = [
+            todo for todo in decision.todos
+            if todo.context.get("path") == doc.path
+            or todo.context.get("artifact_path") == doc.path
+        ]
+        self.assertTrue(
+            any(todo.context.get("capability_hint") == "office.inspect" for todo in matching)
+        )
+        self.assertFalse(
+            any(todo.context.get("capability_hint") == "disk.extract" for todo in matching)
+        )
+
     def test_worker_result_records_executed_tool_target_for_dedupe(self) -> None:
         state = _state([])
         path = "/home/ctfplayer/ctf_files/.autopentest_artifacts/disk_extract/offset_0/clam.pptx"
