@@ -698,6 +698,13 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         )
     if "syntaxerror" in text:
         return "syntax_error", "script failed Python or shell syntax validation"
+    subcommand_error = _subcommand_error_line(output_text)
+    if subcommand_error:
+        return (
+            "subcommand_error",
+            "script completed but an invoked command reported an error: "
+            f"{subcommand_error}",
+        )
     diagnostic = _script_reported_error_line(output_text)
     if diagnostic:
         return "nonzero_exit", f"script exited with status {exit_code}: {diagnostic}"
@@ -712,6 +719,19 @@ def _script_reported_error_line(output_text: str) -> str:
         if re.match(r"(?i)^(?:error|failed|failure|fatal|warning)\b\s*:?", text):
             return _truncate(text, 300)
         if re.search(r"(?i)\b(?:error|failed|failure|fatal)\b", text):
+            return _truncate(text, 300)
+    return ""
+
+
+def _subcommand_error_line(output_text: str) -> str:
+    for line in reversed((output_text or "").splitlines()):
+        text = line.strip()
+        if not text:
+            continue
+        if re.search(r"(?i)\b(?:error|failed|failure|fatal)\b", text) and re.search(
+            r"(?i)(?:\bmake\b|\bgcc\b|\bclang\b|\bld\b|\btar\b|\bunzip\b|\bzip\b|\bjava\b|\bnode\b|\bruby\b|\bgo\b|\bcargo\b|\bcmake\b|\bninja\b|\bperl\b|\bbash\b|\bsh\b|\bpython\b|\bpython3\b|\*\*\*)",
+            text,
+        ):
             return _truncate(text, 300)
     return ""
 

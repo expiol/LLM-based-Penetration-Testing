@@ -1169,6 +1169,17 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
 
         self.assertEqual(ctx["failure_kind"], "unbounded_loop_guard")
 
+    def test_successful_script_with_stderr_subcommand_error_is_diagnostic(self) -> None:
+        ctx = self._output_context(
+            stdout="Source was read successfully\n",
+            stderr="make: *** [Makefile:24: clean] Error 1\n",
+            exit_code=0,
+        )
+
+        self.assertEqual(ctx["failure_kind"], "subcommand_error")
+        self.assertIn("make:", str(ctx["failure_detail"]))
+        self.assertEqual(ctx["result_quality"], "partial_no_candidate")
+
     def test_classifies_bytes_text_mismatch(self) -> None:
         ctx = self._output_context(
             "TypeError: a bytes-like object is required, not 'str'"
