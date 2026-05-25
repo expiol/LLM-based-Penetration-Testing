@@ -1970,6 +1970,34 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
             "execution_closure",
         )
 
+    def test_raw_content_goal_overrides_stale_artifact_triage_hint(self) -> None:
+        state = _state(["source.txt"])
+        todo = PlannedTodo(
+            goal=(
+                "Read the complete raw file content and search every line for "
+                "candidate secrets that a first-pass artifact summary may have truncated."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            context={
+                "family": "artifact-inventory",
+                "path": "/home/ctfplayer/ctf_files/source.txt",
+                "capability_hint": "artifact.triage",
+                "dispatch_intent": {
+                    "profile": "artifact_analysis",
+                    "required_capability": "artifact.triage",
+                },
+            },
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.context["capability_hint"], "shell.exec")
+        self.assertEqual(
+            todo.context["dispatch_intent"]["required_capability"],
+            "shell.exec",
+        )
+        self.assertEqual(todo.context["dispatch_intent"]["profile"], "artifact_analysis")
+
     def test_crypto_model_todo_preserves_structured_dispatch_intent(self) -> None:
         state = _state(["cipher.py", "capture.bin"])
         todo = PlannedTodo(

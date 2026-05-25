@@ -1000,6 +1000,14 @@ class TodoPolicy:
                 capability="script.exec",
             )
             return
+        if TodoPolicy._goal_requires_raw_artifact_access(goal_l):
+            context["capability_hint"] = "shell.exec"
+            TodoPolicy._set_required_capability(
+                context,
+                profile=TodoPolicy._dispatch_profile(context, default="artifact_analysis"),
+                capability="shell.exec",
+            )
+            return
         if TodoPolicy._goal_requires_artifact_extraction(goal_l):
             context["capability_hint"] = "shell.exec"
             TodoPolicy._set_required_capability(
@@ -1031,6 +1039,15 @@ class TodoPolicy:
         intent.pop("completion_contract", None)
         intent.pop("repair_policy_id", None)
         context["dispatch_intent"] = intent
+
+    @staticmethod
+    def _dispatch_profile(context: dict[str, Any], *, default: str) -> str:
+        raw_intent = context.get("dispatch_intent")
+        if isinstance(raw_intent, dict):
+            profile = str(raw_intent.get("profile") or "").strip()
+            if profile and profile != "open":
+                return profile
+        return default
 
     @staticmethod
     def _goal_requires_executable_interaction(goal_l: str) -> bool:
@@ -1076,6 +1093,42 @@ class TodoPolicy:
                 "payload",
                 "source tree",
                 "working directory",
+            )
+        )
+
+    @staticmethod
+    def _goal_requires_raw_artifact_access(goal_l: str) -> bool:
+        has_raw_access_action = any(
+            token in goal_l
+            for token in (
+                "cat ",
+                "complete",
+                "dump",
+                "entire",
+                "every line",
+                "full",
+                "line-by-line",
+                "raw",
+                "read",
+                "recursively",
+                "search",
+                "show",
+            )
+        )
+        if not has_raw_access_action:
+            return False
+        return any(
+            token in goal_l
+            for token in (
+                "artifact",
+                "content",
+                "directory",
+                "directories",
+                "file",
+                "files",
+                "raw text",
+                "source",
+                "tree",
             )
         )
 
