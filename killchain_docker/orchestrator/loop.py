@@ -498,6 +498,33 @@ class Orchestrator:
         self.state.touch()
         return True
 
+    def _halt_after_transient_llm_error(
+        self,
+        cycle: int,
+        source: str,
+        exc: LLMClientError,
+        *,
+        todo: TodoItem | None = None,
+    ) -> None:
+        reason = self._remember_llm_error(cycle, source, exc)
+        self.state.status = RunStatus.FAILED
+        self.state.stop_reason = "llm_transient_error"
+        if todo is not None:
+            if todo.status == TodoStatus.RUNNING:
+                todo.release_after_transient_error(reason)
+            if todo.status == TodoStatus.PENDING:
+                todo.mark_interrupted(reason)
+        else:
+            for pending in self.state.todos:
+                if pending.status == TodoStatus.RUNNING:
+                    pending.mark_interrupted(reason)
+        self._emit_event(
+            f"[cycle {cycle}] transient LLM error budget exhausted in {source}; "
+            "ending run as llm_transient_error without marking task logic failed",
+            event_type="llm_transient_error",
+        )
+        self.state.touch()
+
     def _summarize_round(self, results: list[WorkerResult]):
         return self.router.summarize_round(self.state, results=results)
 
@@ -933,6 +960,11 @@ class Orchestrator:
                         if self._skip_transient_llm_error(cycle, "planner", exc):
                             self._checkpoint()
                             continue
+                        if exc.transient:
+                            self._halt_after_transient_llm_error(cycle, "planner", exc)
+                            self._checkpoint()
+                            max_cycles_exhausted = False
+                            break
                         self.emit(f"[cycle {cycle}] planner LLM error - aborting run")
                         self._mark_llm_error(cycle, "planner", exc)
                         self._checkpoint()
@@ -946,6 +978,11 @@ class Orchestrator:
                     if self._skip_transient_llm_error(cycle, "router", exc):
                         self._checkpoint()
                         continue
+                    if exc.transient:
+                        self._halt_after_transient_llm_error(cycle, "router", exc)
+                        self._checkpoint()
+                        max_cycles_exhausted = False
+                        break
                     self.emit(f"[cycle {cycle}] router LLM error - aborting run")
                     self._mark_llm_error(cycle, "router", exc)
                     self._checkpoint()
@@ -1007,6 +1044,16 @@ class Orchestrator:
                         if self._skip_transient_llm_error(cycle, worker.name, exc):
                             transient_worker_skip = True
                             break
+                        if exc.transient:
+                            self._halt_after_transient_llm_error(
+                                cycle,
+                                worker.name,
+                                exc,
+                                todo=todo,
+                            )
+                            max_cycles_exhausted = False
+                            self._checkpoint()
+                            break
                         self._emit_event(
                             f"[cycle {cycle}] worker LLM error in {worker.name} - "
                             f"marking {todo.todo_id} failed and continuing",
@@ -1044,6 +1091,10 @@ class Orchestrator:
                         self.emit(f"[cycle {cycle}] solved: {self.state.validated_flag}")
                         break
 
+                if self.state.stop_reason == "llm_transient_error":
+                    max_cycles_exhausted = False
+                    break
+
                 if transient_worker_skip:
                     self._checkpoint()
                     continue
@@ -1059,6 +1110,11 @@ class Orchestrator:
                     if self._skip_transient_llm_error(cycle, "round_summarizer", exc):
                         self._checkpoint()
                         continue
+                    if exc.transient:
+                        self._halt_after_transient_llm_error(cycle, "round_summarizer", exc)
+                        self._checkpoint()
+                        max_cycles_exhausted = False
+                        break
                     self.emit(f"[cycle {cycle}] round summarizer LLM error - aborting run")
                     self._mark_llm_error(cycle, "round_summarizer", exc)
                     self._checkpoint()

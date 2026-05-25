@@ -199,6 +199,20 @@ class _TransientThenSuccessWorker(WorkerAgent):
         )
 
 
+class _AlwaysTransientWorker(WorkerAgent):
+    name = "always-transient-worker"
+    supported_todo_kinds = ("todo",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del task, state
+        self.calls += 1
+        raise LLMClientError("provider connection unavailable", transient=True)
+
+
 class _SuccessWorker(WorkerAgent):
     name = "success-worker"
     supported_todo_kinds = ("todo",)
@@ -592,6 +606,44 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertEqual(final_state.status, RunStatus.COMPLETED)
         self.assertEqual(final_state.stop_reason, "unsolved_no_work_remaining")
         self.assertTrue(any("transient LLM error" in event for event in events))
+
+    def test_persistent_transient_worker_llm_error_does_not_fail_todo_logic(self) -> None:
+        events: list[str] = []
+        worker = _AlwaysTransientWorker()
+        planner = _ScriptedPlanner([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Retry while provider is temporarily unavailable",
+                        context={"worker_name": "always-transient-worker"},
+                        dedupe_key="persistent-transient",
+                    )
+                ],
+            )
+        ])
+        state = _state()
+        orchestrator = Orchestrator(
+            state=state,
+            workers=[worker],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=events.append,
+        )
+
+        final_state = orchestrator.run(max_cycles=Orchestrator.MAX_TRANSIENT_SKIPS + 1)
+
+        todo = final_state.todos[0]
+        self.assertEqual(worker.calls, Orchestrator.MAX_TRANSIENT_SKIPS + 1)
+        self.assertEqual(todo.status, TodoStatus.INTERRUPTED)
+        self.assertEqual(todo.attempts, 0)
+        self.assertIn("llm_error:always-transient-worker", todo.error or "")
+        self.assertFalse(any(item.status == TodoStatus.FAILED for item in final_state.todos))
+        self.assertEqual(final_state.status, RunStatus.FAILED)
+        self.assertEqual(final_state.stop_reason, "llm_transient_error")
+        self.assertEqual(final_state.metadata["last_llm_error"]["kind"], "transient")
+        self.assertTrue(final_state.metadata["last_llm_error"]["transient"])
+        self.assertTrue(any("budget exhausted" in event for event in events))
 
     def test_ready_todo_backlog_executes_before_planner_refresh(self) -> None:
         events: list[str] = []
