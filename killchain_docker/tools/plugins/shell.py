@@ -107,6 +107,15 @@ _HTML_STATUS_ERROR_RE = re.compile(
     r"(?is)<(?:title|h1)>\s*(?P<status>[45]\d\d)\b(?P<reason>[^<]{0,120})</(?:title|h1)>"
 )
 _BOUNDED_PIPE_CONSUMER_RE = re.compile(r"(?:^|[|;&]\s*)(?:head|tail)\b")
+_OPTIONAL_PROBE_RE = re.compile(r"(?:^|[|;&]\s*)(?:grep|rg|awk|sed)\b", re.IGNORECASE)
+_STRUCTURED_PROBE_OUTPUT_RE = re.compile(
+    r"(?im)(?:"
+    r"^Symbol table\b|^ELF Header:|^Program Headers:|^Section Headers:|"
+    r"^Disassembly of section\b|^\s*[0-9a-f]{6,}:\s|"
+    r"GNU_STACK|GNU_RELRO|\.dynsym|\.plt|@GLIBC_|"
+    r"DECIMAL\s+HEXADECIMAL|File Type|MIME Type"
+    r")"
+)
 
 
 def package_install_block_reason(command: str) -> str | None:
@@ -453,11 +462,31 @@ def _bounded_sigpipe_observation(
     return _BOUNDED_PIPE_CONSUMER_RE.search(command) is not None
 
 
+def _partial_probe_observation(
+    command: str,
+    stdout: str,
+    stderr: str,
+    exit_code: int | None,
+) -> bool:
+    if exit_code != 1:
+        return False
+    if not stdout.strip():
+        return False
+    if _PATH_RESOLUTION_ERROR_RE.search(stdout) or _PATH_RESOLUTION_ERROR_RE.search(stderr):
+        return False
+    if _MASKED_COMMAND_ERROR_RE.search(stdout) or _MASKED_COMMAND_ERROR_RE.search(stderr):
+        return False
+    if not (_OPTIONAL_PROBE_RE.search(command) or _BOUNDED_PIPE_CONSUMER_RE.search(command)):
+        return False
+    return _STRUCTURED_PROBE_OUTPUT_RE.search(stdout) is not None
+
+
 def _shell_failure_signal(
     stdout: str,
     stderr: str,
     exit_code: int | None,
     *,
+    command: str = "",
     files_root: object = DEFAULT_FILES_ROOT,
     challenge_files: object = None,
     masked_error_detail: str | None = None,
@@ -549,6 +578,11 @@ def _shell_failure_signal(
             "path_resolution_error",
             "shell command referenced a path that was not present in the execution workspace: "
             f"{path_detail}",
+        )
+    if _partial_probe_observation(command, stdout, stderr, exit_code):
+        return (
+            "partial_probe_miss",
+            "shell command produced useful probe output, then a later optional probe returned no matches",
         )
     return None
 
@@ -655,7 +689,15 @@ def build_output(
         result.exit_code,
         has_artifacts=bool(artifact_records),
     )
+    partial_probe = _partial_probe_observation(
+        full_command,
+        stdout,
+        stderr,
+        result.exit_code,
+    )
     if bounded_sigpipe:
+        status = ToolOutputStatus.SUCCESS
+    elif partial_probe:
         status = ToolOutputStatus.SUCCESS
 
     summary = f"shell: {command}"
@@ -704,10 +746,16 @@ def build_output(
         output_context["partial_reason"] = (
             "bounded pipeline consumer closed after useful output was captured"
         )
+    elif partial_probe:
+        output_context["result_quality"] = "partial_probe_output"
+        output_context["partial_reason"] = (
+            "later optional probe returned no matches after useful stdout was captured"
+        )
     failure = _shell_failure_signal(
         stdout,
         stderr,
         result.exit_code,
+        command=full_command,
         files_root=request.metadata.get("files_root") or DEFAULT_FILES_ROOT,
         challenge_files=request.metadata.get("challenge_files"),
         masked_error_detail=masked_error_detail,

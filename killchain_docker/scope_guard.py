@@ -8,6 +8,7 @@ endpoint fails.
 
 from __future__ import annotations
 
+import ast
 import re
 from urllib.parse import urlparse
 
@@ -29,6 +30,10 @@ _BROAD_ENV_PATH_RE = re.compile(
 )
 _BROAD_FLAG_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])/(?:tmp|home(?:/[^/\s;&|]*)?|root|etc|var|opt|srv|usr(?:/local)?)(?:\b|/)",
+    re.IGNORECASE,
+)
+_ROOT_SENSITIVE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])/(?:flag|secret|token|credential|password)(?:\b|/)",
     re.IGNORECASE,
 )
 _BROAD_FILE_TOOL_RE = re.compile(
@@ -145,7 +150,142 @@ def ambient_filesystem_block_reason(
         return None
     if _BROAD_ENV_PATH_RE.search(body):
         return "filesystem exploration must stay under files_root or explicit challenge files"
+    if _ROOT_SENSITIVE_PATH_RE.search(body):
+        return "ambient flag/secret search outside files_root is not permitted"
     if _FLAG_HUNT_RE.search(body) and _BROAD_FLAG_PATH_RE.search(body):
+        return "ambient flag/secret search outside files_root is not permitted"
+    return None
+
+
+def python_ambient_filesystem_block_reason(
+    code: object,
+    *,
+    files_root: object = DEFAULT_FILES_ROOT,
+    authorized_scope: object = None,
+) -> str | None:
+    """Block ambient filesystem access in Python code without scanning strings as shell."""
+
+    if not normalize_authorized_scope(authorized_scope):
+        return None
+    try:
+        tree = ast.parse(str(code or ""))
+    except SyntaxError:
+        return ambient_filesystem_block_reason(
+            code,
+            files_root=files_root,
+            authorized_scope=authorized_scope,
+        )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        shell_text = _python_shell_command_text(node)
+        if shell_text:
+            reason = ambient_filesystem_block_reason(
+                shell_text,
+                files_root=files_root,
+                authorized_scope=authorized_scope,
+            )
+            if reason:
+                return reason
+        for path in _python_local_file_call_paths(node):
+            reason = _ambient_path_reason(path, files_root=files_root)
+            if reason:
+                return reason
+    return None
+
+
+def _python_shell_command_text(node: ast.Call) -> str | None:
+    name = _python_call_name(node.func)
+    if name in {"os.system", "subprocess.getoutput", "subprocess.getstatusoutput"}:
+        if node.args:
+            return _literal_shell_command(node.args[0])
+        return None
+    if name in {
+        "subprocess.call",
+        "subprocess.check_call",
+        "subprocess.check_output",
+        "subprocess.run",
+        "subprocess.Popen",
+    }:
+        if node.args:
+            return _literal_shell_command(node.args[0])
+        return None
+    return None
+
+
+def _python_local_file_call_paths(node: ast.Call) -> list[str]:
+    name = _python_call_name(node.func)
+    if name in {"open", "builtins.open", "io.open", "pathlib.Path"} and node.args:
+        return _literal_path_values(node.args[0])
+    method = name.rsplit(".", 1)[-1]
+    if method in {
+        "read_text",
+        "read_bytes",
+        "write_text",
+        "write_bytes",
+        "open",
+        "glob",
+        "rglob",
+        "iterdir",
+        "exists",
+        "is_file",
+        "is_dir",
+        "mkdir",
+        "unlink",
+    }:
+        receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+        return _literal_path_values(receiver)
+    return []
+
+
+def _python_call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _python_call_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def _literal_shell_command(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+        return node.value.decode("utf-8", "ignore") if isinstance(node.value, bytes) else node.value
+    if isinstance(node, (ast.List, ast.Tuple)):
+        parts: list[str] = []
+        for element in node.elts:
+            if not isinstance(element, ast.Constant) or not isinstance(element.value, (str, bytes)):
+                return None
+            value = element.value.decode("utf-8", "ignore") if isinstance(element.value, bytes) else element.value
+            parts.append(value)
+        return " ".join(parts)
+    return None
+
+
+def _literal_path_values(node: ast.AST | None) -> list[str]:
+    if node is None:
+        return []
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.Call) and _python_call_name(node.func) == "pathlib.Path" and node.args:
+        return _literal_path_values(node.args[0])
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        values: list[str] = []
+        values.extend(_literal_path_values(node.left))
+        values.extend(_literal_path_values(node.right))
+        return values
+    return []
+
+
+def _ambient_path_reason(path: str, *, files_root: object = DEFAULT_FILES_ROOT) -> str | None:
+    body = _remove_allowed_files_root(str(path or ""), files_root)
+    if _ENV_DOTFILE_RE.search(body):
+        return "ambient home/root startup files are outside the challenge scope"
+    if _BROAD_ENV_PATH_RE.search(body):
+        return "filesystem exploration must stay under files_root or explicit challenge files"
+    if _FLAG_HUNT_RE.search(body) and _BROAD_FLAG_PATH_RE.search(body):
+        return "ambient flag/secret search outside files_root is not permitted"
+    if _ROOT_SENSITIVE_PATH_RE.search(body):
         return "ambient flag/secret search outside files_root is not permitted"
     return None
 
@@ -261,6 +401,7 @@ __all__ = [
     "ambient_filesystem_block_reason",
     "loopback_reference_block_reason",
     "normalize_authorized_scope",
+    "python_ambient_filesystem_block_reason",
     "scope_allows_loopback",
     "text_mentions_loopback",
     "todo_loopback_block_reason",

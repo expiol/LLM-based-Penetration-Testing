@@ -426,6 +426,43 @@ class ToolMetadataContractTests(unittest.TestCase):
                 {"script_code": script},
             )
 
+    def test_script_exec_allows_remote_protocol_command_strings(self) -> None:
+        state = RunState(objective="solve", authorized_scope=["tcp://example:31337"])
+        todo = TodoItem(goal="test", context={"files_root": "/challenge/files"})
+        script = (
+            "import socket\n"
+            "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "sock.connect(('example', 31337))\n"
+            "sock.sendall(b'cat /home/service/flag\\n')\n"
+            "print('requesting remote shell command: cat /home/service/flag')\n"
+            "# Remote payload may execute system('/bin/sh') on the target.\n"
+        )
+
+        result = normalize_tool_metadata(
+            ToolCapability.SCRIPT_EXEC,
+            todo,
+            state,
+            {"script_code": script},
+        )
+
+        self.assertIn("sock.sendall", result["script_code"])
+
+    def test_script_exec_rejects_subprocess_ambient_flag_search(self) -> None:
+        state = RunState(objective="solve", authorized_scope=["tcp://example:31337"])
+        todo = TodoItem(goal="test", context={"files_root": "/challenge/files"})
+        script = (
+            "import subprocess\n"
+            "subprocess.run(['cat', '/flag'], check=False)\n"
+        )
+
+        with self.assertRaisesRegex(ToolExecutionError, "script.exec blocked"):
+            normalize_tool_metadata(
+                ToolCapability.SCRIPT_EXEC,
+                todo,
+                state,
+                {"script_code": script},
+            )
+
     def test_script_exec_allows_python_find_on_own_temp_file(self) -> None:
         state = RunState(objective="solve", authorized_scope=["tcp://example:31337"])
         todo = TodoItem(goal="test", context={"files_root": "/challenge/files"})

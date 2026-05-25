@@ -12,6 +12,7 @@ from killchain_docker.state import RunState, TodoItem
 from killchain_docker.state.constants import DEFAULT_FILES_ROOT
 from killchain_docker.scope_guard import (
     ambient_filesystem_block_reason,
+    python_ambient_filesystem_block_reason,
     scratch_path_reference_block_reason,
 )
 from killchain_docker.tools import ToolCapability, ToolExecutionError
@@ -506,11 +507,18 @@ def _normalize_script(raw: dict[str, object], state: RunState) -> dict[str, obje
     if script_language == "python":
         _validate_python_script(script_code)
     files_root = _first_string(raw.get("files_root")) or DEFAULT_FILES_ROOT
-    ambient_reason = ambient_filesystem_block_reason(
-        script_code,
-        files_root=files_root,
-        authorized_scope=state.authorized_scope,
-    )
+    if script_language == "python":
+        ambient_reason = python_ambient_filesystem_block_reason(
+            script_code,
+            files_root=files_root,
+            authorized_scope=state.authorized_scope,
+        )
+    else:
+        ambient_reason = ambient_filesystem_block_reason(
+            script_code,
+            files_root=files_root,
+            authorized_scope=state.authorized_scope,
+        )
     if ambient_reason:
         raise ToolExecutionError(
             f"script.exec blocked: {ambient_reason}; use CTF_FILES_ROOT, CTF_TEMP_DIR, or relative paths"

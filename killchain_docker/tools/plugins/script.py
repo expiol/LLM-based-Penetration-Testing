@@ -13,6 +13,7 @@ from killchain_docker.state import ExploitAttempt
 from killchain_docker.scope_guard import (
     ambient_filesystem_block_reason,
     loopback_reference_block_reason,
+    python_ambient_filesystem_block_reason,
     scratch_path_reference_block_reason,
 )
 from killchain_docker.tools.core import (
@@ -871,11 +872,18 @@ class ScriptPlugin:
                 scope_scan_text,
                 request.metadata.get("authorized_scope"),
             )
-        scope_reason = scope_reason or ambient_filesystem_block_reason(
-            script_code,
-            files_root=files_root,
-            authorized_scope=request.metadata.get("authorized_scope"),
-        )
+        if language == "python":
+            scope_reason = scope_reason or python_ambient_filesystem_block_reason(
+                script_code,
+                files_root=files_root,
+                authorized_scope=request.metadata.get("authorized_scope"),
+            )
+        else:
+            scope_reason = scope_reason or ambient_filesystem_block_reason(
+                script_code,
+                files_root=files_root,
+                authorized_scope=request.metadata.get("authorized_scope"),
+            )
         if scope_reason:
             return ToolExecutionResult(
                 tool_name=self.name,

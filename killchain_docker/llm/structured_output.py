@@ -254,6 +254,101 @@ def escape_unescaped_inner_quotes_in_json_strings(text: str) -> str:
     return "".join(out)
 
 
+def normalize_bare_hex_integer_values(text: str) -> str:
+    """Convert unquoted hexadecimal integer values into JSON decimal integers."""
+
+    out: list[str] = []
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            out.append(char)
+            index += 1
+            continue
+        if char in "{[":
+            stack.append(char)
+            out.append(char)
+            index += 1
+            continue
+        if char in "}]":
+            if stack:
+                stack.pop()
+            out.append(char)
+            index += 1
+            continue
+
+        replacement = _bare_hex_integer_replacement(text, index, stack)
+        if replacement is not None:
+            decimal_text, next_index = replacement
+            out.append(decimal_text)
+            index = next_index
+            continue
+
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _bare_hex_integer_replacement(
+    text: str,
+    index: int,
+    stack: list[str],
+) -> tuple[str, int] | None:
+    if not _is_value_position_for_bare_token(text, index, stack):
+        return None
+    sign = ""
+    cursor = index
+    if text[cursor] in "+-":
+        sign = text[cursor]
+        cursor += 1
+    if cursor + 2 > len(text) or text[cursor : cursor + 2].lower() != "0x":
+        return None
+    digit_start = cursor + 2
+    cursor = digit_start
+    while cursor < len(text) and text[cursor] in "0123456789abcdefABCDEF":
+        cursor += 1
+    if cursor == digit_start:
+        return None
+    if cursor < len(text) and (text[cursor].isalnum() or text[cursor] in "._"):
+        return None
+    try:
+        value = int(f"{sign}{text[digit_start:cursor]}", 16)
+    except ValueError:
+        return None
+    return str(value), cursor
+
+
+def _is_value_position_for_bare_token(text: str, index: int, stack: list[str]) -> bool:
+    if text[index] not in "+-0":
+        return False
+    cursor = index - 1
+    while cursor >= 0 and text[cursor].isspace():
+        cursor -= 1
+    if cursor < 0:
+        return False
+    previous = text[cursor]
+    if previous == ":":
+        return True
+    if previous == "[":
+        return True
+    return previous == "," and bool(stack) and stack[-1] == "["
+
+
 def _quote_can_end_json_string(text: str, quote_index: int) -> bool:
     index = quote_index + 1
     while index < len(text) and text[index].isspace():
@@ -275,13 +370,14 @@ def _quote_can_end_json_string(text: str, quote_index: int) -> bool:
 
 
 def loads_lenient_json_object(text: str) -> Any:
-    """Load model JSON, repairing the common bare-newline-in-string failure."""
+    """Load model JSON, repairing common deterministic JSON syntax drift."""
 
     candidate = extract_json_object_text(text)
     try:
         return json.loads(candidate)
     except json.JSONDecodeError:
         repaired = candidate
+        repaired = normalize_bare_hex_integer_values(repaired)
         repaired = escape_source_backslashes_in_json_strings(repaired)
         repaired = escape_unescaped_inner_quotes_in_json_strings(repaired)
         repaired = close_array_before_object_field(repaired)

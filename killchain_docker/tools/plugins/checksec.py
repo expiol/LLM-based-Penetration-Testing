@@ -148,6 +148,7 @@ def build_output(
     path = str(request.metadata.get("path") or "")
     stdout = result.stdout or ""
     stderr = result.stderr or ""
+    combined = "\n".join(part for part in (stdout, stderr) if part)
 
     # Determine status
     status = ToolOutputStatus.SUCCESS if result.exit_code in (None, 0) else ToolOutputStatus.FAILURE
@@ -155,7 +156,7 @@ def build_output(
     # Parse properties from JSON output or checksec's table format.
     raw_props = _parse_json_output(stdout, path)
     if raw_props is None:
-        raw_props = _parse_table_output(stdout)
+        raw_props = _parse_table_output(combined)
 
     props = _normalize_props(raw_props) if raw_props else {}
     hints = _attack_surface_hints(props) if props else []
@@ -169,7 +170,7 @@ def build_output(
         ))
 
     # Flag candidates (unlikely but consistent with other plugins)
-    flags = _flag_candidates_from(stdout, source="checksec")
+    flags = _flag_candidates_from(combined, source="checksec")
 
     # Summary
     if props:
@@ -194,8 +195,8 @@ def build_output(
     return ToolOutput(
         status=status,
         summary=summary,
-        output_text=_truncate(stdout, 4000),
-        raw_log=_truncate(stdout + stderr, 6000),
+        output_text=_truncate(combined, 4000),
+        raw_log=_truncate(combined, 6000),
         output_context=output_context,
         flag_candidates=flags,
         artifacts=artifacts,

@@ -1479,6 +1479,37 @@ class ShellPluginGuardrailTests(unittest.TestCase):
         self.assertEqual(output.output_context["returncode"], 141)
         self.assertEqual(output.output_context["result_quality"], "bounded_pipe_closed")
 
+    def test_shell_partial_probe_output_survives_late_grep_miss(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={
+                "command": (
+                    "readelf -s program | head -20 && "
+                    "objdump -d program | grep -A 20 '<main>:'"
+                )
+            },
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=1,
+            stdout=(
+                "Symbol table '.dynsym' contains 4 entries:\n"
+                "  1: 0000000000000000 FUNC GLOBAL DEFAULT UND read\n"
+                "  2: 0000000000000000 FUNC GLOBAL DEFAULT UND write\n"
+                "=== objdump ===\n"
+            ),
+            stderr="",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.status, ToolOutputStatus.SUCCESS)
+        self.assertEqual(output.output_context["failure_kind"], "partial_probe_miss")
+        self.assertEqual(output.output_context["result_quality"], "partial_probe_output")
+
     def test_treats_long_bounded_head_sigpipe_as_successful_observation(self) -> None:
         long_prefix = " && ".join(f"printf prefix_{i} >/dev/null" for i in range(12))
         command = f"{long_prefix} && find . -type f | head -2"

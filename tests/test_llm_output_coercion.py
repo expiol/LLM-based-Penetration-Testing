@@ -520,6 +520,23 @@ beta')"
         self.assertEqual(decoded["items"], ["alpha", "beta"])
         self.assertEqual(decoded["schema_renamed_field"], 42)
 
+    def test_decoder_repairs_bare_hex_integer_values(self) -> None:
+        payload = """{
+  "offsets": {
+    "negative_delta": -0x292d0,
+    "positive_delta": 0x10d063,
+    "quoted": "0x10d063"
+  },
+  "items": [0x10, -0x2]
+}"""
+
+        decoded = loads_lenient_json_object(payload)
+
+        self.assertEqual(decoded["offsets"]["negative_delta"], -0x292D0)
+        self.assertEqual(decoded["offsets"]["positive_delta"], 0x10D063)
+        self.assertEqual(decoded["offsets"]["quoted"], "0x10d063")
+        self.assertEqual(decoded["items"], [16, -2])
+
     def test_array_repair_ignores_valid_array_entries(self) -> None:
         payload = '{"items": ["alpha", "beta"]}'
 
@@ -579,6 +596,35 @@ beta')"
         decision, _completion = recovered
         self.assertEqual(decision.notes, ["first note", "second note"])
         self.assertFalse(decision.stop_run)
+
+    def test_gateway_recovers_planner_completion_with_bare_hex_context_values(self) -> None:
+        client = object.__new__(GatewayLLMClient)
+        exc = ValueError(
+            "InstructorRetryException: ChatCompletionMessage("
+            "content='{\\n"
+            "  \"summary\": \"retry plan\",\\n"
+            "  \"todos\": [{\\n"
+            "    \"goal\": \"Use numeric deltas from evidence\",\\n"
+            "    \"phase\": \"analysis\",\\n"
+            "    \"context\": {\\n"
+            "      \"negative_delta\": -0x292d0,\\n"
+            "      \"positive_delta\": 0x10d063,\\n"
+            "      \"quoted_delta\": \"0x10d063\"\\n"
+            "    }\\n"
+            "  }],\\n"
+            "  \"notes\": [],\\n"
+            "  \"stop_run\": false\\n"
+            "}', refusal=None, role='assistant')"
+        )
+
+        recovered = client._recover_structured_from_exception(exc, PlannerDecision)
+
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        decision, _completion = recovered
+        self.assertEqual(decision.todos[0].context["negative_delta"], -0x292D0)
+        self.assertEqual(decision.todos[0].context["positive_delta"], 0x10D063)
+        self.assertEqual(decision.todos[0].context["quoted_delta"], "0x10d063")
 
 
 if __name__ == "__main__":
