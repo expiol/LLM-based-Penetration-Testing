@@ -982,7 +982,11 @@ def build_output(
             output_text = "\n".join(part for part in (stderr, stdout) if part)
             failure_kind, failure_detail = _script_failure_signal(output_text, result.exit_code)
             output_context["result_quality"] = "partial_no_candidate"
-            if failure_kind != "nonzero_exit":
+            if _success_output_failure_kind_is_primary(
+                failure_kind,
+                output_text,
+                stdout=stdout,
+            ):
                 output_context["partial_reason"] = failure_detail
                 output_context["failure_kind"] = failure_kind
                 output_context["failure_detail"] = failure_detail
@@ -1009,3 +1013,34 @@ def build_output(
         flag_candidates=flags,
         exploit_attempts=exploit_attempts,
     )
+
+
+def _success_output_failure_kind_is_primary(
+    failure_kind: str,
+    output_text: str,
+    *,
+    stdout: str,
+) -> bool:
+    """Return true when a zero-exit script's diagnostic is the main outcome."""
+
+    if failure_kind == "nonzero_exit":
+        return False
+    if failure_kind != "path_resolution_error":
+        return True
+    text = output_text.strip()
+    if not text:
+        return True
+    if "traceback (most recent call last)" in text.lower():
+        return True
+    lines = [line.strip() for line in stdout.replace("\r", "\n").splitlines() if line.strip()]
+    if not lines:
+        return True
+    path_error_lines = [
+        line for line in lines
+        if re.search(r"(?i)(filenotfounderror|no such file or directory)", line)
+    ]
+    progress_lines = [
+        line for line in lines
+        if line not in path_error_lines and _is_diagnostic_line(line)
+    ]
+    return not progress_lines

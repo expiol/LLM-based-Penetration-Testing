@@ -63,8 +63,10 @@ _HTTP_CLIENT_ALLOWED_SCHEMES = {"http", "https"}
 _URL_START_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _URL_OPTION_RE = re.compile(r"^(?:--url|-U)=(.+)$")
 _STDERR_SUPPRESSION_RE = re.compile(
-    r"(?:^|[\s;|&])(?:2>>?\s*/dev/null|2>\s*&-|&>>?\s*/dev/null)"
-    r"|>\s*/dev/null\s+2>&1",
+    r"(?P<stdout_null>(?P<stdout_redirect>1?>>?)\s*/dev/null\s+2>\s*&\s*1)"
+    r"|(?P<both_streams>&(?P<both_append>>?)>\s*/dev/null)"
+    r"|(?P<stderr_null>2>>?\s*/dev/null)"
+    r"|(?P<stderr_close>2>\s*&-)",
     re.IGNORECASE,
 )
 _MISSING_COMMAND_RE = re.compile(
@@ -147,12 +149,72 @@ def http_client_non_http_url_block_reason(command: str) -> str | None:
 def stderr_suppression_block_reason(command: str) -> str | None:
     """Return a block reason when shell commands discard stderr diagnostics."""
 
-    if _STDERR_SUPPRESSION_RE.search(command):
+    if normalize_shell_stderr_diagnostics(command) != command:
         return (
             "shell.exec suppressed stderr diagnostics; keep stderr visible or "
             "redirect it to stdout with 2>&1 so failures can be repaired"
         )
     return None
+
+
+def normalize_shell_stderr_diagnostics(command: str) -> str:
+    """Keep stderr visible while preserving stdout suppression intent.
+
+    LLM-selected shell commands often probe optional tools or binary-producing
+    commands with ``>/dev/null 2>&1``.  Blocking those commands wastes a cycle;
+    silently running them loses the diagnostics needed for repair.  This
+    normalizer removes only unquoted stderr-to-null/close redirections.
+    """
+
+    if not command:
+        return command
+
+    out: list[str] = []
+    i = 0
+    in_single = False
+    in_double = False
+    escaped = False
+    while i < len(command):
+        char = command[i]
+        if escaped:
+            out.append(char)
+            escaped = False
+            i += 1
+            continue
+        if char == "\\" and not in_single:
+            out.append(char)
+            escaped = True
+            i += 1
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+            out.append(char)
+            i += 1
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            out.append(char)
+            i += 1
+            continue
+        if not in_single and not in_double:
+            match = _STDERR_SUPPRESSION_RE.match(command, i)
+            if match:
+                replacement = _stderr_diagnostic_replacement(match)
+                if replacement:
+                    out.append(replacement)
+                i = match.end()
+                continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _stderr_diagnostic_replacement(match: re.Match[str]) -> str:
+    if match.group("stdout_null"):
+        return f"{match.group('stdout_redirect')} /dev/null"
+    if match.group("both_streams"):
+        return f"{'>>' if match.group('both_append') else '>'} /dev/null"
+    return ""
 
 
 def unbounded_extraction_block_reason(command: str) -> str | None:
@@ -501,7 +563,9 @@ class ShellPlugin:
         self.argv_prefix = list(argv_prefix or [])
 
     def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
-        command = str(request.metadata.get("command") or "").strip()
+        command = normalize_shell_stderr_diagnostics(
+            str(request.metadata.get("command") or "").strip()
+        )
         if not command:
             raise ToolExecutionError("shell.exec requires metadata.command")
         block_reason = package_install_block_reason(command)

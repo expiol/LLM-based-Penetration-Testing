@@ -1180,6 +1180,23 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
 
         self.assertEqual(ctx["failure_kind"], "path_resolution_error")
 
+    def test_success_with_partial_missing_path_diagnostic_is_no_candidate(self) -> None:
+        ctx = self._output_context(
+            stdout=(
+                "file0.bin: 256 bytes, first 20: 00112233445566778899\n"
+                "Error reading file1.bin: [Errno 2] No such file or directory: '/work/file1.bin'\n"
+                "Analyzing file0.bin\n"
+                "key prefix = 40503ac8\n"
+            ),
+            exit_code=0,
+        )
+
+        self.assertEqual(ctx["failure_kind"], "no_candidate")
+        self.assertEqual(
+            ctx["partial_reason"],
+            "script exited successfully but no flag candidate was recovered",
+        )
+
     def test_classifies_missing_python_module_as_missing_tool(self) -> None:
         ctx = self._output_context(
             "Traceback (most recent call last):\n"

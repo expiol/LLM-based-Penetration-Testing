@@ -26,6 +26,7 @@ from killchain_docker.tools.plugins.shell import (
     ShellPlugin,
     build_output as shell_output_builder,
     http_client_non_http_url_block_reason,
+    normalize_shell_stderr_diagnostics,
     package_install_block_reason,
 )
 from killchain_docker.tools.plugins._base import _run
@@ -557,22 +558,16 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertIsNone(artifact_plugin.last_request)
         self.assertIn("user", captured)
 
-    def test_worker_retries_metadata_validation_error_once(self) -> None:
+    def test_worker_normalizes_repairable_metadata_without_retry(self) -> None:
         captured: list[str] = []
 
         def response(system_prompt: str, user_prompt: str) -> dict[str, object]:
             del system_prompt
             captured.append(user_prompt)
-            if len(captured) == 1:
-                return {
-                    "capability": "shell.exec",
-                    "metadata": {"command": "mmls out.img 2>/dev/null && fls out.img"},
-                    "rationale": "first attempt suppresses diagnostics",
-                }
             return {
                 "capability": "shell.exec",
-                "metadata": {"command": "mmls out.img 2>&1 && fls out.img 2>&1"},
-                "rationale": "keep stderr visible after guard feedback",
+                "metadata": {"command": "mmls out.img 2>/dev/null && fls out.img"},
+                "rationale": "first attempt suppresses diagnostics",
             }
 
         plane = ExecutionPlane()
@@ -592,10 +587,12 @@ class CapabilityGatewayTests(unittest.TestCase):
         result = worker.run(todo, state)
 
         self.assertTrue(result.success)
-        self.assertEqual(len(captured), 2)
-        self.assertIn("VALIDATION ERROR", captured[1])
+        self.assertEqual(len(captured), 1)
         self.assertIsNotNone(shell_plugin.last_request)
-        self.assertIn("2>&1", shell_plugin.last_request.metadata["command"])
+        self.assertEqual(
+            shell_plugin.last_request.metadata["command"],
+            "mmls out.img  && fls out.img",
+        )
 
     def test_tshark_empty_output_has_structured_signal(self) -> None:
         output = tshark_output_builder(
@@ -730,7 +727,7 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertEqual(state.todos[0].status.value, "partial")
         self.assertIn("oversized range", state.todos[0].error or "")
 
-    def test_worker_hands_metadata_validation_error_back_to_planner(self) -> None:
+    def test_worker_retries_metadata_validation_then_normalizes_stderr_suppression(self) -> None:
         plane = ExecutionPlane()
         shell_plugin = _StaticShellPlugin()
         script_plugin = _StaticScriptPlugin()
@@ -772,12 +769,13 @@ class CapabilityGatewayTests(unittest.TestCase):
 
         result = worker.run(todo, state)
 
-        self.assertFalse(result.success)
-        self.assertTrue(result.partial)
-        self.assertEqual(result.result_quality, "metadata_validation")
-        self.assertIn("suppressed stderr", result.error or "")
-        self.assertEqual(result.output_context["agent_handoff"]["target"], "planner")
-        self.assertIsNone(shell_plugin.last_request)
+        self.assertTrue(result.success)
+        self.assertIn("shell: mmls out.img", result.summary)
+        self.assertEqual(result.output_context["flag_candidates"], ["flag{shell_test}"])
+        self.assertEqual(
+            shell_plugin.last_request.metadata["command"],
+            "mmls out.img  && fls out.img",
+        )
         self.assertIsNone(script_plugin.last_request)
 
     def test_partial_flag_recovery_does_not_persist_speculative_memory(self) -> None:
@@ -1998,22 +1996,30 @@ class CurlSessionTests(unittest.TestCase):
             http_client_non_http_url_block_reason("curl -sS http://target:8080/health")
         )
 
-    def test_shell_blocks_stderr_suppression_before_subprocess(self) -> None:
+    def test_shell_normalizes_stderr_suppression_before_subprocess(self) -> None:
         request = ToolExecutionRequest(
             capability=ToolCapability.SHELL_EXEC.value,
             tool_name="shell_exec",
-            metadata={"command": "mmls out.img 2>/dev/null && fls out.img"},
+            metadata={"command": "printf ok 2>/dev/null"},
             timeout_s=5,
         )
 
-        result = ShellPlugin(argv_prefix=["definitely-not-a-real-runner"]).execute(request)
+        result = ShellPlugin(argv_prefix=["sh", "-c", "exit 0", "ignored"]).execute(request)
         output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
 
-        self.assertEqual(result.exit_code, 126)
-        self.assertIn("suppressed stderr", result.stderr)
+        self.assertNotEqual(result.exit_code, 126)
         self.assertEqual(
-            output.output_context["failure_kind"],
-            "stderr_suppression_blocked",
+            normalize_shell_stderr_diagnostics("printf ok 2>/dev/null"),
+            "printf ok ",
+        )
+        self.assertNotEqual(output.output_context.get("failure_kind"), "stderr_suppression_blocked")
+
+    def test_shell_stderr_normalizer_preserves_quoted_text(self) -> None:
+        command = "printf '%s\\n' '2>/dev/null' && cmd >/dev/null 2>&1"
+
+        self.assertEqual(
+            normalize_shell_stderr_diagnostics(command),
+            "printf '%s\\n' '2>/dev/null' && cmd > /dev/null",
         )
 
     def test_shell_guard_allows_stderr_to_stdout_redirect(self) -> None:

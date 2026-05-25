@@ -325,17 +325,18 @@ class ToolMetadataContractTests(unittest.TestCase):
 
         self.assertEqual(result["command"], "curl -sS http://example:8080/health")
 
-    def test_shell_exec_rejects_stderr_suppression(self) -> None:
+    def test_shell_exec_normalizes_stderr_suppression(self) -> None:
         state = RunState(objective="solve")
         todo = TodoItem(goal="test")
 
-        with self.assertRaisesRegex(ToolExecutionError, "suppressed stderr"):
-            normalize_tool_metadata(
-                ToolCapability.SHELL_EXEC,
-                todo,
-                state,
-                {"command": "mmls out.img 2>/dev/null && fls -rd out.img"},
-            )
+        result = normalize_tool_metadata(
+            ToolCapability.SHELL_EXEC,
+            todo,
+            state,
+            {"command": "mmls out.img 2>/dev/null && fls -rd out.img &>/dev/null"},
+        )
+
+        self.assertEqual(result["command"], "mmls out.img  && fls -rd out.img > /dev/null")
 
     def test_shell_exec_allows_stderr_to_stdout_redirect(self) -> None:
         state = RunState(objective="solve")

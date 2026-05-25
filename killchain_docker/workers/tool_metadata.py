@@ -18,6 +18,7 @@ from killchain_docker.tools import ToolCapability, ToolExecutionError
 from killchain_docker.tools.core import _first_string
 from killchain_docker.tools.guard_policy import ToolGuardPolicy
 from killchain_docker.tools.plugins.curl import unsupported_url_scheme_reason
+from killchain_docker.tools.plugins.shell import normalize_shell_stderr_diagnostics
 
 # ---------------------------------------------------------------------------
 # Metadata contracts — shown to the LLM during tool selection
@@ -327,7 +328,7 @@ def _merge_tool_metadata(
 
 
 def _normalize_shell(raw: dict[str, object], state: RunState) -> dict[str, object]:
-    command = _first_string(raw["command"])
+    command = normalize_shell_stderr_diagnostics(_first_string(raw["command"]) or "")
     _validate_shell_command(command)
     files_root = _first_string(raw.get("files_root")) or DEFAULT_FILES_ROOT
     scope_reason = scratch_path_reference_block_reason(command) or ambient_filesystem_block_reason(
