@@ -738,6 +738,13 @@ class WorkerAgent(ABC):
                 + "Correct the script around the observed connection failure without "
                 "leaving the authorized scope."
             )
+        if str(failure_kind or "") == "host_resolution_error":
+            return (
+                base
+                + "Correct URL handling before changing the exploit logic: parse any "
+                "base URL into scheme, hostname, port, and path, pass only the hostname "
+                "to socket/http client constructors, and keep requests inside authorized_scope."
+            )
         if str(failure_kind or "") in {"timeout", "unbounded_loop_guard"}:
             return (
                 base

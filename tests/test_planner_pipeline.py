@@ -1803,6 +1803,36 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
         self.assertNotIn("completion_contract", todo.context["dispatch_intent"])
         self.assertNotIn("repair_policy_id", todo.context["dispatch_intent"])
 
+    def test_crypto_source_understanding_todo_does_not_require_candidate_closure(self) -> None:
+        state = _state(["bundle"])
+        todo = PlannedTodo(
+            goal=(
+                "Examine the source crypto helper implementation to understand "
+                "the cipher algorithm, key management, and encryption/decryption flow."
+            ),
+            phase=TodoPhase.ANALYSIS,
+            context={
+                "family": "crypto-decrypt",
+                "source_files": ["/home/ctfplayer/ctf_files/helper"],
+            },
+            success_criteria=[
+                "Document the algorithm and key handling evidence needed for a later step.",
+            ],
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.context["family"], "crypto-decrypt")
+        self.assertNotIn("execution_closure", todo.context)
+        self.assertNotEqual(
+            todo.context["dispatch_intent"].get("profile"),
+            "execution_closure",
+        )
+        self.assertNotEqual(
+            todo.context["dispatch_intent"].get("required_capability"),
+            "script.exec",
+        )
+
     def test_archive_extraction_todo_uses_executable_extraction_capability(self) -> None:
         state = _state(["bundle.random"])
         todo = PlannedTodo(

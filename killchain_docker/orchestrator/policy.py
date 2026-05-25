@@ -900,29 +900,9 @@ class TodoPolicy:
                 " ".join(str(item) for item in todo.constraints),
             ]
         ).lower()
-        if not any(
-            token in text
-            for token in (
-                "algorithm",
-                "auth",
-                "cipher",
-                "compare",
-                "credential",
-                "decode",
-                "decrypt",
-                "derive",
-                "disassembl",
-                "flag",
-                "keystream",
-                "lfsr",
-                "password",
-                "recover",
-                "reference",
-                "reverse",
-                "source",
-                "transform",
-            )
-        ):
+        if TodoPolicy._is_analysis_only_closure_exempt(text):
+            return
+        if not TodoPolicy._has_execution_closure_intent(text, todo.phase):
             return
 
         context["execution_closure"] = True
@@ -931,6 +911,69 @@ class TodoPolicy:
             context,
             profile="execution_closure",
             capability="script.exec",
+        )
+
+    @staticmethod
+    def _is_analysis_only_closure_exempt(text: str) -> bool:
+        if TodoPolicy._has_concrete_recovery_outcome(text):
+            return False
+        return bool(
+            re.search(
+                r"\b("
+                r"analy[sz]e|analysis|audit|classify|document|examine|explain|"
+                r"identify|inspect|inventory|locate|map|review|summari[sz]e|"
+                r"understand"
+                r")\b",
+                text,
+            )
+        )
+
+    @staticmethod
+    def _has_execution_closure_intent(text: str, phase: TodoPhase) -> bool:
+        if TodoPolicy._has_concrete_recovery_outcome(text):
+            return True
+        if phase == TodoPhase.EXPLOIT and TodoPolicy._goal_requires_executable_interaction(text):
+            return True
+        return bool(
+            re.search(
+                r"\b(apply|build|compare|execute|implement|run|validate|verify)\b",
+                text,
+            )
+            and re.search(
+                r"\b(algorithm|cipher|decode|decrypt|encoded|reference|solver|transform)\b",
+                text,
+            )
+        )
+
+    @staticmethod
+    def _has_concrete_recovery_outcome(text: str) -> bool:
+        action = (
+            r"\b("
+            r"calculate|calculates|calculating|compute|computes|computing|"
+            r"decode|decodes|decoding|decrypt|decrypts|decrypting|derive|derives|"
+            r"deriving|emit|emits|emitting|extract|extracts|extracting|print|"
+            r"prints|printing|produce|produces|producing|recover|recovers|"
+            r"recovering|return|returns|returning|solve|solves|solving|submit|"
+            r"submits|submitting"
+            r")\b"
+        )
+        outcome = (
+            r"\b("
+            r"answer|candidate|credential|flag|keystream|output|password|"
+            r"plaintext|plain\s+text|result|secret|token"
+            r")\b"
+        )
+        if re.search(action, text) and re.search(outcome, text):
+            return True
+        return bool(
+            re.search(
+                r"\b("
+                r"compute|computes|computing|derive|derives|deriving|"
+                r"extract|extracts|extracting|recover|recovers|recovering"
+                r")\s+"
+                r"(?:a|an|the)?\s*(key|keystream)\b",
+                text,
+            )
         )
 
     @staticmethod

@@ -1191,6 +1191,16 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
         self.assertIn("module", str(ctx["failure_detail"]))
         self.assertIn("stdlib", str(ctx["failure_detail"]))
 
+    def test_classifies_socket_gaierror_as_host_resolution_error(self) -> None:
+        ctx = self._output_context(
+            "Traceback (most recent call last):\n"
+            "  File \"/usr/lib/python3.10/socket.py\", line 955, in getaddrinfo\n"
+            "socket.gaierror: [Errno -2] Name or service not known\n"
+        )
+
+        self.assertEqual(ctx["failure_kind"], "host_resolution_error")
+        self.assertIn("hostname", str(ctx["failure_detail"]))
+
     def test_classifies_odd_length_hex_decode_as_parse_error(self) -> None:
         ctx = self._output_context(
             "Traceback (most recent call last):\n"

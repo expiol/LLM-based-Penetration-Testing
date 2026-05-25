@@ -590,6 +590,16 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         return "connection_reset", "remote endpoint reset the connection"
     if "connectionrefusederror" in text or "connection refused" in text:
         return "connection_refused", "remote endpoint refused the connection"
+    if (
+        "socket.gaierror" in text
+        or "name or service not known" in text
+        or "nodename nor servname provided" in text
+        or "temporary failure in name resolution" in text
+    ):
+        return (
+            "host_resolution_error",
+            "script could not resolve the target hostname; parse URLs into scheme, hostname, port, and path before connecting",
+        )
     if "scope_violation_blocked" in text or "outside authorized_scope" in text:
         return "scope_violation_blocked", "script attempted to leave authorized_scope or files_root"
     if (

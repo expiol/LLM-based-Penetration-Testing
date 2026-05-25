@@ -1429,6 +1429,36 @@ class ShellPluginGuardrailTests(unittest.TestCase):
         self.assertEqual(output.output_context["failure_kind"], "http_error_response")
         self.assertIn("404", str(output.output_context["failure_detail"]))
 
+    def test_http_status_probe_keeps_error_statuses_as_diagnostic_success(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={
+                "command": (
+                    "curl -s -o /dev/null -w '%{http_code} %{url_effective}\\n' "
+                    "http://target/missing http://target/"
+                )
+            },
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=0,
+            stdout=(
+                "404 http://target/missing\n"
+                '<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">\n'
+                "<html><head><title>404 Not Found</title></head></html>\n"
+                "200 http://target/\n"
+            ),
+            stderr="",
+        )
+
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.status, ToolOutputStatus.SUCCESS)
+        self.assertNotIn("failure_kind", output.output_context)
+
     def test_treats_bounded_head_sigpipe_as_successful_observation(self) -> None:
         request = ToolExecutionRequest(
             capability=ToolCapability.SHELL_EXEC.value,

@@ -320,8 +320,48 @@ def _uses_http_client(command: str) -> bool:
     return False
 
 
+def _is_http_status_probe(command: str) -> bool:
+    for tokens in _iter_simple_command_tokens(command):
+        if not tokens:
+            continue
+        executable = tokens[0].rsplit("/", 1)[-1].lower()
+        if executable == "curl" and _curl_writeout_requests_status(tokens):
+            return True
+        if executable == "wget" and _wget_spider_reports_status(tokens):
+            return True
+    return False
+
+
+def _curl_writeout_requests_status(tokens: list[str]) -> bool:
+    status_fields = ("%{http_code}", "%{response_code}", "%{http_connect}")
+    idx = 1
+    while idx < len(tokens):
+        token = tokens[idx]
+        value = ""
+        if token in {"-w", "--write-out"} and idx + 1 < len(tokens):
+            value = tokens[idx + 1]
+            idx += 2
+        elif token.startswith("--write-out="):
+            value = token.split("=", 1)[1]
+            idx += 1
+        elif token.startswith("-w") and len(token) > 2:
+            value = token[2:]
+            idx += 1
+        else:
+            idx += 1
+        if value and any(field in value for field in status_fields):
+            return True
+    return False
+
+
+def _wget_spider_reports_status(tokens: list[str]) -> bool:
+    return any(token == "--spider" for token in tokens[1:])
+
+
 def _http_client_error_detail(command: str, stdout: str, stderr: str) -> str | None:
     if not _uses_http_client(command):
+        return None
+    if _is_http_status_probe(command):
         return None
     combined = "\n".join(part for part in (stdout, stderr) if part)
     for pattern in (_HTTP_STATUS_ERROR_RE, _HTML_STATUS_ERROR_RE):

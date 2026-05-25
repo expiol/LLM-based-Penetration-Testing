@@ -37,6 +37,7 @@ _INFRASTRUCTURE_FAILURE_KINDS = frozenset({"infrastructure_error"})
 _SCRIPT_REPAIRABLE_FAILURE_KINDS = frozenset({
     "binary_structure_error",
     "bytes_text_mismatch",
+    "host_resolution_error",
     "parse_error",
     "path_resolution_error",
     "path_type_mismatch",
