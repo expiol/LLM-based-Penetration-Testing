@@ -1180,6 +1180,23 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
         self.assertIn("make:", str(ctx["failure_detail"]))
         self.assertEqual(ctx["result_quality"], "partial_no_candidate")
 
+    def test_successful_script_with_stdout_tool_return_code_is_diagnostic(self) -> None:
+        ctx = self._output_context(
+            stdout=(
+                "Converted artifact to intermediate form\n"
+                "Steghide return code: 1\n"
+                "Steghide stderr:\n"
+                "could not extract any data with that passphrase!\n"
+                "ERROR: Steghide extraction failed\n"
+            ),
+            stderr="",
+            exit_code=0,
+        )
+
+        self.assertEqual(ctx["failure_kind"], "subcommand_error")
+        self.assertIn("return code: 1", str(ctx["failure_detail"]))
+        self.assertEqual(ctx["result_quality"], "partial_no_candidate")
+
     def test_classifies_bytes_text_mismatch(self) -> None:
         ctx = self._output_context(
             "TypeError: a bytes-like object is required, not 'str'"

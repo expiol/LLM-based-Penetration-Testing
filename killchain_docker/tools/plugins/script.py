@@ -728,6 +728,9 @@ def _subcommand_error_line(output_text: str) -> str:
         text = line.strip()
         if not text:
             continue
+        return_code = re.search(r"(?i)\breturn\s+code\s*:\s*(-?\d+)\b", text)
+        if return_code and return_code.group(1) not in {"0", "+0"}:
+            return _truncate(text, 300)
         if re.search(r"(?i)\b(?:error|failed|failure|fatal)\b", text) and re.search(
             r"(?i)(?:\bmake\b|\bgcc\b|\bclang\b|\bld\b|\btar\b|\bunzip\b|\bzip\b|\bjava\b|\bnode\b|\bruby\b|\bgo\b|\bcargo\b|\bcmake\b|\bninja\b|\bperl\b|\bbash\b|\bsh\b|\bpython\b|\bpython3\b|\*\*\*)",
             text,
