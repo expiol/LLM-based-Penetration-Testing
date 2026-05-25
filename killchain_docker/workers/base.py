@@ -16,8 +16,8 @@ from killchain_docker.evidence_context import EvidenceContextBuilder
 from killchain_docker.llm import LLMClient, LLMClientError
 from killchain_docker.prompt_bounds import bounded_value, trim_text
 from killchain_docker.prompt_projection import (
-    artifacts as prompt_artifacts,
     execution_record as prompt_execution_record,
+    worker_artifacts as prompt_worker_artifacts,
     worker_todo as prompt_worker_todo,
     working_memory as prompt_working_memory,
 )
@@ -150,7 +150,12 @@ class WorkerAgent(ABC):
             for kw in ("script", "decrypt", "brute", "write", "compute", "solve")
         )
         max_evidence = 5 if likely_script else 10
-        evidence_context = EvidenceContextBuilder(max_records=max_evidence).build(
+        evidence_context = EvidenceContextBuilder(
+            max_records=max_evidence,
+            max_text_preview=900,
+            max_key_lines=10,
+            max_total_chars=8000,
+        ).build(
             state, allowed_capabilities=allowed
         )
         correction_context = self._correction_context(
@@ -167,7 +172,7 @@ class WorkerAgent(ABC):
             # TASK CONTEXT
             "worker_name": self.name,
             "todo": prompt_worker_todo(task),
-            "artifacts": prompt_artifacts(state, limit=20),
+            "artifacts": prompt_worker_artifacts(state, task, limit=10),
             "working_memory": prompt_working_memory(state),
             # EVIDENCE
             "recent_evidence_context": evidence_context,
@@ -302,7 +307,12 @@ class WorkerAgent(ABC):
                 f"{type(self).__name__} requires a ToolGateway for tool metadata."
             )
         selected = ToolCapability(capability)
-        evidence_context = EvidenceContextBuilder(max_records=5).build(
+        evidence_context = EvidenceContextBuilder(
+            max_records=5,
+            max_text_preview=700,
+            max_key_lines=10,
+            max_total_chars=6000,
+        ).build(
             state,
             allowed_capabilities={selected},
         )
@@ -317,7 +327,7 @@ class WorkerAgent(ABC):
             "tool_use_rules": self._tool_use_rules({selected}),
             "worker_name": self.name,
             "todo": prompt_worker_todo(task),
-            "artifacts": prompt_artifacts(state, limit=12),
+            "artifacts": prompt_worker_artifacts(state, task, limit=8),
             "working_memory": prompt_working_memory(state),
             "recent_evidence_context": evidence_context,
             "prior_steps": bounded_value(prior_steps or [], width=700, list_limit=4, dict_limit=14),

@@ -157,6 +157,8 @@ class Orchestrator:
     FORCED_PIVOT_THRESHOLD = 5  # Rounds without flag progress triggers pivot
     MAX_TRANSIENT_SKIPS = 3  # Transient LLM errors to tolerate before aborting
     LLM_ERROR_MESSAGE_LIMIT = 1200
+    ROUTE_MAX_ASSIGNMENTS = 5
+    MAX_INLINE_DETERMINISTIC_FOLLOWUP_ASSIGNMENTS = 4
     MAX_FINAL_DETERMINISTIC_CLOSURE_PASSES = 2
     MAX_FINAL_DETERMINISTIC_CLOSURE_ASSIGNMENTS = 8
     FINAL_DETERMINISTIC_CAPABILITIES = frozenset({
@@ -390,7 +392,7 @@ class Orchestrator:
         return self.router.route(
             self.state,
             worker_directory=self.worker_directory,
-            max_assignments=5,
+            max_assignments=self.ROUTE_MAX_ASSIGNMENTS,
         )
 
     def select_worker(self, todo: TodoItem, worker_name: str) -> tuple[WorkerAgent | None, str]:
@@ -530,6 +532,103 @@ class Orchestrator:
 
     def _has_ready_backlog(self) -> bool:
         return bool(self.state.ready_todos(limit=1))
+
+    def _inline_deterministic_followup_pass(
+        self,
+        cycle: int,
+        *,
+        remaining_budget: int,
+    ) -> tuple[list[WorkerResult], list[WorkerAssignment]]:
+        if (
+            self.state.solved
+            or remaining_budget <= 0
+            or self._has_ready_backlog()
+            or not self._has_generated_artifact_for_final_closure()
+        ):
+            return [], []
+        pipeline = getattr(self.planner, "pipeline", None)
+        merge = getattr(pipeline, "merge", None)
+        if not callable(merge):
+            return [], []
+
+        budget = min(
+            remaining_budget,
+            self.MAX_INLINE_DETERMINISTIC_FOLLOWUP_ASSIGNMENTS,
+        )
+        decision = merge(
+            self.state,
+            llm_decision=PlannerDecision(
+                summary="Inline deterministic artifact follow-up.",
+                todos=[],
+                notes=[
+                    "Skipped LLM planning for inline deterministic artifact follow-up.",
+                ],
+            ),
+        )
+        filtered = [
+            todo for todo in decision.todos
+            if self._is_final_deterministic_closure_todo(todo)
+        ][:budget]
+        if not filtered:
+            return [], []
+
+        decision = PlannerDecision(
+            summary="Inline deterministic artifact follow-up.",
+            todos=filtered,
+            notes=decision.notes,
+        )
+        proposed, created, created_ids = self._queue_planner_decision(decision)
+        if not created_ids:
+            return [], []
+
+        self.emit(
+            f"[cycle {cycle}] inline deterministic artifact follow-up: "
+            f"proposed={proposed} new={created}"
+        )
+        results: list[WorkerResult] = []
+        assignments: list[WorkerAssignment] = []
+        for todo_id in created_ids:
+            if len(results) >= budget or self.state.solved:
+                break
+            todo = self.state.get_todo(todo_id)
+            if todo is None or todo.status != TodoStatus.PENDING:
+                continue
+            worker, worker_name, reason = self._select_deterministic_worker(todo)
+            if worker is None:
+                todo.mark_blocked(reason)
+                result = WorkerResult(
+                    todo_id=todo.todo_id,
+                    worker_name=worker_name or "deterministic-worker",
+                    success=False,
+                    summary=f"Assignment blocked: {reason}",
+                    error=reason,
+                    retryable=False,
+                )
+            else:
+                assignments.append(
+                    WorkerAssignment(
+                        todo_id=todo.todo_id,
+                        worker_name=worker_name,
+                        rationale="inline deterministic artifact follow-up",
+                    )
+                )
+                result = self._run_assignment(cycle, todo, worker)
+            self.state.apply_worker_result(result)
+            results.append(result)
+            status_tag = "PARTIAL" if result.partial else ("ok" if result.success else "FAILED")
+            self._emit_event(
+                f"[cycle {cycle}] inline deterministic {status_tag} "
+                f"{todo.todo_id}: {result.summary}",
+                event_type="worker_result",
+                **self._todo_context(cycle, todo, worker=result.worker_name),
+                result_success=result.success,
+                result_partial=result.partial,
+            )
+            self._checkpoint()
+            if self._sync_background_flag_validator(cycle, wait_s=0.2):
+                self.emit(f"[cycle {cycle}] solved: {self.state.validated_flag}")
+                break
+        return results, assignments
 
     def _inject_forced_pivot(self, cycle: int) -> None:
         """Inject a forced pivot directive into state metadata.
@@ -1102,6 +1201,46 @@ class Orchestrator:
                 if self.state.solved:
                     max_cycles_exhausted = False
                     break
+
+                followup_budget = max(
+                    0,
+                    self.ROUTE_MAX_ASSIGNMENTS - len(results),
+                )
+                if followup_budget:
+                    try:
+                        followup_results, followup_assignments = (
+                            self._inline_deterministic_followup_pass(
+                                cycle,
+                                remaining_budget=followup_budget,
+                            )
+                        )
+                    except LLMClientError as exc:
+                        if self._skip_transient_llm_error(cycle, "inline_deterministic_followup", exc):
+                            self._checkpoint()
+                            continue
+                        if exc.transient:
+                            self._halt_after_transient_llm_error(
+                                cycle,
+                                "inline_deterministic_followup",
+                                exc,
+                            )
+                            self._checkpoint()
+                            max_cycles_exhausted = False
+                            break
+                        self.emit(
+                            f"[cycle {cycle}] inline deterministic follow-up LLM error - "
+                            "aborting run"
+                        )
+                        self._mark_llm_error(cycle, "inline_deterministic_followup", exc)
+                        self._checkpoint()
+                        max_cycles_exhausted = False
+                        raise
+                    if followup_results:
+                        results.extend(followup_results)
+                        executed_assignments.extend(followup_assignments)
+                        if self.state.solved:
+                            max_cycles_exhausted = False
+                            break
 
                 try:
                     self._checkpoint_activity(f"[cycle {cycle}] summarizing worker results")

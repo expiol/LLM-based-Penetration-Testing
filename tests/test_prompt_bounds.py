@@ -221,6 +221,97 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         self.assertNotIn("reflexion_context", snapshot)
         self.assertNotIn("X" * 1000, json.dumps(snapshot))
 
+    def test_worker_tool_selection_keeps_artifact_projection_task_relevant(self) -> None:
+        captured: dict[str, object] = {}
+
+        def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["user_prompt"] = user_prompt
+            captured["snapshot"] = json.loads(user_prompt)
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('bounded')"},
+                "rationale": "bounded",
+                "expected_signal": "concise diagnostics",
+            }
+
+        huge_text = "X" * 5000
+        state = RunState(objective="Solve.")
+        target_paths: list[str] = []
+        for index in range(40):
+            path = (
+                f"/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+                f"batch_{index}/scratch/item_{index}.bin"
+            )
+            artifact_id = f"artifact-{index}"
+            state.artifacts[artifact_id] = Artifact(
+                artifact_id=artifact_id,
+                path=path,
+                kind="script_artifact",
+                source="script_exec",
+                size=index + 1,
+                digest=f"digest-{index}",
+                preview=huge_text,
+                metadata={
+                    "relative_path": f"scratch/item_{index}.bin",
+                    "file_type": "data",
+                    "mime_type": "application/octet-stream",
+                    "interesting_strings": [huge_text for _ in range(10)],
+                    "irrelevant_blob": huge_text,
+                    "evidence_ids": [f"evidence-{index}"],
+                },
+            )
+            if index in {3, 17, 29}:
+                target_paths.append(path)
+        state.evidence["evidence-17"] = EvidenceRecord(
+            evidence_id="evidence-17",
+            task_id="prior",
+            capability="script.exec",
+            tool_name="script_exec",
+            mode="local_command",
+            summary="script (python)",
+            extracted={
+                "output_context": {
+                    "returncode": 0,
+                    "result_quality": "partial_no_candidate",
+                    "failure_kind": "no_candidate",
+                    "failure_detail": "script exited successfully but no flag candidate was recovered",
+                    "stdout": "line with useful key material\n" + huge_text,
+                }
+            },
+        )
+        task = TodoItem(
+            goal="Use referenced generated artifacts to continue bounded local analysis.",
+            context={
+                "family": "algorithm-verification",
+                "artifact_ids": ["artifact-3"],
+                "paths": target_paths,
+                "prior_evidence_ids": ["evidence-17"],
+                "capability_hint": "script.exec",
+            },
+        )
+        worker = _PromptWorker(
+            llm_client=StaticLLMClient(respond),
+            execution_plane=ExecutionPlane(),
+        )
+
+        worker.choose_tool_use(
+            task=task,
+            state=state,
+            allowed_capabilities=[ToolCapability.SCRIPT_EXEC],
+        )
+
+        snapshot = captured["snapshot"]
+        payload_text = captured["user_prompt"]
+        self.assertLessEqual(len(payload_text), 18000)
+        artifacts = snapshot["artifacts"]  # type: ignore[index]
+        artifact_ids = {artifact["artifact_id"] for artifact in artifacts}
+        self.assertLessEqual(len(artifacts), 10)
+        self.assertIn("artifact-3", artifact_ids)
+        self.assertIn("artifact-17", artifact_ids)
+        self.assertIn("artifact-29", artifact_ids)
+        self.assertNotIn("irrelevant_blob", json.dumps(artifacts))
+        self.assertNotIn("X" * 1000, payload_text)
+
     def test_shell_python_syntax_failure_requests_script_exec(self) -> None:
         captured: dict[str, object] = {}
 

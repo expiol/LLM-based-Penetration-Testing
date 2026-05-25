@@ -1057,6 +1057,7 @@ class OrchestratorLoopTests(unittest.TestCase):
             router=_ContextRouter(),
             emit=lambda _: None,
         )
+        orchestrator.ROUTE_MAX_ASSIGNMENTS = 1
 
         final_state = orchestrator.run(max_cycles=1)
 
@@ -1070,6 +1071,49 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertEqual(closure_todos[0].assigned_worker, "artifact-worker")
         self.assertEqual(closure_todos[0].context.get("path"), artifact_path)
         self.assertTrue(
+            any(
+                round_.planner_summary == "final deterministic evidence closure pass"
+                for round_ in final_state.rounds
+            )
+        )
+
+    def test_generated_artifact_gets_inline_deterministic_followup_before_final_pass(self) -> None:
+        artifact_path = (
+            "/home/ctfplayer/ctf_files/.autopentest_artifacts/"
+            "script_42/scratch/derived.bin"
+        )
+        planner = _ScriptedPlannerWithPipeline([
+            PlannerDecision(
+                summary="cycle 1",
+                todos=[
+                    PlannedTodo(
+                        goal="Generate a derived artifact during the main loop.",
+                        context={"worker_name": "artifact-producer"},
+                        dedupe_key="generate-derived-artifact-inline",
+                    )
+                ],
+            )
+        ])
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[
+                _ArtifactProducerWorker(artifact_path),
+                _ArtifactClosureWorker(),
+            ],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+
+        final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(planner.calls, 1)
+        self.assertEqual(len(final_state.rounds), 1)
+        self.assertEqual(
+            [result.summary for result in final_state.rounds[0].results],
+            ["generated artifact", "triaged 1 generated artifact(s)"],
+        )
+        self.assertFalse(
             any(
                 round_.planner_summary == "final deterministic evidence closure pass"
                 for round_ in final_state.rounds

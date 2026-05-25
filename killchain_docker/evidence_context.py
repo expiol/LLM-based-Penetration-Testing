@@ -173,7 +173,10 @@ class EvidenceContextBuilder:
     def _script_context(self, ctx: dict[str, object], *, tier: str = "full") -> dict[str, object]:
         stdout = _string(ctx.get("stdout"))
         stderr = _string(ctx.get("stderr"))
-        preview_width = {"full": 3000, "medium": 1800, "compressed": 600}[tier]
+        preview_width = min(
+            {"full": 3000, "medium": 1800, "compressed": 600}[tier],
+            self.max_text_preview,
+        )
         result: dict[str, object] = {
             "returncode": ctx.get("returncode"),
             "result_quality": ctx.get("result_quality"),
@@ -238,6 +241,7 @@ class EvidenceContextBuilder:
             elif value not in (None, "", [], {}):
                 out[key] = value
         preview_width = {"full": 2200, "medium": 1200, "compressed": 500}[tier]
+        preview_width = min(preview_width, self.max_text_preview)
         stdout = _evidence_text(evidence, ctx, "stdout")
         stderr = _evidence_text(evidence, ctx, "stderr")
         if stdout:
