@@ -63,11 +63,13 @@ _PROFILE_WORKER_PREFERENCES: dict[str, tuple[str, ...]] = {
     "image_inspection": ("artifact-worker",),
     "near_miss_repair": ("artifact-worker", "exploit-worker"),
     "execution_closure": ("artifact-worker", "exploit-worker"),
+    "execution_continuation": ("exploit-worker", "artifact-worker"),
     "algorithm_verification": ("artifact-worker", "exploit-worker"),
     "binary_analysis": ("artifact-worker", "exploit-worker"),
     "web_analysis": ("web-worker", "recon-worker"),
     "web_exploitation": ("web-worker", "exploit-worker"),
     "exploit": ("exploit-worker",),
+    "pwn_exploit": ("exploit-worker", "artifact-worker"),
     "credential_recovery": ("exploit-worker",),
     "candidate_recovery": ("artifact-worker", "exploit-worker"),
     "flag_validation": ("flag-worker",),
@@ -113,9 +115,7 @@ class DispatchRoutePolicy:
         candidates: list[tuple[str, str]] = []
         intent = DispatchIntent.from_context(todo.context)
         if intent.profile and intent.profile != "open":
-            candidates.extend(
-                cls._ordered_profile_candidates(intent.profile, worker_directory)
-            )
+            candidates.extend(cls._profile_candidates(intent.profile, todo, worker_directory))
 
         capability = str(intent.required_capability or "").strip()
         if capability and capability not in _UNIVERSAL_CAPABILITY_HINTS:
@@ -156,6 +156,22 @@ class DispatchRoutePolicy:
             return True
         text = _todo_text(todo)
         return any(_contains_term(text, term) for term in _SCOPE_TERMS)
+
+    @staticmethod
+    def _profile_candidates(
+        profile: str,
+        todo: TodoItem,
+        worker_directory: WorkerDirectoryView,
+    ) -> list[tuple[str, str]]:
+        if profile == "execution_closure" and _active_exploit_closure(todo):
+            indexed = worker_directory.workers_for_profile(profile)
+            ordered = [name for name in ("exploit-worker", "artifact-worker") if name in indexed]
+            ordered.extend(name for name in indexed if name not in ordered)
+            return [
+                (name, f"Structural: active execution closure profile {profile}.")
+                for name in ordered
+            ]
+        return DispatchRoutePolicy._ordered_profile_candidates(profile, worker_directory)
 
     @staticmethod
     def _ordered_profile_candidates(
@@ -224,3 +240,15 @@ def _todo_text(todo: TodoItem) -> str:
 def _contains_term(text: str, term: str) -> bool:
     pattern = r"(?<![a-z0-9_])" + re.escape(term.lower()) + r"(?![a-z0-9_])"
     return re.search(pattern, text) is not None
+
+
+def _active_exploit_closure(todo: TodoItem) -> bool:
+    if todo.phase == TodoPhase.EXPLOIT:
+        return True
+    if _todo_has_context_key(todo, _WEB_CONTEXT_KEYS):
+        text = _todo_text(todo)
+        return any(
+            _contains_term(text, term)
+            for term in ("authenticate", "connect", "execute", "exploit", "payload", "send")
+        )
+    return False

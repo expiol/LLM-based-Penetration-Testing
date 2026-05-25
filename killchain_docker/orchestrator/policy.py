@@ -890,6 +890,8 @@ class TodoPolicy:
             "crypto-decrypt",
             "flag-recovery",
             "binary-analysis",
+            "pwn-exploit",
+            "web-exploitation",
         }:
             return
 
@@ -907,9 +909,14 @@ class TodoPolicy:
 
         context["execution_closure"] = True
         context["capability_hint"] = "script.exec"
+        profile = "execution_closure"
+        if todo.phase == TodoPhase.EXPLOIT and family == "pwn-exploit":
+            profile = "pwn_exploit"
+        elif todo.phase == TodoPhase.EXPLOIT and family == "web-exploitation":
+            profile = "web_exploitation"
         TodoPolicy._set_required_capability(
             context,
-            profile="execution_closure",
+            profile=profile,
             capability="script.exec",
         )
 

@@ -18,6 +18,7 @@ from killchain_docker.tools.core import (
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
+    ToolOutputStatus,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
@@ -36,6 +37,10 @@ _PORT_RE = re.compile(r"(\d+)/(\w+)\s+open\s+(\S+)(?:\s+(.*))?")
 _OS_RE = re.compile(r"OS details?:\s*(.+)", re.IGNORECASE)
 _HOSTNAME_RE = re.compile(r"Nmap scan report for\s+(\S+?)(?:\s+\((\d+\.\d+\.\d+\.\d+)\))?$", re.MULTILINE)
 _MAC_RE = re.compile(r"MAC Address:\s*([0-9A-Fa-f:]+)(?:\s+\((.+?)\))?")
+_HOST_TIMEOUT_RE = re.compile(
+    r"(?:skipping host .+? due to host timeout|host timeout)",
+    re.IGNORECASE,
+)
 _DEFAULT_HOST_TIMEOUT_CAP_S = 45
 _DEFAULT_NMAP_TIMEOUT_SLACK_S = 15
 
@@ -93,9 +98,14 @@ def build_output(
     _parsed: ParsedToolOutput,
 ) -> ToolOutput:
     target = str(request.metadata.get("target") or "")
+    requested_ports = str(request.metadata.get("ports") or "").strip()
     stdout = result.stdout or ""
     stderr = result.stderr or ""
+    combined = "\n".join(part for part in (stdout, stderr) if part)
     status = _status(result)
+    timeout_signal = _HOST_TIMEOUT_RE.search(combined) is not None
+    if timeout_signal:
+        status = ToolOutputStatus.FAILURE
 
     # -- Parse open ports and services --------------------------------------
     services: list[Service] = []
@@ -208,7 +218,7 @@ def build_output(
         ))
 
     # -- Flags ---------------------------------------------------------------
-    flags = _flag_candidates_from(stdout, source="nmap")
+    flags = _flag_candidates_from(combined, source="nmap")
 
     # -- Summary -------------------------------------------------------------
     summary = f"nmap {target}: {len(open_ports)} open port(s)"
@@ -216,8 +226,13 @@ def build_output(
         summary += f" [{os_info[:60]}]"
     if filtered_count > 5:
         summary += f", {filtered_count} filtered"
+    if timeout_signal:
+        summary = f"nmap {target} timed out before completing scan"
     if status.value == "failure":
-        summary = f"nmap {target} failed (exit {result.exit_code})"
+        if timeout_signal:
+            summary = f"nmap {target} timed out before completing scan"
+        else:
+            summary = f"nmap {target} failed (exit {result.exit_code})"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
 
@@ -227,6 +242,8 @@ def build_output(
         "open_ports": open_ports,
         "port_count": len(open_ports),
     }
+    if requested_ports:
+        output_context["requested_ports"] = requested_ports
     if hostname:
         output_context["hostname"] = hostname
     if ip_address:
@@ -235,12 +252,16 @@ def build_output(
         output_context["os"] = os_info
     if mac_address:
         output_context["mac_address"] = mac_address
+    if timeout_signal:
+        output_context["failure_kind"] = "scan_timeout"
+        output_context["failure_detail"] = "nmap reported that the host scan exceeded its host timeout"
+        output_context["result_quality"] = "scan_incomplete"
 
     return ToolOutput(
         status=status,
         summary=summary,
-        output_text=_truncate(stdout, 4000),
-        raw_log=_truncate(stdout + stderr, 6000),
+        output_text=_truncate(combined, 4000),
+        raw_log=_truncate(combined, 6000),
         output_context=output_context,
         flag_candidates=flags,
         assets=assets,

@@ -1877,6 +1877,44 @@ class TodoPolicyNormalizationTests(unittest.TestCase):
             "script.exec",
         )
 
+    def test_exploit_todo_overrides_stale_scope_profile(self) -> None:
+        state = _state(["target.bin"], ["tcp://service.example:31337"])
+        todo = PlannedTodo(
+            goal=(
+                "Construct and execute an exploit against the authorized service, "
+                "send the crafted payload, and capture a flag candidate."
+            ),
+            phase=TodoPhase.EXPLOIT,
+            context={
+                "family": "pwn-exploit",
+                "scope": "tcp://service.example:31337",
+                "files_root": "/home/ctfplayer/ctf_files",
+                "dispatch_intent": {
+                    "profile": "scope_mapping",
+                    "target_refs": {
+                        "scope": "tcp://service.example:31337",
+                        "files_root": "/home/ctfplayer/ctf_files",
+                    },
+                },
+            },
+            success_criteria=["Exploit returns output containing a flag candidate."],
+        )
+
+        TodoPolicy.normalize(todo, state)
+
+        self.assertEqual(todo.context["family"], "pwn-exploit")
+        self.assertIs(todo.context["execution_closure"], True)
+        self.assertEqual(todo.context["capability_hint"], "script.exec")
+        self.assertEqual(todo.context["dispatch_intent"]["profile"], "pwn_exploit")
+        self.assertEqual(
+            todo.context["dispatch_intent"]["required_capability"],
+            "script.exec",
+        )
+        self.assertEqual(
+            todo.context["dispatch_intent"]["target_refs"]["scope"],
+            "tcp://service.example:31337",
+        )
+
     def test_algorithm_verification_gets_execution_closure_context(self) -> None:
         state = _state(["cipher.py", "capture.bin"])
         todo = PlannedTodo(

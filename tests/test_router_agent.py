@@ -9,6 +9,8 @@ from killchain_docker.llm import StaticLLMClient
 from killchain_docker.orchestrator.router import RouterAgent, WorkerDirectory
 from killchain_docker.state import DispatchIntent, RunState, TodoItem, TodoPhase, WorkerResult
 from killchain_docker.workers.base import WorkerAgent
+from killchain_docker.workers.protocols import ARTIFACT_PERSONA, EXPLOIT_PERSONA
+from killchain_docker.workers.worker import Worker
 
 
 class _DirectoryWorker(WorkerAgent):
@@ -340,6 +342,195 @@ class RouterAgentTests(unittest.TestCase):
             [(todo.todo_id, "artifact-worker")],
         )
         self.assertIn("dispatch profile image_inspection", decision.assignments[0].rationale)
+
+    def test_execution_closure_prefers_exploit_worker_for_active_exploit(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=["tcp://service.example:31337"])
+        todo = state.queue_todo(
+            TodoItem(
+                goal=(
+                    "Execute the exploit against the authorized service, send the "
+                    "crafted payload, and recover a flag candidate."
+                ),
+                phase=TodoPhase.EXPLOIT,
+                context={
+                    "execution_closure": True,
+                    "service_endpoint": "tcp://service.example:31337",
+                    "dispatch_intent": {
+                        "profile": "execution_closure",
+                        "required_capability": "script.exec",
+                    },
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker(
+                    "artifact-worker",
+                    allowed_capabilities=("script.exec",),
+                    supported_dispatch_profiles=("execution_closure",),
+                ),
+                _DirectoryWorker(
+                    "exploit-worker",
+                    allowed_capabilities=("script.exec",),
+                    supported_dispatch_profiles=("execution_closure",),
+                ),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "exploit-worker")],
+        )
+
+    def test_local_execution_closure_keeps_artifact_worker_first(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Run a bounded local decoder over the artifact and recover a candidate.",
+                phase=TodoPhase.ANALYSIS,
+                context={
+                    "execution_closure": True,
+                    "artifact_path": "/home/ctfplayer/ctf_files/blob.bin",
+                    "dispatch_intent": {
+                        "profile": "execution_closure",
+                        "required_capability": "script.exec",
+                    },
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker(
+                    "artifact-worker",
+                    allowed_capabilities=("script.exec",),
+                    supported_dispatch_profiles=("execution_closure",),
+                ),
+                _DirectoryWorker(
+                    "exploit-worker",
+                    allowed_capabilities=("script.exec",),
+                    supported_dispatch_profiles=("execution_closure",),
+                ),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "artifact-worker")],
+        )
+
+    def test_exploit_execution_continuation_prefers_exploit_worker(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=["tcp://service.example:31337"])
+        todo = state.queue_todo(
+            TodoItem(
+                goal=(
+                    "Continue from grounded evidence and execute the next bounded "
+                    "step toward recovering a flag candidate."
+                ),
+                phase=TodoPhase.EXPLOIT,
+                context={
+                    "family": "execution-continuation",
+                    "files_root": "/home/ctfplayer/ctf_files",
+                    "dispatch_intent": {"profile": "execution_continuation"},
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker(
+                    "artifact-worker",
+                    supported_dispatch_profiles=("execution_continuation",),
+                ),
+                _DirectoryWorker(
+                    "exploit-worker",
+                    supported_dispatch_profiles=("execution_continuation",),
+                ),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "exploit-worker")],
+        )
+
+    def test_pwn_exploit_profile_prefers_exploit_worker_over_file_signal(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=["tcp://service.example:31337"])
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Construct and execute exploit for a grounded memory-corruption finding.",
+                phase=TodoPhase.EXPLOIT,
+                context={
+                    "family": "pwn-exploit",
+                    "files_root": "/home/ctfplayer/ctf_files",
+                    "binary_path": "/home/ctfplayer/ctf_files/target",
+                    "endpoint": "tcp://service.example:31337",
+                    "dispatch_intent": {"profile": "pwn_exploit"},
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                _DirectoryWorker(
+                    "artifact-worker",
+                    supported_dispatch_profiles=("pwn_exploit",),
+                ),
+                _DirectoryWorker(
+                    "exploit-worker",
+                    supported_dispatch_profiles=("pwn_exploit",),
+                ),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "exploit-worker")],
+        )
+
+    def test_real_persona_catalog_routes_pwn_exploit_to_exploit_worker(self) -> None:
+        state = RunState(objective="Solve.", authorized_scope=["tcp://service.example:31337"])
+        todo = state.queue_todo(
+            TodoItem(
+                goal="Construct and execute exploit for a grounded memory-corruption finding.",
+                phase=TodoPhase.EXPLOIT,
+                context={
+                    "family": "pwn-exploit",
+                    "files_root": "/home/ctfplayer/ctf_files",
+                    "binary_path": "/home/ctfplayer/ctf_files/target",
+                    "endpoint": "tcp://service.example:31337",
+                    "dispatch_intent": {"profile": "pwn_exploit"},
+                },
+            )
+        )
+        router = RouterAgent(StaticLLMClient([]))
+
+        decision = router.route(
+            state,
+            worker_directory=WorkerDirectory.from_workers([
+                Worker(persona=ARTIFACT_PERSONA),
+                Worker(persona=EXPLOIT_PERSONA),
+            ]),
+            max_assignments=5,
+        )
+
+        self.assertEqual(
+            [(item.todo_id, item.worker_name) for item in decision.assignments],
+            [(todo.todo_id, "exploit-worker")],
+        )
 
     def test_required_capability_filters_profile_candidate(self) -> None:
         state = RunState(objective="Solve.", authorized_scope=[])

@@ -170,9 +170,11 @@ EXPLOIT_PERSONA = PersonaSpec(
         "open",
         "exploit",
         "binary_exploitation",
+        "execution_continuation",
         "credential_recovery",
         "execution_closure",
         "algorithm_verification",
+        "pwn_exploit",
         "web_exploitation",
     ),
 )
