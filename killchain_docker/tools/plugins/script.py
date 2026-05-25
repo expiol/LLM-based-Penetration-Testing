@@ -698,7 +698,22 @@ def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str
         )
     if "syntaxerror" in text:
         return "syntax_error", "script failed Python or shell syntax validation"
+    diagnostic = _script_reported_error_line(output_text)
+    if diagnostic:
+        return "nonzero_exit", f"script exited with status {exit_code}: {diagnostic}"
     return "nonzero_exit", f"script exited with status {exit_code}"
+
+
+def _script_reported_error_line(output_text: str) -> str:
+    for line in reversed((output_text or "").splitlines()):
+        text = line.strip()
+        if not text:
+            continue
+        if re.match(r"(?i)^(?:error|failed|failure|fatal|warning)\b\s*:?", text):
+            return _truncate(text, 300)
+        if re.search(r"(?i)\b(?:error|failed|failure|fatal)\b", text):
+            return _truncate(text, 300)
+    return ""
 
 
 def _traceback_excerpt(output_text: str, *, width: int = 4000) -> str:

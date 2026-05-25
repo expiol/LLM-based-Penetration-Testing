@@ -578,6 +578,33 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
 
         self.assertFalse(Worker._should_continue_after_step(task, prior_steps))
 
+    def test_script_nonzero_exit_preserves_stdout_error_detail(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SCRIPT_EXEC.value,
+            tool_name="script_exec",
+            metadata={"script_language": "python", "script_code": "raise SystemExit(1)"},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="script_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=1,
+            stdout=(
+                "Number of lines found: 3\n"
+                "Line 1: 4514 numbers\n"
+                "Error: Lines have different lengths: 4514 vs 0\n"
+            ),
+            stderr="",
+        )
+
+        output = build_script_output(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.output_context["failure_kind"], "nonzero_exit")
+        self.assertIn(
+            "Lines have different lengths",
+            output.output_context["failure_detail"],
+        )
+
     def test_metadata_validation_retries_once_then_hands_back_to_planner(self) -> None:
         calls = 0
 
