@@ -29,6 +29,15 @@ FIXED_LLM_CONFIG_PATH = (
 SCHEMA_MAX_COMPLETION_TOKENS = {
     "ToolUseDecision": 12000,
 }
+SCHEMA_REQUEST_TIMEOUT_S = {
+    "ToolUseDecision": 45.0,
+}
+SCHEMA_TOTAL_DEADLINE_S = {
+    "ToolUseDecision": 90.0,
+}
+SCHEMA_MAX_RETRIES = {
+    "ToolUseDecision": 1,
+}
 
 
 class LLMClientError(RuntimeError):
@@ -646,11 +655,37 @@ class GatewayLLMClient:
             return self.max_completion_tokens
         return max(1, min(self.max_completion_tokens, cap))
 
-    def _call_deadline_s(self) -> float:
-        retry_budget = float(self.timeout_s * (1 + self.max_retries))
-        if self.total_deadline_s is None:
+    def _request_timeout_s_for_schema(self, schema: type[BaseModel]) -> float:
+        cap = SCHEMA_REQUEST_TIMEOUT_S.get(schema.__name__)
+        if cap is None:
+            return float(self.timeout_s)
+        return max(0.1, min(float(self.timeout_s), cap))
+
+    def _max_retries_for_schema(self, schema: type[BaseModel]) -> int:
+        cap = SCHEMA_MAX_RETRIES.get(schema.__name__)
+        if cap is None:
+            return self.max_retries
+        return max(0, min(self.max_retries, int(cap)))
+
+    def _call_deadline_s(self, schema: type[BaseModel] | None = None) -> float:
+        if schema is None:
+            retry_budget = float(self.timeout_s * (1 + self.max_retries))
+            if self.total_deadline_s is None:
+                return retry_budget
+            return min(float(self.total_deadline_s), retry_budget)
+        max_retries = self._max_retries_for_schema(schema)
+        retry_budget = self._request_timeout_s_for_schema(schema) * (1 + max_retries)
+        deadline = self.total_deadline_s
+        schema_deadline = SCHEMA_TOTAL_DEADLINE_S.get(schema.__name__)
+        if schema_deadline is not None:
+            deadline = (
+                schema_deadline
+                if deadline is None
+                else min(float(deadline), schema_deadline)
+            )
+        if deadline is None:
             return retry_budget
-        return min(float(self.total_deadline_s), retry_budget)
+        return min(float(deadline), retry_budget)
 
     def generate_json(
         self,
@@ -667,16 +702,19 @@ class GatewayLLMClient:
         ]
         # Total deadline across all retry attempts so a single generate_json
         # call never blocks a worker indefinitely.
-        deadline = time.monotonic() + self._call_deadline_s()
+        max_retries = self._max_retries_for_schema(schema)
+        deadline = time.monotonic() + self._call_deadline_s(schema)
         last_exc: Exception | None = None
         attempts_used = 0
-        for attempt in range(1 + self.max_retries):
+        for attempt in range(1 + max_retries):
             remaining_s = deadline - time.monotonic()
             if remaining_s <= 0:
                 break
             try:
                 attempts_used += 1
-                request_timeout_s = max(0.1, min(float(self.timeout_s), remaining_s))
+                request_timeout_s = max(
+                    0.1, min(self._request_timeout_s_for_schema(schema), remaining_s)
+                )
                 with self._hard_request_deadline(request_timeout_s):
                     parsed, completion = self._create_structured(
                         messages=messages,
@@ -694,7 +732,7 @@ class GatewayLLMClient:
             except Exception as exc:
                 last_exc = exc
                 transient = self._is_transient(exc)
-                if not transient or attempt >= self.max_retries:
+                if not transient or attempt >= max_retries:
                     break
                 base_delay = min(
                     self._RETRY_BASE_DELAY * (2**attempt), self._RETRY_MAX_DELAY
@@ -708,7 +746,7 @@ class GatewayLLMClient:
                     exc_info=True,
                     extra={
                         "attempt": attempt + 1,
-                        "attempts": 1 + self.max_retries,
+                        "attempts": 1 + max_retries,
                         "retry_delay_s": round(delay, 3),
                         "schema": schema.__name__,
                         "model": selected_model,
@@ -729,7 +767,7 @@ class GatewayLLMClient:
                 "failure_kind": str(kind),
                 "error_type": type(last_exc).__name__,
                 "attempts": attempts_used,
-                "max_retries": self.max_retries,
+                "max_retries": max_retries,
             },
         )
         raise LLMClientError(

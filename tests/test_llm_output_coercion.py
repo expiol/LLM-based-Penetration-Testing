@@ -59,6 +59,27 @@ class _DeadlineGateway(GatewayLLMClient):
         del completion
 
 
+class _ToolDecisionDeadlineGateway(_DeadlineGateway):
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__(fail=fail, total_deadline_s=300)
+        self.timeout_s = 180
+        self.max_retries = 5
+
+    def _create_structured(
+        self, *, messages, schema, model, temperature, request_timeout_s=None
+    ):
+        self.request_timeouts.append(request_timeout_s)
+        if self.fail:
+            raise TimeoutError("tool metadata timeout")
+        return (
+            ToolUseDecision(
+                capability="script.exec",
+                metadata={"script_code": "print('ok')"},
+            ),
+            None,
+        )
+
+
 class _UsageCompletion:
     model = "completion-model"
     usage = {"prompt_tokens": 11, "completion_tokens": 7}
@@ -306,6 +327,33 @@ class TestGatewayTransientClassification(unittest.TestCase):
         self.assertEqual(decision.capability, "script.exec")
         self.assertLess(completions.captured_kwargs["max_tokens"], 65536)
         self.assertLessEqual(completions.captured_kwargs["max_tokens"], 12000)
+
+    def test_tool_use_decision_uses_shorter_request_deadline(self) -> None:
+        client = _ToolDecisionDeadlineGateway()
+        decision = client.generate_json(
+            system_prompt="",
+            user_prompt="",
+            schema=ToolUseDecision,
+        )
+        self.assertEqual(decision.capability, "script.exec")
+        assert client.request_timeouts[0] is not None
+        self.assertLess(client.request_timeouts[0], 180.0)
+        self.assertLessEqual(client.request_timeouts[0], 45.0)
+
+    def test_tool_use_decision_stops_retry_at_schema_deadline(self) -> None:
+        client = _ToolDecisionDeadlineGateway(fail=True)
+        with (
+            patch("killchain_docker.llm.gateway.random.uniform", return_value=0.0),
+            patch("killchain_docker.llm.gateway.time.sleep"),
+            self.assertRaises(LLMClientError) as ctx,
+        ):
+            client.generate_json(
+                system_prompt="",
+                user_prompt="",
+                schema=ToolUseDecision,
+            )
+        self.assertLess(ctx.exception.attempts, 1 + client.max_retries)
+        self.assertEqual(len(client.request_timeouts), ctx.exception.attempts)
 
     def test_token_ledger_records_thread_safe_snapshots(self) -> None:
         ledger = TokenLedger()
