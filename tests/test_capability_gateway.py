@@ -851,6 +851,60 @@ class CapabilityGatewayTests(unittest.TestCase):
             "shell_python_complexity",
         )
 
+    def test_shell_dispatch_hint_allows_worker_to_choose_script_exec(self) -> None:
+        captured: dict[str, str] = {}
+
+        def response(system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["system"] = system_prompt
+            captured["user"] = user_prompt
+            return {
+                "capability": "script.exec",
+                "metadata": {
+                    "script_code": (
+                        "from pathlib import Path\n"
+                        "print(Path('flag.stfu').read_bytes()[:8].hex())\n"
+                        "print('flag{script_test}')"
+                    )
+                },
+                "rationale": "binary parsing is safer as a bounded script",
+            }
+
+        plane = ExecutionPlane()
+        shell_plugin = _StaticShellPlugin()
+        script_plugin = _StaticScriptPlugin()
+        plane.register(shell_plugin, shell_output_builder)
+        plane.register(script_plugin, script_output_builder)
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(
+                    ToolCapability.SHELL_EXEC,
+                    ToolCapability.SCRIPT_EXEC,
+                ),
+            ),
+            llm_client=StaticLLMClient(response),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = TodoItem(
+            goal="Parse a binary file header and map its fields.",
+            context={
+                "family": "crypto-model",
+                "dispatch_intent": {
+                    "profile": "artifact_analysis",
+                    "required_capability": "shell.exec",
+                },
+            },
+        )
+
+        result = worker.run(todo, state)
+
+        self.assertTrue(result.success)
+        self.assertIsNone(shell_plugin.last_request)
+        self.assertIsNotNone(script_plugin.last_request)
+        self.assertIn("ONLY available capabilities", captured["system"])
+        self.assertNotIn("already selected the capability", captured["system"])
+
     def test_partial_flag_recovery_does_not_persist_speculative_memory(self) -> None:
         plane = ExecutionPlane()
         plane.register(_NoCandidateScriptPlugin(), script_output_builder)

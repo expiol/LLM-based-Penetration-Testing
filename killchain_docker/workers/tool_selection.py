@@ -83,6 +83,12 @@ def choose_fixed_capability(
 def fixed_llm_capability(
     todo: TodoItem, allowed_capabilities: tuple[ToolCapability, ...]
 ) -> ToolCapability | None:
+    """Return capabilities that should hard-bind LLM metadata generation.
+
+    ``shell.exec`` remains a routing and batching hint. It is intentionally not
+    fixed here because shell and script are both universal execution-closure
+    tools, and many file/binary parsing goals are safer as bounded scripts.
+    """
     intent = DispatchIntent.from_context(todo.context)
     raw = str(intent.required_capability or "").strip()
     if not raw:
@@ -91,7 +97,7 @@ def fixed_llm_capability(
         capability = ToolCapability(raw)
     except ValueError:
         return None
-    if capability not in {ToolCapability.SCRIPT_EXEC, ToolCapability.SHELL_EXEC}:
+    if capability != ToolCapability.SCRIPT_EXEC:
         return None
     if capability not in allowed_capabilities:
         return None
