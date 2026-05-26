@@ -28,6 +28,11 @@ from killchain_docker.state.domain import (
 )
 from killchain_docker.state.todos import RouterRound, TodoItem
 from killchain_docker.value_coercion import coerce_string_mapping
+from killchain_docker.memory.durable import (
+    DurableMemoryRecord,
+    DurableMemoryUpdate,
+    coerce_durable_updates,
+)
 
 
 class RunStatus(StrEnum):
@@ -78,6 +83,10 @@ class RunState(BaseModel):
     network_edges: list[NetworkEdge] = Field(default_factory=list)
     execution_log: list[ExecutionRecord] = Field(default_factory=list)
     run_memory: dict[str, str] = Field(default_factory=dict)
+    cross_run_memory: list[DurableMemoryRecord] = Field(default_factory=list)
+    pending_durable_memory_updates: list[DurableMemoryUpdate] = Field(
+        default_factory=list
+    )
     notes: list[str] = Field(default_factory=list)
     orchestration_notes: list[str] = Field(default_factory=list)
     solved: bool = False
@@ -91,3 +100,8 @@ class RunState(BaseModel):
     @classmethod
     def _coerce_run_memory(cls, value: Any) -> Any:
         return coerce_string_mapping(value)
+
+    @field_validator("pending_durable_memory_updates", mode="before")
+    @classmethod
+    def _coerce_pending_durable(cls, value: Any) -> Any:
+        return coerce_durable_updates(value)

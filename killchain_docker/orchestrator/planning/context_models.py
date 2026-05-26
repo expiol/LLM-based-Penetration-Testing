@@ -28,6 +28,7 @@ class PlannerContext:
     recent_evidence_context: list[dict[str, Any]] = field(default_factory=list)
     recent_execution_log: list[dict[str, Any]] = field(default_factory=list)
     run_memory: dict[str, str] = field(default_factory=dict)
+    cross_run_memory: list[dict[str, str]] = field(default_factory=list)
     stagnation: dict[str, Any] = field(default_factory=dict)
     near_miss_evidence: list[dict[str, Any]] = field(default_factory=list)
     pivot_summaries: list[dict[str, Any]] = field(default_factory=list)

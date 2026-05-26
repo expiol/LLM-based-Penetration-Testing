@@ -62,6 +62,10 @@ class WorkerResultApplier:
         self.delta_applier.apply(result.state_delta)
         if result.memory_updates:
             self.memory.upsert_many(result.memory_updates)
+        if result.durable_memory_updates:
+            self.state.pending_durable_memory_updates.extend(
+                result.durable_memory_updates
+            )
         if result.solved:
             self.outcome.solved(
                 validated_flag=result.validated_flag,

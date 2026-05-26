@@ -23,6 +23,10 @@ from killchain_docker.state.domain import (
     StateDelta,
 )
 from killchain_docker.value_coercion import coerce_string_mapping
+from killchain_docker.memory.durable import (
+    DurableMemoryUpdate,
+    coerce_durable_updates,
+)
 
 
 class TodoStatus(StrEnum):
@@ -154,11 +158,17 @@ class WorkerResult(BaseModel):
     validated_flag: str | None = None
     generated_at: datetime = Field(default_factory=utc_now)
     memory_updates: dict[str, str] = Field(default_factory=dict)
+    durable_memory_updates: list[DurableMemoryUpdate] = Field(default_factory=list)
 
     @field_validator("memory_updates", mode="before")
     @classmethod
     def _coerce_memory_updates(cls, value: Any) -> Any:
         return coerce_string_mapping(value)
+
+    @field_validator("durable_memory_updates", mode="before")
+    @classmethod
+    def _coerce_durable_memory_updates(cls, value: Any) -> Any:
+        return coerce_durable_updates(value)
 
 
 class RouterRoundSummary(BaseModel):

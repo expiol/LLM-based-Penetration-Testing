@@ -6,6 +6,7 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from killchain_docker.reasoning.schemas import ToolUseDecision
+from killchain_docker.memory.durable import DurableMemoryUpdate
 from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.domain import Hypothesis
 from killchain_docker.state.run_state import RunState
@@ -21,7 +22,12 @@ from killchain_docker.workers.tooling.metadata.router import normalize_tool_meta
 
 
 ToolSelection = tuple[
-    ToolCapability, dict[str, object], str, str | None, dict[str, str]
+    ToolCapability,
+    dict[str, object],
+    str,
+    str | None,
+    dict[str, str],
+    list[DurableMemoryUpdate],
 ]
 
 
@@ -75,6 +81,7 @@ def run_tool_step(
     max_metadata_retries: int,
     accumulated_hypotheses: list[Hypothesis],
     accumulated_memory: dict[str, str],
+    accumulated_durable_memory: list[DurableMemoryUpdate],
 ) -> tuple[ToolCapability, str, ToolExecutionBundle] | WorkerResult:
     metadata_retries = 0
     capability = None
@@ -86,21 +93,28 @@ def run_tool_step(
         try:
             if forced_capability is not None:
                 capability = forced_capability
-            capability, selected_metadata, rationale, hypothesis_text, mem_updates = (
-                _select_step_tool(
-                    agent,
-                    task,
-                    state,
-                    step=step,
-                    prior_steps=prior_steps,
-                    forced_capability=forced_capability,
-                )
+            (
+                capability,
+                selected_metadata,
+                rationale,
+                hypothesis_text,
+                mem_updates,
+                durable_updates,
+            ) = _select_step_tool(
+                agent,
+                task,
+                state,
+                step=step,
+                prior_steps=prior_steps,
+                forced_capability=forced_capability,
             )
             forced_capability = None
             if hypothesis_text:
                 accumulated_hypotheses.append(Hypothesis(title=hypothesis_text))
             if mem_updates:
                 accumulated_memory.update(mem_updates)
+            if durable_updates:
+                accumulated_durable_memory.extend(durable_updates)
             bundle = _execute_step(
                 agent,
                 task,
@@ -204,6 +218,7 @@ def choose_capability(
         decision.rationale,
         decision.hypothesis,
         dict(decision.memory_updates) if decision.memory_updates else {},
+        list(decision.durable_memory_updates) if decision.durable_memory_updates else [],
     )
 
 
@@ -237,6 +252,7 @@ def _select_step_tool(
             decision.rationale,
             decision.hypothesis,
             dict(decision.memory_updates) if decision.memory_updates else {},
+            list(decision.durable_memory_updates) if decision.durable_memory_updates else [],
         )
     else:
         agent.report_progress(

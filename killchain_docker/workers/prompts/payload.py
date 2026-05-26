@@ -7,6 +7,7 @@ from typing import Any
 from killchain_docker.evidence_context import EvidenceContextBuilder
 from killchain_docker.prompt_bounds import bounded_value
 from killchain_docker.prompt_projection import (
+    cross_run_memory as prompt_cross_run_memory,
     execution_record as prompt_execution_record,
     run_memory as prompt_run_memory,
     worker_artifacts as prompt_worker_artifacts,
@@ -107,6 +108,7 @@ def _base_payload(
         "todo": prompt_worker_todo(task),
         "artifacts": prompt_worker_artifacts(state, task, limit=artifact_limit),
         "run_memory": prompt_run_memory(state),
+        "cross_run_memory": prompt_cross_run_memory(state),
         "recent_evidence_context": evidence_context,
         "prior_steps": bounded_value(
             prior_steps or [], width=700, list_limit=4, dict_limit=14

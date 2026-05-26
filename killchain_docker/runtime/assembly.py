@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 from collections.abc import Callable
+from pathlib import Path
 from killchain_docker.rag.augmenter import RagAugmenter
 from killchain_docker.rag.config import rag_mode
 from killchain_docker.logging_utils import get_logger
 from killchain_docker.llm.gateway import LLMClient, build_llm_client_from_env
+from killchain_docker.memory.persistence import DurableMemoryStore
 from killchain_docker.orchestrator.loop import Orchestrator
 from killchain_docker.orchestrator.planning.planner import LLMPlanner
 from killchain_docker.orchestrator.dispatch.router import RouterAgent
 from killchain_docker.runtime.config import RunConfig
+from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.run_state import RunState
 from killchain_docker.tools.core import ExecutionPlane
 from killchain_docker.tools.registry import build_execution_plane
 from killchain_docker.workers.personas.catalog import WorkerBuildContext, build_builtin_workers
 
 LOGGER = get_logger(__name__)
+
+
+def _resolve_memory_root(config: RunConfig) -> Path:
+    if config.memory_root:
+        return Path(config.memory_root)
+    return Path(config.output_root) / "memory"
 
 
 def build_runtime(
@@ -47,6 +56,12 @@ def build_runtime(
         authorized_scope=config.authorized_scope,
         metadata=metadata,
     )
+    memory_store = DurableMemoryStore(_resolve_memory_root(config))
+    challenge = ChallengeProjection(state)
+    state.cross_run_memory = memory_store.load_relevant(
+        category=challenge.category_raw() or None,
+        challenge=challenge.name(),
+    )
     worker_context = WorkerBuildContext(
         llm_client=llm_client,
         execution_plane=execution_plane,
@@ -60,5 +75,7 @@ def build_runtime(
         router=router,
         emit=emit,
         checkpoint_callback=checkpoint_callback,
+        durable_memory_store=memory_store,
     )
     return (state, orchestrator, llm_client)
+

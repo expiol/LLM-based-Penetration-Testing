@@ -21,6 +21,7 @@ class RunConfig(BaseModel):
     quiet: bool = False
     status_path: str | None = None
     rag_mode: str | None = None
+    memory_root: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod

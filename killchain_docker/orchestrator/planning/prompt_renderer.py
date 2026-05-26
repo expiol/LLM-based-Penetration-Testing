@@ -36,6 +36,7 @@ def render_planner_prompt(
         "stagnation_signals": ctx.stagnation,
         "near_miss_evidence": ctx.near_miss_evidence,
         "run_memory": ctx.run_memory,
+        "cross_run_memory": ctx.cross_run_memory,
         "knowledge_augmentation": ctx.knowledge_augmentation,
     }
     if ctx.pivot_summaries:

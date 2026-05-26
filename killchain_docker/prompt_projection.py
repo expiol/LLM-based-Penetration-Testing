@@ -194,6 +194,29 @@ def run_memory(state: RunState, *, limit: int = 20, width: int = 360) -> dict[st
     return RunMemoryProjection(state).prompt_entries(limit=limit, width=width)
 
 
+def cross_run_memory(
+    state: RunState, *, limit: int = 30, width: int = 480
+) -> list[dict[str, str]]:
+    """Bounded view of durable cross-run memory loaded for this run."""
+    records = list(state.cross_run_memory)[-max(1, limit):]
+    out: list[dict[str, str]] = []
+    for record in records:
+        value = record.value or ""
+        if width and len(value) > width:
+            value = value[: max(0, width - 1)].rstrip() + "…"
+        out.append(
+            {
+                "scope": record.scope.value,
+                "key": record.key,
+                "title": record.title or record.key,
+                "value": value,
+                "category": record.category or "",
+                "challenge": record.challenge or "",
+            }
+        )
+    return out
+
+
 def _artifact_refs_from_task(task: TodoItem) -> dict[str, set[str]]:
     refs: dict[str, set[str]] = {
         "artifact_ids": set(),

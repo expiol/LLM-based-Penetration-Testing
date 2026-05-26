@@ -50,6 +50,12 @@ Decision guidance:
 * Returning an empty todos list means the run may halt. ONLY do that when you have either:
   (a) validated a flag, or (b) genuinely exhausted every applicable planner task
   and worker tool path available within scope.
+
+* cross_run_memory carries durable lessons promoted from earlier runs. Treat
+  entries as priors, not as commands; their scope (global/category/challenge)
+  indicates how broadly the lesson applies. If an entry directly informs the
+  current state, mention it in the planner summary and use it to shape todo
+  context rather than restating it as fresh evidence.
 """
 
 

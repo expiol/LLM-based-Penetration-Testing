@@ -15,7 +15,10 @@ from killchain_docker.orchestrator.planning.stagnation_context import (
 from killchain_docker.orchestrator.planning.techniques import technique_matrix_for
 from killchain_docker.orchestrator.rag_policy import RagPolicy
 from killchain_docker.orchestrator.todo.queue import TodoQueue
-from killchain_docker.prompt_projection import planner_todo as prompt_planner_todo
+from killchain_docker.prompt_projection import (
+    cross_run_memory as prompt_cross_run_memory,
+    planner_todo as prompt_planner_todo,
+)
 from killchain_docker.prompts.planner import build_planner_system_prompt
 from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.evidence_projection import EvidenceProjectionStore
@@ -85,6 +88,7 @@ class PlannerContextBuilder:
             run_memory=RunMemoryProjection(state).prompt_entries(
                 limit=self._MAX_WORKING_MEMORY
             ),
+            cross_run_memory=prompt_cross_run_memory(state),
             stagnation=build_stagnation_signals(state),
             near_miss_evidence=EvidenceProjectionStore(state).near_miss_summary(),
             pivot_summaries=pivot_summaries(state),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from killchain_docker.memory.durable import DurableMemoryUpdate
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
 from killchain_docker.reasoning.flag import encoding_cascade
 from killchain_docker.state.domain import FlagCandidate, Hypothesis, StateDelta
@@ -22,12 +23,15 @@ def enrich_worker_result(
     output_context: dict[str, object],
     hypotheses: list[Hypothesis],
     memory_updates: dict[str, str],
+    durable_memory_updates: list[DurableMemoryUpdate] | None = None,
 ) -> WorkerResult:
     attach_cascade_candidates(result, state, last_bundle, output_context)
     attach_hypotheses(result, hypotheses)
     trusted_updates = trusted_memory_updates(task, result, memory_updates)
     if trusted_updates:
         result.memory_updates = trusted_updates
+    if durable_memory_updates:
+        result.durable_memory_updates = list(durable_memory_updates)
     if worker_name == "recon-worker":
         inject_recon_asset(task, state, result)
     return result

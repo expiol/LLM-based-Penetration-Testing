@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from killchain_docker.memory.durable import DurableMemoryUpdate
 from killchain_docker.state.domain import Hypothesis
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, WorkerResult
@@ -31,6 +32,7 @@ class _ToolLoopState:
     last_rationale: str = ""
     accumulated_hypotheses: list[Hypothesis] = field(default_factory=list)
     accumulated_memory: dict[str, str] = field(default_factory=dict)
+    accumulated_durable_memory: list[DurableMemoryUpdate] = field(default_factory=list)
 
     def record_step(
         self,
@@ -65,6 +67,7 @@ def run_worker_tool_loop(
             max_metadata_retries=max_metadata_retries,
             accumulated_hypotheses=loop_state.accumulated_hypotheses,
             accumulated_memory=loop_state.accumulated_memory,
+            accumulated_durable_memory=loop_state.accumulated_durable_memory,
         )
         if isinstance(step_result, WorkerResult):
             return step_result
@@ -96,6 +99,7 @@ def run_worker_tool_loop(
         prior_steps=loop_state.prior_steps,
         accumulated_hypotheses=loop_state.accumulated_hypotheses,
         accumulated_memory=loop_state.accumulated_memory,
+        accumulated_durable_memory=loop_state.accumulated_durable_memory,
     )
 
 
@@ -151,6 +155,7 @@ def _final_loop_result(
     prior_steps: list[dict[str, object]],
     accumulated_hypotheses: list[Hypothesis],
     accumulated_memory: dict[str, str],
+    accumulated_durable_memory: list[DurableMemoryUpdate],
 ) -> WorkerResult:
     if last_bundle is None or last_capability is None:
         return WorkerResult(
@@ -184,6 +189,7 @@ def _final_loop_result(
         output_context=output_context,
         hypotheses=accumulated_hypotheses,
         memory_updates=accumulated_memory,
+        durable_memory_updates=accumulated_durable_memory,
     )
 
 

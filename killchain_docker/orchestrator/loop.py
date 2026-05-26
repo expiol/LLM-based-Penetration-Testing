@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from killchain_docker.logging_utils import get_logger
 from killchain_docker.llm.gateway import LLMClientError
+from killchain_docker.memory.persistence import DurableMemoryStore
 from killchain_docker.orchestrator.dispatch.controller import DispatchCycleController
 from killchain_docker.orchestrator.background_flags import (
     BackgroundFlagSolved,
@@ -29,6 +30,7 @@ from killchain_docker.orchestrator.planning.schemas import PlannerAgent
 from killchain_docker.orchestrator.dispatch.router import RouterAgent
 from killchain_docker.orchestrator.agent_directory import AgentDirectory
 from killchain_docker.state.common import utc_now
+from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.run_state import RunState
@@ -56,6 +58,7 @@ class Orchestrator:
         router: RouterAgent | None = None,
         emit: Callable[[str], None] = LOGGER.info,
         checkpoint_callback: Callable[[RunState], None] | None = None,
+        durable_memory_store: DurableMemoryStore | None = None,
     ) -> None:
         self.state = state
         if planner is None:
@@ -73,6 +76,7 @@ class Orchestrator:
         self.planner = planner
         self.router = router
         self.emit = emit
+        self.durable_memory_store = durable_memory_store
         self.checkpoint_callback = checkpoint_callback
         self._journal = RunJournal(self.state)
         self._outcome = RunOutcomeStore(self.state)
@@ -190,6 +194,29 @@ class Orchestrator:
         self._events.emit(f"[interrupt] {reason}; marked running todos as interrupted")
         self._events.checkpoint()
 
+    def _flush_durable_memory(self) -> None:
+        """Persist any pending durable memory updates collected during the run."""
+        if self.durable_memory_store is None:
+            return
+        pending = list(self.state.pending_durable_memory_updates)
+        if not pending:
+            return
+        challenge = ChallengeProjection(self.state)
+        try:
+            self.durable_memory_store.apply_updates(
+                pending,
+                run_id=self.state.run_id,
+                category=challenge.category_raw() or None,
+                challenge=challenge.name(),
+            )
+        except Exception:
+            LOGGER.exception(
+                "failed to flush durable memory",
+                extra={"run_id": self.state.run_id},
+            )
+            return
+        self.state.pending_durable_memory_updates.clear()
+
     def _finalize(self, *, current_cycle: int, max_cycles_exhausted: bool) -> None:
         """Run final deterministic closure passes then apply terminal status rules."""
         exhausted = max_cycles_exhausted
@@ -216,6 +243,7 @@ class Orchestrator:
             if ran_final_validation and self._outcome.is_solved:
                 exhausted = False
         self._termination_controller.finalize(max_cycles_exhausted=exhausted)
+        self._flush_durable_memory()
 
     def run(self, max_cycles: int = 10) -> RunState:
         max_cycles_exhausted = True
