@@ -6,6 +6,9 @@ from killchain_docker.orchestrator.planning.schemas import (
     PlannerAgent,
     PlannerDecision,
 )
+from killchain_docker.orchestrator.planning.dependency_gate import (
+    gate_planned_dependencies,
+)
 from killchain_docker.orchestrator.planning.seed_planner import PlanningSeedPlanner
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
 from killchain_docker.orchestrator.progress_families import family_counts
@@ -65,7 +68,8 @@ class PlanningPipeline(PlannerAgent):
         dependency_gated, dependency_notes = self._dependency_gate(deduped, state)
         gated, gate_notes = self._phase_gate(dependency_gated, state)
         scoped, scope_notes = self._scope_gate(gated, state)
-        allowed, progress_notes = self._progress_gate(scoped, state)
+        progress_gated, progress_notes = self._progress_gate(scoped, state)
+        allowed, final_dependency_notes = self._dependency_gate(progress_gated, state)
         return PlannerDecision(
             summary=(llm_decision.summary if llm_decision else "")
             or f"Planning pipeline proposed {len(allowed)} todo(s).",
@@ -77,6 +81,7 @@ class PlanningPipeline(PlannerAgent):
                 *gate_notes,
                 *scope_notes,
                 *progress_notes,
+                *final_dependency_notes,
             ],
             stop_run=bool(llm_decision.stop_run) if llm_decision else False,
         )
@@ -130,31 +135,7 @@ class PlanningPipeline(PlannerAgent):
     def _dependency_gate(
         self, todos: list[PlannedTodo], state: RunState
     ) -> tuple[list[PlannedTodo], list[str]]:
-        queue = TodoQueueReader(state)
-        proposed_refs = {str(todo.dedupe_key or "").strip() for todo in todos}
-        proposed_refs.discard("")
-        kept: list[PlannedTodo] = []
-        dropped_refs: list[str] = []
-        for todo in todos:
-            missing = [
-                ref
-                for ref in todo.depends_on
-                if queue.get_by_ref(ref) is None and ref not in proposed_refs
-            ]
-            if missing:
-                dropped_refs.extend(missing)
-                continue
-            kept.append(todo)
-        notes = (
-            [
-                "Planning dependency gate dropped "
-                f"{len(todos) - len(kept)} todo(s) with missing dependency ref(s): "
-                f"{sorted(set(dropped_refs))[:5]}."
-            ]
-            if dropped_refs
-            else []
-        )
-        return (kept, notes)
+        return gate_planned_dependencies(todos, state)
 
     def _phase_gate(
         self, todos: list[PlannedTodo], state: RunState

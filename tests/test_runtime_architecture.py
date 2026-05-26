@@ -1769,6 +1769,40 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertFalse(hasattr(Orchestrator, "refresh_plan"))
         self.assertFalse(hasattr(Orchestrator, "refresh_deterministic_seeds"))
 
+    def test_planning_refresh_controller_filters_missing_dependency_refs(
+        self,
+    ) -> None:
+        state = RunState(objective="Solve.")
+        controller = PlanningRefreshController(
+            state=state,
+            planner=_RefreshPlanner(
+                PlannerDecision(
+                    summary="dependent plan",
+                    todos=[
+                        PlannedTodo(
+                            goal="Use an upstream result.",
+                            phase=TodoPhase.ANALYSIS,
+                            dedupe_key="dependent-work",
+                            depends_on=["missing-upstream"],
+                        )
+                    ],
+                )
+            ),
+            writer=_todo_queue(state).writer,
+            journal=RunJournal(state),
+            emit=lambda _message: None,
+        )
+        result = controller.refresh(cycle=1)
+        self.assertEqual(result.proposed, 1)
+        self.assertEqual(result.created, 0)
+        self.assertEqual(state.todos, [])
+        self.assertTrue(
+            any(
+                ("dependency gate dropped" in note)
+                for note in state.orchestration_notes
+            )
+        )
+
     def test_planning_cycle_controller_owns_ready_backlog_seed_refresh(self) -> None:
         state = RunState(objective="Solve.")
         queue = _todo_queue(state)

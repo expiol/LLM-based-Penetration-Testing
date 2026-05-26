@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from killchain_docker.orchestrator.planning.dependency_gate import (
+    gate_planned_dependencies,
+)
 from killchain_docker.orchestrator.planning.refresh_results import (
     DETERMINISTIC_BACKLOG_SUMMARY,
     PlanningRefreshResult,
@@ -70,12 +73,14 @@ class PlanningRefreshController:
     def _enqueue(
         self, decision: PlannerDecision, *, deterministic: bool = False
     ) -> PlanningRefreshResult:
-        report = self.writer.enqueue_planned(decision.todos)
-        if decision.notes:
-            self.journal.orchestration_notes(decision.notes)
+        todos, dependency_notes = gate_planned_dependencies(decision.todos, self.state)
+        report = self.writer.enqueue_planned(todos)
+        notes = [*decision.notes, *dependency_notes]
+        if notes:
+            self.journal.orchestration_notes(notes)
         return PlanningRefreshResult(
             summary=decision.summary or "(no summary)",
-            proposed=report.proposed,
+            proposed=len(decision.todos),
             created=report.created,
             created_ids=report.created_ids,
             stop_run=decision.stop_run,

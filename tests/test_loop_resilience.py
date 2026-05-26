@@ -1309,7 +1309,7 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertFalse(todo_queue(final_state).has_open())
         self.assertEqual(final_state.todos[0].status, TodoStatus.BLOCKED)
 
-    def test_unsatisfiable_dependency_blocks_todo_without_router_empty_loop(
+    def test_planner_missing_dependency_is_dropped_before_dispatch(
         self,
     ) -> None:
         recorder = EventRecorder(quiet=True)
@@ -1341,11 +1341,16 @@ class OrchestratorLoopTests(unittest.TestCase):
             if record.get("event_type") == "todo_dependency_blocked"
         ]
         self.assertEqual(final_state.status, RunStatus.FAILED)
-        self.assertEqual(final_state.stop_reason, "todo_blocked")
-        self.assertEqual(final_state.todos[0].status, TodoStatus.BLOCKED)
-        self.assertIn("missing dependency", final_state.todos[0].error or "")
-        self.assertEqual(orchestrator.dispatch_rounds.consecutive_empty_rounds, 0)
-        self.assertTrue(dependency_events)
+        self.assertEqual(final_state.stop_reason, "no_todos_created")
+        self.assertEqual(final_state.todos, [])
+        self.assertTrue(
+            any(
+                ("dependency gate dropped" in note)
+                for note in final_state.orchestration_notes
+            )
+        )
+        self.assertEqual(orchestrator.dispatch_rounds.consecutive_empty_rounds, 2)
+        self.assertFalse(dependency_events)
 
 
 class HollowResultAndProgressTests(unittest.TestCase):

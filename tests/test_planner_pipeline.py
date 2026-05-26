@@ -1449,6 +1449,57 @@ class PlanningPipelineSeedTests(unittest.TestCase):
         decision = PlanningPipeline().merge(state, llm_decision=llm_decision)
         self.assertEqual(len(decision.todos), 1)
 
+    def test_dependency_gate_runs_after_progress_gate_drops_upstream_todo(
+        self,
+    ) -> None:
+        state = _state(["cipher.bin"])
+        queue = todo_queue(state)
+        inventory = queue.enqueue(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                context={"family": "artifact-inventory"},
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        )
+        queue.complete(inventory, "done")
+        for index in range(3):
+            prior = queue.enqueue(
+                TodoItem(
+                    goal=f"Prior crypto model attempt {index}.",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "crypto-model"},
+                    dedupe_key=f"prior-crypto-model-{index}",
+                )
+            )
+            queue.partial(prior, "script (python)", "no flag candidate")
+        llm_decision = PlannerDecision(
+            summary="Plan a dependent decryption step.",
+            todos=[
+                PlannedTodo(
+                    goal="Recover the key from known plaintext.",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "crypto-model"},
+                    dedupe_key="known-plaintext-key-recovery",
+                ),
+                PlannedTodo(
+                    goal="Decrypt files after key recovery.",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "flag-recovery"},
+                    dedupe_key="decrypt-after-key",
+                    depends_on=["known-plaintext-key-recovery"],
+                ),
+            ],
+        )
+        decision = PlanningPipeline().merge(state, llm_decision=llm_decision)
+        self.assertEqual(decision.todos, [])
+        self.assertTrue(
+            any(("progress gate dropped" in note for note in decision.notes))
+        )
+        self.assertTrue(
+            any(("dependency gate dropped" in note for note in decision.notes))
+        )
+
     def test_scope_gate_allows_registered_tmp_artifact(self) -> None:
         state = _state([])
         artifact = Artifact(
