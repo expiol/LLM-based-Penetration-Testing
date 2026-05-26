@@ -21,7 +21,7 @@ from killchain_docker.logging_utils import (
 
 
 LOGGER = get_logger(__name__)
-DEFAULT_EXPECTED_MODES = ("oracle", "strict")
+DEFAULT_EXPECTED_MODES = ("enabled", "strict")
 ALLOWED_MODE_RETURNCODES = {0, 1}
 _URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _FRONTEND_PATH_KEYS = frozenset(
@@ -294,20 +294,23 @@ def audit_ablation_manifest(
         issues.extend(mode_issues)
         mode_checks[mode] = checks
 
-    if {"oracle", "strict"}.issubset(set(expected_modes)):
+    if len(set(expected_modes)) >= 2:
         comparison = manifest.get("comparison")
         if not isinstance(comparison, dict) or not comparison.get("available"):
             issues.append(
                 issue(
                     "comparison_missing",
-                    "oracle/strict comparison is missing or unavailable",
+                    "mode comparison is missing or unavailable",
                 )
             )
-        elif not isinstance(comparison.get("strict_minus_oracle"), dict):
+        elif (
+            not isinstance(comparison.get("baseline_mode"), str)
+            or not isinstance(comparison.get("deltas_from_baseline"), dict)
+        ):
             issues.append(
                 issue(
                     "comparison_delta_missing",
-                    "oracle/strict comparison delta is missing",
+                    "mode comparison delta is missing",
                 )
             )
 
@@ -1382,7 +1385,7 @@ def _audit_public_rag_payload(
         )
 
     expected_policy = {
-        "oracle": "supplemental_context",
+        "enabled": "retrieved_context",
         "strict": "filtered_context",
     }.get(mode)
     if expected_policy and rag.get("policy") != expected_policy:
@@ -1701,11 +1704,11 @@ def _audit_rag_payload(
                 )
             )
         issues.extend(_audit_strict_rag_provenance(mode, challenge, rag, source))
-    if mode == "oracle" and rag.get("strict_exclude"):
+    if mode == "enabled" and rag.get("strict_exclude"):
         issues.append(
             issue(
-                "rag_oracle_strict",
-                "oracle mode unexpectedly enabled strict exclusion",
+                "rag_enabled_strict",
+                "enabled mode unexpectedly enabled strict exclusion",
                 mode=mode,
                 challenge=challenge,
                 source=source,

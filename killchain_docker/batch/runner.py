@@ -32,7 +32,6 @@ from killchain_docker.batch.docker import (
     start_challenge_with_retry,
 )
 from killchain_docker.environment import CTFEnvironment
-from killchain_docker.rag.oracle import oracle_context_status
 from killchain_docker.rag.status import public_rag_payload
 from killchain_docker.logging_utils import (
     configure_logging,
@@ -911,105 +910,6 @@ def resolve_output_root(
     return logfile.parent / "artifacts" / challenge.canonical_name
 
 
-def _oracle_preflight_skip_result(
-    args: argparse.Namespace,
-    challenge: CTFChallenge,
-    *,
-    logfile: Path,
-    status_file: Path,
-    metadata: dict[str, Any],
-    authorized_scope: list[str],
-    objective: str,
-    effective_max_cycles: int,
-    started_at: float,
-) -> dict[str, Any] | None:
-    if getattr(args, "rag_mode", None) != "oracle":
-        return None
-
-    rag_payload = oracle_context_status(
-        metadata.get("canonical_name") or challenge.canonical_name
-    )
-    public_rag = public_rag_payload(rag_payload) or {}
-    if public_rag.get("status") == "hit" and int(public_rag.get("hint_count") or 0) > 0:
-        return None
-
-    status = str(public_rag.get("status") or "unavailable")
-    message = f"oracle RAG has no actionable solution sketch ({status})"
-    runtime_sec = round(time.time() - started_at, 3)
-    token_usage = _token_usage(None)
-    result = {
-        "challenge": challenge.canonical_name,
-        "solved": False,
-        "status": "skipped",
-        "skip_reason": "rag_oracle_unavailable",
-        "logfile": str(logfile),
-        "status_file": str(status_file),
-        "runtime_sec": runtime_sec,
-        "rag_mode": "oracle",
-        "run_id": None,
-        "artifacts": None,
-        "rag": public_rag,
-        "challenge_metadata": metadata,
-        "authorized_scope": authorized_scope,
-        "max_cycles": effective_max_cycles,
-        "token_usage": token_usage,
-        "state_metrics": {},
-        "error": None,
-        "api_error": False,
-        "llm_error": False,
-        "interrupted": False,
-    }
-    write_log(
-        logfile,
-        {
-            "args": _sanitize_for_log(vars(args)),
-            "challenge": challenge.challenge_info,
-            "challenge_metadata": metadata,
-            "objective": objective,
-            "authorized_scope": authorized_scope,
-            "effective_max_cycles": effective_max_cycles,
-            "success": False,
-            "solved": False,
-            "status": "skipped",
-            "finish_reason": "skipped",
-            "skip_reason": "rag_oracle_unavailable",
-            "artifacts": None,
-            "summary": None,
-            "token_usage": token_usage,
-            "rag": rag_payload,
-            "state_metrics": {},
-            "error": None,
-            "llm_error": False,
-            "start_time": started_at,
-            "end_time": time.time(),
-            "runtime_sec": runtime_sec,
-            "status_file": str(status_file),
-            "rag_mode": "oracle",
-        },
-    )
-    write_run_status(
-        status_file,
-        challenge=challenge.canonical_name,
-        stage="rag_preflight",
-        status="skipped",
-        solved=False,
-        logfile=str(logfile),
-        rag=public_rag,
-        token_usage=token_usage,
-        runtime_sec=runtime_sec,
-        message=message,
-    )
-    LOGGER.warning(
-        "oracle RAG context unavailable; skipping execution benchmark sample",
-        extra={
-            "challenge": challenge.canonical_name,
-            "rag_status": status,
-            "hint_count": int(public_rag.get("hint_count") or 0),
-        },
-    )
-    return result
-
-
 # ---------------------------------------------------------------------------
 # Single challenge execution
 # ---------------------------------------------------------------------------
@@ -1093,19 +993,6 @@ def _run_single_challenge_inner(
     )
 
     started_at = time.time()
-    preflight_skip = _oracle_preflight_skip_result(
-        args,
-        challenge,
-        logfile=logfile,
-        status_file=status_file,
-        metadata=metadata,
-        authorized_scope=authorized_scope,
-        objective=objective,
-        effective_max_cycles=effective_max_cycles,
-        started_at=started_at,
-    )
-    if preflight_skip is not None:
-        return preflight_skip
 
     environment = CTFEnvironment(
         challenge, args.container_image, args.container_network

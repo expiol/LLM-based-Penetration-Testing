@@ -4,10 +4,7 @@ import argparse
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
-
 from killchain_docker.batch.dataset import (
-    _oracle_random_candidates,
     derive_objective,
     _scorable_expected_flag,
     sample_challenge_names,
@@ -37,31 +34,6 @@ class _Dataset:
 
 
 class BatchDatasetTests(unittest.TestCase):
-    def test_oracle_random_candidates_keep_only_actionable_context(self) -> None:
-        args = argparse.Namespace(rag_mode="oracle", split="development", category=None)
-
-        with patch(
-            "killchain_docker.batch.dataset.actionable_oracle_challenge_ids",
-            return_value={"beta"},
-        ):
-            self.assertEqual(
-                _oracle_random_candidates(args, _Dataset(), ["alpha", "beta", "gamma"]),
-                ["beta"],
-            )
-
-    def test_non_oracle_random_candidates_keep_original_names(self) -> None:
-        args = argparse.Namespace(rag_mode="strict", split="development", category=None)
-
-        with patch(
-            "killchain_docker.batch.dataset.actionable_oracle_challenge_ids"
-        ) as scan:
-            self.assertEqual(
-                _oracle_random_candidates(args, _Dataset(), ["alpha", "beta"]),
-                ["alpha", "beta"],
-            )
-
-        scan.assert_not_called()
-
     def test_random_sample_is_seeded(self) -> None:
         args = argparse.Namespace(
             rag_mode="strict",
@@ -96,30 +68,26 @@ class BatchDatasetTests(unittest.TestCase):
             ["gamma", "delta", "beta"],
         )
 
-    def test_oracle_sample_uses_actionable_context_pool(self) -> None:
+    def test_enabled_sample_uses_original_candidate_pool(self) -> None:
         args = argparse.Namespace(
-            rag_mode="oracle",
+            rag_mode="enabled",
             split="development",
             category=None,
-            sample_size=1,
+            sample_size=2,
             sample_seed=0,
             sample_strategy="random",
         )
 
-        with patch(
-            "killchain_docker.batch.dataset.actionable_oracle_challenge_ids",
-            return_value={"gamma"},
-        ):
-            self.assertEqual(
-                sample_challenge_names(_Dataset(), args, ["alpha", "beta", "gamma"]),
-                ["gamma"],
-            )
+        self.assertEqual(
+            sample_challenge_names(_Dataset(), args, ["alpha", "beta", "gamma"]),
+            ["alpha", "gamma"],
+        )
 
-    def test_oracle_full_selection_keeps_unavailable_entries_for_skip_accounting(
+    def test_full_selection_keeps_all_entries(
         self,
     ) -> None:
         args = argparse.Namespace(
-            rag_mode="oracle",
+            rag_mode="enabled",
             split="development",
             category=None,
             sample_size=None,
@@ -127,34 +95,10 @@ class BatchDatasetTests(unittest.TestCase):
             sample_strategy="random",
         )
 
-        with patch(
-            "killchain_docker.batch.dataset.actionable_oracle_challenge_ids"
-        ) as scan:
-            self.assertEqual(
-                sample_challenge_names(_Dataset(), args, ["alpha", "beta", "gamma"]),
-                ["alpha", "beta", "gamma"],
-            )
-
-        scan.assert_not_called()
-
-    def test_oracle_sample_skips_placeholder_expected_flags(self) -> None:
-        args = argparse.Namespace(
-            rag_mode="oracle",
-            split="development",
-            category=None,
-            sample_size=1,
-            sample_seed=0,
-            sample_strategy="random",
+        self.assertEqual(
+            sample_challenge_names(_Dataset(), args, ["alpha", "beta", "gamma"]),
+            ["alpha", "beta", "gamma"],
         )
-
-        with patch(
-            "killchain_docker.batch.dataset.actionable_oracle_challenge_ids",
-            return_value={"alpha", "placeholder"},
-        ):
-            self.assertEqual(
-                sample_challenge_names(_Dataset(), args, ["alpha", "placeholder"]),
-                ["alpha"],
-            )
 
     def test_placeholder_expected_flags_are_not_scorable(self) -> None:
         self.assertFalse(_scorable_expected_flag("flag{xxxxxxxxxxxxxx}"))

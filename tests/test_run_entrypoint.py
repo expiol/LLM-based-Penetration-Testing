@@ -12,7 +12,7 @@ class RunEntrypointTests(unittest.TestCase):
                 "--challenge",
                 "demo-challenge",
                 "--rag-mode",
-                "oracle",
+                "enabled",
                 "--max-cycles",
                 "3",
                 "--parallel-workers",
@@ -27,7 +27,7 @@ class RunEntrypointTests(unittest.TestCase):
 
         self.assertEqual(args.challenge, "demo-challenge")
         self.assertFalse(args.run_all)
-        self.assertEqual(args.rag_mode, "oracle")
+        self.assertEqual(args.rag_mode, "enabled")
         self.assertEqual(args.max_cycles, 3)
         self.assertEqual(args.parallel_workers, 2)
         self.assertEqual(args.logdir, "logs/test")
@@ -41,7 +41,7 @@ class RunEntrypointTests(unittest.TestCase):
                 "alpha",
                 "beta",
                 "--rag-mode",
-                "oracle",
+                "enabled",
             ]
         )
 
@@ -53,7 +53,7 @@ class RunEntrypointTests(unittest.TestCase):
             [
                 "--run-all",
                 "--rag-mode",
-                "oracle",
+                "enabled",
                 "--sample-size",
                 "4",
                 "--sample-seed",

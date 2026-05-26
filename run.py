@@ -83,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root")
     parser.add_argument("--parallel-workers", type=int)
     parser.add_argument("--replicas", type=int)
-    parser.add_argument("--rag-mode", choices=["oracle", "strict", "disabled"])
+    parser.add_argument("--rag-mode", choices=["enabled", "strict", "disabled"])
     parser.add_argument("--sample-size", type=int)
     parser.add_argument("--sample-seed", type=int)
     parser.add_argument(

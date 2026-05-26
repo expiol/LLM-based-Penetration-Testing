@@ -14,13 +14,13 @@ def public_rag_payload(payload: object) -> dict[str, Any] | None:
     enabled = bool(payload.get("enabled"))
     mode = str(payload.get("mode") or "").strip().lower()
     policy = {
-        "oracle": "supplemental_context",
+        "enabled": "retrieved_context",
         "strict": "filtered_context",
         "disabled": "disabled",
     }.get(
         mode,
         str(payload.get("policy") or "").strip()
-        or ("supplemental_context" if enabled else "disabled"),
+        or ("retrieved_context" if enabled else "disabled"),
     )
     hints = payload.get("knowledge_hints")
     if isinstance(hints, list):
@@ -33,7 +33,7 @@ def public_rag_payload(payload: object) -> dict[str, Any] | None:
     if not status:
         status = (
             "pending"
-            if mode in {"oracle", "strict"} and not has_enabled
+            if mode in {"enabled", "strict"} and not has_enabled
             else "disabled"
         )
         if enabled:
@@ -53,4 +53,3 @@ def public_count(value: Any) -> int:
         return max(0, int(value))
     except (TypeError, ValueError, OverflowError):
         return 0
-

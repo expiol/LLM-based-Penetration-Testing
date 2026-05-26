@@ -34,11 +34,9 @@ class RagContext:
     """One retrieval snapshot for the current run."""
 
     enabled: bool
-    mode: str = "oracle"
+    mode: str = "enabled"
     status: str = "unavailable"
     top_score: float = 0.0
-    top_challenge_id: str | None = None
-    challenge_identity_hit: bool = False
     hits: list[RetrievalHit] | None = None
 
     def prompt_hits(
@@ -167,46 +165,15 @@ class RagAugmenter:
             )
             return RagContext(enabled=True, mode=mode, status="error", hits=[])
 
-        identity_hit = self._direct_identity_hit(
-            state, mode, require_solution_sketch=False
-        )
-        identity_solution_hit = (
-            identity_hit
-            if identity_hit is not None and identity_hit.solution_sketch.strip()
-            else None
-        )
-        ranked_hits = self._ranked_hits_with_identity(
-            raw_hits, state, mode, identity_solution_hit
-        )
-        metadata_only_identity = (
-            mode != RAG_MODE_STRICT
-            and identity_hit is not None
-            and (identity_solution_hit is None)
-        )
-        hits = (
-            []
-            if metadata_only_identity
-            else self._select_prompt_hits(ranked_hits, state, mode)
-        )
-        canonical_id = str(
-            (state.metadata.get("challenge", {}) or {}).get("canonical_name") or ""
-        ).strip()
+        hits = list(raw_hits)
         top_hit = hits[0] if hits else None
-        challenge_identity_hit = bool(
-            top_hit and canonical_id and (top_hit.challenge_id == canonical_id)
-        )
-        status = (
-            "metadata_only" if metadata_only_identity else "hit" if hits else "miss"
-        )
+        status = "hit" if hits else "miss"
         self._cache_run_result(
             state,
-            [identity_hit, *ranked_hits]
-            if metadata_only_identity and identity_hit
-            else ranked_hits,
+            raw_hits,
             enabled=True,
             mode=mode,
             status=status,
-            challenge_identity_hit=challenge_identity_hit,
             prompt_hits=hits,
             retrieved_hit_count=len(raw_hits),
             excluded_challenge_ids=excluded_ids,
@@ -220,8 +187,6 @@ class RagAugmenter:
             mode=mode,
             status=status,
             top_score=float(top_hit.score) if top_hit else 0.0,
-            top_challenge_id=top_hit.challenge_id if top_hit else None,
-            challenge_identity_hit=challenge_identity_hit,
             hits=hits,
         )
 
@@ -267,51 +232,6 @@ class RagAugmenter:
         return (excluded_ids, excluded_events)
 
     @staticmethod
-    def _select_prompt_hits(
-        hits: list[RetrievalHit], state: RunState, mode: str
-    ) -> list[RetrievalHit]:
-        if mode == RAG_MODE_STRICT:
-            return hits
-        canonical_id = str(
-            (state.metadata.get("challenge", {}) or {}).get("canonical_name") or ""
-        ).strip()
-        if not canonical_id:
-            return hits
-        identity_hits = [hit for hit in hits if hit.challenge_id == canonical_id]
-        return identity_hits or hits
-
-    def _ranked_hits_with_identity(
-        self,
-        hits: list[RetrievalHit],
-        state: RunState,
-        mode: str,
-        identity_hit: RetrievalHit | None = None,
-    ) -> list[RetrievalHit]:
-        if mode == RAG_MODE_STRICT:
-            return hits
-        direct = identity_hit or self._direct_identity_hit(
-            state, mode, require_solution_sketch=True
-        )
-        if direct is None:
-            return hits
-        return [
-            direct,
-            *[hit for hit in hits if hit.challenge_id != direct.challenge_id],
-        ]
-
-    def _direct_identity_hit(
-        self, state: RunState, mode: str, *, require_solution_sketch: bool
-    ) -> RetrievalHit | None:
-        if mode == RAG_MODE_STRICT or self.provider is None:
-            return None
-        canonical_id = str(
-            (state.metadata.get("challenge", {}) or {}).get("canonical_name") or ""
-        ).strip()
-        return self.provider.hit_by_challenge_id(
-            canonical_id, require_solution_sketch=require_solution_sketch
-        )
-
-    @staticmethod
     def _log_context_result(
         state: RunState, *, mode: str, category: str | None, query: str, top_k: int
     ) -> None:
@@ -346,7 +266,6 @@ class RagAugmenter:
         enabled: bool = True,
         mode: str,
         status: str,
-        challenge_identity_hit: bool = False,
         prompt_hits: list[RetrievalHit] | None = None,
         retrieved_hit_count: int | None = None,
         excluded_challenge_ids: list[str] | None = None,
@@ -379,9 +298,6 @@ class RagAugmenter:
                 "strict_exclude": mode == RAG_MODE_STRICT,
                 "status": status,
                 "top_score": float(prompt_hits[0].score) if prompt_hits else 0.0,
-                "top_challenge_id": prompt_hits[0].challenge_id
-                if prompt_hits
-                else None,
                 "top_year": prompt_hits[0].year if prompt_hits else None,
                 "top_event": prompt_hits[0].event if prompt_hits else None,
                 "top_event_key": prompt_hits[0].event_key if prompt_hits else None,
@@ -389,7 +305,6 @@ class RagAugmenter:
                 "retrieved_hit_count": len(hits)
                 if retrieved_hit_count is None
                 else retrieved_hit_count,
-                "challenge_identity_hit": challenge_identity_hit,
                 "challenge_event_key": challenge_event_key or None,
                 "excluded_challenge_ids": list(excluded_challenge_ids or []),
                 "excluded_event_keys": list(excluded_event_keys or []),
@@ -433,4 +348,3 @@ def _hit_provenance(hit: RetrievalHit) -> dict[str, Any]:
         "event_key": hit.event_key,
         "score": round(float(hit.score), 4),
     }
-

@@ -7,7 +7,7 @@ import re
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo
 
 _SUMMARY_SOURCE_PATTERNS = (
-    (re.compile("\\bin\\s+(?:oracle|strict|filtered)\\s+mode\\b", re.IGNORECASE), ""),
+    (re.compile("\\bin\\s+(?:strict|filtered)\\s+mode\\b", re.IGNORECASE), ""),
     (
         re.compile(
             "\\bthe\\s+related\\s+writeup\\s+for\\s+.+?\\s+is\\s+(?:highly\\s+)?similar\\s*(?:\\([^)]*score[^)]*\\))?\\s+and\\s+",
@@ -57,7 +57,6 @@ _SUMMARY_SOURCE_PATTERNS = (
         "a closely related challenge",
     ),
     (re.compile("\\bself[- ]?hit\\b", re.IGNORECASE), "technical context"),
-    (re.compile("\\boracle\\b", re.IGNORECASE), "supplemental context"),
     (re.compile("\\bstrict\\b", re.IGNORECASE), "filtered"),
     (re.compile("\\bRAG\\b", re.IGNORECASE), "technical context"),
 )
@@ -65,7 +64,7 @@ _SUMMARY_SOURCE_PATTERNS = (
 _TODO_SOURCE_PATTERNS = (
     (
         re.compile(
-            "\\b(?:in|from|under)\\s+(?:oracle|strict|filtered)\\s+mode\\b",
+            "\\b(?:in|from|under)\\s+(?:strict|filtered)\\s+mode\\b",
             re.IGNORECASE,
         ),
         "",
@@ -79,7 +78,7 @@ _TODO_SOURCE_PATTERNS = (
     ),
     (
         re.compile(
-            "\\b(?:oracle|strict|filtered)[- ]?(?:provided|guided|derived)?\\s*(?:source\\s+identity\\s+labels?|mode|sources?|results?|hints?|context|(?:correct\\s+)?answers?|provenance)\\b",
+            "\\b(?:strict|filtered)[- ]?(?:provided|guided|derived)?\\s*(?:source\\s+identity\\s+labels?|mode|sources?|results?|hints?|context|(?:correct\\s+)?answers?|provenance)\\b",
             re.IGNORECASE,
         ),
         "supplemental context",

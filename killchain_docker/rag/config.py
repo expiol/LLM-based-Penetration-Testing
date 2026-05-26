@@ -6,10 +6,10 @@ import os
 
 
 RAG_MODE_ENV = "AUTOPENTEST_RAG_MODE"
-RAG_MODE_ORACLE = "oracle"
+RAG_MODE_ENABLED = "enabled"
 RAG_MODE_STRICT = "strict"
 RAG_MODE_DISABLED = "disabled"
-RAG_MODES = frozenset({RAG_MODE_ORACLE, RAG_MODE_STRICT, RAG_MODE_DISABLED})
+RAG_MODES = frozenset({RAG_MODE_ENABLED, RAG_MODE_STRICT, RAG_MODE_DISABLED})
 
 
 def env_flag(name: str) -> bool:
@@ -33,7 +33,7 @@ def rag_mode(override: str | None = None) -> str:
         return RAG_MODE_DISABLED
     if env_flag("AUTOPENTEST_RAG_STRICT_EXCLUDE"):
         return RAG_MODE_STRICT
-    return RAG_MODE_ORACLE
+    return RAG_MODE_ENABLED
 
 
 def default_top_k() -> int:
@@ -51,4 +51,3 @@ def strict_event_exclusion_enabled() -> bool:
     """Return whether the current RAG mode excludes same-event context."""
 
     return rag_mode() == RAG_MODE_STRICT
-

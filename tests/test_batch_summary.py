@@ -324,44 +324,6 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(status_payload["error"]["type"], "CalledProcessError")
             self.assertEqual(status_payload["token_usage"]["total_tokens"], 13)
 
-    def test_oracle_preflight_skips_metadata_only_context_before_llm(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            args = _args(root)
-            args.name = None
-            args.rag_mode = "oracle"
-            logfile = root / "fake-oracle-skip.json"
-            with (
-                patch(
-                    "killchain_docker.batch.runner.oracle_context_status",
-                    return_value={
-                        "mode": "oracle",
-                        "enabled": True,
-                        "status": "metadata_only",
-                        "policy": "supplemental_context",
-                        "hint_count": 0,
-                    },
-                ),
-                patch("killchain_docker.batch.runner.CTFEnvironment") as environment,
-                patch(
-                    "killchain_docker.batch.runner.build_llm_client_from_env"
-                ) as build_llm,
-            ):
-                result = _run_single_challenge_inner(args, _FakeChallenge(), logfile)
-            payload = json.loads(logfile.read_text(encoding="utf-8"))
-            status = json.loads(
-                (root / "fake-oracle-skip.status.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(result["status"], "skipped")
-            self.assertEqual(result["skip_reason"], "rag_oracle_unavailable")
-            self.assertEqual(result["rag"]["status"], "metadata_only")
-            self.assertEqual(result["rag"]["hint_count"], 0)
-            self.assertEqual(payload["status"], "skipped")
-            self.assertEqual(status["stage"], "rag_preflight")
-            self.assertEqual(status["rag"]["status"], "metadata_only")
-            environment.assert_not_called()
-            build_llm.assert_not_called()
-
     def test_run_assessment_attaches_artifacts_to_runtime_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = RunState(objective="fake objective", authorized_scope=[])
@@ -709,13 +671,13 @@ class BatchSummaryTests(unittest.TestCase):
                 "challenge": "metadata-only-sample",
                 "solved": False,
                 "status": "skipped",
-                "skip_reason": "rag_oracle_unavailable",
+                "skip_reason": "preexisting_log",
                 "runtime_sec": 0.01,
-                "rag_mode": "oracle",
+                "rag_mode": "enabled",
                 "rag": {
                     "enabled": True,
                     "status": "metadata_only",
-                    "policy": "supplemental_context",
+                    "policy": "retrieved_context",
                     "hint_count": 0,
                 },
                 "token_usage": {
@@ -739,10 +701,10 @@ class BatchSummaryTests(unittest.TestCase):
                 )
             )
             self.assertEqual(
-                payload["details"][0]["skip_reason"], "rag_oracle_unavailable"
+                payload["details"][0]["skip_reason"], "preexisting_log"
             )
             self.assertEqual(
-                monitor["entries"][0]["result"]["skip_reason"], "rag_oracle_unavailable"
+                monitor["entries"][0]["result"]["skip_reason"], "preexisting_log"
             )
 
     def test_success_rate_excludes_skipped_results(self) -> None:
@@ -754,7 +716,7 @@ class BatchSummaryTests(unittest.TestCase):
                     "challenge": "metadata-only",
                     "solved": False,
                     "status": "skipped",
-                    "skip_reason": "rag_oracle_unavailable",
+                    "skip_reason": "preexisting_log",
                 },
             ]
             path = _save_batch_progress(

@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-cycles", type=int, help="Maximum orchestrator cycles"
     )
     run_parser.add_argument(
-        "--rag-mode", choices=["oracle", "strict", "disabled"], help="RAG policy mode"
+        "--rag-mode", choices=["enabled", "strict", "disabled"], help="RAG policy mode"
     )
     run_parser.add_argument(
         "--quiet", action="store_true", help="Suppress orchestrator event streaming"
@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     demo_parser.add_argument("--status-path", help="Optional live status JSON path")
     demo_parser.add_argument(
-        "--rag-mode", choices=["oracle", "strict", "disabled"], help="RAG policy mode"
+        "--rag-mode", choices=["enabled", "strict", "disabled"], help="RAG policy mode"
     )
     demo_parser.add_argument(
         "--quiet", action="store_true", help="Suppress orchestrator event streaming"

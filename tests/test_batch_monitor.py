@@ -303,7 +303,7 @@ class BatchMonitorTests(unittest.TestCase):
                     "challenge": "alpha",
                     "rag": {
                         "enabled": True,
-                        "mode": "oracle",
+                        "mode": "enabled",
                         "status": "hit",
                         "hit_count": 3,
                         "knowledge_hints": [{"solution_sketch": "raw hint"}],
@@ -319,7 +319,7 @@ class BatchMonitorTests(unittest.TestCase):
                 {
                     "enabled": True,
                     "status": "hit",
-                    "policy": "supplemental_context",
+                    "policy": "retrieved_context",
                     "hint_count": 1,
                 },
             )
@@ -332,7 +332,7 @@ class BatchMonitorTests(unittest.TestCase):
                     "rag": {
                         "enabled": True,
                         "status": "hit",
-                        "policy": "supplemental_context",
+                        "policy": "retrieved_context",
                         "hint_count": 3,
                     },
                 },
@@ -818,7 +818,7 @@ global.setInterval = () => 0;
             status_payload["rag"] = {
                 "enabled": True,
                 "status": "hit",
-                "policy": "supplemental_context",
+                "policy": "retrieved_context",
                 "hint_count": 2,
             }
             status_path.write_text(json.dumps(status_payload), encoding="utf-8")
@@ -884,7 +884,7 @@ Date.now = () => Date.parse("2026-05-23T00:00:05Z");
   assert(rows.includes("analysis-worker"), rows);
   assert(rows.includes("todo-alpha"), rows);
   assert(rows.includes("Analyze parser state"), rows);
-  assert(rows.includes("knowledge supplemental_context hints 2"), rows);
+  assert(rows.includes("knowledge retrieved_context hints 2"), rows);
   assert(rows.includes("LLM 2 calls / 345 tok"), rows);
   assert(rows.includes("rounds 3 / todos 5 / open 1 / evidence 4 / flags 0 / todo completed=2,pending=1,running=1"), rows);
   assert(!rows.includes('{"completed"'), rows);

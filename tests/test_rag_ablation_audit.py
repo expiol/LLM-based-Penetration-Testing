@@ -50,7 +50,7 @@ def _mode_payload(
     rag_enabled = mode != "disabled"
     rag_status = "hit" if rag_enabled else "disabled"
     public_policy = {
-        "oracle": "supplemental_context",
+        "enabled": "retrieved_context",
         "strict": "filtered_context",
         "disabled": "disabled",
     }[mode]
@@ -75,7 +75,6 @@ def _mode_payload(
         "strict_exclude": mode == "strict",
         "status": rag_status,
         "top_score": 0.9,
-        "top_challenge_id": challenge if challenge_identity_hit else "other-challenge",
         "top_year": "2013",
         "top_event": "Other-Event",
         "top_event_key": "2013:other-event",
@@ -96,12 +95,7 @@ def _mode_payload(
             }
         ],
         "hit_count": 2 if rag_enabled else 0,
-        "challenge_identity_hit": challenge_identity_hit,
     }
-    if mode == "oracle":
-        rag["top_challenge_id"] = challenge
-        rag["challenge_identity_hit"] = True
-
     for key, raw_path in artifacts.items():
         if key.endswith("_path"):
             Path(str(raw_path)).write_text("{}\n", encoding="utf-8")
@@ -284,7 +278,7 @@ class RagAblationAuditTests(unittest.TestCase):
         self.assertEqual(captured.records[0].line_number, 2)
         self.assertEqual(captured.records[0].payload_type, "list")
 
-    def test_audit_accepts_valid_oracle_strict_artifacts(self) -> None:
+    def test_audit_accepts_valid_enabled_strict_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
@@ -294,20 +288,23 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": _mode_payload(root, "oracle"),
+                        "enabled": _mode_payload(root, "enabled"),
                         "strict": _mode_payload(root, "strict"),
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
 
             self.assertTrue(payload["ok"], payload["issues"])
-            self.assertEqual(payload["modes"]["oracle"]["details_checked"], 1)
+            self.assertEqual(payload["modes"]["enabled"]["details_checked"], 1)
             self.assertEqual(payload["modes"]["strict"]["events_checked"], 1)
 
     def test_audit_accepts_disabled_mode_without_required_rag(self) -> None:
@@ -335,8 +332,8 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
-            monitor_path = Path(str(oracle_payload["monitor_json_path"]))
+            enabled_payload = _mode_payload(root, "enabled")
+            monitor_path = Path(str(enabled_payload["monitor_json_path"]))
             monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
             monitor["counts"]["failed"] = 0
             write_json(monitor_path, monitor)
@@ -346,13 +343,13 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                     },
                     "comparison": {"available": False},
                 },
             )
 
-            payload = audit_ablation_manifest(report_path, expected_modes=("oracle",))
+            payload = audit_ablation_manifest(report_path, expected_modes=("enabled",))
             codes = {item["code"] for item in payload["issues"]}
 
             self.assertFalse(payload["ok"])
@@ -362,12 +359,12 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
-            summary_path = Path(str(oracle_payload["summary_path"]))
+            enabled_payload = _mode_payload(root, "enabled")
+            summary_path = Path(str(enabled_payload["summary_path"]))
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             summary["total_attempted"] = "bad"
             write_json(summary_path, summary)
-            monitor_path = Path(str(oracle_payload["monitor_json_path"]))
+            monitor_path = Path(str(enabled_payload["monitor_json_path"]))
             monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
             monitor["counts"]["failed"] = "bad"
             write_json(monitor_path, monitor)
@@ -377,13 +374,13 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                     },
                     "comparison": {"available": False},
                 },
             )
 
-            payload = audit_ablation_manifest(report_path, expected_modes=("oracle",))
+            payload = audit_ablation_manifest(report_path, expected_modes=("enabled",))
             codes = {item["code"] for item in payload["issues"]}
 
             self.assertFalse(payload["ok"])
@@ -394,21 +391,21 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
-            oracle_payload["returncode"] = "bad"
+            enabled_payload = _mode_payload(root, "enabled")
+            enabled_payload["returncode"] = "bad"
             write_json(
                 report_path,
                 {
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                     },
                     "comparison": {"available": False},
                 },
             )
 
-            payload = audit_ablation_manifest(report_path, expected_modes=("oracle",))
+            payload = audit_ablation_manifest(report_path, expected_modes=("enabled",))
             codes = {item["code"] for item in payload["issues"]}
 
             self.assertFalse(payload["ok"])
@@ -418,8 +415,8 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
-            monitor_path = Path(str(oracle_payload["monitor_json_path"]))
+            enabled_payload = _mode_payload(root, "enabled")
+            monitor_path = Path(str(enabled_payload["monitor_json_path"]))
             monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
             monitor["entries"][0]["result"]["status"] = "solved"
             write_json(monitor_path, monitor)
@@ -429,13 +426,13 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                     },
                     "comparison": {"available": False},
                 },
             )
 
-            payload = audit_ablation_manifest(report_path, expected_modes=("oracle",))
+            payload = audit_ablation_manifest(report_path, expected_modes=("enabled",))
             codes = {item["code"] for item in payload["issues"]}
 
             self.assertFalse(payload["ok"])
@@ -486,12 +483,12 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": {
-                            "mode": "oracle",
+                        "enabled": {
+                            "mode": "enabled",
                             "dry_run": True,
                             "returncode": 0,
-                            "command": ["python", "run.py", "--rag-mode", "oracle"],
-                            "logdir": str(root / "oracle"),
+                            "command": ["python", "run.py", "--rag-mode", "enabled"],
+                            "logdir": str(root / "enabled"),
                         },
                         "strict": {
                             "mode": "strict",
@@ -517,7 +514,7 @@ class RagAblationAuditTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertTrue(payload["ok"], payload["issues"])
             self.assertTrue(payload["dry_run"])
-            self.assertEqual(payload["modes"]["oracle"]["returncode"], 0)
+            self.assertEqual(payload["modes"]["enabled"]["returncode"], 0)
 
     def test_audit_reports_invalid_dry_run_returncode_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -529,19 +526,19 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": {
-                            "mode": "oracle",
+                        "enabled": {
+                            "mode": "enabled",
                             "dry_run": True,
                             "returncode": "bad",
-                            "command": ["python", "run.py", "--rag-mode", "oracle"],
-                            "logdir": str(root / "oracle"),
+                            "command": ["python", "run.py", "--rag-mode", "enabled"],
+                            "logdir": str(root / "enabled"),
                         },
                     },
                     "comparison": {"available": False},
                 },
             )
 
-            payload = audit_ablation_manifest(report_path, expected_modes=("oracle",))
+            payload = audit_ablation_manifest(report_path, expected_modes=("enabled",))
             codes = {item["code"] for item in payload["issues"]}
 
             self.assertFalse(payload["ok"])
@@ -559,7 +556,7 @@ class RagAblationAuditTests(unittest.TestCase):
             status["rag"] = {
                 "enabled": True,
                 "status": "hit",
-                "policy": "supplemental_context",
+                "policy": "retrieved_context",
                 "hint_count": 2,
             }
             write_json(status_path, status)
@@ -586,15 +583,15 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             status_path = (
-                Path(str(oracle_payload["logdir"])) / "demo-challenge.status.json"
+                Path(str(enabled_payload["logdir"])) / "demo-challenge.status.json"
             )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             status["rag"] = {
                 "enabled": True,
                 "status": "metadata_only",
-                "policy": "supplemental_context",
+                "policy": "retrieved_context",
                 "hint_count": 0,
             }
             write_json(status_path, status)
@@ -604,13 +601,13 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                     },
                     "comparison": {"available": False},
                 },
             )
 
-            payload = audit_ablation_manifest(report_path, expected_modes=("oracle",))
+            payload = audit_ablation_manifest(report_path, expected_modes=("enabled",))
             codes = {item["code"] for item in payload["issues"]}
 
             self.assertFalse(payload["ok"])
@@ -621,9 +618,9 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             status_path = (
-                Path(str(oracle_payload["logdir"])) / "demo-challenge.status.json"
+                Path(str(enabled_payload["logdir"])) / "demo-challenge.status.json"
             )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             status["rag"]["hint_count"] = "bad"
@@ -634,13 +631,13 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                     },
                     "comparison": {"available": False},
                 },
             )
 
-            payload = audit_ablation_manifest(report_path, expected_modes=("oracle",))
+            payload = audit_ablation_manifest(report_path, expected_modes=("enabled",))
             codes = {item["code"] for item in payload["issues"]}
 
             self.assertFalse(payload["ok"])
@@ -656,15 +653,18 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": _mode_payload(root, "oracle"),
+                        "enabled": _mode_payload(root, "enabled"),
                         "strict": _mode_payload(
                             root, "strict", challenge_identity_hit=True
                         ),
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -685,13 +685,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": _mode_payload(root, "oracle"),
+                        "enabled": _mode_payload(root, "enabled"),
                         "strict": _mode_payload(root, "strict", same_event_hit=True),
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -736,7 +739,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             monitor_path = Path(str(strict_payload["monitor_json_path"]))
             monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
@@ -753,13 +756,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -902,7 +908,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             monitor_path = Path(str(strict_payload["monitor_json_path"]))
             monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
@@ -914,13 +920,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -935,7 +944,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             monitor_path = Path(str(strict_payload["monitor_json_path"]))
             monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
@@ -947,13 +956,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -969,7 +981,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             monitor_path = Path(str(strict_payload["monitor_json_path"]))
             monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
@@ -981,13 +993,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -1002,7 +1017,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             monitor_path = Path(str(strict_payload["monitor_json_path"]))
             monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
@@ -1019,13 +1034,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -1049,7 +1067,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             status_path = (
                 Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
@@ -1067,13 +1085,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -1095,7 +1116,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             html_path = Path(str(strict_payload["monitor_path"]))
             html_path.write_text("<html></html>\n", encoding="utf-8")
@@ -1105,13 +1126,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -1128,7 +1152,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             html_path = Path(str(strict_payload["monitor_path"]))
             html = html_path.read_text(encoding="utf-8")
@@ -1142,13 +1166,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -1169,7 +1196,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             html_path = Path(str(strict_payload["monitor_path"]))
             html = html_path.read_text(encoding="utf-8")
@@ -1183,13 +1210,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -1316,7 +1346,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             html_path = Path(str(strict_payload["monitor_path"]))
             html = html_path.read_text(encoding="utf-8")
@@ -1330,13 +1360,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -1357,7 +1390,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             status_path = (
                 Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
@@ -1377,13 +1410,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -1398,7 +1434,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             status_path = (
                 Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
@@ -1414,13 +1450,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -1436,7 +1475,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             status_path = (
                 Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
@@ -1458,13 +1497,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 
@@ -1584,7 +1626,7 @@ class RagAblationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
-            oracle_payload = _mode_payload(root, "oracle")
+            enabled_payload = _mode_payload(root, "enabled")
             strict_payload = _mode_payload(root, "strict")
             state_path = root / "artifacts" / "strict" / "run-demo" / "state.json"
             state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1608,13 +1650,16 @@ class RagAblationAuditTests(unittest.TestCase):
                     "schema_version": 1,
                     "finished": True,
                     "modes": {
-                        "oracle": oracle_payload,
+                        "enabled": enabled_payload,
                         "strict": strict_payload,
                     },
                     "comparison": {
                         "available": True,
-                        "strict_minus_oracle": {"solved": 0},
-                    },
+                        "baseline_mode": "enabled",
+                        "deltas_from_baseline": {"strict": {"solved": 0}},
+                        "strict_minus_enabled": {"solved": 0},
+
+                        },
                 },
             )
 

@@ -21,9 +21,9 @@ from killchain_docker.processes import run_bounded_process
 
 
 LOGGER = get_logger(__name__)
-DEFAULT_MODES = ("oracle", "strict")
+DEFAULT_MODES = ("enabled", "strict")
 QUALITY_GATE_FAILURE_EXIT_CODE = 4
-QUALITY_GATE_RATE_MODES = {"all", "oracle", "strict", "disabled"}
+QUALITY_GATE_RATE_MODES = {"all", "enabled", "strict", "disabled"}
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STREAM_TAIL_CHARS = 12_000
 
@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--modes",
         nargs="+",
         default=list(DEFAULT_MODES),
-        choices=["oracle", "strict", "disabled"],
+        choices=["enabled", "strict", "disabled"],
     )
     parser.add_argument("--max-cycles", type=int, default=8)
     parser.add_argument(
@@ -557,21 +557,18 @@ def build_comparison(modes: dict[str, Any]) -> dict[str, Any]:
         for mode, payload in modes.items()
         if isinstance(payload, dict)
     }
-    oracle = metrics.get("oracle", {})
-    if not oracle:
-        return {"available": False, "metrics": metrics}
-    comparable = {
+    attempted = {
         mode: payload
         for mode, payload in metrics.items()
-        if mode != "oracle" and _has_attempts(payload)
+        if _has_attempts(payload)
     }
-    if not _has_attempts(oracle) or not comparable:
+    if len(attempted) < 2:
         return {
             "available": False,
             "reason": "insufficient_results",
             "metrics": metrics,
         }
-    rag_issues = _comparison_rag_issues({"oracle": oracle, **comparable})
+    rag_issues = _comparison_rag_issues(attempted)
     if rag_issues:
         return {
             "available": False,
@@ -579,18 +576,22 @@ def build_comparison(modes: dict[str, Any]) -> dict[str, Any]:
             "issues": rag_issues,
             "metrics": metrics,
         }
+    baseline_mode, baseline = next(iter(attempted.items()))
+    comparable = {
+        mode: payload for mode, payload in attempted.items() if mode != baseline_mode
+    }
     deltas = {
-        mode: _comparison_delta(payload, oracle) for mode, payload in comparable.items()
+        mode: _comparison_delta(payload, baseline)
+        for mode, payload in comparable.items()
     }
     comparison = {
         "available": True,
         "metrics": metrics,
-        "deltas_from_oracle": deltas,
+        "baseline_mode": baseline_mode,
+        "deltas_from_baseline": deltas,
     }
-    if "strict" in deltas:
-        comparison["strict_minus_oracle"] = deltas["strict"]
-    if "disabled" in deltas:
-        comparison["disabled_minus_oracle"] = deltas["disabled"]
+    for mode, delta in deltas.items():
+        comparison[f"{mode}_minus_{baseline_mode}"] = delta
     return comparison
 
 
@@ -628,7 +629,7 @@ def _rag_health(
     attempted = _count(summary.get("total_attempted"), default)
     if requested_mode == "disabled":
         return {"mode": requested_mode, "required": False, "ok": True}
-    if requested_mode not in {"oracle", "strict"}:
+    if requested_mode not in {"enabled", "strict"}:
         return {"mode": requested_mode or None, "required": False, "ok": True}
 
     payloads = [
@@ -682,7 +683,7 @@ def _rag_payload_matches_mode(rag: dict[str, Any], requested_mode: str) -> bool:
     if raw_mode:
         return raw_mode == requested_mode
     expected_policy = {
-        "oracle": "supplemental_context",
+        "enabled": "retrieved_context",
         "strict": "filtered_context",
     }.get(requested_mode)
     if not expected_policy:
@@ -715,13 +716,13 @@ def _rate_delta(left: Any, right: Any) -> float | None:
     return round(float(left) - float(right), 4)
 
 
-def _comparison_delta(left: dict[str, Any], oracle: dict[str, Any]) -> dict[str, Any]:
+def _comparison_delta(left: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
     return {
-        "solved": _count(left.get("solved")) - _count(oracle.get("solved")),
+        "solved": _count(left.get("solved")) - _count(baseline.get("solved")),
         "success_rate": _rate_delta(
-            left.get("success_rate"), oracle.get("success_rate")
+            left.get("success_rate"), baseline.get("success_rate")
         ),
-        "total_tokens": _token_delta(left, oracle, "total_tokens"),
+        "total_tokens": _token_delta(left, baseline, "total_tokens"),
     }
 
 

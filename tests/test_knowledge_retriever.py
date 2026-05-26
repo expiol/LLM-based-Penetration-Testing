@@ -23,10 +23,6 @@ from killchain_docker.knowledge.corpus import (
 from killchain_docker.knowledge.embedder import CachedEmbeddingMatrix, StubEmbedder
 from killchain_docker.rag.config import rag_mode
 from killchain_docker.rag.hit import RetrievalHit
-from killchain_docker.rag.oracle import (
-    actionable_oracle_challenge_ids,
-    oracle_context_status,
-)
 from killchain_docker.rag.vector import VectorKnowledgeProvider
 from killchain_docker.rag.status import public_rag_payload
 from killchain_docker.orchestrator.planning.context_builder import PlannerContextBuilder
@@ -236,48 +232,6 @@ class LoadCorpusTests(unittest.TestCase):
         entries = load_corpus(self.tmp, idx_path)
         self.assertNotIn("Copyright banner", entries[0].solution_sketch)
         self.assertIn("uint32_t step", entries[0].solution_sketch)
-
-    def test_oracle_context_status_distinguishes_actionable_and_metadata_only(self):
-        index = {
-            "actionable": self._make_chal(
-                "actionable",
-                rel="development/2013/CSAW-Quals/rev/actionable",
-                name="actionable",
-                category="rev",
-                description="binary with a solver",
-                solution="Invert the transform and validate locally.",
-                files=["actionable"],
-            ),
-            "metadata-only": self._make_chal(
-                "metadata-only",
-                rel="development/2013/CSAW-Quals/rev/metadata-only",
-                name="metadata-only",
-                category="rev",
-                description="binary without a solver writeup",
-                solution="",
-                files=["metadata-only"],
-            ),
-        }
-        idx_path = self.tmp / "development_dataset.json"
-        idx_path.write_text(json.dumps(index), encoding="utf-8")
-        self.assertEqual(
-            oracle_context_status("actionable", dataset_root=str(self.tmp))["status"],
-            "hit",
-        )
-        self.assertEqual(
-            oracle_context_status("metadata-only", dataset_root=str(self.tmp))[
-                "status"
-            ],
-            "metadata_only",
-        )
-        self.assertEqual(
-            oracle_context_status("missing", dataset_root=str(self.tmp))["status"],
-            "miss",
-        )
-        self.assertEqual(
-            actionable_oracle_challenge_ids(dataset_root=str(self.tmp)), {"actionable"}
-        )
-
 
 class VectorKnowledgeProviderTests(unittest.TestCase):
     def setUp(self):
@@ -584,11 +538,11 @@ class VectorKnowledgeProviderTests(unittest.TestCase):
 
     def test_public_rag_payload_distinguishes_pending_from_disabled(self):
         self.assertEqual(
-            public_rag_payload({"mode": "oracle"}),
+            public_rag_payload({"mode": "enabled"}),
             {
                 "enabled": False,
                 "status": "pending",
-                "policy": "supplemental_context",
+                "policy": "retrieved_context",
                 "hint_count": 0,
             },
         )
@@ -615,7 +569,7 @@ class VectorKnowledgeProviderTests(unittest.TestCase):
         self.assertEqual(
             public_rag_payload(
                 {
-                    "mode": "oracle",
+                    "mode": "enabled",
                     "enabled": True,
                     "status": "hit",
                     "hint_count": "bad",
@@ -624,7 +578,7 @@ class VectorKnowledgeProviderTests(unittest.TestCase):
             {
                 "enabled": True,
                 "status": "hit",
-                "policy": "supplemental_context",
+                "policy": "retrieved_context",
                 "hint_count": 0,
             },
         )
@@ -806,24 +760,17 @@ class RagAugmenterTests(unittest.TestCase):
         score = context.top_score
         self.assertGreaterEqual(score, -1.0)
         self.assertLessEqual(score, 1.0)
-        self.assertIn(
-            context.top_challenge_id,
-            {entry.challenge_id for entry in self.provider.entries},
-        )
         cached = self.state.metadata.get("rag")
         self.assertIsNotNone(cached)
         self.assertTrue(cached["enabled"])
-        self.assertEqual(cached["mode"], "oracle")
+        self.assertEqual(cached["mode"], "enabled")
         self.assertEqual(cached["status"], "hit")
         self.assertFalse(cached["strict_exclude"])
         rendered_hits = context.prompt_hits(
             max_solution_chars=9000, max_description_chars=280, max_files=8
         )
         self.assertEqual(cached["hit_count"], len(rendered_hits))
-        self.assertIn(
-            cached["top_challenge_id"],
-            {entry.challenge_id for entry in self.provider.entries},
-        )
+        self.assertNotIn("top_challenge_id", cached)
         self.assertIn("hit_provenance", cached)
         self.assertEqual(cached["knowledge_hints"], rendered_hits)
         self.assertNotIn("challenge_id", cached["knowledge_hints"][0])
@@ -843,29 +790,30 @@ class RagAugmenterTests(unittest.TestCase):
         ]
         self.assertEqual(len(records), 1)
         record = records[0]
-        self.assertEqual(record.rag_mode, "oracle")
+        self.assertEqual(record.rag_mode, "enabled")
         self.assertTrue(record.rag_enabled)
         self.assertEqual(record.rag_status, "hit")
-        self.assertEqual(record.rag_policy, "supplemental_context")
-        self.assertEqual(record.hint_count, 1)
+        self.assertEqual(record.rag_policy, "retrieved_context")
+        self.assertEqual(record.hint_count, 2)
         self.assertEqual(record.retrieved_hit_count, 2)
         self.assertGreater(record.query_chars, 0)
         self.assertNotIn("knowledge_hints", record.__dict__)
         self.assertNotIn("hit_provenance", record.__dict__)
         self.assertNotIn("top_challenge_id", record.__dict__)
 
-    def test_identity_match_limits_prompt_hints_to_matching_context(self):
+    def test_enabled_mode_keeps_provider_ranking_without_identity_filter(self):
         context = self.augmenter.context_for(self.state)
         self.assertEqual(
-            [hit.challenge_id for hit in context.hits or []], ["2013f-cry-stfu"]
+            [hit.challenge_id for hit in context.hits or []],
+            ["2013f-cry-stfu", "2013q-cry-csawpad"],
         )
         cached = self.state.metadata["rag"]
-        self.assertEqual(cached["hit_count"], 1)
+        self.assertEqual(cached["hit_count"], 2)
         self.assertEqual(cached["retrieved_hit_count"], 2)
         self.assertEqual(len(cached["hit_provenance"]), 2)
-        self.assertEqual(cached["hint_count"], 1)
+        self.assertEqual(cached["hint_count"], 2)
 
-    def test_oracle_mode_adds_direct_context_when_provider_ranking_misses_identity(self):
+    def test_enabled_mode_does_not_add_direct_identity_context(self):
         provider = _DirectLookupProvider()
         state = RunState(
             objective="generic query whose dense result is a distractor",
@@ -877,20 +825,20 @@ class RagAugmenterTests(unittest.TestCase):
                 }
             },
         )
-        augmenter = RagAugmenter(provider, top_k=1, mode="oracle")
+        augmenter = RagAugmenter(provider, top_k=1, mode="enabled")
         context = augmenter.context_for(state)
         self.assertEqual(
-            [hit.challenge_id for hit in context.hits or []], ["target-challenge"]
+            [hit.challenge_id for hit in context.hits or []], ["distractor-challenge"]
         )
         cached = state.metadata["rag"]
         self.assertEqual(cached["retrieved_hit_count"], 1)
         self.assertEqual(
             [item["challenge_id"] for item in cached["hit_provenance"]],
-            ["target-challenge", "distractor-challenge"],
+            ["distractor-challenge"],
         )
         self.assertEqual(cached["hint_count"], 1)
         self.assertEqual(
-            cached["knowledge_hints"][0]["solution_sketch"], "right method"
+            cached["knowledge_hints"][0]["solution_sketch"], "wrong method"
         )
 
     def test_strict_mode_does_not_add_direct_context(self):
@@ -911,7 +859,7 @@ class RagAugmenterTests(unittest.TestCase):
             [hit.challenge_id for hit in context.hits or []], ["distractor-challenge"]
         )
 
-    def test_description_only_identity_hint_is_not_actionable_oracle_context(self):
+    def test_description_only_hit_is_not_used_without_solution_sketch(self):
         late_hint = "late protocol hint survives description budget"
         description = "start " + "filler " * 80 + late_hint
         provider = VectorKnowledgeProvider(
@@ -938,15 +886,15 @@ class RagAugmenterTests(unittest.TestCase):
                 }
             },
         )
-        augmenter = RagAugmenter(provider, mode="oracle")
+        augmenter = RagAugmenter(provider, mode="enabled")
         context = augmenter.context_for(state)
         hints = context.prompt_hits(
             max_solution_chars=9000, max_description_chars=280, max_files=8
         )
         cached = state.metadata["rag"]
         self.assertEqual(hints, [])
-        self.assertEqual(context.status, "metadata_only")
-        self.assertEqual(cached["status"], "metadata_only")
+        self.assertEqual(context.status, "miss")
+        self.assertEqual(cached["status"], "miss")
         self.assertEqual(cached["hit_count"], 0)
         self.assertEqual(cached["hint_count"], 0)
         self.assertNotIn("knowledge_hints", cached)
@@ -1005,7 +953,7 @@ class RagAugmenterTests(unittest.TestCase):
 
     def test_explicit_mode_overrides_environment(self):
         augmenter = RagAugmenter(self.provider, mode="strict")
-        with mock.patch.dict(os.environ, {"AUTOPENTEST_RAG_MODE": "oracle"}):
+        with mock.patch.dict(os.environ, {"AUTOPENTEST_RAG_MODE": "enabled"}):
             context = augmenter.context_for(self.state)
         self.assertNotIn(
             "2013f-cry-stfu", {hit.challenge_id for hit in context.hits or []}
@@ -1105,7 +1053,7 @@ class PlannerInjectionTests(unittest.TestCase):
         self.assertGreaterEqual(knowledge["suppressed_hint_count"], 1)
         self.assertNotIn("solution_sketch", json.dumps(knowledge))
 
-    def test_oracle_identity_hit_keeps_method_hints_despite_stalled_family(self):
+    def test_misleading_policy_suppresses_enabled_method_hints(self):
         for index in range(3):
             self.state.todos.append(
                 TodoItem(
@@ -1120,10 +1068,9 @@ class PlannerInjectionTests(unittest.TestCase):
         ctx = PlannerContextBuilder(augmenter=self.augmenter).build(self.state)
         payload = json.loads(render_planner_prompt(ctx))
         knowledge = payload["knowledge_augmentation"]
-        self.assertNotEqual(knowledge.get("policy"), "possibly_misleading")
-        self.assertNotIn("suppressed_hint_count", knowledge)
-        self.assertGreaterEqual(len(knowledge["knowledge_hints"]), 1)
-        self.assertIn("solution_sketch", knowledge["knowledge_hints"][0])
+        self.assertEqual(knowledge["policy"], "possibly_misleading")
+        self.assertNotIn("knowledge_hints", knowledge)
+        self.assertGreaterEqual(knowledge["suppressed_hint_count"], 1)
 
     def test_disabled_augmenter_omits_knowledge_hints(self):
         ctx = PlannerContextBuilder(augmenter=RagAugmenter(None)).build(

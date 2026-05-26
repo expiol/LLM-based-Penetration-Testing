@@ -12,7 +12,6 @@ from typing import Any
 from nyuctf.challenge import CTFChallenge
 from nyuctf.dataset import CTFDataset
 
-from killchain_docker.rag.oracle import actionable_oracle_challenge_ids
 from killchain_docker.logging_utils import get_logger
 
 
@@ -66,39 +65,6 @@ def challenge_names_for_category(
         if normalize_category(challenge_info.get("category")) == category_filter:
             filtered.append(name)
     return filtered
-
-
-def _oracle_random_candidates(
-    args: argparse.Namespace,
-    dataset: CTFDataset,
-    names: list[str],
-) -> list[str]:
-    return oracle_actionable_names(args, dataset, names)
-
-
-def oracle_actionable_names(
-    args: argparse.Namespace,
-    dataset: CTFDataset,
-    names: list[str],
-) -> list[str]:
-    if getattr(args, "rag_mode", None) != "oracle":
-        return list(names)
-    ids = actionable_oracle_challenge_ids(dataset_root=str(dataset.basedir))
-    candidates = [name for name in names if name in ids]
-    if candidates:
-        scorable = _scorable_challenge_names(dataset, candidates)
-        if scorable:
-            return scorable
-        raise ValueError(_no_oracle_candidates_message(args, "scorable"))
-    raise ValueError(_no_oracle_candidates_message(args, "actionable"))
-
-
-def _no_oracle_candidates_message(args: argparse.Namespace, kind: str) -> str:
-    category_filter = normalize_category(getattr(args, "category", None))
-    message = f"No oracle-{kind} challenges found in split '{args.split}'"
-    if category_filter:
-        message += f" with category '{category_filter}'"
-    return message
 
 
 def _scorable_challenge_names(dataset: CTFDataset, names: list[str]) -> list[str]:
@@ -168,7 +134,7 @@ def sample_challenge_names(
     if raw_size is None:
         return list(names)
 
-    candidates = oracle_actionable_names(args, dataset, list(names))
+    candidates = list(names)
 
     sample_size = int(raw_size)
     if sample_size <= 0:
@@ -244,7 +210,6 @@ def load_challenge(args: argparse.Namespace) -> CTFChallenge:
             if category_filter:
                 message += f" with category '{category_filter}'"
             raise ValueError(message)
-        names = _oracle_random_candidates(args, dataset, names)
         chosen = random.choice(names)
         LOGGER.info(
             "randomly selected challenge",
