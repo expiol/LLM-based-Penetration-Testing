@@ -3,8 +3,7 @@
 from __future__ import annotations
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
-from killchain_docker.state.candidate_projection import CandidateProjection
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.evidence_projection import EvidenceProjectionStore
 from killchain_docker.state.run_state import RunState
@@ -22,7 +21,7 @@ class RecoverySeedPlanner:
         expected_prefix = ChallengeProjection(state).flag_format_prefix()
         todos: list[PlannedTodo] = []
         notes: list[str] = []
-        for rejected in reversed(CandidateProjection(state).rejected_records()):
+        for rejected in reversed(list(state.rejected_flag_candidates)):
             if not self._rejection_is_actionable(rejected.reason):
                 continue
             dedupe_key = f"bootstrap:candidate-recovery:{rejected.rejection_id}"
@@ -116,7 +115,7 @@ class RecoverySeedPlanner:
 
     @staticmethod
     def artifact_inventory_completed(state: RunState) -> bool:
-        return TodoQueueReader(state).completed_dedupe_key(
+        return TodoQueue(state).completed_dedupe_key(
             "bootstrap:artifact-inventory"
         )
 
@@ -142,4 +141,4 @@ class RecoverySeedPlanner:
 
     @staticmethod
     def _has_todo_key(state: RunState, dedupe_key: str) -> bool:
-        return TodoQueueReader(state).has_dedupe_key(dedupe_key)
+        return TodoQueue(state).has_dedupe_key(dedupe_key)

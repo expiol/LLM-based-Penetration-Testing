@@ -6,8 +6,7 @@ from enum import StrEnum
 
 from killchain_docker.llm.gateway import LLMClientError
 from killchain_docker.orchestrator.runtime_events import RuntimeEventController
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
-from killchain_docker.orchestrator.todo_status_commands import TodoStatusCommands
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.maintenance import RunStateMaintenance
 from killchain_docker.state.metadata import RunMetadataStore
@@ -109,9 +108,9 @@ class RunTerminationController:
     def mark_llm_error(self, cycle: int, source: str, exc: LLMClientError) -> str:
         reason = self.remember_llm_error(cycle, source, exc)
         self.outcome.failed("llm_error", touch=False)
-        commands = TodoStatusCommands(self.state)
-        commands.fail_running(reason, retryable=False)
-        commands.block_open("llm_error")
+        todos = TodoQueue(self.state)
+        todos.fail_running(reason, retryable=False)
+        todos.block_open("llm_error")
         RunStateMaintenance(self.state).touch()
         return reason
 
@@ -125,7 +124,7 @@ class RunTerminationController:
     ) -> str:
         reason = self.remember_llm_error(cycle, source, exc)
         self.outcome.failed("llm_transient_error", touch=False)
-        TodoStatusCommands(self.state).halt_for_transient_error(reason, todo=todo)
+        TodoQueue(self.state).halt_for_transient_error(reason, todo=todo)
         if self.events is not None:
             self.events.emit(
                 f"[cycle {cycle}] transient LLM error budget exhausted in {source}; "
@@ -150,11 +149,10 @@ class RunTerminationController:
         )
 
     def finalize(self, *, max_cycles_exhausted: bool) -> None:
-        reader = TodoQueueReader(self.state)
-        commands = TodoStatusCommands(self.state)
-        open_todos = reader.has_open()
-        terminal_unsolved_todos = reader.has_terminal_unsolved()
-        terminal_unsolved_reason = reader.terminal_unsolved_reason()
+        todos = TodoQueue(self.state)
+        open_todos = todos.has_open()
+        terminal_unsolved_todos = todos.has_terminal_unsolved()
+        terminal_unsolved_reason = todos.terminal_unsolved_reason()
         self.outcome.finalize_terminal(
             max_cycles_exhausted=max_cycles_exhausted,
             has_open_todos=open_todos,
@@ -162,7 +160,7 @@ class RunTerminationController:
             terminal_unsolved_reason=terminal_unsolved_reason,
         )
         if max_cycles_exhausted and open_todos:
-            commands.block_open("max_cycles_exhausted")
+            todos.block_open("max_cycles_exhausted")
             RunJournal(self.state).orchestration_note("max_cycles_exhausted")
         RunStateMaintenance(self.state).touch()
 

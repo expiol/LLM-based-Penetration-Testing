@@ -10,7 +10,7 @@ from killchain_docker.orchestrator.progress_limits import (
     FAILURE_COOLDOWN_THRESHOLD,
 )
 from killchain_docker.orchestrator.todo_family import family_candidates_for, family_for
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.todos import TodoItem, TodoStatus
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ def todo_family_candidates(todo: TodoItem) -> set[str]:
 def family_counts(state: "RunState", family: str) -> tuple[int, int]:
     total = 0
     failed = 0
-    for todo in TodoQueueReader(state).all():
+    for todo in TodoQueue(state).all():
         if family not in todo_family_candidates(todo):
             continue
         total += 1
@@ -44,7 +44,7 @@ def family_counts(state: "RunState", family: str) -> tuple[int, int]:
 def consecutive_failures_without_evidence(state: "RunState", family: str) -> int:
     family_todos = [
         todo
-        for todo in TodoQueueReader(state).all()
+        for todo in TodoQueue(state).all()
         if family in todo_family_candidates(todo)
     ]
     consecutive = 0
@@ -67,7 +67,7 @@ def consecutive_failures_without_evidence(state: "RunState", family: str) -> int
 def stagnation_snapshot(state: "RunState") -> dict[str, Any]:
     counts = Counter()
     failed_counts = Counter()
-    for todo in TodoQueueReader(state).all():
+    for todo in TodoQueue(state).all():
         for family in todo_family_candidates(todo):
             counts[family] += 1
             if todo.status in {
@@ -91,7 +91,7 @@ def stagnation_snapshot(state: "RunState") -> dict[str, Any]:
 
 def bankrupt_families(state: "RunState") -> list[tuple[str, int]]:
     bankrupt: list[tuple[str, int]] = []
-    todos = TodoQueueReader(state).all()
+    todos = TodoQueue(state).all()
     seen_families = {
         family for todo in todos for family in todo_family_candidates(todo)
     }

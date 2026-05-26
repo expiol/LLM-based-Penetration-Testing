@@ -2,44 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
-
 from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, WorkerResult
 from killchain_docker.tools.capabilities import ToolCapability, direct_tool_capabilities
-from killchain_docker.tools.core import ToolExecutionBundle, ToolExecutionError
+from killchain_docker.tools.core import ToolExecutionError
 from killchain_docker.tools.guard_policy import ToolGuardPolicy
-from killchain_docker.workers.execution.metadata import prepare_execution_metadata
-from killchain_docker.workers.execution.policy import tool_success
-from killchain_docker.workers.results.assembly import worker_result_from_bundle
 from killchain_docker.workers.execution.intent import artifact_triage_intent_is_direct
-
-
-class DirectExecutionAgent(Protocol):
-    name: str
-    allowed_capabilities: tuple[ToolCapability, ...]
-
-    def report_progress(
-        self, state: RunState, task: TodoItem, message: str
-    ) -> None: ...
-
-    def report_flag_candidates(
-        self, state: RunState, task: TodoItem, candidates
-    ) -> None: ...
-
-    def run_capability(
-        self,
-        *,
-        task: TodoItem,
-        capability: ToolCapability | str,
-        metadata: dict[str, Any],
-        timeout_s: int | None = None,
-    ) -> ToolExecutionBundle: ...
+from killchain_docker.workers.execution.policy import tool_success
+from killchain_docker.workers.execution.step import (
+    LoopExecutionAgent,
+    prepare_execution_metadata,
+)
+from killchain_docker.workers.results.assembly import worker_result_from_bundle
 
 
 def run_direct_capability(
-    agent: DirectExecutionAgent, task: TodoItem, state: RunState
+    agent: LoopExecutionAgent, task: TodoItem, state: RunState
 ) -> WorkerResult | None:
     capability = _direct_capability(task, agent.allowed_capabilities)
     if capability is None:
@@ -124,4 +103,4 @@ def _direct_failure(
     )
 
 
-__all__ = ["DirectExecutionAgent", "run_direct_capability"]
+__all__ = ["run_direct_capability"]

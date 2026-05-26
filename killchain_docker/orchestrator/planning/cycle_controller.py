@@ -14,7 +14,7 @@ from killchain_docker.orchestrator.planning.refresh_results import (
     DETERMINISTIC_BACKLOG_SUMMARY,
     PlanningCycleResult,
 )
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.metadata import RunMetadataStore
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.run_state import RunState
@@ -27,13 +27,13 @@ class PlanningCycleController:
         self,
         *,
         state: RunState,
-        reader: TodoQueueReader,
+        todos: TodoQueue,
         refresh: PlanningRefreshController,
         events: ExecutionEventsView,
         termination: RunTerminationView,
     ) -> None:
         self.state = state
-        self.reader = reader
+        self.todos = todos
         self.refresh = refresh
         self.events = events
         self.termination = termination
@@ -41,7 +41,7 @@ class PlanningCycleController:
         self.metadata = RunMetadataStore(state)
 
     def plan(self, *, cycle: int) -> PlanningCycleResult:
-        if self.reader.has_ready():
+        if self.todos.has_ready():
             self.events.emit(f"[cycle {cycle}] planner skipped - ready todo backlog")
             if self.metadata.consume_transient_skip() is not None:
                 return PlanningCycleResult(summary=DETERMINISTIC_BACKLOG_SUMMARY)
@@ -58,7 +58,7 @@ class PlanningCycleController:
                 permanent_message=f"[cycle {cycle}] planner LLM error - aborting run",
             )
             return self._result_from_failure_action(action, exc=exc)
-        if refresh.stop_run and (self.outcome.is_solved or not self.reader.has_open()):
+        if refresh.stop_run and (self.outcome.is_solved or not self.todos.has_open()):
             self.events.emit(f"[cycle {cycle}] planner signalled stop - halting run")
             self.outcome.stopped("planner_stop", touch=False)
             self.events.checkpoint()

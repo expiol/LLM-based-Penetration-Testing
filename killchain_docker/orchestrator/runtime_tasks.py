@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from killchain_docker.orchestrator.agent_lifecycle import AgentLifecycle
-from killchain_docker.orchestrator.todo_status_commands import TodoStatusCommands
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.common import utc_now
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, WorkerResult
@@ -114,12 +114,12 @@ class AssignmentLifecycleController:
         state: RunState,
         lifecycle: AgentLifecycle,
         registry: RuntimeTaskRegistry,
-        commands: TodoStatusCommands | None = None,
+        todos: TodoQueue | None = None,
     ) -> None:
         self.state = state
         self.lifecycle = lifecycle
         self.registry = registry
-        self.commands = commands or TodoStatusCommands(state)
+        self.todos = todos or TodoQueue(state)
 
     def begin(
         self, *, cycle: int, todo: TodoItem, worker: WorkerAgent
@@ -135,7 +135,7 @@ class AssignmentLifecycleController:
         )
         self.registry.start(runtime_task.task_id)
         self.lifecycle.begin(worker.name, todo.todo_id)
-        self.commands.start(todo, worker.name, touch=False)
+        self.todos.start(todo, worker.name, touch=False)
         return runtime_task
 
     def complete(
@@ -156,7 +156,7 @@ class AssignmentLifecycleController:
         runtime_task: RuntimeTaskState,
         reason: str,
     ) -> None:
-        self.commands.release_transient(todo, reason, touch=False)
+        self.todos.release_transient(todo, reason, touch=False)
         self.registry.interrupt(runtime_task.task_id, reason)
         self.lifecycle.interrupt(worker.name, reason)
 

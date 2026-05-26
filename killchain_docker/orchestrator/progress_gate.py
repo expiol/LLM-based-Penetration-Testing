@@ -22,7 +22,7 @@ from killchain_docker.orchestrator.todo_family import (
     family_for,
 )
 from killchain_docker.orchestrator.todo_path_predicates import has_context_path
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.grounding_projection import GroundingProjection
 from killchain_docker.state.metadata import RunMetadataStore
@@ -97,7 +97,7 @@ def _flag_validation_allows(
         same_candidate_count = sum(
             (
                 1
-                for t in TodoQueueReader(state).by_family(
+                for t in TodoQueue(state).by_family(
                     "flag-validation",
                     lambda item: str(
                         item.context.get("family")

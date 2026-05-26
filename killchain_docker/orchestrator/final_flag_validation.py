@@ -2,15 +2,32 @@
 
 from __future__ import annotations
 
+from typing import Protocol
+
+from killchain_docker.orchestrator.agent_directory import AgentDirectory
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
-from killchain_docker.orchestrator.closure_rounds import ClosureRoundRecorder
-from killchain_docker.orchestrator.closure_todo_execution import ClosureTodoExecutor
+from killchain_docker.orchestrator.execution import Execution
 from killchain_docker.orchestrator.runtime_events import RuntimeEventController
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
-from killchain_docker.orchestrator.todo_queue_writer import TodoQueueWriter
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.run_state import RunState
-from killchain_docker.state.todos import TodoItem, TodoPhase
+from killchain_docker.state.todos import (
+    TodoItem,
+    TodoPhase,
+    WorkerAssignment,
+    WorkerResult,
+)
+
+
+class _RoundRecorder(Protocol):
+    def record(
+        self,
+        *,
+        cycle: int,
+        planner_summary: str,
+        assignments: list[WorkerAssignment],
+        results: list[WorkerResult],
+    ) -> None: ...
 
 
 class FinalFlagValidationPass:
@@ -20,22 +37,22 @@ class FinalFlagValidationPass:
         self,
         *,
         state: RunState,
-        reader: TodoQueueReader,
-        writer: TodoQueueWriter,
-        executor: ClosureTodoExecutor,
-        recorder: ClosureRoundRecorder,
+        todos: TodoQueue,
+        agent_directory: AgentDirectory,
+        execution: Execution,
+        recorder: _RoundRecorder,
         events: RuntimeEventController,
     ) -> None:
         self.state = state
-        self.reader = reader
-        self.writer = writer
-        self.executor = executor
+        self.todos = todos
+        self.agent_directory = agent_directory
+        self.execution = execution
         self.recorder = recorder
         self.events = events
         self.outcome = RunOutcomeStore(state)
 
     def run(self, *, cycle: int) -> bool:
-        if self.outcome.is_solved or self.reader.has_open():
+        if self.outcome.is_solved or self.todos.has_open():
             return False
         queued = self._queue_candidates()
         if not queued:
@@ -43,14 +60,25 @@ class FinalFlagValidationPass:
         self.events.emit(
             f"[cycle {cycle}] final flag validation pass for {len(queued)} candidate(s)"
         )
-        results, assignments = self.executor.execute_flag_validation(
-            cycle=cycle, todos=queued
+
+        def select_worker(todo: TodoItem):
+            worker, reason = self.agent_directory.select(
+                "flag-worker", todo, self.state
+            )
+            return worker, "flag-worker", reason
+
+        outcome = self.execution.run_assignments(
+            cycle=cycle,
+            todos=queued,
+            select_worker=select_worker,
+            rationale="final validation pass",
+            event_label="final validation",
         )
         self.recorder.record(
             cycle=cycle,
             planner_summary="final flag validation pass",
-            assignments=assignments,
-            results=results,
+            assignments=outcome.executed_assignments,
+            results=outcome.results,
         )
         return True
 
@@ -58,10 +86,10 @@ class FinalFlagValidationPass:
         queued: list[TodoItem] = []
         for candidate in CandidatePolicy.validation_ready_candidates(self.state):
             dedupe_key = f"final:flag-validation:{candidate.value}"
-            if self.reader.has_dedupe_key(dedupe_key):
+            if self.todos.has_dedupe_key(dedupe_key):
                 continue
             queued.append(
-                self.writer.enqueue(
+                self.todos.enqueue(
                     TodoItem(
                         goal="Validate recovered flag candidate.",
                         phase=TodoPhase.FLAG_VALIDATION,

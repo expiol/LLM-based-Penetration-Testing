@@ -16,7 +16,7 @@ from killchain_docker.orchestrator.progress_gate import progress_allows
 from killchain_docker.orchestrator.progress_limits import FAILURE_COOLDOWN_THRESHOLD
 from killchain_docker.orchestrator.todo_keys import default_key
 from killchain_docker.orchestrator.todo_normalization import normalize_todo
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.scope_guard import (
     todo_ephemeral_artifact_dependency_reason,
     todo_loopback_block_reason,
@@ -26,7 +26,6 @@ from killchain_docker.state.artifact_projection import ArtifactProjectionStore
 from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.grounding_projection import GroundingProjection
 from killchain_docker.state.run_state import RunState
-from killchain_docker.state.scope_projection import ScopeProjection
 from killchain_docker.state.todos import TodoPhase, todo_phase_rank
 
 
@@ -91,7 +90,7 @@ class PlanningPipeline(PlannerAgent):
     def _dedupe(
         self, todos: list[PlannedTodo], state: RunState
     ) -> tuple[list[PlannedTodo], list[str]]:
-        queue = TodoQueueReader(state)
+        queue = TodoQueue(state)
         seen = queue.dedupe_keys()
         atomic_seen = queue.atomic_recon_keys(set(self._ATOMIC_RECON_FAMILIES))
         validation_seen = queue.active_validation_candidates(
@@ -183,7 +182,7 @@ class PlanningPipeline(PlannerAgent):
     ) -> tuple[list[PlannedTodo], list[str]]:
         kept: list[PlannedTodo] = []
         dropped = 0
-        authorized_scope = ScopeProjection(state).entries()
+        authorized_scope = list(state.authorized_scope)
         challenge_files = ChallengeProjection(state).files()
         artifact_paths = ArtifactProjectionStore(state).paths()
         for todo in todos:
@@ -217,7 +216,7 @@ class PlanningPipeline(PlannerAgent):
 
     @staticmethod
     def _frontier_phase(todos: list[PlannedTodo], state: RunState) -> TodoPhase | None:
-        open_phases = TodoQueueReader(state).open_phases()
+        open_phases = TodoQueue(state).open_phases()
         if open_phases:
             return min(open_phases, key=todo_phase_rank)
         if todos and CandidatePolicy.validation_ready_candidates(state):

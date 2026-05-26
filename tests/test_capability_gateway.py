@@ -9,7 +9,7 @@ import time
 import tarfile
 import unittest
 from pathlib import Path
-from tests.queue_harness import todo_queue
+from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, WorkerResult
 from killchain_docker.state.state_delta import StateDeltaApplier

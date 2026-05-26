@@ -1,22 +1,68 @@
-"""Single-step selection and execution for worker tool loops."""
+"""Single-step worker tool selection, metadata prep, and execution."""
 
 from __future__ import annotations
 
+from typing import Any, Protocol
+from urllib.parse import urlparse
+
+from killchain_docker.reasoning.schemas import ToolUseDecision
+from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.domain import Hypothesis
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, WorkerResult
 from killchain_docker.tools.capabilities import ToolCapability
 from killchain_docker.tools.core import ToolExecutionBundle, ToolExecutionError
 from killchain_docker.tools.guard_policy import ToolGuardPolicy
-from killchain_docker.workers.execution.agent import LoopExecutionAgent
-from killchain_docker.workers.execution.failures import metadata_failure_result
-from killchain_docker.workers.execution.metadata import prepare_execution_metadata
-from killchain_docker.workers.execution.history import validation_error_step
-from killchain_docker.workers.execution.selection import (
-    choose_capability,
-    choose_fixed_capability,
-    fixed_llm_capability,
+from killchain_docker.workers.execution.failures import (
+    metadata_failure_result,
+    metadata_preview,
 )
+from killchain_docker.workers.tooling.metadata.router import normalize_tool_metadata
+
+
+ToolSelection = tuple[
+    ToolCapability, dict[str, object], str, str | None, dict[str, str]
+]
+
+
+class LoopExecutionAgent(Protocol):
+    name: str
+    allowed_capabilities: tuple[ToolCapability, ...]
+
+    def report_progress(
+        self, state: RunState, task: TodoItem, message: str
+    ) -> None: ...
+
+    def report_flag_candidates(
+        self, state: RunState, task: TodoItem, candidates
+    ) -> None: ...
+
+    def run_capability(
+        self,
+        *,
+        task: TodoItem,
+        capability: ToolCapability | str,
+        metadata: dict[str, Any],
+        timeout_s: int | None = None,
+    ) -> ToolExecutionBundle: ...
+
+    def choose_tool_use(
+        self,
+        *,
+        task: TodoItem,
+        state: RunState,
+        allowed_capabilities: list[ToolCapability | str] | None = None,
+        prior_steps: list[dict[str, Any]] | None = None,
+    ) -> ToolUseDecision: ...
+
+    def choose_fixed_tool_use(
+        self,
+        *,
+        task: TodoItem,
+        state: RunState,
+        capability: ToolCapability | str,
+        prior_steps: list[dict[str, Any]] | None = None,
+    ) -> ToolUseDecision: ...
 
 
 def run_tool_step(
@@ -41,7 +87,7 @@ def run_tool_step(
             if forced_capability is not None:
                 capability = forced_capability
             capability, selected_metadata, rationale, hypothesis_text, mem_updates = (
-                select_step_tool(
+                _select_step_tool(
                     agent,
                     task,
                     state,
@@ -55,7 +101,7 @@ def run_tool_step(
                 accumulated_hypotheses.append(Hypothesis(title=hypothesis_text))
             if mem_updates:
                 accumulated_memory.update(mem_updates)
-            bundle = execute_step(
+            bundle = _execute_step(
                 agent,
                 task,
                 state,
@@ -69,7 +115,7 @@ def run_tool_step(
             failure_kind = ToolGuardPolicy.metadata_failure_kind(error_text, capability)
             metadata_retries += 1
             prior_steps.append(
-                validation_error_step(
+                _validation_error_step(
                     step,
                     capability,
                     rationale,
@@ -100,7 +146,68 @@ def run_tool_step(
                 )
 
 
-def select_step_tool(
+def prepare_execution_metadata(
+    *,
+    capability: ToolCapability,
+    todo: TodoItem,
+    state: RunState,
+    selected_metadata: dict[str, object],
+    worker_name: str,
+) -> dict[str, object]:
+    metadata = normalize_tool_metadata(capability, todo, state, selected_metadata)
+    if worker_name == "recon-worker":
+        return _recon_metadata_defaults(metadata, state)
+    return metadata
+
+
+def fixed_llm_capability(
+    todo: TodoItem, allowed_capabilities: tuple[ToolCapability, ...]
+) -> ToolCapability | None:
+    """Return capabilities that should hard-bind LLM metadata generation.
+
+    ``shell.exec`` remains a routing and batching hint. It is intentionally not
+    fixed here because shell and script are both universal execution-closure
+    tools, and many file/binary parsing goals are safer as bounded scripts.
+    """
+    intent = DispatchIntent.from_context(todo.context)
+    raw = str(intent.required_capability or "").strip()
+    if not raw:
+        return None
+    try:
+        capability = ToolCapability(raw)
+    except ValueError:
+        return None
+    if capability != ToolCapability.SCRIPT_EXEC:
+        return None
+    if capability not in allowed_capabilities:
+        return None
+    return capability
+
+
+def choose_capability(
+    agent: LoopExecutionAgent,
+    todo: TodoItem,
+    state: RunState,
+    *,
+    allowed_capabilities: tuple[ToolCapability, ...],
+    prior_steps: list[dict[str, object]] | None = None,
+) -> ToolSelection:
+    decision = agent.choose_tool_use(
+        task=todo,
+        state=state,
+        allowed_capabilities=list(allowed_capabilities),
+        prior_steps=prior_steps,
+    )
+    return (
+        ToolCapability(decision.capability),
+        dict(decision.metadata),
+        decision.rationale,
+        decision.hypothesis,
+        dict(decision.memory_updates) if decision.memory_updates else {},
+    )
+
+
+def _select_step_tool(
     agent: LoopExecutionAgent,
     task: TodoItem,
     state: RunState,
@@ -108,7 +215,7 @@ def select_step_tool(
     step: int,
     prior_steps: list[dict[str, object]],
     forced_capability: ToolCapability | None = None,
-):
+) -> ToolSelection:
     fixed_capability = forced_capability or fixed_llm_capability(
         task, agent.allowed_capabilities
     )
@@ -118,12 +225,18 @@ def select_step_tool(
             task,
             f"{agent.name} preparing {fixed_capability.value} for step {step + 1}",
         )
-        selected = choose_fixed_capability(
-            agent,
-            fixed_capability,
-            task,
-            state,
+        decision = agent.choose_fixed_tool_use(
+            task=task,
+            state=state,
+            capability=fixed_capability,
             prior_steps=prior_steps if prior_steps else None,
+        )
+        selected = (
+            fixed_capability,
+            dict(decision.metadata),
+            decision.rationale,
+            decision.hypothesis,
+            dict(decision.memory_updates) if decision.memory_updates else {},
         )
     else:
         agent.report_progress(
@@ -143,7 +256,7 @@ def select_step_tool(
     return selected
 
 
-def execute_step(
+def _execute_step(
     agent: LoopExecutionAgent,
     task: TodoItem,
     state: RunState,
@@ -173,3 +286,61 @@ def execute_step(
     if bundle.state_delta.flag_candidates:
         agent.report_flag_candidates(state, task, bundle.state_delta.flag_candidates)
     return bundle
+
+
+def _validation_error_step(
+    step: int,
+    capability: ToolCapability | None,
+    rationale: str,
+    error_text: str,
+    failure_kind: str,
+    selected_metadata: dict[str, object] | None,
+) -> dict[str, object]:
+    cap_str = (
+        capability.value
+        if capability and hasattr(capability, "value")
+        else str(capability or "unknown")
+    )
+    record: dict[str, object] = {
+        "step": step,
+        "capability": cap_str,
+        "rationale": rationale,
+        "summary": f"VALIDATION ERROR: {error_text}",
+        "flag_candidates": [],
+        "stdout_preview": "",
+        "stderr_preview": error_text,
+        "returncode": -1,
+        "failure_kind": failure_kind,
+        "failure_detail": error_text,
+        "executed": False,
+    }
+    if selected_metadata:
+        record["selected_metadata"] = metadata_preview(selected_metadata)
+    return record
+
+
+def _recon_metadata_defaults(
+    metadata: dict[str, object], state: RunState
+) -> dict[str, object]:
+    scope = str(
+        metadata.get("scope")
+        or (state.authorized_scope[0] if state.authorized_scope else "")
+    )
+    parsed = urlparse(scope)
+    if parsed.scheme in {"http", "https"}:
+        metadata.setdefault("base_url", scope)
+        metadata.setdefault("hostname", parsed.hostname or "")
+    else:
+        metadata.setdefault("hostname", parsed.hostname or scope)
+    metadata.setdefault("asset_id", str(metadata.get("asset_id") or "seed-asset"))
+    return metadata
+
+
+__all__ = [
+    "LoopExecutionAgent",
+    "ToolSelection",
+    "choose_capability",
+    "fixed_llm_capability",
+    "prepare_execution_metadata",
+    "run_tool_step",
+]

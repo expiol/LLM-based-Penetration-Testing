@@ -14,22 +14,18 @@ from killchain_docker.orchestrator.agent_lifecycle import (
     AgentStatus,
 )
 from killchain_docker.orchestrator.dispatch_controller import DispatchCycleController
-from killchain_docker.orchestrator.dispatch_rounds import DispatchRoundController
-from killchain_docker.orchestrator.dispatch_scheduler import DispatchScheduler
-from killchain_docker.orchestrator.empty_dispatch import EmptyDispatchController
 from killchain_docker.orchestrator.dispatch_types import (
     DependencyState,
     DispatchCycleResult,
     EmptyDispatchAction,
+    select_ready_batch,
 )
 from killchain_docker.orchestrator.background_flags import (
     BackgroundFlagValidationController,
 )
 from killchain_docker.orchestrator.assignment_planner import AssignmentPlanner
 from killchain_docker.orchestrator.closure_policy import DeterministicClosurePolicy
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
-from killchain_docker.orchestrator.todo_queue_writer import TodoQueueWriter
-from killchain_docker.orchestrator.todo_status_commands import TodoStatusCommands
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.orchestrator.planning.cycle_controller import (
     PlanningCycleController,
 )
@@ -37,21 +33,13 @@ from killchain_docker.orchestrator.planning.queue_refresh import (
     PlanningRefreshController,
 )
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo, PlannerDecision
-from killchain_docker.orchestrator.assignment_execution import (
-    AssignmentExecutionController,
+from killchain_docker.orchestrator.execution import (
+    BatchExecutionOutcome,
+    Execution,
+    routed_transient_llm_handling,
 )
 from killchain_docker.orchestrator.closure_controller import ClosureExecutionController
 from killchain_docker.orchestrator.runtime_events import RuntimeEventController
-from killchain_docker.orchestrator.runtime_results import RoutedAssignmentBatchResult
-from killchain_docker.orchestrator.routed_execution import (
-    RoutedAssignmentExecutionController,
-)
-from killchain_docker.orchestrator.round_completion import (
-    RoutedRoundCompletionController,
-)
-from killchain_docker.orchestrator.run_cycle_gate import RunCycleController
-from killchain_docker.orchestrator.run_finalization import RunFinalizationController
-from killchain_docker.orchestrator.run_lifecycle import RunLifecycleController
 from killchain_docker.orchestrator.run_progress import RunProgressController
 from killchain_docker.orchestrator.run_termination import (
     LLMFailureAction,
@@ -157,26 +145,8 @@ def _has_run_state_attr_access(source: str, *attrs: str) -> bool:
     )
 
 
-class _TodoQueueHarness:
-    def __init__(self, state: RunState) -> None:
-        self.reader = TodoQueueReader(state)
-        self.writer = TodoQueueWriter(state)
-        self.commands = TodoStatusCommands(state)
-
-    def enqueue(self, todo: TodoItem) -> TodoItem:
-        return self.writer.enqueue(todo)
-
-    def enqueue_planned(self, planned_todos):
-        return self.writer.enqueue_planned(planned_todos)
-
-    def __getattr__(self, name: str):
-        if hasattr(self.reader, name):
-            return getattr(self.reader, name)
-        return getattr(self.commands, name)
-
-
-def _todo_queue(state: RunState) -> _TodoQueueHarness:
-    return _TodoQueueHarness(state)
+def _todo_queue(state: RunState) -> TodoQueue:
+    return TodoQueue(state)
 
 
 class _RuntimeWorker(WorkerAgent):
@@ -247,6 +217,13 @@ class _TransientBacklogSeedPipeline:
 class _SummaryRouter:
     def __init__(self) -> None:
         self.calls = 0
+        self.assignments: list[WorkerAssignment] = []
+
+    def route(
+        self, state: RunState, *, agent_directory, max_assignments: int
+    ) -> RouterDecision:
+        del state, agent_directory, max_assignments
+        return RouterDecision(assignments=list(self.assignments))
 
     def summarize_round(self, state: RunState, *, results: list[WorkerResult]):
         del state
@@ -275,38 +252,46 @@ class _DispatchExecution:
     def __init__(self) -> None:
         self.calls = 0
 
-    def execute(
-        self, *, cycle: int, assignments: list[WorkerAssignment]
-    ) -> RoutedAssignmentBatchResult:
+        class _Outcome:
+            is_solved = False
+
+        self.outcome = _Outcome()
+
+    def run_assignments(
+        self, *, cycle, todos, select_worker, rationale, event_label,
+        transient_llm, concurrent, budget=None,
+    ) -> BatchExecutionOutcome:
+        del select_worker, rationale, event_label, transient_llm, concurrent, budget
         self.calls += 1
-        return RoutedAssignmentBatchResult(
+        return BatchExecutionOutcome(
             results=[
                 WorkerResult(
-                    todo_id=assignments[0].todo_id,
-                    worker_name=assignments[0].worker_name,
+                    todo_id=todos[0].todo_id,
+                    worker_name="runtime-worker",
                     success=True,
                     summary=f"cycle {cycle} executed",
                 )
             ],
-            executed_assignments=assignments,
+            executed_assignments=[
+                WorkerAssignment(
+                    todo_id=todos[0].todo_id, worker_name="runtime-worker"
+                )
+            ],
         )
 
 
-class _DispatchCompletion:
-    def __init__(self, result: DispatchCycleResult | None = None) -> None:
-        self.calls = 0
-        self.result = result or DispatchCycleResult()
+class _StubClosure:
+    """Inline-followup is a no-op for these tests."""
 
-    def complete(
-        self,
-        *,
-        cycle: int,
-        planner_summary: str,
-        round_execution: RoutedAssignmentBatchResult,
-    ) -> DispatchCycleResult:
-        del cycle, planner_summary, round_execution
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def inline_deterministic_followup(
+        self, *, cycle, remaining_budget, planner, max_assignments
+    ):
+        del cycle, remaining_budget, planner, max_assignments
         self.calls += 1
-        return self.result
+        return ([], [])
 
 
 class _NoopTermination:
@@ -325,6 +310,7 @@ class _BackgroundLifecycleFlags:
 
     def stop(self) -> None:
         self.stopped += 1
+
 
 
 class RuntimeArchitectureTests(unittest.TestCase):
@@ -454,36 +440,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
             )
         )
 
-    def test_planner_context_uses_queue_reader_for_todo_views(self) -> None:
-        self.assertFalse(
-            (
-                PROJECT_ROOT / "killchain_docker/orchestrator/planning/context.py"
-            ).exists()
-        )
-        self.assertFalse(
-            (
-                PROJECT_ROOT / "killchain_docker/orchestrator/planning/strategy.py"
-            ).exists()
-        )
-        builder_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/planning/context_builder.py"
-        ).read_text()
-        stagnation_source = (
-            PROJECT_ROOT
-            / "killchain_docker/orchestrator/planning/stagnation_context.py"
-        ).read_text()
-        self.assertIn("TodoQueueReader", builder_source)
-        self.assertIn(".recent(", builder_source)
-        self.assertIn(".open_count()", builder_source)
-        self.assertIn("TodoQueueReader", stagnation_source)
-        self.assertIn(".recent_by_status(", stagnation_source)
-        self.assertIn(".family_counts(", stagnation_source)
-        self.assertIn(".by_family(", stagnation_source)
-        self.assertNotIn("state.todos.", builder_source)
-        self.assertNotIn("for todo in state.", builder_source)
-        self.assertNotIn("state.todos.", stagnation_source)
-        self.assertNotIn("for todo in state.", stagnation_source)
-
     def test_planner_context_uses_projection_for_state_snapshots(self) -> None:
         source_paths = [
             "killchain_docker/orchestrator/planning/context_builder.py",
@@ -508,21 +464,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
         for pattern in forbidden:
             with self.subTest(pattern=pattern):
                 self.assertNotIn(pattern, source)
-
-    def test_planning_policy_uses_queue_reader_for_todo_queries(self) -> None:
-        source_paths = [
-            "killchain_docker/orchestrator/planning/planner.py",
-            "killchain_docker/orchestrator/planning/pipeline.py",
-            "killchain_docker/orchestrator/progress_families.py",
-            "killchain_docker/orchestrator/progress_gate.py",
-            "killchain_docker/orchestrator/progress_novelty.py",
-        ]
-        for source_path in source_paths:
-            with self.subTest(source_path=source_path):
-                source = (PROJECT_ROOT / source_path).read_text()
-                self.assertIn("TodoQueueReader", source)
-                self.assertFalse(_has_state_attr_access(source, "todos"))
-                self.assertNotIn("for todo in state.", source)
 
     def test_planning_seed_details_are_split_by_strategy(self) -> None:
         seed_source = (
@@ -576,7 +517,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIn("sorted_followups", artifact_followup_source)
         self.assertIn("media_scan_records", suspicious_media_source)
         self.assertIn("disk_images", disk_extract_source)
-        self.assertIn("rejected_records", recovery_source)
         self.assertIn("near_miss_records", near_miss_source)
 
     def test_policy_modules_use_metadata_store_or_projection(self) -> None:
@@ -604,7 +544,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
         ).read_text()
         self.assertIn("ArtifactProjectionStore", artifact_source)
         self.assertIn("ArtifactProjectionStore", reference_source)
-        self.assertIn("CandidateProjection", candidate_source)
         self.assertIn("ChallengeProjection", candidate_source)
         self.assertIn("RunMetadataStore", progress_source)
         self.assertIn("RunMetadataStore", rag_source)
@@ -735,7 +674,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertNotIn("state.endpoints", source)
 
     def test_dispatch_module_owns_orchestrator_todo_storage_access(self) -> None:
-        queue_storage_modules = {"orchestrator/todo_store.py"}
+        queue_storage_modules = {"orchestrator/todo_queue.py"}
         offenders: list[str] = []
         for source_path in (PROJECT_ROOT / "killchain_docker/orchestrator").rglob(
             "*.py"
@@ -812,9 +751,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIn("is_execution_closure_task", result_source := (
             PROJECT_ROOT / "killchain_docker/workers/results/assembly.py"
         ).read_text())
-        self.assertIn("should_continue_after_step", loop_policy_source := (
-            PROJECT_ROOT / "killchain_docker/workers/execution/loop_policy.py"
-        ).read_text())
         self.assertIn("run_worker_tool_loop(", worker_source)
         for forbidden in (
             "def _is_flag_recovery_task",
@@ -831,7 +767,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIn("def should_continue_after_step", execution_policy_source)
         self.assertIn("def tool_success", execution_policy_source)
         self.assertIn("is_execution_closure_task(todo)", result_source)
-        self.assertIn("should_continue_after_step(", loop_policy_source)
 
     def test_flag_validation_policy_is_not_worker_private_state(self) -> None:
         worker_source = (
@@ -992,26 +927,17 @@ class RuntimeArchitectureTests(unittest.TestCase):
         loop_source = (
             PROJECT_ROOT / "killchain_docker/workers/execution/loop.py"
         ).read_text()
-        loop_policy_source = (
-            PROJECT_ROOT / "killchain_docker/workers/execution/loop_policy.py"
+        execution_policy_source = (
+            PROJECT_ROOT / "killchain_docker/workers/execution/policy.py"
         ).read_text()
         direct_source = (
             PROJECT_ROOT / "killchain_docker/workers/execution/direct.py"
-        ).read_text()
-        result_loop_source = (
-            PROJECT_ROOT / "killchain_docker/workers/execution/result.py"
         ).read_text()
         step_source = (
             PROJECT_ROOT / "killchain_docker/workers/execution/step.py"
         ).read_text()
         enrichment_source = (
             PROJECT_ROOT / "killchain_docker/workers/results/enrichment.py"
-        ).read_text()
-        selection_source = (
-            PROJECT_ROOT / "killchain_docker/workers/execution/selection.py"
-        ).read_text()
-        metadata_source = (
-            PROJECT_ROOT / "killchain_docker/workers/execution/metadata.py"
         ).read_text()
         result_source = (
             PROJECT_ROOT / "killchain_docker/workers/results/assembly.py"
@@ -1038,11 +964,15 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertNotIn("AssetKind.WEB_APPLICATION", worker_source)
         self.assertIn("def run_worker_tool_loop", loop_source)
         self.assertIn("run_tool_step(", loop_source)
-        self.assertIn("final_loop_result(", loop_source)
-        self.assertIn("should_continue_after_step(", loop_policy_source)
-        self.assertIn("worker_result_from_bundle(", result_loop_source)
-        self.assertIn("enrich_worker_result(", result_loop_source)
+        self.assertIn("worker_result_from_bundle(", loop_source)
+        self.assertIn("enrich_worker_result(", loop_source)
+        self.assertIn("should_continue_after_step(", execution_policy_source)
         self.assertIn("prepare_execution_metadata(", step_source)
+        self.assertIn("def choose_capability", step_source)
+        self.assertIn("def fixed_llm_capability", step_source)
+        self.assertIn("def prepare_execution_metadata", step_source)
+        self.assertIn("normalize_tool_metadata(", step_source)
+        self.assertIn("urlparse", step_source)
         self.assertNotIn("inject_recon_asset(", loop_source)
         self.assertNotIn("encoding_cascade", loop_source)
         self.assertIn("def run_direct_capability", direct_source)
@@ -1050,11 +980,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIn("def enrich_worker_result", enrichment_source)
         self.assertIn("inject_recon_asset(", enrichment_source)
         self.assertIn("encoding_cascade", enrichment_source)
-        self.assertIn("def choose_capability", selection_source)
-        self.assertIn("def fixed_llm_capability", selection_source)
-        self.assertIn("def prepare_execution_metadata", metadata_source)
-        self.assertIn("normalize_tool_metadata(", metadata_source)
-        self.assertIn("urlparse", metadata_source)
         self.assertIn("def worker_result_from_bundle", result_source)
         self.assertIn("INFRASTRUCTURE_FAILURE_KINDS", result_source)
         self.assertIn("def inject_recon_asset", recon_source)
@@ -1156,20 +1081,19 @@ class RuntimeArchitectureTests(unittest.TestCase):
         queue = _todo_queue(state)
         recon = queue.enqueue(TodoItem(goal="Map", phase=TodoPhase.RECON, priority=10))
         queue.enqueue(TodoItem(goal="Exploit", phase=TodoPhase.EXPLOIT, priority=100))
-        batch = DispatchScheduler(max_assignments=5).next_batch(queue)
+        batch = select_ready_batch(queue, max_assignments=5)
         self.assertEqual(batch.focus_phase, TodoPhase.RECON)
         self.assertEqual([todo.todo_id for todo in batch.todos], [recon.todo_id])
 
-    def test_todo_queue_readers_and_writers_own_run_state_todo_behavior(self) -> None:
+    def test_todo_queue_owns_run_state_todo_behavior(self) -> None:
         state = RunState(objective="Solve.")
-        writer = TodoQueueWriter(state)
-        reader = TodoQueueReader(state)
-        first = writer.enqueue(TodoItem(goal="Review notes."))
-        duplicate = writer.enqueue(TodoItem(goal="Review notes."))
+        todos = TodoQueue(state)
+        first = todos.enqueue(TodoItem(goal="Review notes."))
+        duplicate = todos.enqueue(TodoItem(goal="Review notes."))
         self.assertIs(first, duplicate)
-        self.assertEqual(reader.get(first.todo_id), first)
-        self.assertEqual(reader.ready(), [first])
-        self.assertTrue(reader.has_open())
+        self.assertEqual(todos.get(first.todo_id), first)
+        self.assertEqual(todos.ready(), [first])
+        self.assertTrue(todos.has_open())
         self.assertFalse(hasattr(RunState, "queue_todo"))
         self.assertFalse(hasattr(RunState, "ready_todos"))
         self.assertFalse(hasattr(RunState, "has_open_todos"))
@@ -1180,10 +1104,8 @@ class RuntimeArchitectureTests(unittest.TestCase):
 
     def test_run_state_maintenance_owns_touch_and_caps(self) -> None:
         source_paths = [
-            "killchain_docker/orchestrator/todo_store.py",
-            "killchain_docker/orchestrator/todo_lifecycle.py",
+            "killchain_docker/orchestrator/todo_queue.py",
             "killchain_docker/orchestrator/closure_controller.py",
-            "killchain_docker/orchestrator/closure_rounds.py",
             "killchain_docker/orchestrator/run_termination.py",
             "killchain_docker/orchestrator/runtime_events.py",
             "killchain_docker/state/artifact_store.py",
@@ -1281,8 +1203,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertFalse(hasattr(TodoItem, "mark_interrupted"))
         runtime_source_paths = [
             "killchain_docker/state/worker_results.py",
-            "killchain_docker/orchestrator/assignment_execution.py",
-            "killchain_docker/orchestrator/routed_execution.py",
+            "killchain_docker/orchestrator/execution.py",
         ]
         forbidden_calls = (
             ".mark_running(",
@@ -1301,7 +1222,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
                     self.assertNotIn(call, text)
         direct_status_writes = []
         for source_path in (PROJECT_ROOT / "killchain_docker").rglob("*.py"):
-            if source_path.as_posix().endswith("orchestrator/todo_lifecycle.py"):
+            if source_path.as_posix().endswith("orchestrator/todo_queue.py"):
                 continue
             tree = ast.parse(source_path.read_text())
             for node in ast.walk(tree):
@@ -1326,18 +1247,12 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIsNone(
             importlib.util.find_spec("killchain_docker.orchestrator.task_queue")
         )
-        commands_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/todo_status_commands.py"
-        ).read_text()
-        self.assertIn("TodoLifecycle", commands_source)
-        self.assertFalse(_has_run_state_attr_access(commands_source, "todos"))
         execution_source = "\n".join(
             (
                 (PROJECT_ROOT / source_path).read_text()
                 for source_path in (
-                    "killchain_docker/orchestrator/assignment_execution.py",
-                    "killchain_docker/orchestrator/routed_execution.py",
-                    "killchain_docker/orchestrator/round_completion.py",
+                    "killchain_docker/orchestrator/execution.py",
+                    "killchain_docker/orchestrator/dispatch_controller.py",
                 )
             )
         )
@@ -1346,19 +1261,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertNotIn("todo.status == TodoStatus.FAILED", execution_source)
         self.assertNotIn("todo.status == TodoStatus.BLOCKED", execution_source)
         self.assertNotIn("todo.status == TodoStatus.PARTIAL", execution_source)
-
-    def test_todo_dependency_gate_owns_dependency_resolution(self) -> None:
-        commands_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/todo_status_commands.py"
-        ).read_text()
-        dependency_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/todo_dependencies.py"
-        ).read_text()
-        self.assertIn("TodoDependencyGate", commands_source)
-        self.assertNotIn("missing dependency", commands_source)
-        self.assertNotIn("waiting for dependency", commands_source)
-        self.assertIn("missing dependency", dependency_source)
-        self.assertIn("waiting for dependency", dependency_source)
 
     def test_worker_identity_uses_persona_spec_not_protocol_adapter(self) -> None:
         from killchain_docker.workers.personas.catalog import PersonaSpec
@@ -1619,9 +1521,8 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertEqual(state.status, RunStatus.SOLVED)
         self.assertEqual(state.validated_flag, "flag{ok}")
         runtime_source_paths = [
-            "killchain_docker/orchestrator/routed_execution.py",
+            "killchain_docker/orchestrator/execution.py",
             "killchain_docker/orchestrator/dispatch_controller.py",
-            "killchain_docker/orchestrator/empty_dispatch.py",
             "killchain_docker/orchestrator/planning/cycle_controller.py",
             "killchain_docker/runtime/session.py",
             "killchain_docker/runtime/persistence.py",
@@ -1721,25 +1622,14 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIn("RunReportProjection", source)
         self.assertNotIn("state.metadata", source)
 
-    def test_run_cycle_controller_owns_cycle_entry_gate(self) -> None:
-        state = RunState(objective="Solve.")
-        events: list[tuple[str, dict[str, object]]] = []
-        controller = RunCycleController(
-            state=state, events=self._runtime_events(state, events)
-        )
-        running = controller.begin(cycle=3)
-        state.solved = True
-        solved = controller.begin(cycle=4)
-        self.assertFalse(running.halt_run)
-        self.assertIsNotNone(state.last_cycle_at)
-        self.assertTrue(solved.halt_run)
-        self.assertEqual(events[-1][0], "[cycle 4] validated flag found - halting run")
-
-    def test_orchestrator_delegates_cycle_entry_gate(self) -> None:
+    def test_orchestrator_cycle_entry_gate_halts_when_solved(self) -> None:
         run_source = inspect.getsource(Orchestrator.run)
+        begin_source = inspect.getsource(Orchestrator._begin_cycle)
         self.assertNotIn("last_cycle_at", run_source)
-        self.assertNotIn("_background_flags.sync(cycle)", run_source)
-        self.assertIn("_cycle_controller.begin", run_source)
+        self.assertIn("_begin_cycle", run_source)
+        self.assertIn("sync_background_flags", begin_source)
+        self.assertIn("validated flag found", begin_source)
+        self.assertIn("cycle_started", begin_source)
 
     def test_scheduler_waits_for_todo_dependencies(self) -> None:
         state = RunState(objective="Solve.")
@@ -1755,13 +1645,13 @@ class RuntimeArchitectureTests(unittest.TestCase):
             )
         )
         queue = _todo_queue(state)
-        batch = DispatchScheduler(max_assignments=5).next_batch(queue)
+        batch = select_ready_batch(queue, max_assignments=5)
         self.assertEqual([todo.todo_id for todo in batch.todos], [upstream.todo_id])
         self.assertEqual(
             [todo.todo_id for todo in batch.blocked_by_dependency], [downstream.todo_id]
         )
         _todo_queue(state).complete(upstream, "done")
-        batch = DispatchScheduler(max_assignments=5).next_batch(queue)
+        batch = select_ready_batch(queue, max_assignments=5)
         self.assertEqual([todo.todo_id for todo in batch.todos], [downstream.todo_id])
         self.assertEqual(
             queue.dependency_check(downstream).state, DependencyState.SATISFIED
@@ -1797,7 +1687,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         controller = PlanningRefreshController(
             state=state,
             planner=planner,
-            writer=_todo_queue(state).writer,
+            todos=_todo_queue(state),
             journal=RunJournal(state),
             emit=events.append,
         )
@@ -1834,7 +1724,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
                     ],
                 )
             ),
-            writer=_todo_queue(state).writer,
+            todos=_todo_queue(state),
             journal=RunJournal(state),
             emit=lambda _message: None,
         )
@@ -1856,11 +1746,11 @@ class RuntimeArchitectureTests(unittest.TestCase):
         events: list[tuple[str, dict[str, object]]] = []
         controller = PlanningCycleController(
             state=state,
-            reader=queue.reader,
+            todos=queue,
             refresh=PlanningRefreshController(
                 state=state,
                 planner=_RefreshPlanner(PlannerDecision(summary="unused")),
-                writer=queue.writer,
+                todos=queue,
                 journal=RunJournal(state),
                 emit=lambda _message: None,
             ),
@@ -1887,11 +1777,11 @@ class RuntimeArchitectureTests(unittest.TestCase):
         planner.pipeline = _TransientBacklogSeedPipeline()
         controller = PlanningCycleController(
             state=state,
-            reader=queue.reader,
+            todos=queue,
             refresh=PlanningRefreshController(
                 state=state,
                 planner=planner,
-                writer=queue.writer,
+                todos=queue,
                 journal=RunJournal(state),
                 emit=lambda message: events.append((message, {})),
             ),
@@ -1914,11 +1804,11 @@ class RuntimeArchitectureTests(unittest.TestCase):
         queue = _todo_queue(state)
         controller = PlanningCycleController(
             state=state,
-            reader=queue.reader,
+            todos=queue,
             refresh=PlanningRefreshController(
                 state=state,
                 planner=_RefreshPlanner(PlannerDecision(summary="stop", stop_run=True)),
-                writer=queue.writer,
+                todos=queue,
                 journal=RunJournal(state),
                 emit=lambda _message: None,
             ),
@@ -2037,94 +1927,117 @@ class RuntimeArchitectureTests(unittest.TestCase):
             [(generic.todo_id, "artifact-worker")],
         )
 
-    def test_dispatch_round_controller_handles_empty_router_decisions(self) -> None:
-        state = RunState(objective="Solve.")
-        queue = _todo_queue(state)
-        controller = DispatchRoundController(
-            reader=queue.reader, commands=queue.commands, max_consecutive_empty_rounds=2
-        )
-        first = controller.handle_empty_decision()
-        second = controller.handle_empty_decision()
-        self.assertEqual(first.action, EmptyDispatchAction.CONTINUE)
-        self.assertEqual(first.reason, "router_empty")
-        self.assertEqual(first.consecutive_empty_rounds, 1)
-        self.assertEqual(second.action, EmptyDispatchAction.HALT)
-        self.assertEqual(second.reason, "router_no_assignments")
-        self.assertEqual(second.consecutive_empty_rounds, 2)
-
-    def test_dispatch_round_controller_reconciles_unsatisfiable_dependencies(
+    def _make_dispatch_controller(
         self,
-    ) -> None:
+        *,
+        state: RunState,
+        router,
+        agent_directory: AgentDirectory,
+        events: RuntimeEventController,
+        execution=None,
+        max_consecutive_empty_rounds: int = 1,
+        assignment_budget: int = 2,
+        journal: RunJournal | None = None,
+        progress_threshold: int = 10,
+        closure=None,
+    ) -> DispatchCycleController:
+        termination = RunTerminationController(state, events=events)
+        if journal is None:
+            journal = RunJournal(state)
+        return DispatchCycleController(
+            state=state,
+            router=router,
+            agent_directory=agent_directory,
+            events=events,
+            termination=termination,
+            execution=execution if execution is not None else _DispatchExecution(),
+            transient_llm=routed_transient_llm_handling(
+                termination=termination, events=events
+            ),
+            closure=closure if closure is not None else _StubClosure(),
+            progress=RunProgressController(
+                state=state,
+                events=events,
+                threshold=progress_threshold,
+                journal=journal,
+            ),
+            planner=object(),
+            assignment_budget=lambda: assignment_budget,
+            max_consecutive_empty_rounds=max_consecutive_empty_rounds,
+            journal=journal,
+        )
+
+    def test_dispatch_cycle_handles_empty_router_decisions(self) -> None:
         state = RunState(objective="Solve.")
-        queue = _todo_queue(state)
+        events: list[tuple[str, dict[str, object]]] = []
+        controller = self._make_dispatch_controller(
+            state=state,
+            router=_DispatchRouter(RouterDecision(rationale="none")),
+            agent_directory=AgentDirectory.from_workers([_RuntimeWorker()]),
+            events=self._runtime_events(state, events),
+            max_consecutive_empty_rounds=2,
+        )
+        first = controller.dispatch(cycle=1, planner_summary="planned")
+        self.assertTrue(first.retry_cycle)
+        self.assertFalse(first.halt_run)
+        self.assertEqual(controller.consecutive_empty_rounds, 1)
+        second = controller.dispatch(cycle=2, planner_summary="planned")
+        self.assertTrue(second.halt_run)
+        self.assertEqual(state.stop_reason, "router_no_assignments")
+        self.assertEqual(controller.consecutive_empty_rounds, 2)
+
+    def test_dispatch_cycle_reconciles_unsatisfiable_dependencies(self) -> None:
+        state = RunState(objective="Solve.")
         todo = _todo_queue(state).enqueue(
             TodoItem(goal="Use missing input", depends_on=["missing"])
         )
-        controller = DispatchRoundController(
-            reader=queue.reader, commands=queue.commands, max_consecutive_empty_rounds=2
+        events: list[tuple[str, dict[str, object]]] = []
+        controller = self._make_dispatch_controller(
+            state=state,
+            router=_DispatchRouter(RouterDecision(rationale="none")),
+            agent_directory=AgentDirectory.from_workers([_RuntimeWorker()]),
+            events=self._runtime_events(state, events),
+            max_consecutive_empty_rounds=2,
         )
-        result = controller.handle_empty_decision()
-        self.assertEqual(result.action, EmptyDispatchAction.HALT)
-        self.assertEqual(result.reason, "dependency_blocked")
-        self.assertEqual(
-            [block.todo.todo_id for block in result.dependency_blocks], [todo.todo_id]
-        )
+        result = controller.dispatch(cycle=4, planner_summary="planned")
+        self.assertTrue(result.halt_run)
         self.assertEqual(todo.status.value, "blocked")
         self.assertEqual(controller.consecutive_empty_rounds, 0)
+        dep_events = [
+            payload
+            for _, payload in events
+            if payload.get("event_type") == "todo_dependency_blocked"
+        ]
+        self.assertEqual(len(dep_events), 1)
+        self.assertEqual(dep_events[0]["todo_id"], todo.todo_id)
 
-    def test_empty_dispatch_controller_owns_no_assignment_events_and_blocking(
-        self,
-    ) -> None:
+    def test_dispatch_cycle_emits_no_assignments_event_and_blocks_open(self) -> None:
         state = RunState(objective="Solve.")
         queue = _todo_queue(state)
         todo = queue.enqueue(TodoItem(goal="Never routed."))
         events: list[tuple[str, dict[str, object]]] = []
         checkpoints: list[bool] = []
-        controller = EmptyDispatchController(
-            rounds=DispatchRoundController(
-                reader=queue.reader,
-                commands=queue.commands,
-                max_consecutive_empty_rounds=1,
-            ),
+        controller = self._make_dispatch_controller(
+            state=state,
+            router=_DispatchRouter(RouterDecision(rationale="none")),
+            agent_directory=AgentDirectory.from_workers([_RuntimeWorker()]),
             events=self._runtime_events(state, events, checkpoints),
+            max_consecutive_empty_rounds=1,
         )
-        result = controller.handle_no_assignments(cycle=9)
+        result = controller.dispatch(cycle=9, planner_summary="planned")
         self.assertTrue(result.halt_run)
-        self.assertFalse(result.retry_cycle)
-        self.assertEqual(result.reason, "router_no_assignments")
         self.assertEqual(state.stop_reason, "router_no_assignments")
         self.assertEqual(todo.status.value, "blocked")
-        self.assertEqual(checkpoints, [True])
-        self.assertEqual(events[0][0], "[cycle 9] router selected no assignments")
-
-    def test_empty_dispatch_controller_emits_dependency_blocks_without_empty_loop(
-        self,
-    ) -> None:
-        state = RunState(objective="Solve.")
-        queue = _todo_queue(state)
-        todo = queue.enqueue(TodoItem(goal="Needs missing.", depends_on=["missing"]))
-        events: list[tuple[str, dict[str, object]]] = []
-        checkpoints: list[bool] = []
-        controller = EmptyDispatchController(
-            rounds=DispatchRoundController(
-                reader=queue.reader,
-                commands=queue.commands,
-                max_consecutive_empty_rounds=3,
-            ),
-            events=self._runtime_events(state, events, checkpoints),
+        self.assertTrue(checkpoints)
+        self.assertTrue(
+            any("router selected no assignments" in message for message, _ in events)
         )
-        result = controller.handle_no_assignments(cycle=4)
-        self.assertTrue(result.halt_run)
-        self.assertEqual(todo.status.value, "blocked")
-        self.assertEqual(events[0][1]["event_type"], "todo_dependency_blocked")
-        self.assertEqual(events[0][1]["todo_id"], todo.todo_id)
-        self.assertEqual(checkpoints, [True])
 
     def test_orchestrator_delegates_empty_dispatch_to_dispatch_controller(self) -> None:
         run_source = inspect.getsource(Orchestrator.run)
         self.assertNotIn("handle_empty_decision", run_source)
         self.assertNotIn("block_open_todos", run_source)
-        self.assertNotIn("_empty_dispatch_controller.handle_no_assignments", run_source)
+        self.assertNotIn("_empty_dispatch_controller", run_source)
 
     def test_dispatch_cycle_controller_owns_route_execute_and_complete(self) -> None:
         state = RunState(objective="Solve.")
@@ -2136,25 +2049,20 @@ class RuntimeArchitectureTests(unittest.TestCase):
                 ]
             )
         )
+        router.summarize_round = (
+            lambda state, *, results: RouterRoundSummary(
+                summary="; ".join(result.summary for result in results),
+                direct_results=[result.summary for result in results],
+            )
+        )
         execution = _DispatchExecution()
-        completion = _DispatchCompletion()
-        controller = DispatchCycleController(
+        controller = self._make_dispatch_controller(
             state=state,
             router=router,
             agent_directory=AgentDirectory.from_workers([_RuntimeWorker()]),
             events=self._runtime_events(state),
-            termination=RunTerminationController(state),
-            empty_dispatch=EmptyDispatchController(
-                rounds=DispatchRoundController(
-                    reader=_todo_queue(state).reader,
-                    commands=_todo_queue(state).commands,
-                    max_consecutive_empty_rounds=1,
-                ),
-                events=self._runtime_events(state),
-            ),
-            routed_execution=execution,
-            round_completion=completion,
-            assignment_budget=lambda: 2,
+            execution=execution,
+            assignment_budget=2,
         )
         result = controller.dispatch(cycle=5, planner_summary="planned")
         self.assertFalse(result.retry_cycle)
@@ -2162,30 +2070,20 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertEqual(router.calls, 1)
         self.assertEqual(router.max_assignments, 2)
         self.assertEqual(execution.calls, 1)
-        self.assertEqual(completion.calls, 1)
+        self.assertEqual(state.rounds[0].planner_summary, "planned")
 
     def test_dispatch_cycle_controller_owns_empty_route_recovery(self) -> None:
         state = RunState(objective="Solve.")
         queue = _todo_queue(state)
         queue.enqueue(TodoItem(goal="Unrouted."))
         events: list[tuple[str, dict[str, object]]] = []
-        controller = DispatchCycleController(
+        controller = self._make_dispatch_controller(
             state=state,
             router=_DispatchRouter(RouterDecision(rationale="none")),
             agent_directory=AgentDirectory.from_workers([_RuntimeWorker()]),
             events=self._runtime_events(state, events),
-            termination=RunTerminationController(state),
-            empty_dispatch=EmptyDispatchController(
-                rounds=DispatchRoundController(
-                    reader=queue.reader,
-                    commands=queue.commands,
-                    max_consecutive_empty_rounds=1,
-                ),
-                events=self._runtime_events(state, events),
-            ),
-            routed_execution=_DispatchExecution(),
-            round_completion=_DispatchCompletion(),
-            assignment_budget=lambda: 1,
+            max_consecutive_empty_rounds=1,
+            assignment_budget=1,
         )
         result = controller.dispatch(cycle=6, planner_summary="planned")
         self.assertTrue(result.halt_run)
@@ -2199,7 +2097,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertFalse(hasattr(Orchestrator, "route"))
         self.assertNotIn("routing ready todos", run_source)
         self.assertNotIn("reset_empty_rounds", run_source)
-        self.assertNotIn("_routed_execution_controller.execute", run_source)
         self.assertNotIn("_round_completion_controller.complete", run_source)
         self.assertIn("_dispatch_cycle_controller.dispatch", run_source)
 
@@ -2309,7 +2206,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
             state=state,
             lifecycle=lifecycle,
             registry=registry,
-            commands=queue.commands,
+            todos=queue,
         )
         runtime_task = controller.begin(cycle=3, todo=todo, worker=worker)
         self.assertEqual(todo.status.value, "running")
@@ -2343,7 +2240,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertNotIn("runtime_task.interrupt", source)
 
     def test_assignment_execution_uses_assignment_lifecycle_controller(self) -> None:
-        source = inspect.getsource(AssignmentExecutionController.run)
+        source = inspect.getsource(Execution.run)
         self.assertIn("self.assignment_lifecycle.begin", source)
         self.assertIn("self.assignment_lifecycle.complete", source)
         self.assertIn("self.assignment_lifecycle.fail", source)
@@ -2356,11 +2253,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertNotIn("runtime_task.complete", source)
         self.assertNotIn("runtime_task.fail", source)
         self.assertNotIn("runtime_task.interrupt", source)
-
-    def test_legacy_execution_module_is_removed(self) -> None:
-        self.assertIsNone(
-            importlib.util.find_spec("killchain_docker.orchestrator.execution")
-        )
 
     def test_script_plugin_delegates_runtime_and_output_logic(self) -> None:
         script_source = (
@@ -2439,7 +2331,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         lifecycle = AgentLifecycle()
         registry = RuntimeTaskRegistry()
         events: list[tuple[str, dict[str, object]]] = []
-        controller = AssignmentExecutionController(
+        controller = Execution(
             state=state,
             lifecycle=lifecycle,
             registry=registry,
@@ -2456,110 +2348,64 @@ class RuntimeArchitectureTests(unittest.TestCase):
             any(("UNHANDLED EXCEPTION" in message for message, _ in events))
         )
 
-    def test_closure_and_routed_execution_use_event_controller_not_raw_callbacks(
+    def test_closure_controller_uses_event_controller_not_raw_callbacks(
         self,
     ) -> None:
         state = RunState(objective="Solve.")
         events = self._runtime_events(state)
-        execution = AssignmentExecutionController(
+        execution = Execution(
             state=state,
             lifecycle=AgentLifecycle(),
             registry=RuntimeTaskRegistry(),
             events=events,
         )
         directory = AgentDirectory.from_workers([_RuntimeWorker()])
-        journal = RunJournal(state)
         closure = ClosureExecutionController(
             state=state,
-            todo_reader=_todo_queue(state).reader,
-            todo_writer=_todo_queue(state).writer,
+            todos=_todo_queue(state),
             agent_directory=directory,
             execution=execution,
             events=events,
-        )
-        routed = RoutedAssignmentExecutionController(
-            state=state,
-            todo_reader=_todo_queue(state).reader,
-            agent_directory=directory,
-            execution=execution,
-            termination=RunTerminationController(state, events=events),
-            transient_error_skipper=lambda *_args: False,
-            journal=journal,
         )
         self.assertIs(closure.events, events)
         self.assertFalse(hasattr(closure, "checkpoint"))
         self.assertFalse(hasattr(closure, "sync_background_flags"))
         self.assertFalse(hasattr(closure, "emit"))
-        self.assertFalse(hasattr(routed, "checkpoint"))
-        self.assertFalse(hasattr(routed, "sync_background_flags"))
 
-    def test_routed_round_completion_controller_owns_summary_journal_and_progress(
-        self,
-    ) -> None:
+    def test_dispatch_cycle_records_round_summary_and_progress(self) -> None:
         state = RunState(objective="Solve.")
+        todo = _todo_queue(state).enqueue(TodoItem(goal="Run."))
         events: list[tuple[str, dict[str, object]]] = []
         checkpoints: list[bool] = []
         event_controller = self._runtime_events(state, events, checkpoints)
         router = _SummaryRouter()
+        router.assignments = [
+            WorkerAssignment(todo_id=todo.todo_id, worker_name="runtime-worker")
+        ]
         journal = RunJournal(state)
-        progress = RunProgressController(
-            state=state, events=event_controller, threshold=1, journal=journal
-        )
-        controller = RoutedRoundCompletionController(
+        controller = self._make_dispatch_controller(
             state=state,
-            closure=ClosureExecutionController(
-                state=state,
-                todo_reader=_todo_queue(state).reader,
-                todo_writer=_todo_queue(state).writer,
-                agent_directory=AgentDirectory.from_workers([_RuntimeWorker()]),
-                execution=AssignmentExecutionController(
-                    state=state,
-                    lifecycle=AgentLifecycle(),
-                    registry=RuntimeTaskRegistry(),
-                    events=event_controller,
-                ),
-                events=event_controller,
-            ),
-            termination=RunTerminationController(state, events=event_controller),
-            progress=progress,
-            journal=journal,
             router=router,
-            planner=object(),
-            route_assignment_budget=lambda: 1,
-            inline_followup_assignments=0,
+            agent_directory=AgentDirectory.from_workers([_RuntimeWorker()]),
+            events=event_controller,
+            max_consecutive_empty_rounds=1,
+            assignment_budget=1,
+            journal=journal,
+            progress_threshold=1,
+            closure=_StubClosure(),
         )
-        result = WorkerResult(
-            todo_id="todo-1",
-            worker_name="runtime-worker",
-            success=False,
-            summary="no progress",
-        )
-        completion = controller.complete(
-            cycle=7,
-            planner_summary="planned",
-            round_execution=RoutedAssignmentBatchResult(
-                results=[result],
-                executed_assignments=[
-                    WorkerAssignment(todo_id="todo-1", worker_name="runtime-worker")
-                ],
-            ),
-        )
-        self.assertFalse(completion.retry_cycle)
-        self.assertFalse(completion.halt_run)
+        result = controller.dispatch(cycle=7, planner_summary="planned")
+        self.assertFalse(result.retry_cycle)
+        self.assertFalse(result.halt_run)
         self.assertEqual(router.calls, 1)
         self.assertEqual(state.rounds[0].planner_summary, "planned")
-        self.assertEqual(state.rounds[0].summary.summary, "no progress")
+        self.assertEqual(state.rounds[0].summary.summary, "cycle 7 executed")
+        self.assertEqual(
+            state.rounds[0].assignments[0].worker_name, "runtime-worker"
+        )
         self.assertEqual(state.metadata["forced_pivot"]["pivot_number"], 1)
         self.assertTrue(any(("router summary" in message for message, _ in events)))
         self.assertTrue(checkpoints)
-
-    def test_orchestrator_delegates_routed_round_completion(self) -> None:
-        run_source = inspect.getsource(Orchestrator.run)
-        self.assertNotIn("inline_deterministic_followup", run_source)
-        self.assertNotIn("summarize_round", run_source)
-        self.assertNotIn("RouterRound(", run_source)
-        self.assertNotIn("observe_round", run_source)
-        self.assertNotIn("_round_completion_controller.complete", run_source)
 
     def test_execution_controller_applies_result_and_emits_runtime_event(self) -> None:
         state = RunState(objective="Solve.")
@@ -2573,7 +2419,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
             memory_updates={"format": "png"},
         )
         events: list[tuple[str, dict[str, object]]] = []
-        controller = AssignmentExecutionController(
+        controller = Execution(
             state=state,
             lifecycle=AgentLifecycle(),
             registry=RuntimeTaskRegistry(),
@@ -2735,108 +2581,42 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertEqual(state.status.value, "failed")
         self.assertEqual(state.stop_reason, "partial_todos_unsolved")
 
-    def test_run_lifecycle_controller_owns_start_stop_interrupt_and_runtime_llm_error(
+    def test_orchestrator_owns_start_stop_interrupt_and_runtime_llm_error(
         self,
     ) -> None:
-        state = RunState(objective="Solve.")
-        queue = _todo_queue(state)
-        running = queue.enqueue(TodoItem(goal="Running."))
-        _todo_queue(state).start(running, "runtime-worker")
-        events: list[tuple[str, dict[str, object]]] = []
-        checkpoints: list[bool] = []
-        background = _BackgroundLifecycleFlags()
-        controller = RunLifecycleController(
-            state=state,
-            commands=queue.commands,
-            events=self._runtime_events(state, events, checkpoints),
-            journal=RunJournal(state),
-            termination=RunTerminationController(state),
-            background_flags=background,
-        )
-        controller.start()
-        controller.handle_interrupt(KeyboardInterrupt())
-        controller.stop_background()
-        self.assertEqual(background.started, 1)
-        self.assertEqual(background.stopped, 1)
-        self.assertEqual(state.status.value, "interrupted")
-        self.assertEqual(state.stop_reason, "interrupted")
-        self.assertEqual(running.status.value, "interrupted")
-        self.assertTrue(any(("[interrupt]" in message for message, _ in events)))
-        self.assertTrue(checkpoints)
-        failed_state = RunState(objective="Solve.")
-        failed_events: list[tuple[str, dict[str, object]]] = []
-        failed_controller = RunLifecycleController(
-            state=failed_state,
-            commands=_todo_queue(failed_state).commands,
-            events=self._runtime_events(failed_state, failed_events, []),
-            journal=RunJournal(failed_state),
-            termination=RunTerminationController(failed_state),
-            background_flags=_BackgroundLifecycleFlags(),
-        )
-        failed_controller.handle_uncaught_llm_error(
-            cycle=11, exc=LLMClientError("runtime failure")
-        )
-        self.assertEqual(failed_state.status.value, "failed")
-        self.assertEqual(failed_state.stop_reason, "llm_error")
-        self.assertIn("[cycle 11] LLM error - aborting run", failed_events[0][0])
+        run_source = inspect.getsource(Orchestrator.run)
+        self.assertIn("self._outcome.start", run_source)
+        self.assertIn("self._background_flags.start()", run_source)
+        self.assertIn("self._background_flags.stop()", run_source)
+        self.assertIn("self._handle_interrupt", run_source)
+        self.assertIn("self._handle_uncaught_llm_error", run_source)
+        interrupt_source = inspect.getsource(Orchestrator._handle_interrupt)
+        self.assertIn("interrupt_running", interrupt_source)
+        self.assertIn("[interrupt]", interrupt_source)
+        llm_error_source = inspect.getsource(Orchestrator._handle_uncaught_llm_error)
+        self.assertIn("mark_llm_error", llm_error_source)
+        self.assertIn("LLM error - aborting run", llm_error_source)
 
     def test_orchestrator_delegates_run_lifecycle(self) -> None:
         run_source = inspect.getsource(Orchestrator.run)
         self.assertNotIn("state.status = RunStatus.RUNNING", run_source)
-        self.assertNotIn("_background_flags.start()", run_source)
-        self.assertNotIn("_background_flags.stop()", run_source)
         self.assertNotIn("run interrupted by", run_source)
         self.assertNotIn("marked running todos as interrupted", run_source)
-        self.assertNotIn("mark_llm_error(current_cycle", run_source)
-        self.assertIn("_lifecycle_controller.start()", run_source)
-        self.assertIn("_lifecycle_controller.handle_interrupt", run_source)
+        self.assertIn("self._begin_cycle", run_source)
+        self.assertIn("self._finalize", run_source)
 
-    def test_run_finalization_controller_owns_post_loop_closure_and_terminal_status(
+    def test_orchestrator_owns_post_loop_closure_and_terminal_status(
         self,
     ) -> None:
-        state = RunState(objective="Solve.")
-        events = self._runtime_events(state)
-
-        class _SolvingClosure:
-            def __init__(self) -> None:
-                self.final_validation_calls = 0
-
-            def final_deterministic_evidence_pass(
-                self,
-                *,
-                cycle: int,
-                planner: object,
-                max_passes: int,
-                max_assignments: int,
-            ) -> bool:
-                del cycle, planner, max_passes, max_assignments
-                return False
-
-            def final_flag_validation_pass(self, *, cycle: int) -> bool:
-                del cycle
-                self.final_validation_calls += 1
-                state.solved = True
-                state.validated_flag = "flag{ok}"
-                return True
-
-        closure = _SolvingClosure()
-        controller = RunFinalizationController(
-            state=state,
-            events=events,
-            closure=closure,
-            termination=RunTerminationController(state),
+        finalize_source = inspect.getsource(Orchestrator._finalize)
+        self.assertIn("final_deterministic_evidence_pass", finalize_source)
+        self.assertIn("final_flag_validation_pass", finalize_source)
+        self.assertIn("self._termination_controller.finalize", finalize_source)
+        self.assertTrue(
+            hasattr(Orchestrator, "FINAL_DETERMINISTIC_CLOSURE_PASSES")
         )
-        controller.finalize(
-            current_cycle=2, max_cycles_exhausted=True, planner=object()
-        )
-        self.assertEqual(closure.final_validation_calls, 1)
-        self.assertEqual(state.status.value, "solved")
-        self.assertEqual(state.validated_flag, "flag{ok}")
-        self.assertFalse(
-            hasattr(Orchestrator, "MAX_FINAL_DETERMINISTIC_CLOSURE_PASSES")
-        )
-        self.assertFalse(
-            hasattr(Orchestrator, "MAX_FINAL_DETERMINISTIC_CLOSURE_ASSIGNMENTS")
+        self.assertTrue(
+            hasattr(Orchestrator, "FINAL_DETERMINISTIC_CLOSURE_ASSIGNMENTS")
         )
 
     def test_run_termination_controller_interrupts_transient_llm_exhaustion(
@@ -2930,15 +2710,18 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertTrue(strings.execution_policy().concurrency_safe)
 
     def test_routed_execution_batches_concurrency_safe_assignments(self) -> None:
-        source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/routed_execution.py"
+        execution_source = (
+            PROJECT_ROOT / "killchain_docker/orchestrator/execution.py"
+        ).read_text()
+        dispatch_source = (
+            PROJECT_ROOT / "killchain_docker/orchestrator/dispatch_controller.py"
         ).read_text()
         batch_source = (
             PROJECT_ROOT / "killchain_docker/orchestrator/assignment_batches.py"
         ).read_text()
-        self.assertIn("assignment_execution_batches(", source)
-        self.assertIn("ThreadPoolExecutor", source)
-        self.assertIn("as_completed", source)
+        self.assertIn("assignment_execution_batches(", dispatch_source)
+        self.assertIn("ThreadPoolExecutor", execution_source)
+        self.assertIn("as_completed", execution_source)
         self.assertIn("tool_spec(", batch_source)
         self.assertIn("spec.direct", batch_source)
         self.assertIn("spec.read_only", batch_source)

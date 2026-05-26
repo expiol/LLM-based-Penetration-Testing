@@ -25,7 +25,7 @@ from killchain_docker.state.run_state import RunState
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.evidence_projection import EvidenceProjectionStore
-from killchain_docker.state.projection_common import (
+from killchain_docker.value_coercion import (
     COMPACT_GOAL_LIMIT,
     compact_text,
 )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.evidence_projection import EvidenceProjectionStore
 from killchain_docker.state.run_state import RunState
@@ -140,7 +140,7 @@ class NearMissSeedPlanner:
             str(ctx.get("stderr") or ""),
             cls._candidate_body(near_misses),
         ]
-        todo = TodoQueueReader(state).get(evidence.task_id)
+        todo = TodoQueue(state).get(evidence.task_id)
         if todo is not None:
             texts.extend(
                 [
@@ -167,4 +167,4 @@ class NearMissSeedPlanner:
 
     @staticmethod
     def _has_todo_key(state: RunState, dedupe_key: str) -> bool:
-        return TodoQueueReader(state).has_dedupe_key(dedupe_key)
+        return TodoQueue(state).has_dedupe_key(dedupe_key)

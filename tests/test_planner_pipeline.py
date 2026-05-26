@@ -5,7 +5,7 @@ import json
 import unittest
 from killchain_docker.rag.augmenter import RagAugmenter
 from killchain_docker.llm.gateway import LLMClientError, StaticLLMClient
-from tests.queue_harness import todo_queue
+from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
 from killchain_docker.orchestrator.planning.planner import LLMPlanner
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo, PlannerDecision

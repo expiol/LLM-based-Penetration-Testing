@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 from killchain_docker.state.metadata import RunMetadataStore
 from killchain_docker.state.todos import TodoStatus
-from killchain_docker.state.projection_common import (
+from killchain_docker.value_coercion import (
     COMPACT_GOAL_LIMIT,
     COMPACT_TIMELINE_LIMIT,
     compact_text,

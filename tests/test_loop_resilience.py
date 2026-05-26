@@ -5,7 +5,7 @@ import unittest
 from collections.abc import Iterable
 from killchain_docker.runtime.events import EventRecorder
 from killchain_docker.llm.gateway import LLMClientError, LLMFailureKind
-from tests.queue_harness import todo_queue
+from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
 from killchain_docker.orchestrator.loop import Orchestrator
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
 from killchain_docker.orchestrator.planning.schemas import (
@@ -1349,7 +1349,9 @@ class OrchestratorLoopTests(unittest.TestCase):
                 for note in final_state.orchestration_notes
             )
         )
-        self.assertEqual(orchestrator.dispatch_rounds.consecutive_empty_rounds, 2)
+        self.assertEqual(
+            orchestrator._dispatch_cycle_controller.consecutive_empty_rounds, 2
+        )
         self.assertFalse(dependency_events)
 
 

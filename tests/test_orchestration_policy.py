@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import unittest
-from tests.queue_harness import todo_queue
+from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
 from killchain_docker.orchestrator.forced_pivot import forced_pivot_directive
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.artifact_projection import ArtifactProjection
 from killchain_docker.state.run_state import RunState
 from killchain_docker.tools.capabilities import dispatch_profile_for_capability
@@ -30,7 +30,7 @@ def has_artifact_followup_path(state: RunState, path: str) -> bool:
     target = str(path or "").strip()
     if not target:
         return False
-    for todo in TodoQueueReader(state).recent(limit=10000):
+    for todo in TodoQueue(state).recent(limit=10000):
         is_artifact_followup = (
             str(todo.context.get("family") or "") == "artifact-followup"
         )
@@ -59,7 +59,7 @@ def has_capability_todo_for_path(state: RunState, path: str, capability: str) ->
     expected = str(capability or "").strip()
     if not target or not expected:
         return False
-    for todo in TodoQueueReader(state).recent(limit=10000):
+    for todo in TodoQueue(state).recent(limit=10000):
         current_capability = ""
         intent = todo.context.get("dispatch_intent")
         if isinstance(intent, dict):
@@ -163,4 +163,4 @@ def artifact_should_batch_media(artifact: ArtifactProjection) -> bool:
 
 
 def has_todo_key(state: RunState, dedupe_key: str) -> bool:
-    return TodoQueueReader(state).has_dedupe_key(dedupe_key)
+    return TodoQueue(state).has_dedupe_key(dedupe_key)

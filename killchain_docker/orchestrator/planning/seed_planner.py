@@ -14,10 +14,9 @@ from killchain_docker.orchestrator.planning.schemas import PlannedTodo
 from killchain_docker.orchestrator.planning.suspicious_media_seeds import (
     SuspiciousMediaSeedPlanner,
 )
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.run_state import RunState
-from killchain_docker.state.scope_projection import ScopeProjection
 from killchain_docker.state.todos import TodoPhase
 
 
@@ -50,7 +49,7 @@ class PlanningSeedPlanner:
         todos: list[PlannedTodo] = []
         notes: list[str] = []
         challenge_files = ChallengeProjection(state).files()
-        authorized_scope = ScopeProjection(state).entries()
+        authorized_scope = list(state.authorized_scope)
         if challenge_files and (
             not self._has_todo_key(state, "bootstrap:artifact-inventory")
         ):
@@ -148,7 +147,7 @@ class PlanningSeedPlanner:
         )
         todos.extend(near_miss_todos)
         notes.extend(near_miss_notes)
-        if not todos and TodoQueueReader(state).empty():
+        if not todos and TodoQueue(state).empty():
             notes.append(
                 "No authorized scope or challenge files are available for bootstrap."
             )
@@ -163,4 +162,4 @@ class PlanningSeedPlanner:
 
     @staticmethod
     def _has_todo_key(state: RunState, dedupe_key: str) -> bool:
-        return TodoQueueReader(state).has_dedupe_key(dedupe_key)
+        return TodoQueue(state).has_dedupe_key(dedupe_key)

@@ -10,7 +10,6 @@ from killchain_docker.state.constants import (
     looks_like_escaped_byte_candidate,
     validatable_flag_candidate,
 )
-from killchain_docker.state.candidate_projection import CandidateProjection
 from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.domain import FlagCandidate
 
@@ -88,7 +87,7 @@ class CandidatePolicy:
     @classmethod
     def validation_ready_candidates(cls, state: "RunState") -> list[FlagCandidate]:
         ready: list[FlagCandidate] = []
-        for candidate in CandidateProjection(state).validation_ready_records():
+        for candidate in state.flag_candidates.values():
             if candidate.validated is False or candidate.rejected_reason:
                 continue
             if cls.accepts_for_state(state, candidate.value):

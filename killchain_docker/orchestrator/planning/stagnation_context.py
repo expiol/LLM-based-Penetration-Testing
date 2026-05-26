@@ -10,7 +10,7 @@ from killchain_docker.orchestrator.progress_families import (
 )
 from killchain_docker.orchestrator.progress_limits import CONSECUTIVE_FAILURE_CAP
 from killchain_docker.orchestrator.todo_family import family_for
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.metadata import RunMetadataStore
 from killchain_docker.state.planner_projection import PlannerStateProjection
 from killchain_docker.state.report_projection import RunReportProjection
@@ -28,7 +28,7 @@ _STAGNATION_GUIDANCE = (
 def build_stagnation_signals(state: RunState) -> dict[str, Any]:
     report_projection = RunReportProjection(state)
     planner_projection = PlannerStateProjection(state)
-    queue = TodoQueueReader(state)
+    queue = TodoQueue(state)
     snapshot = stagnation_snapshot(state)
     cooldown_families = snapshot.get("cooldown_families", [])
     family_counts = queue.family_counts(_todo_family)
@@ -98,7 +98,7 @@ def build_stagnation_signals(state: RunState) -> dict[str, Any]:
 
 
 def pivot_summaries(state: RunState) -> list[dict[str, Any]]:
-    queue = TodoQueueReader(state)
+    queue = TodoQueue(state)
     summaries: list[dict[str, Any]] = []
     for family in queue.families(_pivot_family):
         consecutive = consecutive_failures_without_evidence(state, family)

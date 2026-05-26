@@ -14,7 +14,7 @@ from killchain_docker.orchestrator.planning.stagnation_context import (
 )
 from killchain_docker.orchestrator.planning.techniques import technique_matrix_for
 from killchain_docker.orchestrator.rag_policy import RagPolicy
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.prompt_projection import planner_todo as prompt_planner_todo
 from killchain_docker.prompts.planner import build_planner_system_prompt
 from killchain_docker.state.challenge_projection import ChallengeProjection
@@ -53,7 +53,7 @@ class PlannerContextBuilder:
         report_projection = RunReportProjection(state)
         planner_projection = PlannerStateProjection(state)
         category = challenge_projection.category()
-        queue = TodoQueueReader(state)
+        queue = TodoQueue(state)
         if self.augmenter is not None:
             self.augmenter.context_for(state)
         RagPolicy.annotate(state)

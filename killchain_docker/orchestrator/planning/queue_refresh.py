@@ -12,7 +12,7 @@ from killchain_docker.orchestrator.planning.refresh_results import (
     PlanningRefreshResult,
 )
 from killchain_docker.orchestrator.planning.schemas import PlannerAgent, PlannerDecision
-from killchain_docker.orchestrator.todo_queue_writer import TodoQueueWriter
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.run_state import RunState
 
@@ -25,13 +25,13 @@ class PlanningRefreshController:
         *,
         state: RunState,
         planner: PlannerAgent,
-        writer: TodoQueueWriter,
+        todos: TodoQueue,
         journal: RunJournal,
         emit: Callable[[str], None],
     ) -> None:
         self.state = state
         self.planner = planner
-        self.writer = writer
+        self.todos = todos
         self.journal = journal
         self.emit = emit
 
@@ -74,7 +74,7 @@ class PlanningRefreshController:
         self, decision: PlannerDecision, *, deterministic: bool = False
     ) -> PlanningRefreshResult:
         todos, dependency_notes = gate_planned_dependencies(decision.todos, self.state)
-        report = self.writer.enqueue_planned(todos)
+        report = self.todos.enqueue_planned(todos)
         notes = [*decision.notes, *dependency_notes]
         if notes:
             self.journal.orchestration_notes(notes)

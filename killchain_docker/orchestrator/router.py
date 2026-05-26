@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 from killchain_docker.llm.gateway import LLMClient, LLMClientError
 from killchain_docker.orchestrator.agent_directory import AgentDirectory
-from killchain_docker.orchestrator.dispatch_scheduler import DispatchScheduler
+from killchain_docker.orchestrator.dispatch_types import select_ready_batch
 from killchain_docker.orchestrator.assignment_planner import AssignmentPlanner
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.prompt_bounds import bounded_value
 from killchain_docker.prompt_projection import router_todo as prompt_router_todo
 from killchain_docker.state.run_state import RunState
@@ -35,9 +35,7 @@ class RouterAgent:
     def route(
         self, state: RunState, *, agent_directory: AgentDirectory, max_assignments: int
     ) -> RouterDecision:
-        batch = DispatchScheduler(max_assignments=max_assignments).next_batch(
-            TodoQueueReader(state)
-        )
+        batch = select_ready_batch(TodoQueue(state), max_assignments=max_assignments)
         ready = batch.todos
         if not ready:
             return RouterDecision(rationale="No ready todos.")

@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from queue import Empty, PriorityQueue
 from threading import Event, Lock, Thread
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
-from killchain_docker.orchestrator.todo_status_commands import TodoStatusCommands
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.maintenance import RunStateMaintenance
 from killchain_docker.state.domain import FlagCandidate, StateDelta
@@ -167,7 +167,7 @@ class BackgroundFlagValidationController:
         RunJournal(self.state).orchestration_note(
             f"cycle {cycle}: background flag validator accepted a candidate"
         )
-        TodoStatusCommands(self.state).interrupt_running("background_flag_validated")
+        TodoQueue(self.state).interrupt_running("background_flag_validated")
         RunStateMaintenance(self.state).touch()
         self._checkpoint()
         return True

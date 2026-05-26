@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 from killchain_docker.rag.augmenter import RagAugmenter
 from killchain_docker.llm.gateway import StaticLLMClient, TokenLedger
-from tests.queue_harness import todo_queue
+from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
 from killchain_docker.runtime.assembly import build_runtime
 from killchain_docker.runtime.compact_log import (
     build_compact_run_log,

@@ -11,7 +11,7 @@ from killchain_docker.orchestrator.planning.schemas import (
 )
 from killchain_docker.orchestrator.planning.llm_strategy import LLMPlanningStrategy
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.planner_projection import PlannerStateProjection
@@ -82,14 +82,14 @@ class LLMPlanner(PlannerAgent):
     ) -> bool:
         if decision.todos or decision.stop_run:
             return False
-        if RunOutcomeStore(state).is_solved or TodoQueueReader(state).has_open():
+        if RunOutcomeStore(state).is_solved or TodoQueue(state).has_open():
             return False
         if llm_decision.todos and (
             not LLMPlanner._all_llm_todos_were_dropped(decision)
         ):
             return False
         return PlannerStateProjection(state).empty_retry_available(
-            todo_count=TodoQueueReader(state).count()
+            todo_count=TodoQueue(state).count()
         )
 
     @staticmethod
@@ -112,7 +112,7 @@ class LLMPlanner(PlannerAgent):
     def _continuation_decision(
         state: RunState, *, previous_summary: str
     ) -> PlannerDecision | None:
-        queue = TodoQueueReader(state)
+        queue = TodoQueue(state)
         todo_count = queue.count()
         if RunOutcomeStore(state).is_solved or queue.has_open():
             return None

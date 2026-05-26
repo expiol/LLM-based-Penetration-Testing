@@ -30,12 +30,10 @@ class WorkerResultApplier:
         self.delta_applier = StateDeltaApplier(state)
 
     def apply(self, result: WorkerResult) -> None:
-        from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
-        from killchain_docker.orchestrator.todo_status_commands import (
-            TodoStatusCommands,
-        )
+        from killchain_docker.orchestrator.todo_queue import TodoQueue
 
-        todo = TodoQueueReader(self.state).get(result.todo_id)
+        todos = TodoQueue(self.state)
+        todo = todos.get(result.todo_id)
         if todo is None:
             raise KeyError(f"Unknown todo id: {result.todo_id}")
         record_todo_execution_context(todo, result)
@@ -50,7 +48,7 @@ class WorkerResultApplier:
             result.result_quality = result.result_quality or "diagnostic_evidence"
             result.output_context.setdefault("result_quality", result.result_quality)
             result.output_context.setdefault("partial_reason", result.partial_reason)
-        TodoStatusCommands(self.state).apply_result(todo, result, touch=False)
+        todos.apply_result(todo, result, touch=False)
         for asset in result.asset_updates:
             self.recon_facts.asset(asset)
         for finding in result.finding_updates:

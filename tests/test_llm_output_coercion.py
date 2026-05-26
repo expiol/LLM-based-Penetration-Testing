@@ -21,7 +21,7 @@ from killchain_docker.llm.structured_output import (
     loads_lenient_json_object,
     python_string_literal_after,
 )
-from tests.queue_harness import todo_queue
+from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
 from killchain_docker.orchestrator.planning.schemas import PlannerDecision
 from killchain_docker.reasoning.coercion import coerce_llm_bool
 from killchain_docker.reasoning.schemas import ToolUseDecision

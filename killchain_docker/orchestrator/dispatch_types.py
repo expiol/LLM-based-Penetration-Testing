@@ -10,7 +10,7 @@ from killchain_docker.state.todos import (
     RouterDecision,
     TodoItem,
     TodoPhase,
-    WorkerAssignment,
+    todo_phase_rank,
 )
 
 
@@ -97,6 +97,25 @@ class QueuedTodoBatch:
     blocked_by_dependency: list[TodoItem] = field(default_factory=list)
 
 
+def select_ready_batch(queue, *, max_assignments: int) -> QueuedTodoBatch:
+    """Pick the next coherent batch of ready todos for a single dispatch round."""
+    limit = max(1, max_assignments)
+    ready = queue.ready(limit=None)
+    if not ready:
+        return QueuedTodoBatch(
+            todos=[],
+            focus_phase=None,
+            blocked_by_dependency=queue.blocked_by_dependency(),
+        )
+    focus_phase = min((todo.phase for todo in ready), key=todo_phase_rank)
+    todos = [todo for todo in ready if todo.phase == focus_phase][:limit]
+    return QueuedTodoBatch(
+        todos=todos,
+        focus_phase=focus_phase,
+        blocked_by_dependency=queue.blocked_by_dependency(),
+    )
+
+
 @dataclass(frozen=True)
 class EnqueueReport:
     """Append-only queue result for a planner decision."""
@@ -141,14 +160,6 @@ class RunTerminationView(Protocol):
     def handle_step_llm_error(
         self, *, cycle: int, source: str, exc: LLMClientError, permanent_message: str
     ): ...
-
-
-class RoutedExecutionView(Protocol):
-    def execute(self, *, cycle: int, assignments: list[WorkerAssignment]): ...
-
-
-class RoundCompletionView(Protocol):
-    def complete(self, *, cycle: int, planner_summary: str, round_execution): ...
 
 
 class RouterView(Protocol):

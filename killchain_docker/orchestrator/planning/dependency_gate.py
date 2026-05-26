@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo
-from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.orchestrator.todo_queue import TodoQueue
 from killchain_docker.state.run_state import RunState
 
 
@@ -14,7 +14,7 @@ def gate_planned_dependencies(
 ) -> tuple[list[PlannedTodo], list[str]]:
     """Drop planner todos whose dependency refs cannot resolve after this batch."""
 
-    queue = TodoQueueReader(state)
+    queue = TodoQueue(state)
     proposed_refs = _proposed_refs(todos)
     kept: list[PlannedTodo] = []
     dropped_refs: list[str] = []
