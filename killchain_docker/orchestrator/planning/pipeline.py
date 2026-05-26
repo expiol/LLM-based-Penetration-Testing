@@ -62,14 +62,22 @@ class PlanningPipeline(PlannerAgent):
             normalize_todo(todo, state)
             normalized.append(todo)
         deduped, dedupe_notes = self._dedupe(normalized, state)
-        gated, gate_notes = self._phase_gate(deduped, state)
+        dependency_gated, dependency_notes = self._dependency_gate(deduped, state)
+        gated, gate_notes = self._phase_gate(dependency_gated, state)
         scoped, scope_notes = self._scope_gate(gated, state)
         allowed, progress_notes = self._progress_gate(scoped, state)
         return PlannerDecision(
             summary=(llm_decision.summary if llm_decision else "")
             or f"Planning pipeline proposed {len(allowed)} todo(s).",
             todos=allowed,
-            notes=[*notes, *dedupe_notes, *gate_notes, *scope_notes, *progress_notes],
+            notes=[
+                *notes,
+                *dedupe_notes,
+                *dependency_notes,
+                *gate_notes,
+                *scope_notes,
+                *progress_notes,
+            ],
             stop_run=bool(llm_decision.stop_run) if llm_decision else False,
         )
 
@@ -118,6 +126,35 @@ class PlanningPipeline(PlannerAgent):
             else []
         )
         return (out, notes)
+
+    def _dependency_gate(
+        self, todos: list[PlannedTodo], state: RunState
+    ) -> tuple[list[PlannedTodo], list[str]]:
+        queue = TodoQueueReader(state)
+        proposed_refs = {str(todo.dedupe_key or "").strip() for todo in todos}
+        proposed_refs.discard("")
+        kept: list[PlannedTodo] = []
+        dropped_refs: list[str] = []
+        for todo in todos:
+            missing = [
+                ref
+                for ref in todo.depends_on
+                if queue.get_by_ref(ref) is None and ref not in proposed_refs
+            ]
+            if missing:
+                dropped_refs.extend(missing)
+                continue
+            kept.append(todo)
+        notes = (
+            [
+                "Planning dependency gate dropped "
+                f"{len(todos) - len(kept)} todo(s) with missing dependency ref(s): "
+                f"{sorted(set(dropped_refs))[:5]}."
+            ]
+            if dropped_refs
+            else []
+        )
+        return (kept, notes)
 
     def _phase_gate(
         self, todos: list[PlannedTodo], state: RunState

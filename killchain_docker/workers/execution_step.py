@@ -32,12 +32,24 @@ def run_tool_step(
 ) -> tuple[ToolCapability, str, ToolExecutionBundle] | WorkerResult:
     metadata_retries = 0
     capability = None
+    forced_capability: ToolCapability | None = None
+    shell_python_script_rescue_used = False
     rationale = ""
     while True:
         try:
+            if forced_capability is not None:
+                capability = forced_capability
             capability, selected_metadata, rationale, hypothesis_text, mem_updates = (
-                select_step_tool(agent, task, state, step=step, prior_steps=prior_steps)
+                select_step_tool(
+                    agent,
+                    task,
+                    state,
+                    step=step,
+                    prior_steps=prior_steps,
+                    forced_capability=forced_capability,
+                )
             )
+            forced_capability = None
             if hypothesis_text:
                 accumulated_hypotheses.append(Hypothesis(title=hypothesis_text))
             if mem_updates:
@@ -55,15 +67,25 @@ def run_tool_step(
             error_text = str(exc)
             failure_kind = ToolGuardPolicy.metadata_failure_kind(error_text, capability)
             metadata_retries += 1
-            if metadata_retries > max_metadata_retries:
-                return metadata_failure_result(
-                    task, agent.name, capability, error_text, failure_kind
-                )
             prior_steps.append(
                 validation_error_step(
                     step, capability, rationale, error_text, failure_kind
                 )
             )
+            if (
+                metadata_retries > max_metadata_retries
+                and failure_kind == "shell_python_complexity"
+                and capability == ToolCapability.SHELL_EXEC
+                and ToolCapability.SCRIPT_EXEC in agent.allowed_capabilities
+                and not shell_python_script_rescue_used
+            ):
+                shell_python_script_rescue_used = True
+                forced_capability = ToolCapability.SCRIPT_EXEC
+                continue
+            if metadata_retries > max_metadata_retries:
+                return metadata_failure_result(
+                    task, agent.name, capability, error_text, failure_kind
+                )
 
 
 def select_step_tool(
@@ -73,8 +95,11 @@ def select_step_tool(
     *,
     step: int,
     prior_steps: list[dict[str, object]],
+    forced_capability: ToolCapability | None = None,
 ):
-    fixed_capability = fixed_llm_capability(task, agent.allowed_capabilities)
+    fixed_capability = forced_capability or fixed_llm_capability(
+        task, agent.allowed_capabilities
+    )
     if fixed_capability is not None:
         agent.report_progress(
             state,

@@ -1394,6 +1394,61 @@ class PlanningPipelineSeedTests(unittest.TestCase):
         )
         self.assertTrue(any(("scope gate dropped" in note for note in decision.notes)))
 
+    def test_dependency_gate_drops_missing_planner_dependency(self) -> None:
+        state = _state(["csawpad.py"])
+        seed = todo_queue(state).enqueue(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        )
+        todo_queue(state).complete(seed, "done")
+        llm_decision = PlannerDecision(
+            summary="Plan dependent work.",
+            todos=[
+                PlannedTodo(
+                    goal="Parse flag.stfu after the file discovery todo completes.",
+                    phase=TodoPhase.ANALYSIS,
+                    priority=90,
+                    context={"family": "crypto-model"},
+                    depends_on=["recon-find-stfu-files"],
+                )
+            ],
+        )
+        decision = PlanningPipeline().merge(state, llm_decision=llm_decision)
+        self.assertFalse(
+            any(("flag.stfu" in todo.goal for todo in decision.todos))
+        )
+        self.assertTrue(
+            any(("dependency gate dropped" in note for note in decision.notes))
+        )
+
+    def test_dependency_gate_allows_existing_dependency_ref(self) -> None:
+        state = _state(["csawpad.py"])
+        upstream = todo_queue(state).enqueue(
+            TodoItem(
+                goal="Find encrypted challenge files.",
+                phase=TodoPhase.RECON,
+                dedupe_key="recon-find-stfu-files",
+            )
+        )
+        todo_queue(state).complete(upstream, "no stfu files found")
+        llm_decision = PlannerDecision(
+            summary="Plan dependent work.",
+            todos=[
+                PlannedTodo(
+                    goal="Analyze source after file discovery.",
+                    phase=TodoPhase.ANALYSIS,
+                    priority=90,
+                    context={"family": "crypto-model"},
+                    depends_on=["recon-find-stfu-files"],
+                )
+            ],
+        )
+        decision = PlanningPipeline().merge(state, llm_decision=llm_decision)
+        self.assertEqual(len(decision.todos), 1)
+
     def test_scope_gate_allows_registered_tmp_artifact(self) -> None:
         state = _state([])
         artifact = Artifact(
@@ -2882,6 +2937,63 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         self.assertEqual(len(decision.todos), 1)
         self.assertEqual(decision.todos[0].phase, TodoPhase.ANALYSIS)
+        self.assertTrue(any(("retried after empty" in note for note in decision.notes)))
+
+    def test_planner_retries_when_dependency_gate_drops_all_llm_todos(self) -> None:
+        captured: list[dict[str, object]] = []
+
+        def responder(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured.append(json.loads(user_prompt))
+            if len(captured) == 1:
+                return {
+                    "summary": "dependent missing artifact step",
+                    "todos": [
+                        {
+                            "goal": "Parse flag.stfu after file discovery completes.",
+                            "phase": "analysis",
+                            "priority": 90,
+                            "context": {"family": "crypto-model"},
+                            "depends_on": ["recon-find-stfu-files"],
+                        }
+                    ],
+                    "notes": [],
+                    "stop_run": False,
+                }
+            return {
+                "summary": "continue with local source",
+                "todos": [
+                    {
+                        "goal": "Analyze the available source file and identify embedded ciphertext.",
+                        "phase": "analysis",
+                        "priority": 80,
+                        "context": {
+                            "family": "crypto-model",
+                            "files_root": "/home/ctfplayer/ctf_files",
+                            "challenge_files": ["csawpad.py"],
+                        },
+                    }
+                ],
+                "notes": [],
+                "stop_run": False,
+            }
+
+        state = _state(["csawpad.py"])
+        inventory = todo_queue(state).enqueue(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                context={"family": "artifact-inventory"},
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        )
+        todo_queue(state).complete(inventory, "only csawpad.py is present")
+        decision = LLMPlanner(
+            StaticLLMClient(responder), augmenter=KnowledgeAugmenter(None)
+        ).plan(state)
+        self.assertEqual(len(captured), 2)
+        self.assertIn("planner_retry_instruction", captured[1])
+        self.assertEqual(len(decision.todos), 1)
+        self.assertFalse(any(("flag.stfu" in todo.goal for todo in decision.todos)))
         self.assertTrue(any(("retried after empty" in note for note in decision.notes)))
 
     def test_planner_synthesizes_grounded_continuation_after_repeated_empty_plans(

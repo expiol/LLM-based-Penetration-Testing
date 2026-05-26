@@ -100,6 +100,7 @@ class LLMPlanner(PlannerAgent):
                 marker in text
                 for marker in (
                     "duplicate todo",
+                    "dependency gate dropped",
                     "phase gate dropped",
                     "scope gate dropped",
                     "progress gate dropped",

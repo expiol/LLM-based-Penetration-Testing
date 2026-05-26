@@ -1,6 +1,7 @@
 """Tests for the capability gateway with the new 2-plugin architecture."""
 
 from __future__ import annotations
+import json
 import sys
 import shlex
 import tempfile
@@ -795,6 +796,60 @@ class CapabilityGatewayTests(unittest.TestCase):
             "mmls out.img  && fls out.img",
         )
         self.assertIsNone(script_plugin.last_request)
+
+    def test_repeated_complex_shell_python_falls_back_to_script_exec(self) -> None:
+        captured: list[tuple[str, str]] = []
+
+        def response(system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured.append((system_prompt, user_prompt))
+            if len(captured) < 3:
+                return {
+                    "capability": "shell.exec",
+                    "metadata": {
+                        "command": 'python3 -c "for i in range(3): print(i)"'
+                    },
+                    "rationale": "try compact Python in shell",
+                }
+            return {
+                "capability": "script.exec",
+                "metadata": {"script_code": "print('flag{script_test}')"},
+                "rationale": "switch to multiline script",
+            }
+
+        plane = ExecutionPlane()
+        shell_plugin = _StaticShellPlugin()
+        script_plugin = _StaticScriptPlugin()
+        plane.register(shell_plugin, shell_output_builder)
+        plane.register(script_plugin, script_output_builder)
+        worker = Worker(
+            persona=PersonaSpec(
+                name="artifact-worker",
+                allowed_capabilities=(
+                    ToolCapability.SHELL_EXEC,
+                    ToolCapability.SCRIPT_EXEC,
+                ),
+            ),
+            llm_client=StaticLLMClient(response),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(objective="Solve.", authorized_scope=[])
+        todo = todo_queue(state).enqueue(
+            TodoItem(goal="Extract source details with Python and recover the flag.")
+        )
+
+        result = worker.run(todo, state)
+
+        self.assertTrue(result.success)
+        self.assertIsNone(shell_plugin.last_request)
+        self.assertIsNotNone(script_plugin.last_request)
+        self.assertEqual(len(captured), 3)
+        self.assertIn("already selected the capability", captured[2][0])
+        fallback_payload = json.loads(captured[2][1])
+        self.assertEqual(fallback_payload["fixed_capability"], "script.exec")
+        self.assertEqual(
+            fallback_payload["correction_context"]["failure_kind"],
+            "shell_python_complexity",
+        )
 
     def test_partial_flag_recovery_does_not_persist_speculative_memory(self) -> None:
         plane = ExecutionPlane()

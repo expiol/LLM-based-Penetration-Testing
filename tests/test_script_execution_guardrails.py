@@ -1131,6 +1131,27 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
         self.assertIn("expected data", str(ctx["failure_detail"]))
         self.assertEqual(ctx["result_quality"], "partial_no_candidate")
 
+    def test_python_traceback_takes_precedence_over_incomplete_read_diagnostics(
+        self,
+    ) -> None:
+        ctx = self._output_context(
+            stderr=(
+                "Traceback (most recent call last):\n"
+                '  File "/workspace/solver.py", line 9, in <module>\n'
+                "    x.bit_length()\n"
+                "AttributeError: 'float' object has no attribute 'bit_length'\n"
+            ),
+            stdout=(
+                "Connecting to target:31337...\n"
+                "Connected!\n"
+                "Round 2: No header received\n"
+                "No final data received\n"
+            ),
+        )
+        self.assertEqual(ctx["failure_kind"], "type_error")
+        self.assertIn("incompatible value type", str(ctx["failure_detail"]))
+        self.assertIn("AttributeError", str(ctx["traceback"]))
+
     def test_plain_connection_close_is_not_network_incomplete_read(self) -> None:
         ctx = self._output_context(
             stdout="Connected\nReceived banner\nConnection closed by server\nDone\n",

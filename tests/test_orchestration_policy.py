@@ -8,6 +8,7 @@ from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
 from killchain_docker.orchestrator.progress_gate import progress_allows
 from killchain_docker.orchestrator.progress_limits import (
+    CONSECUTIVE_FAILURE_CAP,
     FAILURE_COOLDOWN_THRESHOLD,
     MAX_FLAG_VALIDATION_ATTEMPTS,
 )
@@ -336,6 +337,35 @@ class TodoProgressGateTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("cooldown", reason)
 
+    def test_uncapped_crypto_family_enters_cooldown_before_bankruptcy(
+        self,
+    ) -> None:
+        state = _state()
+        for idx in range(FAILURE_COOLDOWN_THRESHOLD):
+            item = todo_queue(state).enqueue(
+                TodoItem(
+                    goal=f"Try XOR decrypt strategy {idx}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "crypto-decrypt"},
+                    dedupe_key=f"crypto-decrypt-{idx}",
+                )
+            )
+            todo_queue(state).start(item, "artifact-worker")
+            todo_queue(state).partial(
+                item,
+                "script (python)",
+                "script exited successfully but no flag candidate was recovered",
+            )
+        todo = PlannedTodo(
+            goal="Try another XOR decrypt strategy with a different scoring function.",
+            phase=TodoPhase.ANALYSIS,
+            context={"family": "crypto-decrypt"},
+        )
+        allowed, reason = progress_allows(todo, state)
+        self.assertFalse(allowed)
+        self.assertIn("cooldown", reason)
+        self.assertLess(FAILURE_COOLDOWN_THRESHOLD, CONSECUTIVE_FAILURE_CAP)
+
     def test_failed_family_blocks_bare_novelty_key(self) -> None:
         state = _state()
         for idx in range(FAILURE_COOLDOWN_THRESHOLD):
@@ -390,6 +420,111 @@ class TodoProgressGateTests(unittest.TestCase):
         )
         allowed, _reason = progress_allows(todo, state)
         self.assertTrue(allowed)
+
+    def test_uncapped_crypto_family_allows_grounded_new_evidence(self) -> None:
+        state = _state()
+        EvidenceFactStore(state).evidence(
+            EvidenceRecord(
+                evidence_id="e-old",
+                task_id="todo-old",
+                capability="script.exec",
+                tool_name="script_exec",
+                mode="local_command",
+                summary="Old failed decrypt attempt.",
+            )
+        )
+        EvidenceFactStore(state).evidence(
+            EvidenceRecord(
+                evidence_id="e-new",
+                task_id="todo-new",
+                capability="shell.exec",
+                tool_name="shell_exec",
+                mode="local_command",
+                summary="New disassembly evidence changes the byte order.",
+            )
+        )
+        for idx in range(FAILURE_COOLDOWN_THRESHOLD):
+            item = todo_queue(state).enqueue(
+                TodoItem(
+                    goal=f"Try XOR decrypt strategy {idx}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "crypto-decrypt", "evidence_ids": ["e-old"]},
+                    dedupe_key=f"crypto-decrypt-{idx}",
+                )
+            )
+            todo_queue(state).start(item, "artifact-worker")
+            todo_queue(state).partial(item, "script (python)", "no candidate")
+        todo = PlannedTodo(
+            goal="Retry decrypt using newly extracted byte-order evidence.",
+            phase=TodoPhase.ANALYSIS,
+            context={
+                "family": "crypto-decrypt",
+                "evidence_ids": ["e-new"],
+                "novelty_key": "byte-order-evidence",
+            },
+        )
+        allowed, _reason = progress_allows(todo, state)
+        self.assertTrue(allowed)
+
+    def test_no_candidate_script_evidence_is_not_progress_novelty(self) -> None:
+        state = _state()
+        EvidenceFactStore(state).evidence(
+            EvidenceRecord(
+                evidence_id="e-old",
+                task_id="todo-old",
+                capability="script.exec",
+                tool_name="script_exec",
+                mode="local_command",
+                summary="Old failed decrypt attempt.",
+                extracted={
+                    "output_context": {
+                        "result_quality": "partial_no_candidate",
+                        "failure_kind": "no_candidate",
+                        "flag_candidates": [],
+                    }
+                },
+            )
+        )
+        EvidenceFactStore(state).evidence(
+            EvidenceRecord(
+                evidence_id="e-new",
+                task_id="todo-new",
+                capability="script.exec",
+                tool_name="script_exec",
+                mode="local_command",
+                summary="New script also produced no flag candidate.",
+                extracted={
+                    "output_context": {
+                        "result_quality": "partial_no_candidate",
+                        "failure_kind": "no_candidate",
+                        "flag_candidates": [],
+                    }
+                },
+            )
+        )
+        for idx in range(FAILURE_COOLDOWN_THRESHOLD):
+            item = todo_queue(state).enqueue(
+                TodoItem(
+                    goal=f"Try XOR decrypt strategy {idx}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "crypto-decrypt", "evidence_ids": ["e-old"]},
+                    dedupe_key=f"crypto-decrypt-{idx}",
+                )
+            )
+            todo_queue(state).start(item, "artifact-worker")
+            todo_queue(state).partial(item, "script (python)", "no candidate")
+        todo = PlannedTodo(
+            goal="Retry decrypt using the latest no-candidate script transcript.",
+            phase=TodoPhase.ANALYSIS,
+            context={
+                "family": "crypto-decrypt",
+                "evidence_ids": ["e-new"],
+                "novelty_key": "latest-no-candidate-transcript",
+            },
+        )
+        allowed, reason = progress_allows(todo, state)
+        self.assertFalse(allowed)
+        self.assertIn("cooldown", reason)
 
     def test_default_key_includes_typed_reference_ids(self) -> None:
         first = PlannedTodo(

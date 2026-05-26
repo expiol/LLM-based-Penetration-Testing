@@ -259,11 +259,6 @@ def script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str,
         return ("connection_reset", "remote endpoint reset the connection")
     if "connectionrefusederror" in text or "connection refused" in text:
         return ("connection_refused", "remote endpoint refused the connection")
-    if network_incomplete_read_signal(text):
-        return (
-            "network_incomplete_read",
-            "remote endpoint closed or stopped sending before the script received expected data",
-        )
     if (
         "socket.gaierror" in text
         or "name or service not known" in text
@@ -398,6 +393,11 @@ def script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str,
         )
     if "syntaxerror" in text:
         return ("syntax_error", "script failed Python or shell syntax validation")
+    if network_incomplete_read_signal(text):
+        return (
+            "network_incomplete_read",
+            "remote endpoint closed or stopped sending before the script received expected data",
+        )
     subcommand_error = subcommand_error_line(output_text)
     if subcommand_error:
         return (
