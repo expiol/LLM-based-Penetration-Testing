@@ -491,18 +491,43 @@ class GatewayLLMClient:
         assistant_payload = self._truncate_for_prompt(
             bad_content, self._MAX_CORRECTION_PROMPT_BYTES
         )
+        schema_text = self._compact_schema_contract(schema)
         feedback = (
             f"Your previous reply did not satisfy the {schema.__name__} schema.\n"
             f"Validator feedback:\n{validator_message}\n\n"
+            f"Schema contract:\n{schema_text}\n\n"
             "Reply again with a single JSON object that fully satisfies the schema. "
-            "Do not apologise, do not add prose, and do not wrap the JSON in code "
-            "fences. Re-emit any unchanged fields verbatim."
+            "Use exactly the field names listed above — do not rename, alias, or "
+            "prefix them. Do not apologise, do not add prose, and do not wrap the "
+            "JSON in code fences. Re-emit any unchanged fields verbatim."
         )
         return [
             *original,
             {"role": "assistant", "content": assistant_payload},
             {"role": "user", "content": feedback},
         ]
+
+    @staticmethod
+    def _compact_schema_contract(schema: type[BaseModel]) -> str:
+        """Render a short field-by-field contract for the correction prompt.
+
+        Pydantic's ``model_json_schema`` is verbose; the model only needs the
+        flat list of field names, types, and which ones are required.  This
+        keeps the correction prompt cheap while still giving the model the
+        exact key names it must emit.
+        """
+
+        json_schema = schema.model_json_schema()
+        required = set(json_schema.get("required", []) or [])
+        properties = json_schema.get("properties", {}) or {}
+        lines: list[str] = []
+        for name, info in properties.items():
+            type_hint = info.get("type") or info.get("$ref") or "any"
+            if isinstance(type_hint, str) and type_hint.startswith("#/"):
+                type_hint = type_hint.rsplit("/", 1)[-1]
+            req = "required" if name in required else "optional"
+            lines.append(f"- {name} ({type_hint}, {req})")
+        return "\n".join(lines) if lines else f"object matching {schema.__name__}"
 
     def _create_structured(
         self,

@@ -680,7 +680,12 @@ class TestLenientStructuredOutput(unittest.TestCase):
         # plus user turn carrying validator feedback.
         self.assertEqual(correction_messages[2]["role"], "assistant")
         self.assertEqual(correction_messages[3]["role"], "user")
-        self.assertIn("schema", correction_messages[3]["content"])
+        feedback = correction_messages[3]["content"]
+        self.assertIn("schema", feedback)
+        # Correction prompt also surfaces the schema's actual field names so
+        # the model has an authoritative key list, not just a validator hint.
+        self.assertIn("capability", feedback)
+        self.assertIn("metadata", feedback)
 
 
 if __name__ == "__main__":
