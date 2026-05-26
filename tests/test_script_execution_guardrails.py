@@ -2035,6 +2035,60 @@ class TestScriptExecutionRuntime(unittest.TestCase):
             ["flag{real_candidate_123}"],
         )
 
+    def test_self_test_fixture_candidates_do_not_survive_script_context_filter(
+        self,
+    ) -> None:
+        stdout = "\n".join(
+            [
+                "Generating local substitution tables...",
+                "Self-test plaintext: 'CTF{local_known_value_12345}'",
+                "Encryption succeeded: 00112233445566778899",
+                "Decryption result: b'CTF{local_known_value_12345}'",
+                "Roundtrip test passed!",
+            ]
+        )
+        output = build_script_output(
+            ToolExecutionRequest(
+                tool_name="script_exec", metadata={"script_language": "python"}
+            ),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout=stdout,
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+        self.assertEqual([candidate.value for candidate in output.flag_candidates], [])
+        self.assertEqual(output.output_context["failure_kind"], "no_candidate")
+
+    def test_explicit_flag_found_survives_after_self_test_fixture(self) -> None:
+        stdout = "\n".join(
+            [
+                "Self-test plaintext: 'CTF{local_known_value_12345}'",
+                "Roundtrip test passed!",
+                "FLAG FOUND: CTF{local_known_value_12345}",
+            ]
+        )
+        output = build_script_output(
+            ToolExecutionRequest(
+                tool_name="script_exec", metadata={"script_language": "python"}
+            ),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=0,
+                stdout=stdout,
+                stderr="",
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+        self.assertEqual(
+            [candidate.value for candidate in output.flag_candidates],
+            ["CTF{local_known_value_12345}"],
+        )
+
     def test_labeled_bare_token_survives_script_context_filter(self) -> None:
         output = build_script_output(
             ToolExecutionRequest(

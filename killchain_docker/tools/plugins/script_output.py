@@ -48,6 +48,17 @@ PROTOCOL_DUMP_TOKEN_RE = re.compile(
 DIAGNOSTIC_REPORT_RE = re.compile(
     r"(?im)^\s*(?:\[[^\]]+\]\s*)?(?:=+\s*top\s+|=+\s*local\s+self-test|=+\s*differential\s+test|score\s*=|\d+\.\s+seed=|testing\s+\d+.+candidates|braces\s*=|first\s+bytes:|all\s+tests\s+passed|solver\s+function|sum\s+verification|=+\s*png\s+chunk\s+analysis|=+\s*string\s+search\s+in\s+decrypted\s+png|chunk\s+'(?:ihdr|idat|iend|itxt|text|ztxt)'|found\s+\d+\s+printable\s+strings|offset\s+\d+\s*:)"
 )
+SELF_TEST_CANDIDATE_CONTEXT_RE = re.compile(
+    r"\b(?:self[- ]?test|round[- ]?trip|unit\s+test|test\s+vector|"
+    r"known\s+plaintext|fixture|all\s+tests\s+passed|test\s+(?:passed|failed)|"
+    r"expected\s*:|got\s*:)\b",
+    re.IGNORECASE,
+)
+SELF_TEST_RESULT_LINE_RE = re.compile(
+    r"\b(?:encrypt(?:ion|ed)?|decrypt(?:ion|ed)?|result|plaintext|ciphertext|"
+    r"round[- ]?trip|verify|verification|expected|got|pass(?:ed)?|fail(?:ed)?)\b",
+    re.IGNORECASE,
+)
 
 
 def printable_ratio(text: str) -> float:
@@ -538,9 +549,54 @@ def candidate_has_readable_context(
         lowered = window.lower()
         if any(label in lowered for label in labels):
             return True
+        surrounding = surrounding_line_context(stdout, line_start, line_end)
+        if candidate_is_in_self_test_context(window, surrounding, candidate):
+            start = index + len(candidate)
+            continue
         if "�" not in window and printable_ratio(window) >= 0.9:
             return True
         start = index + len(candidate)
+
+
+def surrounding_line_context(
+    text: str,
+    line_start: int,
+    line_end: int,
+    *,
+    before: int = 2,
+    after: int = 2,
+) -> str:
+    start = line_start
+    for _ in range(before):
+        previous = text.rfind("\n", 0, max(0, start - 1))
+        if previous < 0:
+            start = 0
+            break
+        start = previous + 1
+    end = line_end
+    for _ in range(after):
+        next_newline = text.find("\n", end + 1)
+        if next_newline < 0:
+            end = len(text)
+            break
+        end = next_newline
+    return text[start:end]
+
+
+def candidate_is_in_self_test_context(
+    line_context: str, surrounding_context: str, candidate: str
+) -> bool:
+    if SELF_TEST_CANDIDATE_CONTEXT_RE.search(line_context or ""):
+        return True
+    if not (
+        SELF_TEST_RESULT_LINE_RE.search(line_context or "")
+        and SELF_TEST_CANDIDATE_CONTEXT_RE.search(surrounding_context or "")
+    ):
+        return False
+    for line in (surrounding_context or "").splitlines():
+        if candidate in line and SELF_TEST_CANDIDATE_CONTEXT_RE.search(line):
+            return True
+    return False
 
 
 def candidate_body_has_readable_context(stdout: str, candidate: str) -> bool:
