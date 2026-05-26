@@ -3096,6 +3096,79 @@ class LLMPlannerTests(unittest.TestCase):
             any(("repeated empty plans" in note for note in decision.notes))
         )
 
+    def test_planner_keeps_no_progress_local_continuation_in_analysis(self) -> None:
+        state = _state(["cipher.bin"])
+        inventory = todo_queue(state).enqueue(
+            TodoItem(
+                goal="Inventory and classify bundled challenge files.",
+                phase=TodoPhase.RECON,
+                dedupe_key="bootstrap:artifact-inventory",
+            )
+        )
+        todo_queue(state).complete(inventory, "cipher.bin")
+        closure = todo_queue(state).enqueue(
+            TodoItem(
+                goal="Build and run a bounded solver harness from current evidence.",
+                phase=TodoPhase.ANALYSIS,
+                dedupe_key="bootstrap:evidence-execution-closure",
+            )
+        )
+        todo_queue(state).complete(closure, "bounded harness produced no candidate")
+        prior = todo_queue(state).enqueue(
+            TodoItem(
+                goal="Try local solver variant.",
+                phase=TodoPhase.ANALYSIS,
+                dedupe_key="local-solver",
+            )
+        )
+        todo_queue(state).start(prior, "artifact-worker")
+        todo_queue(state).partial(
+            prior,
+            "script (python)",
+            "script exited successfully but no flag candidate was recovered",
+        )
+        EvidenceFactStore(state).evidence(
+            EvidenceRecord(
+                evidence_id="evidence-no-candidate",
+                task_id=prior.todo_id,
+                capability="script.exec",
+                tool_name="script_exec",
+                mode="local_command",
+                summary="script ran without recovering a candidate",
+                extracted={
+                    "output_context": {
+                        "result_quality": "partial_no_candidate",
+                        "failure_kind": "no_candidate",
+                        "flag_candidates": [],
+                    }
+                },
+            )
+        )
+        planner = LLMPlanner(
+            StaticLLMClient(
+                [
+                    {
+                        "summary": "observed but no action",
+                        "todos": [],
+                        "notes": [],
+                        "stop_run": False,
+                    },
+                    {
+                        "summary": "still no action",
+                        "todos": [],
+                        "notes": [],
+                        "stop_run": False,
+                    },
+                ]
+            )
+        )
+        decision = planner.plan(state)
+        self.assertEqual(len(decision.todos), 1)
+        todo = decision.todos[0]
+        self.assertEqual(todo.phase, TodoPhase.ANALYSIS)
+        self.assertEqual(todo.context["family"], "execution-continuation")
+        self.assertNotIn("evidence_ids", todo.context)
+
     def test_planner_raises_when_llm_fails(self) -> None:
         planner = LLMPlanner(StaticLLMClient([]))
         with self.assertRaises(LLMClientError):

@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from killchain_docker.orchestrator.progress_families import (
     consecutive_failures_without_evidence,
     family_counts,
-    todo_family,
 )
 from killchain_docker.orchestrator.progress_limits import (
     CONSECUTIVE_FAILURE_CAP,
@@ -18,7 +17,8 @@ from killchain_docker.orchestrator.progress_limits import (
 )
 from killchain_docker.orchestrator.progress_novelty import has_new_novelty
 from killchain_docker.orchestrator.todo_family import (
-    derive_family_from_goal,
+    broad_family_candidates_for,
+    family_candidates_for,
     family_for,
 )
 from killchain_docker.orchestrator.todo_path_predicates import has_context_path
@@ -34,18 +34,32 @@ if TYPE_CHECKING:
 
 def progress_allows(todo: "PlannedTodo", state: "RunState") -> tuple[bool, str]:
     family = str(todo.context.get("family") or family_for(todo.goal, todo.context))
+    candidates = todo_family_candidates(todo, family)
+    if todo.depends_on:
+        candidates = {family}
     forced_pivot = RunMetadataStore(state).forced_pivot()
     if forced_pivot is not None:
         banned = {str(item) for item in forced_pivot.get("banned_families") or []}
-        blocked = sorted(todo_family_candidates(todo, family) & banned)
+        blocked = sorted(forced_pivot_family_candidates(todo, family) & banned)
         if blocked:
             return (
                 False,
                 f"family {blocked[0]!r} is BANNED by forced pivot #{forced_pivot.get('pivot_number', '?')}",
             )
-    total, failed = family_counts(state, family)
-    if family == "flag-validation":
+    if "flag-validation" in candidates:
+        total, _failed = family_counts(state, "flag-validation")
         return _flag_validation_allows(todo, state, total)
+    for candidate in sorted(candidates):
+        allowed, reason = _candidate_family_allows(todo, state, candidate)
+        if not allowed:
+            return (False, reason)
+    return (True, "")
+
+
+def _candidate_family_allows(
+    todo: "PlannedTodo", state: "RunState", family: str
+) -> tuple[bool, str]:
+    total, failed = family_counts(state, family)
     if family in UNCAPPED_FAMILIES:
         consecutive = consecutive_failures_without_evidence(state, family)
         if consecutive >= CONSECUTIVE_FAILURE_CAP:
@@ -131,17 +145,18 @@ def is_evidence_triggered_artifact_followup(
 
 
 def todo_family_candidates(todo: "PlannedTodo", family: str) -> set[str]:
-    candidates = {family}
-    context = todo.context or {}
-    text = " ".join(
-        [
-            todo.goal,
-            " ".join((str(item) for item in todo.success_criteria)),
-            " ".join((str(item) for item in todo.constraints)),
-            " ".join((str(context.get(key) or "") for key in ("tool", "tool_name"))),
-        ]
+    context = {**(todo.context or {}), "family": family}
+    return family_candidates_for(
+        todo.goal,
+        context,
+        [*todo.success_criteria, *todo.constraints],
     )
-    derived = derive_family_from_goal(text)
-    if derived != "other":
-        candidates.add(derived)
-    return candidates
+
+
+def forced_pivot_family_candidates(todo: "PlannedTodo", family: str) -> set[str]:
+    context = {**(todo.context or {}), "family": family}
+    return broad_family_candidates_for(
+        todo.goal,
+        context,
+        [*todo.success_criteria, *todo.constraints],
+    )

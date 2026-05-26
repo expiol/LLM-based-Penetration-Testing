@@ -4,6 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 from killchain_docker.prompt_bounds import bounded_value
+from killchain_docker.state.evidence_progress import (
+    evidence_ref_can_unlock_progress,
+    evidence_ref_supports_exploit_continuation,
+)
 from killchain_docker.state.metadata import RunMetadataStore
 from killchain_docker.state.todos import TodoPhase
 
@@ -177,7 +181,11 @@ class PlannerStateProjection:
         }
 
     def continuation(self, *, todo_count: int) -> PlannerContinuationProjection | None:
-        evidence_ids = list(self.state.evidence.keys())[-3:]
+        evidence_ids = [
+            evidence_id
+            for evidence_id in list(self.state.evidence.keys())[-8:]
+            if evidence_ref_can_unlock_progress(self.state, evidence_id)
+        ][-3:]
         endpoint_ids = list(self.state.endpoints.keys())[-2:]
         hypothesis_ids = list(self.state.hypotheses.keys())[-2:]
         evidence_count = len(self.state.evidence)
@@ -194,7 +202,13 @@ class PlannerStateProjection:
         if hypothesis_ids:
             context["hypothesis_ids"] = hypothesis_ids
         phase = (
-            TodoPhase.EXPLOIT if evidence_ids or endpoint_ids else TodoPhase.ANALYSIS
+            TodoPhase.EXPLOIT
+            if endpoint_ids
+            or any(
+                evidence_ref_supports_exploit_continuation(self.state, evidence_id)
+                for evidence_id in evidence_ids
+            )
+            else TodoPhase.ANALYSIS
         )
         return PlannerContinuationProjection(
             phase=phase,

@@ -9,7 +9,7 @@ from killchain_docker.orchestrator.progress_limits import (
     CONSECUTIVE_FAILURE_CAP,
     FAILURE_COOLDOWN_THRESHOLD,
 )
-from killchain_docker.orchestrator.todo_family import family_for
+from killchain_docker.orchestrator.todo_family import family_candidates_for, family_for
 from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
 from killchain_docker.state.todos import TodoItem, TodoStatus
 
@@ -21,10 +21,20 @@ def todo_family(todo: TodoItem) -> str:
     return str(todo.context.get("family") or family_for(todo.goal, todo.context))
 
 
+def todo_family_candidates(todo: TodoItem) -> set[str]:
+    return family_candidates_for(
+        todo.goal,
+        todo.context,
+        [*todo.success_criteria, *todo.constraints],
+    )
+
+
 def family_counts(state: "RunState", family: str) -> tuple[int, int]:
     total = 0
     failed = 0
-    for todo in TodoQueueReader(state).by_family(family, todo_family):
+    for todo in TodoQueueReader(state).all():
+        if family not in todo_family_candidates(todo):
+            continue
         total += 1
         if todo.status in {TodoStatus.FAILED, TodoStatus.PARTIAL, TodoStatus.BLOCKED}:
             failed += 1
@@ -32,7 +42,11 @@ def family_counts(state: "RunState", family: str) -> tuple[int, int]:
 
 
 def consecutive_failures_without_evidence(state: "RunState", family: str) -> int:
-    family_todos = TodoQueueReader(state).by_family(family, todo_family)
+    family_todos = [
+        todo
+        for todo in TodoQueueReader(state).all()
+        if family in todo_family_candidates(todo)
+    ]
     consecutive = 0
     for todo in reversed(family_todos):
         if todo.status in {TodoStatus.FAILED, TodoStatus.PARTIAL, TodoStatus.BLOCKED}:
@@ -53,18 +67,15 @@ def consecutive_failures_without_evidence(state: "RunState", family: str) -> int
 def stagnation_snapshot(state: "RunState") -> dict[str, Any]:
     counts = Counter()
     failed_counts = Counter()
-    queue = TodoQueueReader(state)
-    for family in queue.families(todo_family):
-        family_todos = queue.by_family(family, todo_family)
-        counts[family] += len(family_todos)
-        failed_counts[family] += sum(
-            (
-                1
-                for todo in family_todos
-                if todo.status
-                in {TodoStatus.FAILED, TodoStatus.PARTIAL, TodoStatus.BLOCKED}
-            )
-        )
+    for todo in TodoQueueReader(state).all():
+        for family in todo_family_candidates(todo):
+            counts[family] += 1
+            if todo.status in {
+                TodoStatus.FAILED,
+                TodoStatus.PARTIAL,
+                TodoStatus.BLOCKED,
+            }:
+                failed_counts[family] += 1
     return {
         "family_counts": dict(counts),
         "failed_or_partial_family_counts": dict(failed_counts),
@@ -79,9 +90,12 @@ def stagnation_snapshot(state: "RunState") -> dict[str, Any]:
 
 
 def bankrupt_families(state: "RunState") -> list[tuple[str, int]]:
-    queue = TodoQueueReader(state)
     bankrupt: list[tuple[str, int]] = []
-    for family in queue.families(todo_family):
+    todos = TodoQueueReader(state).all()
+    seen_families = {
+        family for todo in todos for family in todo_family_candidates(todo)
+    }
+    for family in sorted(seen_families):
         consecutive = consecutive_failures_without_evidence(state, family)
         if consecutive >= CONSECUTIVE_FAILURE_CAP:
             bankrupt.append((family, consecutive))

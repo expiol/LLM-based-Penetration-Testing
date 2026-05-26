@@ -2,25 +2,11 @@
 
 from __future__ import annotations
 
-from killchain_docker.state.todos import WorkerResult
-
-NO_PROGRESS_QUALITIES = frozenset(
-    {
-        "connection_refused",
-        "connection_reset",
-        "empty_result",
-        "metadata_validation",
-        "network_incomplete_read",
-        "network_pipe_closed",
-        "no_candidate",
-        "package_install_blocked",
-        "partial_no_candidate",
-        "scope_violation_blocked",
-        "timeout",
-        "unbounded_loop_guard",
-    }
+from killchain_docker.state.progress_qualities import (
+    NEAR_MISS_QUALITIES,
+    NO_PROGRESS_QUALITIES,
 )
-NEAR_MISS_QUALITIES = frozenset({"near_miss"})
+from killchain_docker.state.todos import WorkerResult
 
 
 def has_observation_text(payload: dict[str, object]) -> bool:

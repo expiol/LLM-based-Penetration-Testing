@@ -41,6 +41,9 @@ class TodoQueueReader:
     def recent(self, *, limit: int) -> list[TodoItem]:
         return self.store.recent(limit=limit)
 
+    def all(self) -> list[TodoItem]:
+        return self.store.all()
+
     def recent_by_status(
         self, statuses: set[TodoStatus], *, limit: int
     ) -> list[TodoItem]:

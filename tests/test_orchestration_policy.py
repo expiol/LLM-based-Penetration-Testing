@@ -7,6 +7,7 @@ from killchain_docker.orchestrator.forced_pivot import forced_pivot_directive
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
 from killchain_docker.orchestrator.progress_gate import progress_allows
+from killchain_docker.orchestrator.progress_families import family_counts
 from killchain_docker.orchestrator.progress_limits import (
     CONSECUTIVE_FAILURE_CAP,
     FAILURE_COOLDOWN_THRESHOLD,
@@ -621,6 +622,38 @@ class TodoProgressGateTests(unittest.TestCase):
             goal="Retry LFSR decrypt using invented evidence.",
             phase=TodoPhase.ANALYSIS,
             context={"family": "lfsr-decrypt", "evidence_ids": ["missing-evidence"]},
+        )
+        allowed, reason = progress_allows(todo, state)
+        self.assertFalse(allowed)
+        self.assertIn("cooldown", reason)
+
+    def test_progress_gate_counts_mislabelled_same_semantic_family(self) -> None:
+        state = _state()
+        for idx, explicit_family in enumerate(
+            ("binary-analysis", "crypto-model", "algorithm-verification")
+        ):
+            item = todo_queue(state).enqueue(
+                TodoItem(
+                    goal=f"Try decrypt algorithm variant {idx} against local bytes.",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": explicit_family},
+                    dedupe_key=f"decrypt-variant-{idx}",
+                )
+            )
+            todo_queue(state).start(item, "artifact-worker")
+            todo_queue(state).partial(
+                item,
+                "script (python)",
+                "script exited successfully but no flag candidate was recovered",
+            )
+        self.assertEqual(
+            family_counts(state, "crypto-decrypt"),
+            (FAILURE_COOLDOWN_THRESHOLD, FAILURE_COOLDOWN_THRESHOLD),
+        )
+        todo = PlannedTodo(
+            goal="Try another decrypt algorithm variant with a renamed family.",
+            phase=TodoPhase.ANALYSIS,
+            context={"family": "crypto-model"},
         )
         allowed, reason = progress_allows(todo, state)
         self.assertFalse(allowed)
