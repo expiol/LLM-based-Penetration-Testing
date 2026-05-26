@@ -32,6 +32,7 @@ from killchain_docker.knowledge.status import public_rag_payload
 from killchain_docker.orchestrator.planning.context_builder import PlannerContextBuilder
 from killchain_docker.orchestrator.planning.prompt_renderer import render_planner_prompt
 from killchain_docker.state.run_state import RunState
+from killchain_docker.state.todos import TodoItem, TodoPhase, TodoStatus
 
 
 def _entry(
@@ -1080,6 +1081,28 @@ class PlannerInjectionTests(unittest.TestCase):
         self.assertNotIn("challenge_id", hints[0])
         self.assertNotIn("score", hints[0])
         self.assertGreaterEqual(payload["knowledge_augmentation"]["hint_count"], 1)
+
+    def test_misleading_policy_suppresses_method_hints_in_planner_prompt(self):
+        for index in range(3):
+            self.state.todos.append(
+                TodoItem(
+                    goal=f"Decrypt attempt {index}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "crypto-decrypt"},
+                    status=TodoStatus.PARTIAL,
+                    result_summary="script ran without recovering a flag",
+                    error="no flag candidate",
+                )
+            )
+        ctx = PlannerContextBuilder(augmenter=self.augmenter).build(self.state)
+        payload = json.loads(render_planner_prompt(ctx))
+        knowledge = payload["knowledge_augmentation"]
+        self.assertEqual(knowledge["policy"], "possibly_misleading")
+        self.assertEqual(knowledge["stalled_families"], ["crypto-decrypt"])
+        self.assertGreaterEqual(knowledge["hint_count"], 1)
+        self.assertNotIn("knowledge_hints", knowledge)
+        self.assertGreaterEqual(knowledge["suppressed_hint_count"], 1)
+        self.assertNotIn("solution_sketch", json.dumps(knowledge))
 
     def test_disabled_augmenter_omits_knowledge_hints(self):
         ctx = PlannerContextBuilder(augmenter=KnowledgeAugmenter(retriever=None)).build(

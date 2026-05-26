@@ -45,14 +45,26 @@ class PlannerStateProjection:
         }
         metadata = {key: raw[key] for key in allowed if key in raw}
         hints = raw.get("knowledge_hints")
-        if isinstance(hints, list):
-            metadata["knowledge_hints"] = [
-                hint for hint in hints if isinstance(hint, dict)
-            ][:3]
+        valid_hints = (
+            [hint for hint in hints if isinstance(hint, dict)]
+            if isinstance(hints, list)
+            else []
+        )
         if "hint_count" not in metadata and isinstance(hints, list):
-            metadata["hint_count"] = sum(
-                (1 for item in hints if isinstance(item, dict))
-            )
+            metadata["hint_count"] = len(valid_hints)
+        if metadata.get("policy") == "possibly_misleading":
+            suppressed_count = len(valid_hints)
+            if not suppressed_count:
+                try:
+                    suppressed_count = max(0, int(metadata.get("hint_count") or 0))
+                except (TypeError, ValueError, OverflowError):
+                    suppressed_count = 0
+            if suppressed_count:
+                metadata["suppressed_hint_count"] = suppressed_count
+                metadata["suppressed_reason"] = "rag_policy_possibly_misleading"
+            return metadata
+        if valid_hints:
+            metadata["knowledge_hints"] = valid_hints[:3]
         return metadata
 
     def assets(self, *, limit: int) -> list[dict[str, Any]]:
