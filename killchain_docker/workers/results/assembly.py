@@ -80,13 +80,18 @@ def worker_result_from_bundle(
             }
         output_context["result_quality"] = result_quality
         output_context["partial_reason"] = partial_reason
-    elif capability == ToolCapability.SCRIPT_EXEC and (not success) and needs_closure:
+    elif capability == ToolCapability.SCRIPT_EXEC and (not success):
+        # Script-exec failure is a worker-output issue (wrong script, scope
+        # violation, runtime crash) regardless of task phase.  The next
+        # planner cycle can re-frame the goal or pick a different approach,
+        # so always degrade to PARTIAL rather than ending the run on a
+        # single non-closure-task script failure.
         partial = True
         failure_detail = str(output_context.get("failure_detail") or "").strip()
         partial_reason = (
             failure_detail
             or failure_kind
-            or "script execution failed before recovering a flag"
+            or "script execution failed"
         )
         result_quality = result_quality or failure_kind or "script_failed"
         output_context["result_quality"] = result_quality
