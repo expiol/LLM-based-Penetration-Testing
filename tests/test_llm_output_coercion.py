@@ -102,6 +102,31 @@ class _PreflightClient:
         self.preflight_called = True
 
 
+class _FakeCompletionsEndpoint:
+    def __init__(self) -> None:
+        self.captured_kwargs: dict[str, object] = {}
+
+    def create_with_completion(self, **kwargs):
+        self.captured_kwargs = dict(kwargs)
+        return (
+            ToolUseDecision(
+                capability="script.exec",
+                metadata={"script_code": "print('ok')"},
+            ),
+            None,
+        )
+
+
+class _FakeChat:
+    def __init__(self, completions: _FakeCompletionsEndpoint) -> None:
+        self.completions = completions
+
+
+class _FakeOpenAIClient:
+    def __init__(self, completions: _FakeCompletionsEndpoint) -> None:
+        self.chat = _FakeChat(completions)
+
+
 class TestCoerceLlmBool(unittest.TestCase):
     def test_empty_container_is_false(self) -> None:
         self.assertIs(coerce_llm_bool([]), False)
@@ -261,6 +286,26 @@ class TestGatewayTransientClassification(unittest.TestCase):
         self.assertEqual(record.completion_tokens, 0)
         self.assertEqual(record.total_tokens, 0)
         self.assertFalse(record.usage_available)
+
+    def test_tool_use_decision_uses_bounded_completion_token_budget(self) -> None:
+        completions = _FakeCompletionsEndpoint()
+        client = object.__new__(GatewayLLMClient)
+        client.default_model = "test-model"
+        client.schema_models = {}
+        client.timeout_s = 20
+        client.max_retries = 0
+        client.total_deadline_s = 5
+        client.max_completion_tokens = 65536
+        client.token_ledger = TokenLedger()
+        client._client = _FakeOpenAIClient(completions)
+        decision = client.generate_json(
+            system_prompt="",
+            user_prompt="",
+            schema=ToolUseDecision,
+        )
+        self.assertEqual(decision.capability, "script.exec")
+        self.assertLess(completions.captured_kwargs["max_tokens"], 65536)
+        self.assertLessEqual(completions.captured_kwargs["max_tokens"], 12000)
 
     def test_token_ledger_records_thread_safe_snapshots(self) -> None:
         ledger = TokenLedger()

@@ -26,6 +26,9 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 FIXED_LLM_CONFIG_PATH = (
     Path(__file__).resolve().parents[2] / "configs" / "llm_gateway.json"
 )
+SCHEMA_MAX_COMPLETION_TOKENS = {
+    "ToolUseDecision": 12000,
+}
 
 
 class LLMClientError(RuntimeError):
@@ -615,7 +618,7 @@ class GatewayLLMClient:
             "response_model": schema,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": self.max_completion_tokens,
+            "max_tokens": self._max_tokens_for_schema(schema),
         }
         if request_timeout_s is not None:
             kwargs["timeout"] = request_timeout_s
@@ -636,6 +639,12 @@ class GatewayLLMClient:
                 return recovered
             raise
         return parsed, None
+
+    def _max_tokens_for_schema(self, schema: type[BaseModel]) -> int:
+        cap = SCHEMA_MAX_COMPLETION_TOKENS.get(schema.__name__)
+        if cap is None:
+            return self.max_completion_tokens
+        return max(1, min(self.max_completion_tokens, cap))
 
     def _call_deadline_s(self) -> float:
         retry_budget = float(self.timeout_s * (1 + self.max_retries))
