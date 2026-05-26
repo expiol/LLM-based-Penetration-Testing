@@ -65,6 +65,7 @@ class TransientLLMHandling:
     handle: Callable[[int, TodoItem, WorkerAgent, LLMClientError], LLMErrorOutcome] = (
         lambda _cycle, _todo, _worker, _exc: LLMErrorOutcome()
     )
+    note_success: Callable[[WorkerAgent], None] = lambda _worker: None
 
 
 PROPAGATE_LLM_ERROR = TransientLLMHandling()
@@ -320,6 +321,8 @@ class Execution:
                 if outcome.fallback_result is None:
                     raise
                 result = outcome.fallback_result
+            else:
+                transient_llm.note_success(worker)
             self.apply_result(
                 cycle=cycle, todo=todo, result=result, event_label=event_label
             )
@@ -421,6 +424,8 @@ class Execution:
                     if outcome.fallback_result is None:
                         raise
                     completed[todo.todo_id] = outcome.fallback_result
+                else:
+                    transient_llm.note_success(worker)
         for todo, _worker, _worker_name in pending:
             result = completed.get(todo.todo_id)
             if result is None:
@@ -487,4 +492,7 @@ def routed_transient_llm_handling(
             )
         )
 
-    return TransientLLMHandling(handle=handle)
+    def note_success(worker: WorkerAgent) -> None:
+        termination.note_successful_step(worker.name)
+
+    return TransientLLMHandling(handle=handle, note_success=note_success)
