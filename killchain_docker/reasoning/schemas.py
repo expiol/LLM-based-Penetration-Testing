@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from killchain_docker.tools import ToolCapability
+from killchain_docker.tools.capabilities import ToolCapability
 from killchain_docker.value_coercion import coerce_string_mapping
 
 

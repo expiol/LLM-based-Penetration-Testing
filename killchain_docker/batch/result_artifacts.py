@@ -17,7 +17,9 @@ class BatchResultReaders:
     read_json: Callable[[str | Path | None], dict[str, Any] | None]
     token_usage: Callable[[Any], dict[str, int]]
     state_metrics: Callable[[dict[str, Any] | None], dict[str, Any]]
-    rag_payload: Callable[[dict[str, Any] | None, dict[str, Any] | None], dict[str, Any] | None]
+    rag_payload: Callable[
+        [dict[str, Any] | None, dict[str, Any] | None], dict[str, Any] | None
+    ]
     failure_buckets: Callable[[dict[str, Any], dict[str, Any]], list[str]]
 
 
@@ -41,27 +43,37 @@ def build_challenge_entry(
     return {
         "challenge": result["challenge"],
         "monitor_challenge": result.get("monitor_challenge"),
-        "run_id": result.get("run_id") or summary.get("run_id") or state_metrics.get("run_id"),
+        "run_id": result.get("run_id")
+        or summary.get("run_id")
+        or state_metrics.get("run_id"),
         "solved": result.get("solved", False),
         "status": result.get("status", "unknown"),
         "skip_reason": result.get("skip_reason") or log_payload.get("skip_reason"),
         "runtime_sec": result.get("runtime_sec"),
-        "rag_mode": result.get("rag_mode") or (log_payload.get("args") or {}).get("rag_mode"),
+        "rag_mode": result.get("rag_mode")
+        or (log_payload.get("args") or {}).get("rag_mode"),
         "category": metadata.get("category"),
         "files_count": len(metadata.get("files") or []),
         "has_server": bool(metadata.get("server_name") and metadata.get("port")),
         "server_type": metadata.get("server_type"),
-        "authorized_scope_count": len(result.get("authorized_scope") or log_payload.get("authorized_scope") or []),
-        "max_cycles": result.get("max_cycles") or log_payload.get("effective_max_cycles"),
+        "authorized_scope_count": len(
+            result.get("authorized_scope") or log_payload.get("authorized_scope") or []
+        ),
+        "max_cycles": result.get("max_cycles")
+        or log_payload.get("effective_max_cycles"),
         "token_usage": token_usage,
         "state_metrics": state_metrics,
         "artifacts": artifacts,
         "rag": rag,
         "threads": _result_threads(result, log_payload, status_payload),
-        "runtime_error": _result_runtime_error(result, log_payload, summary, status_payload),
+        "runtime_error": _result_runtime_error(
+            result, log_payload, summary, status_payload
+        ),
         "logfile": result.get("logfile"),
         "status_file": _result_status_file(result, log_payload, logdir),
-        "error_type": result.get("error", {}).get("type") if result.get("error") else None,
+        "error_type": result.get("error", {}).get("type")
+        if result.get("error")
+        else None,
         "failure_buckets": failure_buckets,
     }
 
@@ -70,7 +82,9 @@ def _result_log(result: dict[str, Any], readers: BatchResultReaders) -> dict[str
     return readers.read_json(result.get("logfile")) or {}
 
 
-def _result_summary(result: dict[str, Any], log_payload: dict[str, Any]) -> dict[str, Any]:
+def _result_summary(
+    result: dict[str, Any], log_payload: dict[str, Any]
+) -> dict[str, Any]:
     summary = result.get("summary")
     if isinstance(summary, dict):
         return summary
@@ -90,7 +104,9 @@ def _result_state_metrics(
     if isinstance(metrics, dict) and metrics:
         return metrics
     state_payload = log_payload.get("state")
-    return readers.state_metrics(state_payload if isinstance(state_payload, dict) else None)
+    return readers.state_metrics(
+        state_payload if isinstance(state_payload, dict) else None
+    )
 
 
 def _result_token_usage(
@@ -106,7 +122,9 @@ def _result_token_usage(
     return readers.token_usage(summary.get("token_usage"))
 
 
-def _result_challenge_metadata(result: dict[str, Any], log_payload: dict[str, Any]) -> dict[str, Any]:
+def _result_challenge_metadata(
+    result: dict[str, Any], log_payload: dict[str, Any]
+) -> dict[str, Any]:
     meta = result.get("challenge_metadata")
     if isinstance(meta, dict) and meta:
         return meta
@@ -114,7 +132,9 @@ def _result_challenge_metadata(result: dict[str, Any], log_payload: dict[str, An
     return meta if isinstance(meta, dict) else {}
 
 
-def _result_artifacts(result: dict[str, Any], log_payload: dict[str, Any]) -> dict[str, Any] | None:
+def _result_artifacts(
+    result: dict[str, Any], log_payload: dict[str, Any]
+) -> dict[str, Any] | None:
     artifacts = result.get("artifacts")
     if isinstance(artifacts, dict):
         return artifacts
@@ -135,7 +155,9 @@ def _result_rag(
         return rag
     summary = _result_summary(result, log_payload)
     state_payload = log_payload.get("state")
-    return readers.rag_payload(summary, state_payload if isinstance(state_payload, dict) else None)
+    return readers.rag_payload(
+        summary, state_payload if isinstance(state_payload, dict) else None
+    )
 
 
 def _result_status_file(
@@ -189,7 +211,9 @@ def _result_runtime_error(
     status_payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     for source in (result, log_payload, summary, status_payload):
-        runtime_error = source.get("runtime_error") if isinstance(source, dict) else None
+        runtime_error = (
+            source.get("runtime_error") if isinstance(source, dict) else None
+        )
         if isinstance(runtime_error, dict):
             return runtime_error
     return None

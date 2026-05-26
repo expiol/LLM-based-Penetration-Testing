@@ -41,7 +41,12 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="recon",
         categories=("*",),
         objective="Inventory challenge files, service scope, formats, and obvious flag surfaces.",
-        evidence_to_seek=("file types", "entrypoints", "service URLs/ports", "flag format"),
+        evidence_to_seek=(
+            "file types",
+            "entrypoints",
+            "service URLs/ports",
+            "flag format",
+        ),
         failure_escape=("Switch from listing to content sampling or service probing.",),
     ),
     Technique(
@@ -50,8 +55,15 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="analysis",
         categories=("web", "crypto", "misc", "forensics"),
         objective="Review source/config/scripts for algorithm, auth, parsing, or secret-handling mistakes.",
-        evidence_to_seek=("constants", "input parsers", "crypto parameters", "auth/session logic"),
-        failure_escape=("Run minimal reproductions instead of re-reading the same files.",),
+        evidence_to_seek=(
+            "constants",
+            "input parsers",
+            "crypto parameters",
+            "auth/session logic",
+        ),
+        failure_escape=(
+            "Run minimal reproductions instead of re-reading the same files.",
+        ),
     ),
     Technique(
         family="binary-static",
@@ -59,8 +71,15 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="analysis",
         categories=("rev", "pwn", "crypto"),
         objective="Extract strings, symbols, mitigations, disassembly windows, and checker/decryptor logic.",
-        evidence_to_seek=("interesting strings", "control-flow checks", "mitigations", "data tables"),
-        failure_escape=("Change lens: strings -> symbols -> disassembly -> decompiler-like pseudocode.",),
+        evidence_to_seek=(
+            "interesting strings",
+            "control-flow checks",
+            "mitigations",
+            "data tables",
+        ),
+        failure_escape=(
+            "Change lens: strings -> symbols -> disassembly -> decompiler-like pseudocode.",
+        ),
     ),
     Technique(
         family="binary-dynamic",
@@ -68,8 +87,15 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="analysis",
         categories=("rev", "pwn"),
         objective="Run the binary with controlled inputs to observe branches, crashes, prompts, and outputs.",
-        evidence_to_seek=("stdout/stderr", "exit status", "crash offset", "branch-dependent output"),
-        failure_escape=("Reduce input size, add tracing, or inspect only the divergent branch.",),
+        evidence_to_seek=(
+            "stdout/stderr",
+            "exit status",
+            "crash offset",
+            "branch-dependent output",
+        ),
+        failure_escape=(
+            "Reduce input size, add tracing, or inspect only the divergent branch.",
+        ),
     ),
     Technique(
         family="crypto-model",
@@ -77,8 +103,15 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="analysis",
         categories=("crypto",),
         objective="Infer cipher family, state update, key material, encoding, and known-plaintext constraints.",
-        evidence_to_seek=("headers", "known plaintext", "keystream relation", "modulus/group parameters"),
-        failure_escape=("Try a different model family or verify byte order/packing before repeating code.",),
+        evidence_to_seek=(
+            "headers",
+            "known plaintext",
+            "keystream relation",
+            "modulus/group parameters",
+        ),
+        failure_escape=(
+            "Try a different model family or verify byte order/packing before repeating code.",
+        ),
     ),
     Technique(
         family="algorithm-verification",
@@ -95,9 +128,7 @@ TECHNIQUES: tuple[Technique, ...] = (
             "bounded execution evidence",
             "candidate evidence",
         ),
-        failure_escape=(
-            "Use observed execution feedback before changing families.",
-        ),
+        failure_escape=("Use observed execution feedback before changing families.",),
     ),
     Technique(
         family="web-surface",
@@ -105,8 +136,16 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="recon",
         categories=("web",),
         objective="Map routes, parameters, cookies, source leaks, and server-side framework clues.",
-        evidence_to_seek=("routes", "forms", "cookies", "status codes", "source/config leaks"),
-        failure_escape=("Probe alternate methods, encodings, and static assets before exploit planning.",),
+        evidence_to_seek=(
+            "routes",
+            "forms",
+            "cookies",
+            "status codes",
+            "source/config leaks",
+        ),
+        failure_escape=(
+            "Probe alternate methods, encodings, and static assets before exploit planning.",
+        ),
     ),
     Technique(
         family="web-exploit",
@@ -114,8 +153,15 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="exploit",
         categories=("web",),
         objective="Exploit a grounded web finding such as auth bypass, injection, traversal, or deserialization.",
-        evidence_to_seek=("finding_id", "endpoint_ref", "payload effect", "session/cookie state"),
-        failure_escape=("Change payload class only when evidence shows the current class is blocked.",),
+        evidence_to_seek=(
+            "finding_id",
+            "endpoint_ref",
+            "payload effect",
+            "session/cookie state",
+        ),
+        failure_escape=(
+            "Change payload class only when evidence shows the current class is blocked.",
+        ),
     ),
     Technique(
         family="pwn-surface",
@@ -123,8 +169,15 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="analysis",
         categories=("pwn",),
         objective="Identify mitigations, input path, memory layout clues, and controllable crash primitive.",
-        evidence_to_seek=("checksec", "crash offset", "controlled registers", "useful gadgets/functions"),
-        failure_escape=("Switch between static mitigation review, fuzzing, and debugger inspection.",),
+        evidence_to_seek=(
+            "checksec",
+            "crash offset",
+            "controlled registers",
+            "useful gadgets/functions",
+        ),
+        failure_escape=(
+            "Switch between static mitigation review, fuzzing, and debugger inspection.",
+        ),
     ),
     Technique(
         family="pwn-exploit",
@@ -132,8 +185,15 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="exploit",
         categories=("pwn",),
         objective="Build a grounded exploit from a known primitive and validate it in the authorized target.",
-        evidence_to_seek=("vulnerability_id", "offset", "target symbol/address", "I/O transcript"),
-        failure_escape=("Re-derive offsets and bad bytes before changing exploit strategy.",),
+        evidence_to_seek=(
+            "vulnerability_id",
+            "offset",
+            "target symbol/address",
+            "I/O transcript",
+        ),
+        failure_escape=(
+            "Re-derive offsets and bad bytes before changing exploit strategy.",
+        ),
     ),
     Technique(
         family="forensics-extract",
@@ -141,7 +201,13 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="analysis",
         categories=("forensics", "misc"),
         objective="Recover hidden, deleted, embedded, compressed, or transformed data from artifacts.",
-        evidence_to_seek=("embedded files", "metadata", "magic bytes", "archives", "pcap streams"),
+        evidence_to_seek=(
+            "embedded files",
+            "metadata",
+            "magic bytes",
+            "archives",
+            "pcap streams",
+        ),
         failure_escape=(
             "Change extractor or layer ordering; avoid rerunning the same extractor blindly.",
             "For PCAPs, if a display filter is empty, inspect conversations or packet payloads; "
@@ -154,8 +220,14 @@ TECHNIQUES: tuple[Technique, ...] = (
         phase="analysis",
         categories=("*",),
         objective="Derive a concrete flag candidate from grounded evidence or computed output.",
-        evidence_to_seek=("candidate source", "normalization/encoding", "evidence_refs"),
-        failure_escape=("If candidates are malformed, inspect generation logic instead of guessing variants.",),
+        evidence_to_seek=(
+            "candidate source",
+            "normalization/encoding",
+            "evidence_refs",
+        ),
+        failure_escape=(
+            "If candidates are malformed, inspect generation logic instead of guessing variants.",
+        ),
     ),
     Technique(
         family="flag-validation",

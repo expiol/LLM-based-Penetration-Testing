@@ -27,10 +27,12 @@ class LogSummaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             challenge = _challenge_dir(Path(tmp))
             (challenge / "valid.json").write_text(
-                json.dumps({
-                    "solved": True,
-                    "messages": [["user", {"content": "nc None"}]],
-                }),
+                json.dumps(
+                    {
+                        "solved": True,
+                        "messages": [["user", {"content": "nc None"}]],
+                    }
+                ),
                 encoding="utf-8",
             )
             (challenge / "bad.json").write_text("{", encoding="utf-8")

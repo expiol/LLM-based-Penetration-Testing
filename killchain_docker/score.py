@@ -60,8 +60,7 @@ def summarize_logdir(logdir: Path) -> dict[str, dict[str, Any]]:
         if payload is None:
             continue
         challenge = (
-            payload.get("challenge_metadata", {}).get("canonical_name")
-            or path.stem
+            payload.get("challenge_metadata", {}).get("canonical_name") or path.stem
         )
         results[challenge] = {
             "solved": bool(payload.get("solved")),
@@ -228,8 +227,7 @@ def diagnose_logdir(logdir: Path) -> dict[str, Any]:
         "failed": sum(1 for row in rows if not row["solved"]),
         "bucket_counts": dict(bucket_counts.most_common()),
         "bucket_members": {
-            key: sorted(value)
-            for key, value in sorted(bucket_members.items())
+            key: sorted(value) for key, value in sorted(bucket_members.items())
         },
         "details": rows,
     }

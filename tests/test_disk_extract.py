@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from killchain_docker.tools import ToolExecutionRequest, ToolExecutionResult
+from killchain_docker.tools.core import ToolExecutionRequest, ToolExecutionResult
 from killchain_docker.tools.core import ExecutionMode, ParsedToolOutput
 from killchain_docker.tools.plugins.disk_extract import (
     DiskExtractPlugin,
@@ -76,21 +76,31 @@ class DiskExtractTests(unittest.TestCase):
         )
         self.assertEqual(output.artifacts[1].metadata["file_type"], "PNG image data")
         self.assertEqual(output.artifacts[1].kind, "disk_extract_image")
-        self.assertEqual(output.output_context["extracted_file_records"][1]["digest"], "b" * 64)
+        self.assertEqual(
+            output.output_context["extracted_file_records"][1]["digest"], "b" * 64
+        )
         self.assertEqual(output.flag_candidates[0].value, "flag{from_disk_extract}")
         self.assertIn("2 durable file(s)", output.summary)
 
     def test_plugin_preserves_durable_artifact_directory(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             captured["timeout_s"] = timeout_s
-            return ToolExecutionResult(tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0)
+            return ToolExecutionResult(
+                tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("killchain_docker.tools.plugins.disk_extract._run", side_effect=fake_run):
-                DiskExtractPlugin(argv_prefix=["docker", "exec", "-i", "container"]).execute(
+            with patch(
+                "killchain_docker.tools.plugins.disk_extract._run", side_effect=fake_run
+            ):
+                DiskExtractPlugin(
+                    argv_prefix=["docker", "exec", "-i", "container"]
+                ).execute(
                     ToolExecutionRequest(
                         tool_name="disk_extract",
                         timeout_s=5,

@@ -22,7 +22,10 @@ EXPERIMENT_LABEL_RE = re.compile(
     r"\b(?:oracle_exec|oracle_e2e|scope_guard|thread_status|codex_style|logging_thread|monitor_heartbeat)_"
     r"[a-z0-9_]*\b"
 )
-RESERVED_LOG_RECORD_KEYS = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
+RESERVED_LOG_RECORD_KEYS = frozenset(logging.makeLogRecord({}).__dict__) | {
+    "message",
+    "asctime",
+}
 LOG_METHODS = {"debug", "info", "warning", "error", "critical", "exception"}
 EXCEPTION_LOG_DELEGATES = {"_debug_decode_failure", "_worker_failure_result"}
 
@@ -33,7 +36,9 @@ def production_python_files() -> list[Path]:
         if root.is_file():
             files.append(root)
             continue
-        files.extend(path for path in root.rglob("*.py") if "__pycache__" not in path.parts)
+        files.extend(
+            path for path in root.rglob("*.py") if "__pycache__" not in path.parts
+        )
     return sorted(files)
 
 
@@ -45,7 +50,9 @@ def test_production_code_does_not_use_print_or_debug_breakpoints() -> None:
             if isinstance(node, ast.Call) and _is_forbidden_call(node.func):
                 violations.append(f"{_rel(path)}:{node.lineno}")
 
-    assert not violations, "forbidden production debug/output calls:\n" + "\n".join(violations)
+    assert not violations, "forbidden production debug/output calls:\n" + "\n".join(
+        violations
+    )
 
 
 def test_stdout_stderr_access_is_centralized() -> None:
@@ -57,7 +64,10 @@ def test_stdout_stderr_access_is_centralized() -> None:
             if path != allowed:
                 violations.append(f"{_rel(path)}:{lineno}")
 
-    assert not violations, "direct sys stdout/stderr access must stay in logging_utils:\n" + "\n".join(violations)
+    assert not violations, (
+        "direct sys stdout/stderr access must stay in logging_utils:\n"
+        + "\n".join(violations)
+    )
 
 
 def test_production_broad_exception_handlers_are_not_silent() -> None:
@@ -72,7 +82,9 @@ def test_production_broad_exception_handlers_are_not_silent() -> None:
             ):
                 violations.append(f"{_rel(path)}:{node.lineno}")
 
-    assert not violations, "silent broad production exception handlers:\n" + "\n".join(violations)
+    assert not violations, "silent broad production exception handlers:\n" + "\n".join(
+        violations
+    )
 
 
 def test_production_broad_exception_handlers_log_delegate_or_reraise() -> None:
@@ -80,7 +92,9 @@ def test_production_broad_exception_handlers_log_delegate_or_reraise() -> None:
     for path in production_python_files():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ExceptHandler) or not _is_broad_exception_handler(node):
+            if not isinstance(
+                node, ast.ExceptHandler
+            ) or not _is_broad_exception_handler(node):
                 continue
             if _broad_exception_handler_is_accounted_for(node):
                 continue
@@ -106,7 +120,10 @@ def test_production_code_has_no_challenge_or_probe_specific_literals() -> None:
         if matches:
             violations.append(f"{_rel(path)}: {', '.join(matches)}")
 
-    assert not violations, "challenge/probe-specific literals in production files:\n" + "\n".join(violations)
+    assert not violations, (
+        "challenge/probe-specific literals in production files:\n"
+        + "\n".join(violations)
+    )
 
 
 def test_logging_extra_literals_do_not_override_log_record_fields() -> None:
@@ -121,7 +138,9 @@ def test_logging_extra_literals_do_not_override_log_record_fields() -> None:
                 keys = ", ".join(sorted(reserved))
                 violations.append(f"{_rel(path)}:{node.lineno}: {keys}")
 
-    assert not violations, "logging extra overrides reserved LogRecord fields:\n" + "\n".join(violations)
+    assert not violations, (
+        "logging extra overrides reserved LogRecord fields:\n" + "\n".join(violations)
+    )
 
 
 def test_exception_logs_include_structured_context() -> None:
@@ -137,7 +156,9 @@ def test_exception_logs_include_structured_context() -> None:
                 continue
             violations.append(f"{_rel(path)}:{node.lineno}")
 
-    assert not violations, "exception logs missing structured extra context:\n" + "\n".join(violations)
+    assert not violations, (
+        "exception logs missing structured extra context:\n" + "\n".join(violations)
+    )
 
 
 def test_executable_logging_entrypoints_configure_standard_logging() -> None:
@@ -150,14 +171,20 @@ def test_executable_logging_entrypoints_configure_standard_logging() -> None:
         if "configure_logging(" not in source:
             violations.append(_rel(path))
 
-    assert not violations, "executable logging entrypoints missing configure_logging:\n" + "\n".join(violations)
+    assert not violations, (
+        "executable logging entrypoints missing configure_logging:\n"
+        + "\n".join(violations)
+    )
 
 
 def test_scripts_directory_has_no_legacy_shell_entrypoints() -> None:
     scripts_dir = PROJECT_ROOT / "scripts"
     violations = sorted(path.name for path in scripts_dir.glob("*.sh"))
 
-    assert not violations, "legacy shell entrypoints must be replaced by logged Python scripts:\n" + "\n".join(violations)
+    assert not violations, (
+        "legacy shell entrypoints must be replaced by logged Python scripts:\n"
+        + "\n".join(violations)
+    )
 
 
 def test_docker_execution_image_uses_logged_python_entrypoint() -> None:
@@ -177,8 +204,8 @@ def test_docker_execution_image_uses_logged_python_entrypoint() -> None:
         "python3 -u -m http.server",
     ]
     violations = [value for value in forbidden if value in dockerfile + entrypoint]
-    assert not violations, (
-        "legacy docker entrypoint fragments remain:\n" + "\n".join(violations)
+    assert not violations, "legacy docker entrypoint fragments remain:\n" + "\n".join(
+        violations
     )
 
 
@@ -293,12 +320,18 @@ def _broad_exception_handler_is_accounted_for(node: ast.ExceptHandler) -> bool:
 
 
 def _contains_raise(body: list[ast.stmt]) -> bool:
-    return any(isinstance(child, ast.Raise) for statement in body for child in ast.walk(statement))
+    return any(
+        isinstance(child, ast.Raise)
+        for statement in body
+        for child in ast.walk(statement)
+    )
 
 
 def _contains_exception_log(body: list[ast.stmt]) -> bool:
     return any(
-        isinstance(child, ast.Call) and _is_exception_log_call(child) and _has_extra_context(child)
+        isinstance(child, ast.Call)
+        and _is_exception_log_call(child)
+        and _has_extra_context(child)
         for statement in body
         for child in ast.walk(statement)
     )
@@ -342,7 +375,9 @@ def _delegates_exception(body: list[ast.stmt], exception_name: str) -> bool:
     return any(
         isinstance(child, ast.Call)
         and _call_name(child.func) in EXCEPTION_LOG_DELEGATES
-        and any(isinstance(arg, ast.Name) and arg.id == exception_name for arg in child.args)
+        and any(
+            isinstance(arg, ast.Name) and arg.id == exception_name for arg in child.args
+        )
         for statement in body
         for child in ast.walk(statement)
     )
@@ -369,7 +404,10 @@ def _reserved_extra_literal_keys(node: ast.Call) -> set[str]:
 
 
 def _has_main_guard(tree: ast.AST) -> bool:
-    return any(isinstance(node, ast.If) and _is_main_guard_test(node.test) for node in ast.walk(tree))
+    return any(
+        isinstance(node, ast.If) and _is_main_guard_test(node.test)
+        for node in ast.walk(tree)
+    )
 
 
 def _is_main_guard_test(node: ast.expr) -> bool:

@@ -1,14 +1,11 @@
 """Regression: Pydantic LLM-guidance schemas tolerate common JSON quirks."""
 
 from __future__ import annotations
-
 import unittest
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
-
 from pydantic import BaseModel
-
 from killchain_docker.llm.gateway import (
     GatewayLLMClient,
     LLMClientError,
@@ -24,10 +21,14 @@ from killchain_docker.llm.structured_output import (
     loads_lenient_json_object,
     python_string_literal_after,
 )
+from tests.queue_harness import todo_queue
 from killchain_docker.orchestrator.planning.schemas import PlannerDecision
 from killchain_docker.reasoning.coercion import coerce_llm_bool
 from killchain_docker.reasoning.schemas import ToolUseDecision
-from killchain_docker.state import RunState, TodoItem, WorkerResult
+from killchain_docker.state.run_state import RunState
+from killchain_docker.state.todos import TodoItem, WorkerResult
+from killchain_docker.state.state_delta import StateDeltaApplier
+from killchain_docker.state.worker_results import WorkerResultApplier
 
 
 class _RequiredPayload(BaseModel):
@@ -46,19 +47,13 @@ class _DeadlineGateway(GatewayLLMClient):
         self.fail = fail
 
     def _create_structured(
-        self,
-        *,
-        messages,
-        schema,
-        model,
-        temperature,
-        request_timeout_s=None,
+        self, *, messages, schema, model, temperature, request_timeout_s=None
     ):
         del messages, schema, model, temperature
         self.request_timeouts.append(request_timeout_s)
         if self.fail:
             raise ConnectionError("Connection error.")
-        return _RequiredPayload(name="ok"), None
+        return (_RequiredPayload(name="ok"), None)
 
     def _record_usage(self, completion, **_kwargs) -> None:
         del completion
@@ -76,16 +71,10 @@ class _UsageGateway(_DeadlineGateway):
         self.completion = completion
 
     def _create_structured(
-        self,
-        *,
-        messages,
-        schema,
-        model,
-        temperature,
-        request_timeout_s=None,
+        self, *, messages, schema, model, temperature, request_timeout_s=None
     ):
         del messages, schema, model, temperature, request_timeout_s
-        return _RequiredPayload(name="ok"), self.completion
+        return (_RequiredPayload(name="ok"), self.completion)
 
     def _record_usage(self, completion, **kwargs) -> None:
         GatewayLLMClient._record_usage(self, completion, **kwargs)
@@ -98,17 +87,11 @@ class _HangingGateway(_DeadlineGateway):
         self.max_retries = 0
 
     def _create_structured(
-        self,
-        *,
-        messages,
-        schema,
-        model,
-        temperature,
-        request_timeout_s=None,
+        self, *, messages, schema, model, temperature, request_timeout_s=None
     ):
         self.request_timeouts.append(request_timeout_s)
         time.sleep(5)
-        return _RequiredPayload(name="late"), None
+        return (_RequiredPayload(name="late"), None)
 
 
 class _PreflightClient:
@@ -155,7 +138,6 @@ class TestMemoryUpdateCoercion(unittest.TestCase):
                 },
             }
         )
-
         self.assertEqual(
             decision.memory_updates,
             {
@@ -177,23 +159,20 @@ class TestMemoryUpdateCoercion(unittest.TestCase):
             }
         )
         state = RunState(objective="Solve.", authorized_scope=[])
-        state.queue_todo(TodoItem(todo_id="todo-1", goal="Capture grounded facts."))
-
-        state.apply_worker_result(result)
-
+        todo_queue(state).enqueue(
+            TodoItem(todo_id="todo-1", goal="Capture grounded facts.")
+        )
+        WorkerResultApplier(state).apply(result)
         self.assertEqual(result.memory_updates, {"expected_key_length": "256"})
-        self.assertEqual(state.working_memory, {"expected_key_length": "256"})
+        self.assertEqual(state.run_memory, {"expected_key_length": "256"})
 
 
 class TestGatewayTransientClassification(unittest.TestCase):
-    def test_validation_error_is_not_transient_even_with_connection_history(self) -> None:
+    def test_validation_error_is_not_transient_even_with_connection_history(
+        self,
+    ) -> None:
         client = object.__new__(GatewayLLMClient)
-        message = (
-            "1 validation error for ToolUseDecision\n"
-            "Value error, script.execute requires script_code\n"
-            "previous failed attempt: Connection error."
-        )
-
+        message = "1 validation error for ToolUseDecision\nValue error, script.execute requires script_code\nprevious failed attempt: Connection error."
         self.assertFalse(client._is_transient(ValueError(message)))
         self.assertEqual(
             client._classify_failure(ValueError(message)),
@@ -206,18 +185,15 @@ class TestGatewayTransientClassification(unittest.TestCase):
             _RequiredPayload.model_validate({})
         except Exception as exc:
             validation_error = exc
-        else:  # pragma: no cover
+        else:
             self.fail("expected validation error")
-
         self.assertFalse(client._is_transient(validation_error))
         self.assertEqual(
-            client._classify_failure(validation_error),
-            LLMFailureKind.SCHEMA_VALIDATION,
+            client._classify_failure(validation_error), LLMFailureKind.SCHEMA_VALIDATION
         )
 
     def test_network_errors_remain_transient(self) -> None:
         client = object.__new__(GatewayLLMClient)
-
         self.assertTrue(client._is_transient(ConnectionError("Connection error.")))
         self.assertTrue(client._is_transient(TimeoutError("timed out")))
         self.assertEqual(
@@ -225,8 +201,7 @@ class TestGatewayTransientClassification(unittest.TestCase):
             LLMFailureKind.CONNECTION,
         )
         self.assertEqual(
-            client._classify_failure(TimeoutError("timed out")),
-            LLMFailureKind.TIMEOUT,
+            client._classify_failure(TimeoutError("timed out")), LLMFailureKind.TIMEOUT
         )
 
     def test_client_error_carries_typed_failure_metadata(self) -> None:
@@ -237,7 +212,6 @@ class TestGatewayTransientClassification(unittest.TestCase):
             model="test-model",
             attempts=3,
         )
-
         self.assertFalse(exc.transient)
         self.assertEqual(exc.kind, LLMFailureKind.SCHEMA_VALIDATION)
         self.assertEqual(exc.schema_name, "ToolUseDecision")
@@ -246,9 +220,9 @@ class TestGatewayTransientClassification(unittest.TestCase):
 
     def test_generate_json_passes_remaining_deadline_to_request(self) -> None:
         client = _DeadlineGateway(total_deadline_s=5)
-
-        result = client.generate_json(system_prompt="", user_prompt="", schema=_RequiredPayload)
-
+        result = client.generate_json(
+            system_prompt="", user_prompt="", schema=_RequiredPayload
+        )
         self.assertEqual(result.name, "ok")
         assert client.request_timeouts[0] is not None
         self.assertLessEqual(client.request_timeouts[0], 5.0)
@@ -256,10 +230,10 @@ class TestGatewayTransientClassification(unittest.TestCase):
 
     def test_generate_json_usage_log_is_structured(self) -> None:
         client = _UsageGateway(completion=_UsageCompletion())
-
         with self.assertLogs("killchain_docker.llm.gateway", level="INFO") as captured:
-            result = client.generate_json(system_prompt="", user_prompt="", schema=_RequiredPayload)
-
+            result = client.generate_json(
+                system_prompt="", user_prompt="", schema=_RequiredPayload
+            )
         self.assertEqual(result.name, "ok")
         self.assertEqual(client.token_ledger.to_dict()["total_tokens"], 18)
         self.assertEqual(len(captured.records), 1)
@@ -275,10 +249,10 @@ class TestGatewayTransientClassification(unittest.TestCase):
 
     def test_generate_json_usage_log_marks_missing_usage(self) -> None:
         client = _UsageGateway(completion=None)
-
         with self.assertLogs("killchain_docker.llm.gateway", level="INFO") as captured:
-            client.generate_json(system_prompt="", user_prompt="", schema=_RequiredPayload)
-
+            client.generate_json(
+                system_prompt="", user_prompt="", schema=_RequiredPayload
+            )
         self.assertEqual(client.token_ledger.to_dict()["total_tokens"], 0)
         record = captured.records[0]
         self.assertEqual(record.getMessage(), "LLM call completed")
@@ -297,7 +271,6 @@ class TestGatewayTransientClassification(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(lambda _worker: record_many(), range(8)))
-
         self.assertEqual(
             ledger.to_dict(),
             {
@@ -308,12 +281,14 @@ class TestGatewayTransientClassification(unittest.TestCase):
             },
         )
 
-    def test_generate_json_stops_retry_when_total_deadline_cannot_fit_backoff(self) -> None:
+    def test_generate_json_stops_retry_when_total_deadline_cannot_fit_backoff(
+        self,
+    ) -> None:
         client = _DeadlineGateway(fail=True, total_deadline_s=1)
-
         with self.assertRaises(LLMClientError) as ctx:
-            client.generate_json(system_prompt="", user_prompt="", schema=_RequiredPayload)
-
+            client.generate_json(
+                system_prompt="", user_prompt="", schema=_RequiredPayload
+            )
         self.assertEqual(ctx.exception.attempts, 1)
         self.assertEqual(len(client.request_timeouts), 1)
         assert client.request_timeouts[0] is not None
@@ -322,15 +297,17 @@ class TestGatewayTransientClassification(unittest.TestCase):
     def test_transient_retry_log_includes_context_and_traceback(self) -> None:
         client = _DeadlineGateway(fail=True, total_deadline_s=10)
         client.max_retries = 1
-
         with (
             patch("killchain_docker.llm.gateway.random.uniform", return_value=0.0),
             patch("killchain_docker.llm.gateway.time.sleep"),
-            self.assertLogs("killchain_docker.llm.gateway", level="WARNING") as captured,
+            self.assertLogs(
+                "killchain_docker.llm.gateway", level="WARNING"
+            ) as captured,
         ):
             with self.assertRaises(LLMClientError):
-                client.generate_json(system_prompt="", user_prompt="", schema=_RequiredPayload)
-
+                client.generate_json(
+                    system_prompt="", user_prompt="", schema=_RequiredPayload
+                )
         retry_records = [
             record
             for record in captured.records
@@ -341,15 +318,17 @@ class TestGatewayTransientClassification(unittest.TestCase):
         self.assertEqual(record.schema, "_RequiredPayload")
         self.assertEqual(record.model, "test-model")
         self.assertEqual(record.error_type, "ConnectionError")
-        self.assertTrue(any("Traceback" in message for message in captured.output))
+        self.assertTrue(any(("Traceback" in message for message in captured.output)))
 
-    def test_generate_json_final_failure_log_includes_context_and_traceback(self) -> None:
+    def test_generate_json_final_failure_log_includes_context_and_traceback(
+        self,
+    ) -> None:
         client = _DeadlineGateway(fail=True, total_deadline_s=1)
-
         with self.assertLogs("killchain_docker.llm.gateway", level="ERROR") as captured:
             with self.assertRaises(LLMClientError):
-                client.generate_json(system_prompt="", user_prompt="", schema=_RequiredPayload)
-
+                client.generate_json(
+                    system_prompt="", user_prompt="", schema=_RequiredPayload
+                )
         self.assertEqual(len(captured.records), 1)
         record = captured.records[0]
         self.assertEqual(record.getMessage(), "gateway structured output failed")
@@ -358,25 +337,31 @@ class TestGatewayTransientClassification(unittest.TestCase):
         self.assertEqual(record.failure_kind, "connection")
         self.assertEqual(record.error_type, "ConnectionError")
         self.assertEqual(record.attempts, 1)
-        self.assertTrue(any("Traceback" in message for message in captured.output))
+        self.assertTrue(any(("Traceback" in message for message in captured.output)))
 
-    def test_build_llm_client_from_env_constructs_gateway_before_preflight(self) -> None:
+    def test_build_llm_client_from_env_constructs_gateway_before_preflight(
+        self,
+    ) -> None:
         fake_client = _PreflightClient()
         settings = LLMSettings(
             provider="openai_compatible",
             api_key="test-key",
-            model="test-model",
+            default_model="test-model",
             timeout_s=180,
             max_retries=5,
             total_deadline_s=300,
         )
-
         with (
-            patch("killchain_docker.llm.gateway.LLMSettings.from_env", return_value=settings),
-            patch("killchain_docker.llm.gateway.GatewayLLMClient", return_value=fake_client) as gateway_cls,
+            patch(
+                "killchain_docker.llm.gateway.LLMSettings.from_env",
+                return_value=settings,
+            ),
+            patch(
+                "killchain_docker.llm.gateway.GatewayLLMClient",
+                return_value=fake_client,
+            ) as gateway_cls,
         ):
             client = build_llm_client_from_env(preflight=True)
-
         self.assertIs(client, fake_client)
         self.assertTrue(fake_client.preflight_called)
         self.assertEqual(gateway_cls.call_args.kwargs["total_deadline_s"], 300)
@@ -388,34 +373,38 @@ class TestGatewayTransientClassification(unittest.TestCase):
             "default_model": "test-model",
             "timeout_s": "later",
         }
-
-        with patch("killchain_docker.llm.gateway._load_runtime_config_payload", return_value=payload):
+        with patch(
+            "killchain_docker.llm.gateway._load_runtime_config_payload",
+            return_value=payload,
+        ):
             with self.assertRaises(LLMClientError) as ctx:
                 LLMSettings.from_env()
-
         self.assertEqual(ctx.exception.kind, LLMFailureKind.CONFIG)
 
-    def test_llm_settings_rejects_out_of_range_numeric_config_as_config_error(self) -> None:
+    def test_llm_settings_rejects_out_of_range_numeric_config_as_config_error(
+        self,
+    ) -> None:
         payload = {
             "provider": "openai_compatible",
             "api_key": "test-key",
             "default_model": "test-model",
             "max_retries": -1,
         }
-
-        with patch("killchain_docker.llm.gateway._load_runtime_config_payload", return_value=payload):
+        with patch(
+            "killchain_docker.llm.gateway._load_runtime_config_payload",
+            return_value=payload,
+        ):
             with self.assertRaises(LLMClientError) as ctx:
                 LLMSettings.from_env()
-
         self.assertEqual(ctx.exception.kind, LLMFailureKind.CONFIG)
 
     def test_generate_json_hard_deadline_interrupts_blocking_request(self) -> None:
         client = _HangingGateway()
         started = time.monotonic()
-
         with self.assertRaises(LLMClientError) as ctx:
-            client.generate_json(system_prompt="", user_prompt="", schema=_RequiredPayload)
-
+            client.generate_json(
+                system_prompt="", user_prompt="", schema=_RequiredPayload
+            )
         self.assertLess(time.monotonic() - started, 3.0)
         self.assertEqual(ctx.exception.kind, LLMFailureKind.TIMEOUT)
         self.assertEqual(ctx.exception.attempts, 1)
@@ -423,207 +412,123 @@ class TestGatewayTransientClassification(unittest.TestCase):
 
 class TestLenientStructuredOutput(unittest.TestCase):
     def test_decoder_repairs_bare_newline_without_gateway_client(self) -> None:
-        payload = """{
-  "script_code": "print('alpha
-beta')"
-}"""
-
+        payload = '{\n  "script_code": "print(\'alpha\nbeta\')"\n}'
         decoded = loads_lenient_json_object(payload)
-
         self.assertEqual(decoded["script_code"], "print('alpha\nbeta')")
 
     def test_decoder_recovers_content_literal_from_exception_text(self) -> None:
         text = "InstructorRetryException(content='{\\n  \"ok\": true\\n}', retries=2)"
-
-        self.assertEqual(python_string_literal_after(text, "content="), '{\n  "ok": true\n}')
-
-    def test_static_client_repairs_bare_newline_in_json_string(self) -> None:
-        payload = """{
-  "capability": "script.exec",
-  "metadata": {
-    "script_code": "print('alpha
-beta')"
-  },
-  "rationale": "run script",
-  "expected_signal": "stdout"
-}"""
-        client = StaticLLMClient([payload])
-
-        decision = client.generate_json(
-            system_prompt="",
-            user_prompt="",
-            schema=ToolUseDecision,
+        self.assertEqual(
+            python_string_literal_after(text, "content="), '{\n  "ok": true\n}'
         )
 
+    def test_static_client_repairs_bare_newline_in_json_string(self) -> None:
+        payload = '{\n  "capability": "script.exec",\n  "metadata": {\n    "script_code": "print(\'alpha\nbeta\')"\n  },\n  "rationale": "run script",\n  "expected_signal": "stdout"\n}'
+        client = StaticLLMClient([payload])
+        decision = client.generate_json(
+            system_prompt="", user_prompt="", schema=ToolUseDecision
+        )
         self.assertEqual(decision.capability, "script.exec")
         self.assertEqual(decision.metadata["script_code"], "print('alpha\nbeta')")
 
-    def test_static_client_does_not_repair_missing_quote_by_schema_field_name(self) -> None:
-        payload = """{
-  "capability": "script.exec",
-  "metadata": {
-    "script_code": "print('alpha')
-  },
-  "rationale": "run script",
-  "expected_signal": "stdout"
-}"""
+    def test_static_client_does_not_repair_missing_quote_by_schema_field_name(
+        self,
+    ) -> None:
+        payload = '{\n  "capability": "script.exec",\n  "metadata": {\n    "script_code": "print(\'alpha\')\n  },\n  "rationale": "run script",\n  "expected_signal": "stdout"\n}'
         client = StaticLLMClient([payload])
-
         with self.assertRaises(LLMClientError):
             client.generate_json(
-                system_prompt="",
-                user_prompt="",
-                schema=ToolUseDecision,
+                system_prompt="", user_prompt="", schema=ToolUseDecision
             )
 
     def test_static_client_repairs_source_code_backslash_escapes(self) -> None:
-        payload = r"""{
-  "capability": "script.exec",
-  "metadata": {
-    "script_code": "import re\npat = re.compile('\bcmp\w+')"
-  },
-  "rationale": "inspect disassembly",
-  "expected_signal": "matching cmp instructions"
-}"""
+        payload = '{\n  "capability": "script.exec",\n  "metadata": {\n    "script_code": "import re\\npat = re.compile(\'\\bcmp\\w+\')"\n  },\n  "rationale": "inspect disassembly",\n  "expected_signal": "matching cmp instructions"\n}'
         client = StaticLLMClient([payload])
-
         decision = client.generate_json(
-            system_prompt="",
-            user_prompt="",
-            schema=ToolUseDecision,
+            system_prompt="", user_prompt="", schema=ToolUseDecision
         )
-
         self.assertEqual(
             decision.metadata["script_code"],
             "import re\npat = re.compile('\\bcmp\\w+')",
         )
 
     def test_decoder_closes_array_before_next_object_field(self) -> None:
-        payload = """{
-  "summary": "retry plan",
-  "todos": [],
-  "notes": ["first note", "second note", "stop_run": false
-}"""
-
+        payload = '{\n  "summary": "retry plan",\n  "todos": [],\n  "notes": ["first note", "second note", "stop_run": false\n}'
         decoded = loads_lenient_json_object(payload)
-
         self.assertEqual(decoded["notes"], ["first note", "second note"])
         self.assertIs(decoded["stop_run"], False)
 
     def test_decoder_closes_array_before_arbitrary_object_field(self) -> None:
-        payload = """{
-  "items": ["alpha", "beta", "schema_renamed_field": 42
-}"""
-
+        payload = '{\n  "items": ["alpha", "beta", "schema_renamed_field": 42\n}'
         decoded = loads_lenient_json_object(payload)
-
         self.assertEqual(decoded["items"], ["alpha", "beta"])
         self.assertEqual(decoded["schema_renamed_field"], 42)
 
     def test_decoder_repairs_bare_hex_integer_values(self) -> None:
-        payload = """{
-  "offsets": {
-    "negative_delta": -0x292d0,
-    "positive_delta": 0x10d063,
-    "quoted": "0x10d063"
-  },
-  "items": [0x10, -0x2]
-}"""
-
+        payload = '{\n  "offsets": {\n    "negative_delta": -0x292d0,\n    "positive_delta": 0x10d063,\n    "quoted": "0x10d063"\n  },\n  "items": [0x10, -0x2]\n}'
         decoded = loads_lenient_json_object(payload)
-
-        self.assertEqual(decoded["offsets"]["negative_delta"], -0x292D0)
-        self.assertEqual(decoded["offsets"]["positive_delta"], 0x10D063)
+        self.assertEqual(decoded["offsets"]["negative_delta"], -168656)
+        self.assertEqual(decoded["offsets"]["positive_delta"], 1101923)
         self.assertEqual(decoded["offsets"]["quoted"], "0x10d063")
         self.assertEqual(decoded["items"], [16, -2])
 
     def test_array_repair_ignores_valid_array_entries(self) -> None:
         payload = '{"items": ["alpha", "beta"]}'
-
         self.assertEqual(close_array_before_object_field(payload), payload)
 
     def test_decoder_repairs_unescaped_quotes_inside_string_values(self) -> None:
-        payload = """{
-  "items": [
-    "Identify offsets for system, "/bin/sh", and dup2"
-  ],
-  "stop": false
-}"""
-
+        payload = '{\n  "items": [\n    "Identify offsets for system, "/bin/sh", and dup2"\n  ],\n  "stop": false\n}'
         decoded = loads_lenient_json_object(payload)
-
-        self.assertEqual(decoded["items"], ['Identify offsets for system, "/bin/sh", and dup2'])
+        self.assertEqual(
+            decoded["items"], ['Identify offsets for system, "/bin/sh", and dup2']
+        )
         self.assertFalse(decoded["stop"])
 
     def test_inner_quote_repair_preserves_valid_structural_quotes(self) -> None:
         payload = '{"items": ["alpha", "beta"], "stop": false}'
-
-        self.assertEqual(escape_unescaped_inner_quotes_in_json_strings(payload), payload)
+        self.assertEqual(
+            escape_unescaped_inner_quotes_in_json_strings(payload), payload
+        )
 
     def test_gateway_recovers_completion_embedded_in_instructor_error(self) -> None:
         client = object.__new__(GatewayLLMClient)
         exc = ValueError(
-            "InstructorRetryException: ChatCompletionMessage("
-            "content='{\\n  \"capability\": \"script.exec\",\\n  \"metadata\": {"
-            "\\n    \"script_code\": \"print(\\'alpha\\nbeta\\')\"\\n  },"
-            "\\n  \"rationale\": \"run script\",\\n  \"expected_signal\": \"stdout\"\\n}', "
-            "refusal=None, role='assistant')"
+            'InstructorRetryException: ChatCompletionMessage(content=\'{\\n  "capability": "script.exec",\\n  "metadata": {\\n    "script_code": "print(\\\'alpha\\nbeta\\\')"\\n  },\\n  "rationale": "run script",\\n  "expected_signal": "stdout"\\n}\', refusal=None, role=\'assistant\')'
         )
-
         recovered = client._recover_structured_from_exception(exc, ToolUseDecision)
-
         self.assertIsNotNone(recovered)
         assert recovered is not None
         decision, completion = recovered
         self.assertIsNone(completion)
         self.assertEqual(decision.metadata["script_code"], "print('alpha\nbeta')")
 
-    def test_gateway_recovers_planner_completion_with_missing_notes_array_close(self) -> None:
+    def test_gateway_recovers_planner_completion_with_missing_notes_array_close(
+        self,
+    ) -> None:
         client = object.__new__(GatewayLLMClient)
         exc = ValueError(
-            "InstructorRetryException: ChatCompletionMessage("
-            "content='{\\n"
-            "  \"summary\": \"retry plan\",\\n"
-            "  \"todos\": [],\\n"
-            "  \"notes\": [\"first note\", \"second note\", \"stop_run\": false\\n"
-            "}', refusal=None, role='assistant')"
+            'InstructorRetryException: ChatCompletionMessage(content=\'{\\n  "summary": "retry plan",\\n  "todos": [],\\n  "notes": ["first note", "second note", "stop_run": false\\n}\', refusal=None, role=\'assistant\')'
         )
-
         recovered = client._recover_structured_from_exception(exc, PlannerDecision)
-
         self.assertIsNotNone(recovered)
         assert recovered is not None
         decision, _completion = recovered
         self.assertEqual(decision.notes, ["first note", "second note"])
         self.assertFalse(decision.stop_run)
 
-    def test_gateway_recovers_planner_completion_with_bare_hex_context_values(self) -> None:
+    def test_gateway_recovers_planner_completion_with_bare_hex_context_values(
+        self,
+    ) -> None:
         client = object.__new__(GatewayLLMClient)
         exc = ValueError(
-            "InstructorRetryException: ChatCompletionMessage("
-            "content='{\\n"
-            "  \"summary\": \"retry plan\",\\n"
-            "  \"todos\": [{\\n"
-            "    \"goal\": \"Use numeric deltas from evidence\",\\n"
-            "    \"phase\": \"analysis\",\\n"
-            "    \"context\": {\\n"
-            "      \"negative_delta\": -0x292d0,\\n"
-            "      \"positive_delta\": 0x10d063,\\n"
-            "      \"quoted_delta\": \"0x10d063\"\\n"
-            "    }\\n"
-            "  }],\\n"
-            "  \"notes\": [],\\n"
-            "  \"stop_run\": false\\n"
-            "}', refusal=None, role='assistant')"
+            'InstructorRetryException: ChatCompletionMessage(content=\'{\\n  "summary": "retry plan",\\n  "todos": [{\\n    "goal": "Use numeric deltas from evidence",\\n    "phase": "analysis",\\n    "context": {\\n      "negative_delta": -0x292d0,\\n      "positive_delta": 0x10d063,\\n      "quoted_delta": "0x10d063"\\n    }\\n  }],\\n  "notes": [],\\n  "stop_run": false\\n}\', refusal=None, role=\'assistant\')'
         )
-
         recovered = client._recover_structured_from_exception(exc, PlannerDecision)
-
         self.assertIsNotNone(recovered)
         assert recovered is not None
         decision, _completion = recovered
-        self.assertEqual(decision.todos[0].context["negative_delta"], -0x292D0)
-        self.assertEqual(decision.todos[0].context["positive_delta"], 0x10D063)
+        self.assertEqual(decision.todos[0].context["negative_delta"], -168656)
+        self.assertEqual(decision.todos[0].context["positive_delta"], 1101923)
         self.assertEqual(decision.todos[0].context["quoted_delta"], "0x10d063")
 
 

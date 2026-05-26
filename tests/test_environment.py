@@ -4,7 +4,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from killchain_docker.environment import CTFEnvironment, cleanup_stale_managed_containers
+from killchain_docker.environment import (
+    CTFEnvironment,
+    cleanup_stale_managed_containers,
+)
 
 
 class _Challenge:
@@ -24,8 +27,12 @@ class EnvironmentTests(unittest.TestCase):
         env = CTFEnvironment(_Challenge(), "ctfenv:latest", "ctfnet")
 
         with (
-            patch("killchain_docker.environment.cleanup_stale_managed_containers") as cleanup,
-            patch("killchain_docker.environment._run_docker_command", side_effect=fake_run),
+            patch(
+                "killchain_docker.environment.cleanup_stale_managed_containers"
+            ) as cleanup,
+            patch(
+                "killchain_docker.environment._run_docker_command", side_effect=fake_run
+            ),
         ):
             env.start_docker()
 
@@ -41,7 +48,9 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn("--label", command)
         self.assertIn("killchain_docker.managed=true", command)
         self.assertIn("killchain_docker.challenge=demo_challenge", command)
-        self.assertTrue(any(item.startswith("killchain_docker.owner_pid=") for item in command))
+        self.assertTrue(
+            any(item.startswith("killchain_docker.owner_pid=") for item in command)
+        )
 
     def test_cleanup_stale_managed_containers_stops_dead_owner(self) -> None:
         commands: list[list[str]] = []
@@ -56,8 +65,12 @@ class EnvironmentTests(unittest.TestCase):
             return pid == "456"
 
         with (
-            patch("killchain_docker.environment._run_docker_command", side_effect=fake_run),
-            patch("killchain_docker.environment._owner_pid_alive", side_effect=owner_alive),
+            patch(
+                "killchain_docker.environment._run_docker_command", side_effect=fake_run
+            ),
+            patch(
+                "killchain_docker.environment._owner_pid_alive", side_effect=owner_alive
+            ),
         ):
             cleanup_stale_managed_containers()
 

@@ -63,15 +63,17 @@ def cleanup_stale_managed_containers() -> None:
     """Remove execution containers whose owning process is gone."""
 
     try:
-        rows = _run_docker_command([
-            "docker",
-            "ps",
-            "-a",
-            "--filter",
-            f"label={_MANAGED_LABEL}=true",
-            "--format",
-            f"{{{{.ID}}}}\t{{{{.Label \"{_OWNER_PID_LABEL}\"}}}}",
-        ])
+        rows = _run_docker_command(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                f"label={_MANAGED_LABEL}=true",
+                "--format",
+                f'{{{{.ID}}}}\t{{{{.Label "{_OWNER_PID_LABEL}"}}}}',
+            ]
+        )
     except (OSError, subprocess.CalledProcessError):
         LOGGER.debug(
             "failed to list stale managed containers",
@@ -155,22 +157,26 @@ class CTFEnvironment:
             containerpath = Path(filename)
         else:
             containerpath = self.container_home / filename
-            _run_docker_command([
-                "docker",
-                "exec",
-                self.container,
-                "mkdir",
-                "-p",
-                str(containerpath.parent),
-            ])
+            _run_docker_command(
+                [
+                    "docker",
+                    "exec",
+                    self.container,
+                    "mkdir",
+                    "-p",
+                    str(containerpath.parent),
+                ]
+            )
 
-        _run_docker_command([
-            "docker",
-            "cp",
-            "-aq",
-            str(hostpath),
-            f"{self.container}:{containerpath}",
-        ])
+        _run_docker_command(
+            [
+                "docker",
+                "cp",
+                "-aq",
+                str(hostpath),
+                f"{self.container}:{containerpath}",
+            ]
+        )
         return containerpath
 
     def stop_docker(self) -> None:
@@ -180,8 +186,7 @@ class CTFEnvironment:
             _run_docker_command(["docker", "rm", "-f", self.container])
         except subprocess.CalledProcessError as exc:
             combined = "\n".join(
-                part for part in (str(exc.stderr or ""), str(exc.output or ""))
-                if part
+                part for part in (str(exc.stderr or ""), str(exc.output or "")) if part
             )
             if not _NO_SUCH_CONTAINER_RE.search(combined):
                 raise

@@ -8,12 +8,10 @@ Supports:
 """
 
 from __future__ import annotations
-
 import re
 import shlex
 from typing import Any
-
-from killchain_docker.state import Artifact
+from killchain_docker.state.domain import Artifact
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
@@ -21,34 +19,26 @@ from killchain_docker.tools.core import (
     ToolExecutionResult,
     ToolOutput,
     ToolOutputStatus,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
-    _truncate,
 )
 from killchain_docker.tools.plugins.workspace import protected_shell_command
 
-# Parse strace output: syscall(args) = return_value
 _SYSCALL_RE = re.compile(
-    r"^(?:\[\w+\]\s+)?"          # optional [pid] prefix
-    r"(?:\d+\s+)?"               # optional pid prefix
-    r"(\w+)\(([^)]*)\)"          # syscall_name(args)
-    r"\s*=\s*(.+)$"              # = return_value
+    "^(?:\\[\\w+\\]\\s+)?(?:\\d+\\s+)?(\\w+)\\(([^)]*)\\)\\s*=\\s*(.+)$"
 )
-# Exit line: +++ exited with N +++
-_EXIT_RE = re.compile(r"\+\+\+ exited with (\d+) \+\+\+")
-# File path in open/openat: first quoted string argument
-_QUOTED_PATH_RE = re.compile(r'"([^"]+)"')
-# Network: AF_INET/AF_INET6, sin_port=htons(N), sin_addr=inet_addr("...")
-_INET_PORT_RE = re.compile(r"sin_port=htons\((\d+)\)")
-_INET_ADDR_RE = re.compile(r'sin_addr=inet_addr\("([^"]+)"\)')
-_AF_RE = re.compile(r"(AF_INET6?|AF_UNIX)")
-
-# Syscalls that access files
-_FILE_SYSCALLS = frozenset({"open", "openat", "stat", "lstat", "access", "readlink", "execve"})
-# Syscalls related to network
+_EXIT_RE = re.compile("\\+\\+\\+ exited with (\\d+) \\+\\+\\+")
+_QUOTED_PATH_RE = re.compile('"([^"]+)"')
+_INET_PORT_RE = re.compile("sin_port=htons\\((\\d+)\\)")
+_INET_ADDR_RE = re.compile('sin_addr=inet_addr\\("([^"]+)"\\)')
+_AF_RE = re.compile("(AF_INET6?|AF_UNIX)")
+_FILE_SYSCALLS = frozenset(
+    {"open", "openat", "stat", "lstat", "access", "readlink", "execve"}
+)
 _NET_SYSCALLS = frozenset({"connect", "bind", "sendto", "recvfrom", "socket", "accept"})
 
 
@@ -65,25 +55,25 @@ class StracePlugin:
         filter_expr = str(request.metadata.get("filter") or "")
         input_data = str(request.metadata.get("input_data") or "")
         files_root = request.metadata.get("files_root")
-
-        # Build strace command
         cmd_parts = ["strace", "-f", "-s", "200"]
         if filter_expr:
             cmd_parts.extend(["-e", shlex.quote(filter_expr)])
         cmd_parts.append(shlex.quote(path))
         if args:
             cmd_parts.append(args)
-
         cmd = " ".join(cmd_parts)
-        # strace outputs to stderr; merge to stdout for parsing
         if input_data:
             full_cmd = f"printf %s {shlex.quote(input_data)} | {cmd} 2>&1"
         else:
             full_cmd = f"{cmd} 2>&1"
-
         return _run(
             self.name,
-            [*self.argv_prefix, "bash", "-c", protected_shell_command(full_cmd, files_root)],
+            [
+                *self.argv_prefix,
+                "bash",
+                "-c",
+                protected_shell_command(full_cmd, files_root),
+            ],
             request.timeout_s,
         )
 
@@ -97,57 +87,40 @@ def build_output(
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     combined = stdout + stderr
-
-    # strace returns the traced program's exit code; don't treat as tool failure
     status = ToolOutputStatus.SUCCESS
-
-    # Parse syscalls
     syscalls: list[dict[str, Any]] = []
     syscall_counts: dict[str, int] = {}
     file_accesses: list[str] = []
     network_connections: list[dict[str, Any]] = []
     exit_status: int | None = None
     seen_files: set[str] = set()
-
     for line in combined.splitlines():
         line = line.strip()
-
-        # Check exit
         m = _EXIT_RE.search(line)
         if m:
             exit_status = int(m.group(1))
             continue
-
-        # Parse syscall
         m = _SYSCALL_RE.match(line)
         if not m:
             continue
-
         name = m.group(1)
         args_raw = m.group(2)
         ret_val = m.group(3).strip()
-
         syscall_counts[name] = syscall_counts.get(name, 0) + 1
-
         entry: dict[str, Any] = {
             "name": name,
             "args": args_raw[:300],
             "return": ret_val[:100],
         }
         syscalls.append(entry)
-
-        # Extract file paths from file-related syscalls
         if name in _FILE_SYSCALLS:
             for pm in _QUOTED_PATH_RE.finditer(args_raw):
                 filepath = pm.group(1)
-                # Skip noise: /proc, /sys, /lib loaders, locale
                 if filepath.startswith(("/proc/", "/sys/", "/usr/lib/locale")):
                     continue
                 if filepath not in seen_files:
                     seen_files.add(filepath)
                     file_accesses.append(filepath)
-
-        # Extract network connections
         if name in _NET_SYSCALLS:
             af_m = _AF_RE.search(args_raw)
             port_m = _INET_PORT_RE.search(args_raw)
@@ -162,27 +135,24 @@ def build_output(
                     conn["port"] = int(port_m.group(1))
                 conn["syscall"] = name
                 network_connections.append(conn)
-
-    # Artifact
     artifacts: list[Artifact] = []
     if path:
-        artifacts.append(Artifact(
-            path=path, kind="binary", source="strace",
-            metadata={
-                "syscall_count": len(syscalls),
-                "unique_syscalls": len(syscall_counts),
-                "file_access_count": len(file_accesses),
-            },
-        ))
-
-    # Flag candidates from output
+        artifacts.append(
+            Artifact(
+                path=path,
+                kind="binary",
+                source="strace",
+                metadata={
+                    "syscall_count": len(syscalls),
+                    "unique_syscalls": len(syscall_counts),
+                    "file_access_count": len(file_accesses),
+                },
+            )
+        )
     flags = _flag_candidates_from(combined, source="strace")
-    # Also check file contents shown in read() syscalls
     for entry in syscalls:
         if entry["name"] in ("read", "write") and len(entry["args"]) > 50:
             flags.extend(_flag_candidates_from(entry["args"], source="strace:io"))
-
-    # Summary
     summary = f"strace {path}: {len(syscalls)} syscall(s), {len(syscall_counts)} unique"
     if file_accesses:
         summary += f", {len(file_accesses)} file(s) accessed"
@@ -190,8 +160,6 @@ def build_output(
         summary += f", {len(network_connections)} network connection(s)"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
-
-    # output_context
     output_context: dict[str, Any] = {
         "path": path,
         "total_syscalls": len(syscalls),
@@ -207,13 +175,12 @@ def build_output(
     if exit_status is not None:
         output_context["exit_status"] = exit_status
     if syscalls:
-        # Only include the most relevant syscalls (file + network + first/last few)
         relevant = [
-            s for s in syscalls
+            s
+            for s in syscalls
             if s["name"] in _FILE_SYSCALLS | _NET_SYSCALLS | {"read", "write", "ioctl"}
         ]
         output_context["relevant_syscalls"] = relevant[:50]
-
     return ToolOutput(
         status=status,
         summary=summary,

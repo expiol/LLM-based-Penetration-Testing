@@ -20,12 +20,14 @@ class ScoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "results.jsonl").write_text(
-                "\n".join([
-                    json.dumps({"challenge": "demo", "solved": True}),
-                    "{",
-                    "[]",
-                    json.dumps({"solved": True}),
-                ]),
+                "\n".join(
+                    [
+                        json.dumps({"challenge": "demo", "solved": True}),
+                        "{",
+                        "[]",
+                        json.dumps({"solved": True}),
+                    ]
+                ),
                 encoding="utf-8",
             )
 
@@ -134,11 +136,15 @@ class ScoreTests(unittest.TestCase):
 
             with patch("killchain_docker.score.challenge_names", return_value=["demo"]):
                 with contextlib.redirect_stdout(stdout):
-                    code = score.main([
-                        "--logdir", str(root),
-                        "--output", str(output),
-                        "--quiet",
-                    ])
+                    code = score.main(
+                        [
+                            "--logdir",
+                            str(root),
+                            "--output",
+                            str(output),
+                            "--quiet",
+                        ]
+                    )
             payload = json.loads(output.read_text(encoding="utf-8"))
 
         self.assertEqual(code, 0)

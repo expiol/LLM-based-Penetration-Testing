@@ -7,45 +7,41 @@ Supports:
 """
 
 from __future__ import annotations
-
 import re
 from typing import Any
-
-from killchain_docker.state import Credential
+from killchain_docker.state.domain import Credential
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
     _status,
-    _truncate,
 )
 
+_CRACKED_RE = re.compile("^(.+?):(.+?)(?::.*)?$", re.MULTILINE)
+_SUMMARY_RE = re.compile("(\\d+) password hash(?:es)? cracked", re.IGNORECASE)
+_LOADED_RE = re.compile("Loaded (\\d+) password hash", re.IGNORECASE)
+_FORMAT_RE = re.compile('(?:using default|Will run) .+ format "(.+?)"', re.IGNORECASE)
+_NOISE = frozenset(
+    {
+        "password hash",
+        "loaded",
+        "will run",
+        "using default",
+        "proceeding",
+        "press",
+        "session",
+        "cost ",
+    }
+)
 
-# ---------------------------------------------------------------------------
-# Regex patterns
-# ---------------------------------------------------------------------------
-
-_CRACKED_RE = re.compile(r"^(.+?):(.+?)(?::.*)?$", re.MULTILINE)
-_SUMMARY_RE = re.compile(r"(\d+) password hash(?:es)? cracked", re.IGNORECASE)
-_LOADED_RE = re.compile(r"Loaded (\d+) password hash", re.IGNORECASE)
-_FORMAT_RE = re.compile(r'(?:using default|Will run) .+ format "(.+?)"', re.IGNORECASE)
-
-_NOISE = frozenset({
-    "password hash", "loaded", "will run", "using default",
-    "proceeding", "press", "session", "cost ",
-})
-
-
-# ---------------------------------------------------------------------------
-# Plugin
-# ---------------------------------------------------------------------------
 
 class JohnPlugin:
     name = "john"
@@ -67,12 +63,10 @@ class JohnPlugin:
         if extra:
             cmd += f" {extra}"
         cmd += f" {path} && john --show {path}"
-        return _run(self.name, [*self.argv_prefix, "bash", "-c", cmd], request.timeout_s)
+        return _run(
+            self.name, [*self.argv_prefix, "bash", "-c", cmd], request.timeout_s
+        )
 
-
-# ---------------------------------------------------------------------------
-# Output builder
-# ---------------------------------------------------------------------------
 
 def build_output(
     request: ToolExecutionRequest,
@@ -83,53 +77,43 @@ def build_output(
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     status = _status(result)
-
-    # -- Parse cracked credentials ------------------------------------------
     cracked: list[dict[str, str]] = []
     seen: set[str] = set()
     for m in _CRACKED_RE.finditer(stdout):
-        user, passwd = m.group(1).strip(), m.group(2).strip()
-        if any(skip in user.lower() for skip in _NOISE):
+        user, passwd = (m.group(1).strip(), m.group(2).strip())
+        if any((skip in user.lower() for skip in _NOISE)):
             continue
         key = f"{user}:{passwd}"
         if key not in seen:
             seen.add(key)
             cracked.append({"username": user, "password": passwd})
-
-    # -- Parse metadata ------------------------------------------------------
     loaded_count = 0
     m = _LOADED_RE.search(stdout + stderr)
     if m:
         loaded_count = int(m.group(1))
-
     cracked_count = len(cracked)
     m = _SUMMARY_RE.search(stdout + stderr)
     if m:
         cracked_count = max(cracked_count, int(m.group(1)))
-
     hash_format = ""
     m = _FORMAT_RE.search(stdout + stderr)
     if m:
         hash_format = m.group(1).strip()
-
-    # -- Credentials ---------------------------------------------------------
     credentials: list[Credential] = []
     for entry in cracked[:50]:
-        credentials.append(Credential(
-            credential_id=f"john-{entry['username'][:32]}",
-            username=entry["username"],
-            secret_ref=f"cracked:{entry['password']}",
-            credential_type=hash_format or "hash",
-            source="john",
-            metadata={"hash_file": path},
-        ))
-
-    # -- Flags ---------------------------------------------------------------
+        credentials.append(
+            Credential(
+                credential_id=f"john-{entry['username'][:32]}",
+                username=entry["username"],
+                secret_ref=f"cracked:{entry['password']}",
+                credential_type=hash_format or "hash",
+                source="john",
+                metadata={"hash_file": path},
+            )
+        )
     flags = _flag_candidates_from(stdout, source="john")
     for entry in cracked:
         flags.extend(_flag_candidates_from(entry["password"], source="john"))
-
-    # -- Summary -------------------------------------------------------------
     summary = f"john {path}: {cracked_count} cracked"
     if loaded_count:
         summary += f" / {loaded_count} loaded"
@@ -137,20 +121,16 @@ def build_output(
         summary += f" ({hash_format})"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
-
-    # -- output_context ------------------------------------------------------
     output_context: dict[str, Any] = {
         "path": path,
         "cracked_count": cracked_count,
         "loaded_count": loaded_count,
         "cracked": [
-            {"username": e["username"], "password": e["password"]}
-            for e in cracked[:20]
+            {"username": e["username"], "password": e["password"]} for e in cracked[:20]
         ],
     }
     if hash_format:
         output_context["hash_format"] = hash_format
-
     return ToolOutput(
         status=status,
         summary=summary,

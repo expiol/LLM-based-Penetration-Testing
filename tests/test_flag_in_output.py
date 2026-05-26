@@ -72,10 +72,12 @@ class FlagInOutputTests(unittest.TestCase):
             )
             (root / "demo.status.json").write_text("{}", encoding="utf-8")
             (root / "demo.json").write_text(
-                json.dumps({
-                    "success": False,
-                    "planner": [{"content": "candidate FLAG{demo}"}],
-                }),
+                json.dumps(
+                    {
+                        "success": False,
+                        "planner": [{"content": "candidate FLAG{demo}"}],
+                    }
+                ),
                 encoding="utf-8",
             )
             stdout = StringIO()

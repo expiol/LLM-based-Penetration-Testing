@@ -7,27 +7,30 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 
-from killchain_docker.controller import RunConfig, run_assessment
 from killchain_docker.logging_utils import (
     configure_logging,
     write_json_file,
     write_json_stdout,
     write_jsonl_file,
 )
-from killchain_docker.llm import StaticLLMClient
+from killchain_docker.llm.gateway import StaticLLMClient
+from killchain_docker.runtime.config import RunConfig
+from killchain_docker.runtime.session import run_assessment
 from killchain_docker.score import (
     build_validation_payload,
     summarize_logdir,
     summarize_run_dir,
 )
-from killchain_docker.tools import (
+from killchain_docker.tools.core import (
     ExecutionMode,
     ExecutionPlane,
     ToolExecutionRequest,
     ToolExecutionResult,
-    build_execution_plane,
 )
-from killchain_docker.tools.plugins.shell import build_output as shell_output_builder
+from killchain_docker.tools.registry import build_execution_plane
+from killchain_docker.tools.plugins.shell_output import (
+    build_output as shell_output_builder,
+)
 from killchain_docker.tools.plugins.script import build_output as script_output_builder
 
 
@@ -117,7 +120,9 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
     live_plane = build_execution_plane()
     missing_plugins = sorted(_required_plugin_names() - set(live_plane.plugins))
     if missing_plugins:
-        raise AssertionError(f"build_execution_plane() is missing plugins: {missing_plugins}")
+        raise AssertionError(
+            f"build_execution_plane() is missing plugins: {missing_plugins}"
+        )
 
     expected_flag = "flag{selftest-ok}"
     simulated_plane = _build_selftest_plane(expected_flag)
@@ -138,7 +143,11 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                 for todo in todos
                 if todo.get("status") in {"pending", "running"}
             }
-            if flag_candidates and "Validate selftest flag candidate." not in completed_goals | pending_goals:
+            if (
+                flag_candidates
+                and "Validate selftest flag candidate."
+                not in completed_goals | pending_goals
+            ):
                 return {
                     "summary": "Validate discovered selftest flag.",
                     "todos": [
@@ -146,7 +155,9 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                             "goal": "Validate selftest flag candidate.",
                             "priority": 99,
                             "context": {"candidate_flag": flag_candidates[-1]["value"]},
-                            "success_criteria": ["Confirm the candidate against the expected flag."],
+                            "success_criteria": [
+                                "Confirm the candidate against the expected flag."
+                            ],
                             "constraints": ["Do not fabricate alternate flags."],
                             "dedupe_key": f"selftest:validate:{flag_candidates[-1]['value']}",
                         }
@@ -155,7 +166,10 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                     "stop_run": False,
                 }
             assets = snapshot.get("assets") or []
-            if assets and "Fetch selftest web content." not in completed_goals | pending_goals:
+            if (
+                assets
+                and "Fetch selftest web content." not in completed_goals | pending_goals
+            ):
                 asset = assets[0]
                 return {
                     "summary": "Fetch selftest web content via curl.",
@@ -167,7 +181,9 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
                                 "asset_id": asset["asset_id"],
                                 "base_url": asset["base_url"],
                             },
-                            "success_criteria": ["Fetch content and surface flag candidates."],
+                            "success_criteria": [
+                                "Fetch content and surface flag candidates."
+                            ],
                             "constraints": ["Stay on the known selftest base URL."],
                             "dedupe_key": "selftest:web-content",
                         }
@@ -189,7 +205,9 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
             for todo in ready:
                 goal = str(todo.get("goal") or "").lower()
                 context = todo.get("context") or {}
-                if todo.get("phase") == "flag_validation" or context.get("candidate_flag"):
+                if todo.get("phase") == "flag_validation" or context.get(
+                    "candidate_flag"
+                ):
                     worker_name = "flag-worker"
                 elif context.get("base_url") or "web" in goal:
                     worker_name = "web-worker"
@@ -279,7 +297,9 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
     if not summary.get("solved"):
         raise AssertionError("selftest runtime did not reach solved state")
     if summary.get("validated_flag") != expected_flag:
-        raise AssertionError("selftest runtime did not preserve validated flag in summary")
+        raise AssertionError(
+            "selftest runtime did not preserve validated flag in summary"
+        )
     if artifacts.status != "solved":
         raise AssertionError(f"unexpected selftest run status: {artifacts.status}")
     if not any(event.get("event_type") == "solved" for event in events):
@@ -322,9 +342,13 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
         split="development",
     )
     if run_dir_validation["score"]["solved"] != 1:
-        raise AssertionError("run-dir score validation did not count the solved challenge")
+        raise AssertionError(
+            "run-dir score validation did not count the solved challenge"
+        )
     if run_dir_validation["coverage"]["missing"]:
-        raise AssertionError("run-dir score validation reported missing challenges unexpectedly")
+        raise AssertionError(
+            "run-dir score validation reported missing challenges unexpectedly"
+        )
 
     logdir_results = summarize_logdir(logdir)
     logdir_validation = build_validation_payload(
@@ -333,9 +357,13 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
         split="development",
     )
     if logdir_validation["score"]["solved"] != 1:
-        raise AssertionError("logdir score validation did not count the solved challenge")
+        raise AssertionError(
+            "logdir score validation did not count the solved challenge"
+        )
     if logdir_validation["coverage"]["missing"]:
-        raise AssertionError("logdir score validation reported missing challenges unexpectedly")
+        raise AssertionError(
+            "logdir score validation reported missing challenges unexpectedly"
+        )
 
     payload = {
         "ok": True,
@@ -363,7 +391,9 @@ def run_selftest(output_root: str | Path) -> dict[str, Any]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run a local self-test for the killchain workflow (no Docker)")
+    parser = argparse.ArgumentParser(
+        description="Run a local self-test for the killchain workflow (no Docker)"
+    )
     parser.add_argument(
         "--output-root",
         default="selftest_output",

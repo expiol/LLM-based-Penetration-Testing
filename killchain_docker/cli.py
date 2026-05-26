@@ -6,10 +6,15 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from killchain_docker.controller import RunConfig, run_assessment
 from killchain_docker.lab import DEFAULT_COMPOSE_REL, lab_down, lab_health_check, lab_up
-from killchain_docker.logging_utils import configure_logging, get_logger, write_json_stdout
-from killchain_docker.llm import LLMClientError
+from killchain_docker.logging_utils import (
+    configure_logging,
+    get_logger,
+    write_json_stdout,
+)
+from killchain_docker.llm.gateway import LLMClientError
+from killchain_docker.runtime.config import RunConfig
+from killchain_docker.runtime.session import run_assessment
 from killchain_docker.selftest import run_selftest
 
 
@@ -17,33 +22,55 @@ LOGGER = get_logger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="autopentest", description="Safe multi-agent security assessment runner")
+    parser = argparse.ArgumentParser(
+        prog="autopentest", description="Safe multi-agent security assessment runner"
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subcommands.add_parser("run", help="Run an assessment")
     run_parser.add_argument("--objective", help="Run objective")
-    run_parser.add_argument("--scope", action="append", dest="scope", help="Authorized scope entry")
+    run_parser.add_argument(
+        "--scope", action="append", dest="scope", help="Authorized scope entry"
+    )
     run_parser.add_argument("--config", help="Path to a JSON config file")
-    run_parser.add_argument("--output-root", help="Directory where run artifacts are stored")
+    run_parser.add_argument(
+        "--output-root", help="Directory where run artifacts are stored"
+    )
     run_parser.add_argument("--status-path", help="Optional live status JSON path")
-    run_parser.add_argument("--max-cycles", type=int, help="Maximum orchestrator cycles")
-    run_parser.add_argument("--rag-mode", choices=["oracle", "strict", "disabled"], help="RAG policy mode")
-    run_parser.add_argument("--quiet", action="store_true", help="Suppress orchestrator event streaming")
+    run_parser.add_argument(
+        "--max-cycles", type=int, help="Maximum orchestrator cycles"
+    )
+    run_parser.add_argument(
+        "--rag-mode", choices=["oracle", "strict", "disabled"], help="RAG policy mode"
+    )
+    run_parser.add_argument(
+        "--quiet", action="store_true", help="Suppress orchestrator event streaming"
+    )
 
     demo_parser = subcommands.add_parser("demo", help="Run a built-in local demo")
-    demo_parser.add_argument("--output-root", default="runs", help="Directory where run artifacts are stored")
+    demo_parser.add_argument(
+        "--output-root", default="runs", help="Directory where run artifacts are stored"
+    )
     demo_parser.add_argument("--status-path", help="Optional live status JSON path")
-    demo_parser.add_argument("--rag-mode", choices=["oracle", "strict", "disabled"], help="RAG policy mode")
-    demo_parser.add_argument("--quiet", action="store_true", help="Suppress orchestrator event streaming")
+    demo_parser.add_argument(
+        "--rag-mode", choices=["oracle", "strict", "disabled"], help="RAG policy mode"
+    )
+    demo_parser.add_argument(
+        "--quiet", action="store_true", help="Suppress orchestrator event streaming"
+    )
 
-    selftest_parser = subcommands.add_parser("selftest", help="Run a local no-docker self-test")
+    selftest_parser = subcommands.add_parser(
+        "selftest", help="Run a local no-docker self-test"
+    )
     selftest_parser.add_argument(
         "--output-root",
         default="selftest_output",
         help="Directory where self-test artifacts are written",
     )
 
-    lab_parser = subcommands.add_parser("lab", help="Docker Compose lab helpers (optional)")
+    lab_parser = subcommands.add_parser(
+        "lab", help="Docker Compose lab helpers (optional)"
+    )
     lab_sub = lab_parser.add_subparsers(dest="lab_cmd", required=True)
 
     lab_up_p = lab_sub.add_parser("up", help="docker compose up (default: detached)")
@@ -71,7 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     lab_health_p = lab_sub.add_parser("health", help="HTTP GET probe (readiness check)")
-    lab_health_p.add_argument("--url", required=True, help="Target URL, e.g. http://127.0.0.1:8080")
+    lab_health_p.add_argument(
+        "--url", required=True, help="Target URL, e.g. http://127.0.0.1:8080"
+    )
     lab_health_p.add_argument("--timeout", type=float, default=15.0, help="Seconds")
 
     return parser
@@ -108,16 +137,26 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
     if not objective:
         raise ValueError("--objective is required when not provided via --config")
     if not scope:
-        raise ValueError("At least one --scope entry is required when not provided via --config")
+        raise ValueError(
+            "At least one --scope entry is required when not provided via --config"
+        )
 
     return RunConfig(
         objective=objective,
         authorized_scope=scope,
-        output_root=args.output_root if args.output_root is not None else (base.output_root if base is not None else "runs"),
-        max_cycles=args.max_cycles if args.max_cycles is not None else (base.max_cycles if base is not None else 6),
+        output_root=args.output_root
+        if args.output_root is not None
+        else (base.output_root if base is not None else "runs"),
+        max_cycles=args.max_cycles
+        if args.max_cycles is not None
+        else (base.max_cycles if base is not None else 6),
         quiet=args.quiet or (base.quiet if base is not None else False),
-        status_path=args.status_path if args.status_path is not None else (base.status_path if base is not None else None),
-        rag_mode=args.rag_mode if args.rag_mode is not None else (base.rag_mode if base is not None else None),
+        status_path=args.status_path
+        if args.status_path is not None
+        else (base.status_path if base is not None else None),
+        rag_mode=args.rag_mode
+        if args.rag_mode is not None
+        else (base.rag_mode if base is not None else None),
         metadata=dict(base.metadata) if base is not None else {},
     )
 
@@ -125,11 +164,15 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
 def _lab_cli_main(args: argparse.Namespace) -> int:
     if args.lab_cmd == "up":
         code = lab_up(args.compose, detach=not args.foreground)
-        write_json_stdout({"compose": args.compose, "exit_code": code, "detach": not args.foreground})
+        write_json_stdout(
+            {"compose": args.compose, "exit_code": code, "detach": not args.foreground}
+        )
         return 0 if code == 0 else 1
     if args.lab_cmd == "down":
         code = lab_down(args.compose, remove_volumes=args.volumes)
-        write_json_stdout({"compose": args.compose, "exit_code": code, "remove_volumes": args.volumes})
+        write_json_stdout(
+            {"compose": args.compose, "exit_code": code, "remove_volumes": args.volumes}
+        )
         return 0 if code == 0 else 1
     if args.lab_cmd == "health":
         ok = lab_health_check(args.url, timeout_s=args.timeout)

@@ -1,8 +1,4 @@
-"""Tests for artifact triage — updated for 2-capability architecture.
-
-The old test ran the deleted artifact_triage plugin directly via subprocess.
-This test now validates the shell-based equivalent approach.
-"""
+"""Tests for artifact triage plugin output normalization."""
 
 from __future__ import annotations
 
@@ -12,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from killchain_docker.tools import ToolExecutionRequest, ToolExecutionResult
+from killchain_docker.tools.core import ToolExecutionRequest, ToolExecutionResult
 from killchain_docker.tools.core import ExecutionMode, ParsedToolOutput
 from killchain_docker.tools.core import extract_flags_from_text
 from killchain_docker.tools.plugins.artifact_triage import (
@@ -128,10 +124,13 @@ class ArtifactTriageTests(unittest.TestCase):
         self.assertEqual(record["png"]["chunk_count"], 3)
         self.assertEqual(record["png"]["nonstandard_chunks"][0]["type"], "qfme")
         child_artifacts = [
-            artifact for artifact in output.artifacts
+            artifact
+            for artifact in output.artifacts
             if artifact.source == "artifact_triage_png"
         ]
-        self.assertEqual([artifact.path for artifact in child_artifacts], [chunk_path, trailing_path])
+        self.assertEqual(
+            [artifact.path for artifact in child_artifacts], [chunk_path, trailing_path]
+        )
         self.assertEqual(child_artifacts[0].kind, "png_chunk_qfme")
         self.assertEqual(child_artifacts[1].kind, "png_trailing_data")
         self.assertIn("2 png payload artifact(s)", output.summary)
@@ -228,7 +227,8 @@ class ArtifactTriageTests(unittest.TestCase):
 
             self.assertEqual(result.exit_code, 0, result.stderr)
             child_artifacts = [
-                artifact for artifact in output.artifacts
+                artifact
+                for artifact in output.artifacts
                 if artifact.source == "artifact_triage_png"
             ]
             self.assertEqual(len(child_artifacts), 2)
@@ -239,7 +239,9 @@ class ArtifactTriageTests(unittest.TestCase):
 def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
     crc = binascii.crc32(chunk_type)
     crc = binascii.crc32(payload, crc) & 0xFFFFFFFF
-    return struct.pack(">I", len(payload)) + chunk_type + payload + struct.pack(">I", crc)
+    return (
+        struct.pack(">I", len(payload)) + chunk_type + payload + struct.pack(">I", crc)
+    )
 
 
 def _png_with_nonstandard_chunk_and_trailer() -> bytes:

@@ -6,18 +6,20 @@ planner, router, and worker prompts from drifting independently.
 """
 
 from __future__ import annotations
-
 import posixpath
 from typing import Any
-
 from killchain_docker.prompt_bounds import bounded_value, trim_text
-from killchain_docker.state import Artifact, DispatchIntent, ExecutionRecord, RunState, TodoItem
+from killchain_docker.state.artifact_projection import ArtifactProjectionStore
+from killchain_docker.state.dispatch import DispatchIntent
+from killchain_docker.state.domain import Artifact, ExecutionRecord
+from killchain_docker.state.memory_projection import RunMemoryProjection
+from killchain_docker.state.run_state import RunState
+from killchain_docker.state.todos import TodoItem
 
 
 def dispatch_intent(context: dict[str, Any]) -> dict[str, Any]:
     payload = DispatchIntent.from_context(context).model_dump(
-        mode="json",
-        exclude_defaults=True,
+        mode="json", exclude_defaults=True
     )
     payload.pop("completion_contract", None)
     payload.pop("repair_policy_id", None)
@@ -25,17 +27,10 @@ def dispatch_intent(context: dict[str, Any]) -> dict[str, Any]:
 
 
 def context_projection(
-    context: dict[str, Any],
-    *,
-    width: int,
-    list_limit: int,
-    dict_limit: int,
+    context: dict[str, Any], *, width: int, list_limit: int, dict_limit: int
 ) -> Any:
     payload = bounded_value(
-        context,
-        width=width,
-        list_limit=list_limit,
-        dict_limit=dict_limit,
+        context, width=width, list_limit=list_limit, dict_limit=dict_limit
     )
     if isinstance(payload, dict):
         raw_intent = payload.get("dispatch_intent")
@@ -52,11 +47,9 @@ def planner_todo(todo: TodoItem) -> dict[str, Any]:
         "phase": todo.phase,
         "status": todo.status,
         "priority": todo.priority,
+        "depends_on": bounded_value(todo.depends_on, width=180, list_limit=8),
         "context": context_projection(
-            todo.context,
-            width=360,
-            list_limit=8,
-            dict_limit=14,
+            todo.context, width=360, list_limit=8, dict_limit=14
         ),
         "result_summary": trim_text(todo.result_summary, width=300),
         "error": trim_text(todo.error, width=220),
@@ -70,13 +63,13 @@ def router_todo(todo: TodoItem) -> dict[str, object]:
         "phase": todo.phase,
         "dispatch_intent": dispatch_intent(todo.context),
         "context": context_projection(
-            todo.context,
-            width=360,
-            list_limit=8,
-            dict_limit=14,
+            todo.context, width=360, list_limit=8, dict_limit=14
         ),
         "priority": todo.priority,
-        "success_criteria": bounded_value(todo.success_criteria, width=240, list_limit=6),
+        "depends_on": bounded_value(todo.depends_on, width=180, list_limit=8),
+        "success_criteria": bounded_value(
+            todo.success_criteria, width=240, list_limit=6
+        ),
         "constraints": bounded_value(todo.constraints, width=240, list_limit=6),
         "attempts": todo.attempts,
         "error": trim_text(todo.error, width=220),
@@ -90,13 +83,13 @@ def worker_todo(task: TodoItem) -> dict[str, Any]:
         "phase": task.phase,
         "dispatch_intent": dispatch_intent(task.context),
         "context": context_projection(
-            task.context,
-            width=420,
-            list_limit=8,
-            dict_limit=14,
+            task.context, width=420, list_limit=8, dict_limit=14
         ),
         "priority": task.priority,
-        "success_criteria": bounded_value(task.success_criteria, width=260, list_limit=6),
+        "depends_on": bounded_value(task.depends_on, width=180, list_limit=8),
+        "success_criteria": bounded_value(
+            task.success_criteria, width=260, list_limit=6
+        ),
         "constraints": bounded_value(task.constraints, width=260, list_limit=6),
         "status": task.status,
         "assigned_worker": task.assigned_worker,
@@ -127,15 +120,10 @@ def artifact_record(artifact: Artifact) -> dict[str, Any]:
         "size": artifact.size,
         "digest": artifact.digest,
         "preview": trim_text(artifact.preview, width=260),
-        "metadata": bounded_value(artifact.metadata, width=260, list_limit=6, dict_limit=10),
+        "metadata": bounded_value(
+            artifact.metadata, width=260, list_limit=6, dict_limit=10
+        ),
     }
-
-
-def artifacts(state: RunState, *, limit: int = 30) -> list[dict[str, Any]]:
-    return [
-        artifact_record(artifact)
-        for artifact in list(state.artifacts.values())[-limit:]
-    ]
 
 
 _WORKER_ARTIFACT_METADATA_KEYS = (
@@ -171,37 +159,28 @@ def worker_artifact_record(artifact: Artifact) -> dict[str, Any]:
         "size": artifact.size,
         "digest": artifact.digest,
         "metadata": bounded_value(
-            compact_metadata,
-            width=180,
-            list_limit=4,
-            dict_limit=8,
+            compact_metadata, width=180, list_limit=4, dict_limit=8
         ),
     }
 
 
 def worker_artifacts(
-    state: RunState,
-    task: TodoItem | None = None,
-    *,
-    limit: int = 10,
+    state: RunState, task: TodoItem | None = None, *, limit: int = 10
 ) -> list[dict[str, Any]]:
     """Return a compact, task-aware artifact view for worker tool prompts."""
-
-    values = list(state.artifacts.values())
+    values = [
+        projection.artifact for projection in ArtifactProjectionStore(state).all()
+    ]
     if not values:
         return []
     if task is None:
         return [worker_artifact_record(artifact) for artifact in values[-limit:]]
-
     refs = _artifact_refs_from_task(task)
     scored: list[tuple[float, int, Artifact]] = []
     for index, artifact in enumerate(values):
         score = _artifact_relevance_score(artifact, refs)
-        # Keep a small recency signal so workers still see recent artifacts when
-        # no explicit path/id/evidence ref is available.
         score += min(5.0, (index + 1) / max(1, len(values)) * 5.0)
         scored.append((score, index, artifact))
-
     positives = [item for item in scored if item[0] > 5.0]
     if positives:
         selected = sorted(positives, key=lambda item: (-item[0], -item[1]))[:limit]
@@ -211,11 +190,8 @@ def worker_artifacts(
     return [worker_artifact_record(artifact) for _score, _index, artifact in selected]
 
 
-def working_memory(state: RunState, *, limit: int = 20, width: int = 360) -> dict[str, str]:
-    return {
-        str(key): trim_text(value, width=width)
-        for key, value in list(state.working_memory.items())[-limit:]
-    }
+def run_memory(state: RunState, *, limit: int = 20, width: int = 360) -> dict[str, str]:
+    return RunMemoryProjection(state).prompt_entries(limit=limit, width=width)
 
 
 def _artifact_refs_from_task(task: TodoItem) -> dict[str, set[str]]:
@@ -257,8 +233,10 @@ def _collect_refs(value: Any, refs: dict[str, set[str]], *, key: str = "") -> No
     if key_norm in {"evidence_id", "evidence_ids", "prior_evidence_ids"}:
         refs["evidence_ids"].add(text)
         return
-    if any(token in key_norm for token in ("path", "file", "dir", "root")):
-        _add_path_ref(text, refs, directory=("dir" in key_norm or key_norm.endswith("root")))
+    if any((token in key_norm for token in ("path", "file", "dir", "root"))):
+        _add_path_ref(
+            text, refs, directory="dir" in key_norm or key_norm.endswith("root")
+        )
 
 
 def _collect_path_like_text(text: str, refs: dict[str, set[str]]) -> None:
@@ -268,7 +246,9 @@ def _collect_path_like_text(text: str, refs: dict[str, set[str]]) -> None:
             _add_path_ref(cleaned, refs)
 
 
-def _add_path_ref(text: str, refs: dict[str, set[str]], *, directory: bool = False) -> None:
+def _add_path_ref(
+    text: str, refs: dict[str, set[str]], *, directory: bool = False
+) -> None:
     cleaned = text.strip().strip("'\"")
     if not cleaned:
         return
@@ -286,14 +266,17 @@ def _artifact_relevance_score(artifact: Artifact, refs: dict[str, set[str]]) -> 
     metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
     relative_path = str(metadata.get("relative_path") or "").strip().strip("/")
     artifact_name = posixpath.basename(path.rstrip("/"))
-    relative_name = posixpath.basename(relative_path.rstrip("/")) if relative_path else ""
-
+    relative_name = (
+        posixpath.basename(relative_path.rstrip("/")) if relative_path else ""
+    )
     if artifact.artifact_id in refs["artifact_ids"]:
         score += 100.0
     evidence_values = metadata.get("evidence_ids") or metadata.get("evidence_id") or []
     if not isinstance(evidence_values, list):
         evidence_values = [evidence_values]
-    if refs["evidence_ids"].intersection(str(item).strip() for item in evidence_values):
+    if refs["evidence_ids"].intersection(
+        (str(item).strip() for item in evidence_values)
+    ):
         score += 80.0
     if path and path in refs["paths"]:
         score += 90.0

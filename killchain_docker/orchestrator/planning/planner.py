@@ -1,14 +1,20 @@
 """PlannerAgent pipeline for high-level todo generation."""
 
 from __future__ import annotations
-
-from killchain_docker.llm import LLMClient, LLMClientError
-from killchain_docker.knowledge import KnowledgeAugmenter
+from killchain_docker.knowledge.augmenter import KnowledgeAugmenter
+from killchain_docker.llm.gateway import LLMClient, LLMClientError
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
-from killchain_docker.orchestrator.planning.schemas import PlannedTodo, PlannerAgent, PlannerDecision
-from killchain_docker.orchestrator.planning.strategy import PlanStrategy
-from killchain_docker.orchestrator.policy import CandidatePolicy
-from killchain_docker.state import RunState, TodoPhase
+from killchain_docker.orchestrator.planning.schemas import (
+    PlannedTodo,
+    PlannerAgent,
+    PlannerDecision,
+)
+from killchain_docker.orchestrator.planning.llm_strategy import LLMPlanningStrategy
+from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
+from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.state.run_state import RunState
+from killchain_docker.state.outcome import RunOutcomeStore
+from killchain_docker.state.planner_projection import PlannerStateProjection
 
 
 class LLMPlanner(PlannerAgent):
@@ -18,41 +24,41 @@ class LLMPlanner(PlannerAgent):
         self,
         llm_client: LLMClient,
         *,
-        strategy: PlanStrategy | None = None,
+        strategy: LLMPlanningStrategy | None = None,
         pipeline: PlanningPipeline | None = None,
         augmenter: KnowledgeAugmenter | None = None,
     ) -> None:
         if llm_client is None:
             raise LLMClientError("LLMPlanner requires an LLM client.")
         self.pipeline = pipeline or PlanningPipeline()
-        self.strategy = strategy or PlanStrategy(llm_client, augmenter=augmenter)
+        self.strategy = strategy or LLMPlanningStrategy(llm_client, augmenter=augmenter)
 
     def plan(self, state: RunState) -> PlannerDecision:
         candidate_decision = self._candidate_validation_decision(state)
         if candidate_decision is not None:
             return candidate_decision
-
         llm_decision = self.strategy.propose(state)
         decision = self.pipeline.merge(state, llm_decision=llm_decision)
         if not self._needs_empty_plan_retry(state, decision, llm_decision):
             return decision
-
         retry_decision = self.strategy.propose(
-            state,
-            require_action=True,
-            previous_summary=llm_decision.summary,
+            state, require_action=True, previous_summary=llm_decision.summary
         )
         repaired = self.pipeline.merge(state, llm_decision=retry_decision)
         repaired.notes.extend(decision.notes)
         repaired.notes.append("Planner retried after empty non-terminal decision.")
         if repaired.todos or repaired.stop_run:
             return repaired
-        fallback = self._continuation_decision(state, previous_summary=retry_decision.summary)
+        fallback = self._continuation_decision(
+            state, previous_summary=retry_decision.summary
+        )
         if fallback is None:
             return repaired
         merged = self.pipeline.merge(state, llm_decision=fallback)
         merged.notes.extend(repaired.notes)
-        merged.notes.append("Planner synthesized a grounded continuation after repeated empty plans.")
+        merged.notes.append(
+            "Planner synthesized a grounded continuation after repeated empty plans."
+        )
         return merged
 
     def _candidate_validation_decision(self, state: RunState) -> PlannerDecision | None:
@@ -61,9 +67,7 @@ class LLMPlanner(PlannerAgent):
         decision = self.pipeline.merge(
             state,
             llm_decision=PlannerDecision(
-                summary=(
-                    "Grounded flag candidate is ready for deterministic validation."
-                ),
+                summary="Grounded flag candidate is ready for deterministic validation.",
                 todos=[],
                 notes=[
                     "Skipped LLM planning because flag validation is deterministic."
@@ -74,69 +78,54 @@ class LLMPlanner(PlannerAgent):
 
     @staticmethod
     def _needs_empty_plan_retry(
-        state: RunState,
-        decision: PlannerDecision,
-        llm_decision: PlannerDecision,
+        state: RunState, decision: PlannerDecision, llm_decision: PlannerDecision
     ) -> bool:
         if decision.todos or decision.stop_run:
             return False
-        if state.solved or state.has_open_todos():
+        if RunOutcomeStore(state).is_solved or TodoQueueReader(state).has_open():
             return False
-        if llm_decision.todos and not LLMPlanner._all_llm_todos_were_dropped(decision):
+        if llm_decision.todos and (
+            not LLMPlanner._all_llm_todos_were_dropped(decision)
+        ):
             return False
-        return bool(state.todos or state.evidence or state.hypotheses)
+        return PlannerStateProjection(state).empty_retry_available(
+            todo_count=TodoQueueReader(state).count()
+        )
 
     @staticmethod
     def _all_llm_todos_were_dropped(decision: PlannerDecision) -> bool:
         text = "\n".join(decision.notes).lower()
         return any(
-            marker in text
-            for marker in (
-                "duplicate todo",
-                "phase gate dropped",
-                "scope gate dropped",
-                "progress gate dropped",
+            (
+                marker in text
+                for marker in (
+                    "duplicate todo",
+                    "phase gate dropped",
+                    "scope gate dropped",
+                    "progress gate dropped",
+                )
             )
         )
 
     @staticmethod
     def _continuation_decision(
-        state: RunState,
-        *,
-        previous_summary: str,
+        state: RunState, *, previous_summary: str
     ) -> PlannerDecision | None:
-        if state.solved or state.has_open_todos():
+        queue = TodoQueueReader(state)
+        todo_count = queue.count()
+        if RunOutcomeStore(state).is_solved or queue.has_open():
             return None
-        if not (state.todos or state.evidence or state.hypotheses or state.endpoints):
+        continuation = PlannerStateProjection(state).continuation(todo_count=todo_count)
+        if continuation is None:
             return None
-
-        evidence_ids = list(state.evidence.keys())[-3:]
-        endpoint_ids = list(state.endpoints.keys())[-2:]
-        hypothesis_ids = list(state.hypotheses.keys())[-2:]
-        context = {
-            "family": "execution-continuation",
-            "novelty_key": f"continuation:{len(state.todos)}:{len(state.evidence)}",
-        }
-        if evidence_ids:
-            context["evidence_ids"] = evidence_ids
-        if endpoint_ids:
-            context["endpoint_ids"] = endpoint_ids
-        if hypothesis_ids:
-            context["hypothesis_ids"] = hypothesis_ids
-
-        phase = TodoPhase.EXPLOIT if (evidence_ids or endpoint_ids) else TodoPhase.ANALYSIS
         return PlannerDecision(
             summary="Synthesized continuation because repeated planner responses had no actionable todo.",
             todos=[
                 PlannedTodo(
-                    goal=(
-                        "Continue from the latest grounded evidence and execute the next bounded "
-                        "step toward recovering or validating a flag candidate. If execution is "
-                        "blocked, produce a concise blocker diagnostic with the exact missing fact."
-                    ),
-                    phase=phase,
+                    goal="Continue from the latest grounded evidence and execute the next bounded step toward recovering or validating a flag candidate. If execution is blocked, produce a concise blocker diagnostic with the exact missing fact.",
+                    phase=continuation.phase,
                     priority=80,
-                    context=context,
+                    context=continuation.context,
                     success_criteria=[
                         "Use current-state evidence instead of repeating completed diagnostics.",
                         "Either recover a valid candidate or produce a precise blocker diagnostic.",
@@ -145,7 +134,7 @@ class LLMPlanner(PlannerAgent):
                         "Stay within authorized scope.",
                         "Keep generated execution bounded and self-contained.",
                     ],
-                    dedupe_key=f"planner:continuation:{len(state.todos)}:{len(state.evidence)}",
+                    dedupe_key=continuation.dedupe_key,
                 )
             ],
             notes=[f"Previous empty planner summary: {previous_summary[:240]}"],

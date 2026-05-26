@@ -20,28 +20,32 @@ class CliLoggingTests(unittest.TestCase):
         self.assertTrue(any("Traceback" in line for line in captured.output))
 
     def test_run_config_accepts_status_path(self) -> None:
-        args = cli.build_parser().parse_args([
-            "run",
-            "--objective",
-            "demo",
-            "--scope",
-            "http://example.test",
-            "--status-path",
-            "runs/demo.status.json",
-        ])
+        args = cli.build_parser().parse_args(
+            [
+                "run",
+                "--objective",
+                "demo",
+                "--scope",
+                "http://example.test",
+                "--status-path",
+                "runs/demo.status.json",
+            ]
+        )
 
         config = cli._config_from_args(args)
 
         self.assertEqual(config.status_path, "runs/demo.status.json")
 
     def test_demo_config_accepts_status_path(self) -> None:
-        args = cli.build_parser().parse_args([
-            "demo",
-            "--output-root",
-            str(Path("runs")),
-            "--status-path",
-            "runs/demo.status.json",
-        ])
+        args = cli.build_parser().parse_args(
+            [
+                "demo",
+                "--output-root",
+                str(Path("runs")),
+                "--status-path",
+                "runs/demo.status.json",
+            ]
+        )
 
         config = cli._config_from_args(args)
 

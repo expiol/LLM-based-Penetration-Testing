@@ -7,32 +7,30 @@ Supports:
 """
 
 from __future__ import annotations
-
 import re
 from typing import Any
-
-from killchain_docker.state import Artifact
+from killchain_docker.state.domain import Artifact
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
     _status,
-    _truncate,
 )
 
-# afl output: "0x08048450    1 33   sym.main"
-_AFL_RE = re.compile(r"(0x[0-9a-fA-F]+)\s+\d+\s+\d+\s+(.+)")
-# iz (strings in data) output: "vaddr=0x... paddr=0x... ... string=Hello"
-_IZ_RE = re.compile(r"string=(.+)")
-# Binary info from iI: "arch     x86"
-_INFO_RE = re.compile(r"^(arch|bits|os|type|class|lang|endian|machine)\s+(.+)", re.MULTILINE | re.IGNORECASE)
+_AFL_RE = re.compile("(0x[0-9a-fA-F]+)\\s+\\d+\\s+\\d+\\s+(.+)")
+_IZ_RE = re.compile("string=(.+)")
+_INFO_RE = re.compile(
+    "^(arch|bits|os|type|class|lang|endian|machine)\\s+(.+)",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 
 class RadarePlugin:
@@ -62,50 +60,42 @@ def build_output(
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     status = _status(result)
-
-    # -- Parse function list (afl output) ------------------------------------
     functions: list[dict[str, str]] = []
     for m in _AFL_RE.finditer(stdout):
         functions.append({"address": m.group(1), "name": m.group(2).strip()})
-
-    # -- Parse strings (iz output) -------------------------------------------
     strings_found: list[str] = []
     for m in _IZ_RE.finditer(stdout):
         s = m.group(1).strip()
         if len(s) >= 4:
             strings_found.append(s)
-
-    # -- Parse binary info (iI output) ---------------------------------------
     binary_info: dict[str, str] = {}
     for m in _INFO_RE.finditer(stdout):
         binary_info[m.group(1).lower()] = m.group(2).strip()
-
-    # -- Detect interesting patterns -----------------------------------------
-    has_crypto = bool(re.search(
-        r"\b(aes|des|rsa|sha|md5|xor|cipher|encrypt|decrypt)\b",
-        stdout, re.IGNORECASE,
-    ))
-    has_network = bool(re.search(
-        r"\b(socket|connect|send|recv|bind|listen|accept|http|url)\b",
-        stdout, re.IGNORECASE,
-    ))
-
-    # -- Artifact ------------------------------------------------------------
+    has_crypto = bool(
+        re.search(
+            "\\b(aes|des|rsa|sha|md5|xor|cipher|encrypt|decrypt)\\b",
+            stdout,
+            re.IGNORECASE,
+        )
+    )
+    has_network = bool(
+        re.search(
+            "\\b(socket|connect|send|recv|bind|listen|accept|http|url)\\b",
+            stdout,
+            re.IGNORECASE,
+        )
+    )
     artifacts: list[Artifact] = []
     if path:
         meta: dict[str, Any] = {"commands": cmds[:200]}
         if binary_info:
             meta["binary_info"] = binary_info
-        artifacts.append(Artifact(
-            path=path, kind="binary", source="radare2", metadata=meta,
-        ))
-
-    # -- Flags ---------------------------------------------------------------
+        artifacts.append(
+            Artifact(path=path, kind="binary", source="radare2", metadata=meta)
+        )
     flags = _flag_candidates_from(stdout, source="radare2")
     for s in strings_found:
         flags.extend(_flag_candidates_from(s, source="radare2"))
-
-    # -- Summary -------------------------------------------------------------
     parts: list[str] = []
     if functions:
         parts.append(f"{len(functions)} function(s)")
@@ -119,8 +109,6 @@ def build_output(
         summary += " [crypto]"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
-
-    # -- output_context ------------------------------------------------------
     output_context: dict[str, Any] = {
         "path": path,
         "commands": cmds,
@@ -136,7 +124,6 @@ def build_output(
         output_context["has_crypto_refs"] = True
     if has_network:
         output_context["has_network_refs"] = True
-
     return ToolOutput(
         status=status,
         summary=summary,

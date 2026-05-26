@@ -5,16 +5,13 @@ Provides:
   - _require(): metadata field validation
   - _status(): exit code → ToolOutputStatus
   - _flag_candidates_from(): stdout flag extraction
-  - _truncate: re-export from core
 """
 
 from __future__ import annotations
-
 from typing import Any
-
 from killchain_docker.processes import DEFAULT_MAX_CAPTURE_BYTES, run_bounded_process
 from killchain_docker.reasoning.flag import extract_flag_candidates
-from killchain_docker.state import FlagCandidate
+from killchain_docker.state.domain import FlagCandidate
 from killchain_docker.state.constants import (
     looks_like_escaped_byte_candidate,
     validatable_flag_candidate,
@@ -27,7 +24,6 @@ from killchain_docker.tools.core import (
     ToolOutput,
     ToolOutputStatus,
     ParsedToolOutput,
-    _truncate,
 )
 
 _MAX_CAPTURE_BYTES = DEFAULT_MAX_CAPTURE_BYTES
@@ -38,9 +34,9 @@ _INFRASTRUCTURE_ERROR_NEEDLES = (
     "cannot connect to the docker daemon",
     "docker daemon",
 )
-_FLAG_SCAN_HEAD_CHARS = 80_000
-_FLAG_SCAN_TAIL_CHARS = 80_000
-_FLAG_SCAN_CONTEXT_CHARS = 4_000
+_FLAG_SCAN_HEAD_CHARS = 80000
+_FLAG_SCAN_TAIL_CHARS = 80000
+_FLAG_SCAN_CONTEXT_CHARS = 4000
 _FLAG_SCAN_MAX_WINDOWS = 32
 _FLAG_SCAN_NEEDLES = (
     "flag",
@@ -99,19 +95,16 @@ def _status(result: ToolExecutionResult) -> ToolOutputStatus:
 
 
 def _infrastructure_failure_signal(
-    stdout: str,
-    stderr: str,
-    exit_code: int | None,
+    stdout: str, stderr: str, exit_code: int | None
 ) -> tuple[str, str] | None:
-    text = "\n".join(part for part in (stderr, stdout) if part).lower()
+    text = "\n".join((part for part in (stderr, stdout) if part)).lower()
     if exit_code == 137:
         return (
             "infrastructure_error",
             "tool execution container was terminated by the runtime",
         )
-    if (
-        any(needle in text for needle in _INFRASTRUCTURE_ERROR_NEEDLES)
-        or ("container " in text and " is not running" in text)
+    if any((needle in text for needle in _INFRASTRUCTURE_ERROR_NEEDLES)) or (
+        "container " in text and " is not running" in text
     ):
         return (
             "infrastructure_error",
@@ -129,19 +122,12 @@ def _flag_candidates_from(text: str, *, source: str = "") -> list[FlagCandidate]
     """
     if not text:
         return []
-
     scan_text = _flag_scan_text(text)
     all_values = extract_flag_candidates(scan_text)
-
     return [
-        FlagCandidate(
-            value=v,
-            source=source,
-            confidence=0.6 if v in text else 0.4,
-        )
+        FlagCandidate(value=v, source=source, confidence=0.6 if v in text else 0.4)
         for v in all_values
-        if validatable_flag_candidate(v)
-        and not looks_like_escaped_byte_candidate(v)
+        if validatable_flag_candidate(v) and (not looks_like_escaped_byte_candidate(v))
     ]
 
 
@@ -152,14 +138,9 @@ def _flag_scan_text(text: str) -> str:
     the same Codex-style discipline: inspect a deterministic head/tail sample
     plus small windows around flag-related words, never an unbounded blob.
     """
-
     if len(text) <= _FLAG_SCAN_HEAD_CHARS + _FLAG_SCAN_TAIL_CHARS:
         return text
-
-    chunks = [
-        text[:_FLAG_SCAN_HEAD_CHARS],
-        text[-_FLAG_SCAN_TAIL_CHARS:],
-    ]
+    chunks = [text[:_FLAG_SCAN_HEAD_CHARS], text[-_FLAG_SCAN_TAIL_CHARS:]]
     lowered = text.lower()
     seen_offsets: set[int] = set()
     for needle in _FLAG_SCAN_NEEDLES:
@@ -175,7 +156,6 @@ def _flag_scan_text(text: str) -> str:
                 seen_offsets.add(offset_key)
                 chunks.append(text[window_start:window_end])
             start = index + len(needle)
-
     return "\n".join(chunks)
 
 

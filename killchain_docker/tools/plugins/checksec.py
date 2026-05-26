@@ -7,12 +7,10 @@ Supports:
 """
 
 from __future__ import annotations
-
 import json
 import re
 from typing import Any
-
-from killchain_docker.state import Artifact
+from killchain_docker.state.domain import Artifact
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
@@ -20,19 +18,18 @@ from killchain_docker.tools.core import (
     ToolExecutionResult,
     ToolOutput,
     ToolOutputStatus,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
-    _truncate,
 )
 
-# Table-format parser regexes for checksec versions without JSON output.
-_RELRO_RE = re.compile(r"(Full RELRO|Partial RELRO|No RELRO)", re.IGNORECASE)
-_CANARY_RE = re.compile(r"(Canary found|No canary found)", re.IGNORECASE)
-_NX_RE = re.compile(r"(NX enabled|NX disabled)", re.IGNORECASE)
-_PIE_RE = re.compile(r"(PIE enabled|No PIE|DSO)", re.IGNORECASE)
+_RELRO_RE = re.compile("(Full RELRO|Partial RELRO|No RELRO)", re.IGNORECASE)
+_CANARY_RE = re.compile("(Canary found|No canary found)", re.IGNORECASE)
+_NX_RE = re.compile("(NX enabled|NX disabled)", re.IGNORECASE)
+_PIE_RE = re.compile("(PIE enabled|No PIE|DSO)", re.IGNORECASE)
 
 
 class ChecksecPlugin:
@@ -46,7 +43,12 @@ class ChecksecPlugin:
         path = _require(request.metadata, "path", self.name)
         return _run(
             self.name,
-            [*self.argv_prefix, "bash", "-c", f"checksec --file={path} --output=json 2>/dev/null || checksec --file={path}"],
+            [
+                *self.argv_prefix,
+                "bash",
+                "-c",
+                f"checksec --file={path} --output=json 2>/dev/null || checksec --file={path}",
+            ],
             request.timeout_s,
         )
 
@@ -57,9 +59,7 @@ def _parse_json_output(stdout: str, path: str) -> dict[str, Any] | None:
         data = json.loads(stdout)
     except (json.JSONDecodeError, ValueError):
         return None
-    # checksec JSON keys the result by file path
     if isinstance(data, dict):
-        # Try exact path match or first key
         props = data.get(path) or next(iter(data.values()), None)
         if isinstance(props, dict):
             return props
@@ -72,7 +72,9 @@ def _parse_table_output(stdout: str) -> dict[str, Any]:
     m = _RELRO_RE.search(stdout)
     if m:
         val = m.group(1).lower()
-        props["relro"] = "full" if "full" in val else ("partial" if "partial" in val else "no")
+        props["relro"] = (
+            "full" if "full" in val else "partial" if "partial" in val else "no"
+        )
     m = _CANARY_RE.search(stdout)
     if m:
         props["canary"] = "found" in m.group(1).lower()
@@ -127,7 +129,9 @@ def _attack_surface_hints(props: dict[str, Any]) -> list[str]:
     else:
         hints.append("No PIE: binary addresses are fixed, no leak needed")
     if props.get("canary"):
-        hints.append("Stack canary present: need canary leak or format string to bypass")
+        hints.append(
+            "Stack canary present: need canary leak or format string to bypass"
+        )
     else:
         hints.append("No canary: buffer overflow directly controls return address")
     relro = props.get("relro", "no")
@@ -148,31 +152,23 @@ def build_output(
     path = str(request.metadata.get("path") or "")
     stdout = result.stdout or ""
     stderr = result.stderr or ""
-    combined = "\n".join(part for part in (stdout, stderr) if part)
-
-    # Determine status
-    status = ToolOutputStatus.SUCCESS if result.exit_code in (None, 0) else ToolOutputStatus.FAILURE
-
-    # Parse properties from JSON output or checksec's table format.
+    combined = "\n".join((part for part in (stdout, stderr) if part))
+    status = (
+        ToolOutputStatus.SUCCESS
+        if result.exit_code in (None, 0)
+        else ToolOutputStatus.FAILURE
+    )
     raw_props = _parse_json_output(stdout, path)
     if raw_props is None:
         raw_props = _parse_table_output(combined)
-
     props = _normalize_props(raw_props) if raw_props else {}
     hints = _attack_surface_hints(props) if props else []
-
-    # Artifact
     artifacts: list[Artifact] = []
     if path:
-        artifacts.append(Artifact(
-            path=path, kind="binary", source="checksec",
-            metadata=props,
-        ))
-
-    # Flag candidates (unlikely but consistent with other plugins)
+        artifacts.append(
+            Artifact(path=path, kind="binary", source="checksec", metadata=props)
+        )
     flags = _flag_candidates_from(combined, source="checksec")
-
-    # Summary
     if props:
         parts = []
         if props.get("nx"):
@@ -186,12 +182,9 @@ def build_output(
     else:
         summary = f"checksec {path}: parse failed"
         status = ToolOutputStatus.FAILURE
-
-    # output_context
     output_context: dict[str, Any] = {"path": path, **props}
     if hints:
         output_context["attack_surface_hints"] = hints
-
     return ToolOutput(
         status=status,
         summary=summary,

@@ -23,7 +23,10 @@ from killchain_docker.tools.plugins.gdb import GdbPlugin
 from killchain_docker.tools.plugins.ltrace import LtracePlugin
 from killchain_docker.tools.plugins.script import ScriptPlugin
 from killchain_docker.tools.plugins.script import build_output as script_output_builder
-from killchain_docker.tools.plugins.shell import ShellPlugin, build_output as shell_output_builder
+from killchain_docker.tools.plugins.shell import ShellPlugin
+from killchain_docker.tools.plugins.shell_output import (
+    build_output as shell_output_builder,
+)
 from killchain_docker.tools.plugins.strace import StracePlugin
 from killchain_docker.tools.plugins.workspace import protected_shell_command
 
@@ -102,9 +105,7 @@ class ToolWorkspaceTests(unittest.TestCase):
                     metadata={
                         "files_root": str(root),
                         "command": (
-                            f"_kc_root={decoy}; "
-                            "printf changed > data.txt; "
-                            "printf done"
+                            f"_kc_root={decoy}; printf changed > data.txt; printf done"
                         ),
                     },
                 )
@@ -129,9 +130,9 @@ class ToolWorkspaceTests(unittest.TestCase):
                         "files_root": str(root),
                         "command": (
                             "printf changed > data.txt; "
-                            "printf corrupted > \"$CTF_ORIGINAL_FILES_ROOT/data.txt\"; "
+                            'printf corrupted > "$CTF_ORIGINAL_FILES_ROOT/data.txt"; '
                             "printf '%s|' \"$(cat data.txt)\"; "
-                            "printf '%s' \"$(cat \"$CTF_ORIGINAL_FILES_ROOT/data.txt\")\""
+                            'printf \'%s\' "$(cat "$CTF_ORIGINAL_FILES_ROOT/data.txt")"'
                         ),
                     },
                 )
@@ -153,10 +154,10 @@ class ToolWorkspaceTests(unittest.TestCase):
                     metadata={
                         "files_root": str(root),
                         "command": (
-                            "test -n \"$CTF_TEMP_DIR\"; "
-                            "test \"$TMPDIR\" = \"$CTF_TEMP_DIR\"; "
-                            "printf shell-temp > \"$CTF_TEMP_DIR/marker.txt\"; "
-                            "cat \"$CTF_TEMP_DIR/marker.txt\""
+                            'test -n "$CTF_TEMP_DIR"; '
+                            'test "$TMPDIR" = "$CTF_TEMP_DIR"; '
+                            'printf shell-temp > "$CTF_TEMP_DIR/marker.txt"; '
+                            'cat "$CTF_TEMP_DIR/marker.txt"'
                         ),
                     },
                 )
@@ -179,23 +180,33 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
 
             result = ShellPlugin().execute(request)
-            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+            output = shell_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
 
             self.assertEqual(result.exit_code, 0)
             self.assertTrue(result.stdout.startswith("done"))
             self.assertIn("__KILLCHAIN_SCRIPT_ARTIFACTS__", result.stdout)
             self.assertFalse((root / "generated" / "result.txt").exists())
             records = output.output_context["generated_artifact_records"]
-            record = next(item for item in records if item["relative_path"] == "generated/result.txt")
+            record = next(
+                item
+                for item in records
+                if item["relative_path"] == "generated/result.txt"
+            )
             artifact_path = Path(str(record["path"]))
             self.assertEqual(record["origin"], "work")
             self.assertEqual(artifact_path.read_text(encoding="utf-8"), "durable")
-            self.assertTrue(str(artifact_path).startswith(str(root / ".autopentest_artifacts")))
+            self.assertTrue(
+                str(artifact_path).startswith(str(root / ".autopentest_artifacts"))
+            )
             self.assertEqual(output.output_context["generated_artifacts_durable"], True)
             self.assertEqual(output.artifacts[0].source, "shell_exec")
             self.assertRegex(str(record["digest"]), r"^[0-9a-f]{64}$")
 
-    def test_shell_exec_prioritizes_readable_generated_artifacts_before_cap(self) -> None:
+    def test_shell_exec_prioritizes_readable_generated_artifacts_before_cap(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             request = ToolExecutionRequest(
@@ -215,14 +226,18 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
 
             result = ShellPlugin().execute(request)
-            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+            output = shell_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
 
             self.assertEqual(result.exit_code, 0, result.stderr)
             records = output.output_context["generated_artifact_records"]
             relative_paths = {str(record["relative_path"]) for record in records}
             self.assertLessEqual(len(records), 40)
             self.assertIn("readable_target", relative_paths)
-            self.assertEqual(output.artifacts[0].metadata["relative_path"], "readable_target")
+            self.assertEqual(
+                output.artifacts[0].metadata["relative_path"], "readable_target"
+            )
 
     def test_shell_exec_prioritizes_source_like_artifacts_over_html_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -245,7 +260,9 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
 
             result = ShellPlugin().execute(request)
-            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+            output = shell_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
 
             self.assertEqual(result.exit_code, 0, result.stderr)
             records = output.output_context["generated_artifact_records"]
@@ -253,7 +270,9 @@ class ToolWorkspaceTests(unittest.TestCase):
             self.assertIn("source_like", relative_paths)
             self.assertEqual(relative_paths[0], "source_like")
 
-    def test_shell_exec_prioritizes_shallow_source_artifacts_before_deep_cap(self) -> None:
+    def test_shell_exec_prioritizes_shallow_source_artifacts_before_deep_cap(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             request = ToolExecutionRequest(
@@ -265,7 +284,7 @@ class ToolWorkspaceTests(unittest.TestCase):
                         "mkdir -p zz/deep/nested/tree; "
                         "for i in $(seq -w 1 45); do "
                         "  printf '#!/bin/sh\\necho deep\\n' > \"zz/deep/nested/tree/source_$i\"; "
-                        "  chmod +x \"zz/deep/nested/tree/source_$i\"; "
+                        '  chmod +x "zz/deep/nested/tree/source_$i"; '
                         "done; "
                         "printf '#!/bin/sh\\necho entry\\n' > aa_entry; "
                         "chmod +x aa_entry; "
@@ -275,7 +294,9 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
 
             result = ShellPlugin().execute(request)
-            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+            output = shell_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
 
             self.assertEqual(result.exit_code, 0, result.stderr)
             records = output.output_context["generated_artifact_records"]
@@ -316,7 +337,9 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
 
             result = ShellPlugin().execute(request)
-            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+            output = shell_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
 
             self.assertEqual(result.exit_code, 7)
             self.assertEqual(output.status, ToolOutputStatus.FAILURE)
@@ -324,13 +347,19 @@ class ToolWorkspaceTests(unittest.TestCase):
     def test_shell_exec_wraps_user_command_with_resource_limits(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             captured["timeout_s"] = timeout_s
-            return ToolExecutionResult(tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0)
+            return ToolExecutionResult(
+                tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("killchain_docker.tools.plugins.shell._run", side_effect=fake_run):
+            with patch(
+                "killchain_docker.tools.plugins.shell._run", side_effect=fake_run
+            ):
                 ShellPlugin(argv_prefix=["docker", "exec", "-i", "container"]).execute(
                     ToolExecutionRequest(
                         tool_name="shell_exec",
@@ -353,14 +382,23 @@ class ToolWorkspaceTests(unittest.TestCase):
     def test_artifact_triage_preserves_generated_png_payload_artifacts(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             captured["timeout_s"] = timeout_s
-            return ToolExecutionResult(tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0)
+            return ToolExecutionResult(
+                tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("killchain_docker.tools.plugins.artifact_triage._run", side_effect=fake_run):
-                ArtifactTriagePlugin(argv_prefix=["docker", "exec", "-i", "container"]).execute(
+            with patch(
+                "killchain_docker.tools.plugins.artifact_triage._run",
+                side_effect=fake_run,
+            ):
+                ArtifactTriagePlugin(
+                    argv_prefix=["docker", "exec", "-i", "container"]
+                ).execute(
                     ToolExecutionRequest(
                         tool_name="artifact_triage",
                         timeout_s=5,
@@ -379,14 +417,22 @@ class ToolWorkspaceTests(unittest.TestCase):
     def test_foremost_rehomes_requested_tmp_output_to_durable_artifacts(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             captured["timeout_s"] = timeout_s
-            return ToolExecutionResult(tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0)
+            return ToolExecutionResult(
+                tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("killchain_docker.tools.plugins.foremost._run", side_effect=fake_run):
-                ForemostPlugin(argv_prefix=["docker", "exec", "-i", "container"]).execute(
+            with patch(
+                "killchain_docker.tools.plugins.foremost._run", side_effect=fake_run
+            ):
+                ForemostPlugin(
+                    argv_prefix=["docker", "exec", "-i", "container"]
+                ).execute(
                     ToolExecutionRequest(
                         tool_name="foremost",
                         timeout_s=5,
@@ -403,7 +449,9 @@ class ToolWorkspaceTests(unittest.TestCase):
         self.assertIn("_kc_preserve_paths=.autopentest_artifacts", command)
         self.assertNotIn("_kc_out=/tmp/foremost_out", command)
 
-    def test_binwalk_signatures_are_successful_evidence_even_with_nonzero_exit(self) -> None:
+    def test_binwalk_signatures_are_successful_evidence_even_with_nonzero_exit(
+        self,
+    ) -> None:
         request = ToolExecutionRequest(
             tool_name="binwalk",
             timeout_s=5,
@@ -420,7 +468,9 @@ class ToolWorkspaceTests(unittest.TestCase):
             stderr="warning: extractor disabled\n",
         )
 
-        output = binwalk_output_builder(request, result, ParsedToolOutput(summary="raw"))
+        output = binwalk_output_builder(
+            request, result, ParsedToolOutput(summary="raw")
+        )
 
         self.assertEqual(output.status, ToolOutputStatus.SUCCESS)
         self.assertEqual(output.output_context["signature_count"], 1)
@@ -454,11 +504,15 @@ class ToolWorkspaceTests(unittest.TestCase):
             result = ShellPlugin(argv_prefix=["definitely-not-a-real-runner"]).execute(
                 request
             )
-            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+            output = shell_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
 
             self.assertEqual(result.exit_code, 126)
             self.assertIn("raw binwalk extraction", result.stderr)
-            self.assertEqual(output.output_context["failure_kind"], "unbounded_extraction_blocked")
+            self.assertEqual(
+                output.output_context["failure_kind"], "unbounded_extraction_blocked"
+            )
 
     def test_shell_exec_blocks_unbounded_byte_dd_before_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -473,11 +527,15 @@ class ToolWorkspaceTests(unittest.TestCase):
             result = ShellPlugin(argv_prefix=["definitely-not-a-real-runner"]).execute(
                 request
             )
-            output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+            output = shell_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
 
             self.assertEqual(result.exit_code, 126)
             self.assertIn("byte-by-byte extraction", result.stderr)
-            self.assertEqual(output.output_context["failure_kind"], "unbounded_extraction_blocked")
+            self.assertEqual(
+                output.output_context["failure_kind"], "unbounded_extraction_blocked"
+            )
 
     def test_script_exec_runs_in_disposable_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -510,7 +568,9 @@ class ToolWorkspaceTests(unittest.TestCase):
             self.assertEqual(data.read_text(encoding="utf-8"), "original")
             self.assertFalse((root / "extra.txt").exists())
 
-    def test_script_exec_persists_new_workdir_artifacts_with_file_metadata(self) -> None:
+    def test_script_exec_persists_new_workdir_artifacts_with_file_metadata(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             request = ToolExecutionRequest(
@@ -531,16 +591,22 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
 
             result = ScriptPlugin().execute(request)
-            output = script_output_builder(request, result, ParsedToolOutput(summary="raw"))
+            output = script_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
 
             self.assertEqual(result.exit_code, 0)
             records = output.output_context["generated_artifact_records"]
-            record = next(item for item in records if item["relative_path"] == "generated.png")
+            record = next(
+                item for item in records if item["relative_path"] == "generated.png"
+            )
             self.assertEqual(record["origin"], "work")
             self.assertRegex(str(record["digest"]), r"^[0-9a-f]{64}$")
             self.assertIn("png", str(record["mime_type"]).lower())
             self.assertIn("png", str(record["file_type"]).lower())
-            artifact = next(item for item in output.artifacts if item.path == record["path"])
+            artifact = next(
+                item for item in output.artifacts if item.path == record["path"]
+            )
             self.assertEqual(artifact.kind, "script_artifact_png")
             self.assertEqual(artifact.digest, record["digest"])
             self.assertEqual(artifact.metadata["mime_type"], record["mime_type"])
@@ -590,7 +656,9 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
 
             result = ScriptPlugin().execute(request)
-            output = script_output_builder(request, result, ParsedToolOutput(summary="raw"))
+            output = script_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
 
             self.assertEqual(result.exit_code, 0)
             self.assertIn("__KILLCHAIN_SCRIPT_ARTIFACTS__", result.stdout)
@@ -598,7 +666,9 @@ class ToolWorkspaceTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             artifact_path = Path(str(records[0]["path"]))
             self.assertEqual(artifact_path.read_bytes(), b"durable")
-            self.assertTrue(str(artifact_path).startswith(str(root / ".autopentest_artifacts")))
+            self.assertTrue(
+                str(artifact_path).startswith(str(root / ".autopentest_artifacts"))
+            )
             self.assertEqual(output.artifacts[0].path, str(artifact_path))
             self.assertRegex(str(records[0]["digest"]), r"^[0-9a-f]{64}$")
 
@@ -628,13 +698,19 @@ class ToolWorkspaceTests(unittest.TestCase):
     def test_script_exec_wraps_generated_script_with_resource_limits(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             captured["timeout_s"] = timeout_s
-            return ToolExecutionResult(tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0)
+            return ToolExecutionResult(
+                tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("killchain_docker.tools.plugins.script._run", side_effect=fake_run):
+            with patch(
+                "killchain_docker.tools.plugins.script._run", side_effect=fake_run
+            ):
                 ScriptPlugin(argv_prefix=["docker", "exec", "-i", "container"]).execute(
                     ToolExecutionRequest(
                         tool_name="script_exec",
@@ -705,7 +781,9 @@ class ToolWorkspaceTests(unittest.TestCase):
     def test_ltrace_runs_under_protected_workspace(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             captured["timeout_s"] = timeout_s
             return ToolExecutionResult(
@@ -739,7 +817,9 @@ class ToolWorkspaceTests(unittest.TestCase):
     def test_strace_runs_under_protected_workspace(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             return ToolExecutionResult(
                 tool_name=name,
@@ -769,7 +849,9 @@ class ToolWorkspaceTests(unittest.TestCase):
     def test_gdb_runs_under_protected_workspace(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             return ToolExecutionResult(
                 tool_name=name,
@@ -800,7 +882,9 @@ class ToolWorkspaceTests(unittest.TestCase):
     def test_binwalk_extract_runs_under_bounded_scratch_workspace(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             captured["timeout_s"] = timeout_s
             return ToolExecutionResult(

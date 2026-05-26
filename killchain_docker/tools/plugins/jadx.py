@@ -7,31 +7,28 @@ Supports:
 """
 
 from __future__ import annotations
-
 import re
 from typing import Any
-
-from killchain_docker.state import Artifact, Credential
+from killchain_docker.state.domain import Artifact, Credential
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
     _status,
-    _truncate,
 )
 
-# Interesting Java file patterns (activities, services, receivers)
-_ACTIVITY_RE = re.compile(r"Activity\.java$", re.IGNORECASE)
-_SERVICE_RE = re.compile(r"Service\.java$", re.IGNORECASE)
-_RECEIVER_RE = re.compile(r"Receiver\.java$", re.IGNORECASE)
-_PROVIDER_RE = re.compile(r"Provider\.java$", re.IGNORECASE)
+_ACTIVITY_RE = re.compile("Activity\\.java$", re.IGNORECASE)
+_SERVICE_RE = re.compile("Service\\.java$", re.IGNORECASE)
+_RECEIVER_RE = re.compile("Receiver\\.java$", re.IGNORECASE)
+_PROVIDER_RE = re.compile("Provider\\.java$", re.IGNORECASE)
 
 
 class JadxPlugin:
@@ -44,13 +41,10 @@ class JadxPlugin:
     def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
         path = _require(request.metadata, "path", self.name)
         output_dir = str(request.metadata.get("output_dir") or "/tmp/jadx_out")
-        cmd = (
-            f"jadx -d {output_dir} {path} 2>&1 && "
-            f"find {output_dir} -name '*.java' -o -name '*.xml' | head -80 && "
-            f"echo '---MANIFEST---' && "
-            f"cat {output_dir}/resources/AndroidManifest.xml 2>/dev/null | head -60 || true"
+        cmd = f"jadx -d {output_dir} {path} 2>&1 && find {output_dir} -name '*.java' -o -name '*.xml' | head -80 && echo '---MANIFEST---' && cat {output_dir}/resources/AndroidManifest.xml 2>/dev/null | head -60 || true"
+        return _run(
+            self.name, [*self.argv_prefix, "bash", "-c", cmd], request.timeout_s
         )
-        return _run(self.name, [*self.argv_prefix, "bash", "-c", cmd], request.timeout_s)
 
 
 def build_output(
@@ -63,24 +57,18 @@ def build_output(
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     status = _status(result)
-
-    # -- Parse decompiled files ----------------------------------------------
     java_files: list[str] = []
     xml_files: list[str] = []
     for line in stdout.splitlines():
         line_s = line.strip()
         if line_s.endswith(".java"):
             java_files.append(line_s)
-        elif line_s.endswith(".xml") and not line_s.startswith("---"):
+        elif line_s.endswith(".xml") and (not line_s.startswith("---")):
             xml_files.append(line_s)
-
-    # -- Categorize Java files -----------------------------------------------
     activities: list[str] = [f for f in java_files if _ACTIVITY_RE.search(f)]
     services: list[str] = [f for f in java_files if _SERVICE_RE.search(f)]
     receivers: list[str] = [f for f in java_files if _RECEIVER_RE.search(f)]
     providers: list[str] = [f for f in java_files if _PROVIDER_RE.search(f)]
-
-    # -- Parse manifest section ----------------------------------------------
     manifest_text = ""
     in_manifest = False
     for line in stdout.splitlines():
@@ -89,48 +77,40 @@ def build_output(
             continue
         if in_manifest:
             manifest_text += line + "\n"
-
-    # Extract package name and permissions from manifest
     package_name = ""
-    m = re.search(r'package="([^"]+)"', manifest_text)
+    m = re.search('package="([^"]+)"', manifest_text)
     if m:
         package_name = m.group(1)
-
-    permissions: list[str] = re.findall(r'android:name="([^"]*permission[^"]*)"', manifest_text, re.IGNORECASE)
-
-    # -- Artifacts -----------------------------------------------------------
+    permissions: list[str] = re.findall(
+        'android:name="([^"]*permission[^"]*)"', manifest_text, re.IGNORECASE
+    )
     artifacts: list[Artifact] = []
     for fpath in java_files[:30]:
-        # Classify by component type
         kind = "java_source"
         if _ACTIVITY_RE.search(fpath):
             kind = "android_activity"
         elif _SERVICE_RE.search(fpath):
             kind = "android_service"
-        artifacts.append(Artifact(
-            path=fpath,
-            kind=kind,
-            source="jadx",
-            metadata={"apk": path},
-        ))
-
-    # -- Flags ---------------------------------------------------------------
+        artifacts.append(
+            Artifact(path=fpath, kind=kind, source="jadx", metadata={"apk": path})
+        )
     flags = _flag_candidates_from(stdout, source="jadx")
-
-    # -- Credentials (hardcoded in manifest or output) -----------------------
     credentials: list[Credential] = []
-    # Look for API keys / hardcoded secrets in output
-    for m in re.finditer(r'(?:api[_-]?key|secret|token|password)\s*[=:]\s*"([^"]{8,})"', stdout, re.IGNORECASE):
-        credentials.append(Credential(
-            credential_id=f"jadx-{m.group(1)[:20]}",
-            username="(hardcoded)",
-            secret_ref=f"jadx:{m.group(1)}",
-            credential_type="hardcoded",
-            source="jadx",
-            metadata={"apk": path},
-        ))
-
-    # -- Summary -------------------------------------------------------------
+    for m in re.finditer(
+        '(?:api[_-]?key|secret|token|password)\\s*[=:]\\s*"([^"]{8,})"',
+        stdout,
+        re.IGNORECASE,
+    ):
+        credentials.append(
+            Credential(
+                credential_id=f"jadx-{m.group(1)[:20]}",
+                username="(hardcoded)",
+                secret_ref=f"jadx:{m.group(1)}",
+                credential_type="hardcoded",
+                source="jadx",
+                metadata={"apk": path},
+            )
+        )
     summary = f"jadx {path}: {len(java_files)} Java source(s)"
     if xml_files:
         summary += f", {len(xml_files)} XML(s)"
@@ -145,8 +125,6 @@ def build_output(
         summary += f" [{package_name}]"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
-
-    # -- output_context ------------------------------------------------------
     output_context: dict[str, Any] = {
         "path": path,
         "java_file_count": len(java_files),
@@ -161,7 +139,6 @@ def build_output(
         output_context["package_name"] = package_name
     if permissions:
         output_context["permissions"] = permissions[:20]
-
     return ToolOutput(
         status=status,
         summary=summary,

@@ -31,7 +31,11 @@ def public_rag_payload(payload: object) -> dict[str, Any] | None:
         hint_count = public_count(payload.get("hit_count"))
     status = payload.get("status")
     if not status:
-        status = "pending" if mode in {"oracle", "strict"} and not has_enabled else "disabled"
+        status = (
+            "pending"
+            if mode in {"oracle", "strict"} and not has_enabled
+            else "disabled"
+        )
         if enabled:
             status = "enabled"
     return {

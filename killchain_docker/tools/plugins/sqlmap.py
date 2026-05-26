@@ -8,46 +8,33 @@ Supports:
 """
 
 from __future__ import annotations
-
 import re
 from typing import Any
 from urllib.parse import urlparse
-
-from killchain_docker.state import Endpoint, Finding, Vulnerability
+from killchain_docker.state.domain import Endpoint, Finding, Vulnerability
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
     _status,
-    _truncate,
 )
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 _JAR_DIR = "/tmp/_curl_sessions"
-_INJECTION_TYPE_RE = re.compile(
-    r"Type:\s*(.+?)(?:\n|$)", re.IGNORECASE,
+_INJECTION_TYPE_RE = re.compile("Type:\\s*(.+?)(?:\\n|$)", re.IGNORECASE)
+_PARAM_RE = re.compile("Parameter:\\s*(.+?)(?:\\s*\\(|$)", re.IGNORECASE)
+_TABLE_RE = re.compile("^\\[\\*\\]\\s+(.+)$", re.MULTILINE)
+_DB_RE = re.compile(
+    "available databases.*?:\\s*\\n((?:\\[\\*\\]\\s+.+\\n?)+)", re.IGNORECASE
 )
-_PARAM_RE = re.compile(
-    r"Parameter:\s*(.+?)(?:\s*\(|$)", re.IGNORECASE,
-)
-_TABLE_RE = re.compile(r"^\[\*\]\s+(.+)$", re.MULTILINE)
-_DB_RE = re.compile(r"available databases.*?:\s*\n((?:\[\*\]\s+.+\n?)+)", re.IGNORECASE)
 
-
-# ---------------------------------------------------------------------------
-# Plugin
-# ---------------------------------------------------------------------------
 
 class SqlmapPlugin:
     """SQL injection scanner with session/cookie support.
@@ -73,58 +60,35 @@ class SqlmapPlugin:
         headers = meta.get("headers") or {}
         data = str(meta.get("data") or "").strip()
         method = str(meta.get("method") or "").strip().upper()
-
-        parts: list[str] = [
-            "sqlmap",
-            "-u", url,
-            "--batch",
-            "--level=3",
-            "--risk=2",
-        ]
-
-        # Cookie: explicit cookie string or session jar from curl
+        parts: list[str] = ["sqlmap", "-u", url, "--batch", "--level=3", "--risk=2"]
         if cookie:
             parts.extend(["--cookie", cookie])
         elif session_id:
-            safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)[:64] or "default"
+            safe_id = re.sub("[^a-zA-Z0-9_-]", "", session_id)[:64] or "default"
             jar_path = f"{_JAR_DIR}/{safe_id}.cookies"
             parts.extend(["--load-cookies", jar_path])
-
-        # Custom headers
         if isinstance(headers, dict):
             for k, v in headers.items():
                 parts.extend(["--header", f"{k}: {v}"])
-
-        # POST data
         if data:
             parts.extend(["--data", data])
-
-        # Force method
         if method and method != "GET":
             parts.extend(["--method", method])
-
         if extra:
-            cmd = " ".join(_shell_quote(p) for p in parts) + f" {extra}"
+            cmd = " ".join((_shell_quote(p) for p in parts)) + f" {extra}"
             return _run(
-                self.name,
-                [*self.argv_prefix, "bash", "-c", cmd],
-                request.timeout_s,
+                self.name, [*self.argv_prefix, "bash", "-c", cmd], request.timeout_s
             )
-
         return _run(self.name, [*self.argv_prefix, *parts], request.timeout_s)
 
 
 def _shell_quote(s: str) -> str:
     if not s:
         return "''"
-    if re.fullmatch(r"[a-zA-Z0-9_./:@=,-]+", s):
+    if re.fullmatch("[a-zA-Z0-9_./:@=,-]+", s):
         return s
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
-
-# ---------------------------------------------------------------------------
-# Output builder
-# ---------------------------------------------------------------------------
 
 def build_output(
     request: ToolExecutionRequest,
@@ -135,46 +99,31 @@ def build_output(
     meta = request.metadata
     url = str(meta.get("url") or "")
     session_id = str(meta.get("session_id") or "").strip()
-
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     status = _status(result)
-
-    # -- Injection detection -------------------------------------------------
     stdout_lower = stdout.lower()
     injectable = "is vulnerable" in stdout_lower or "injectable" in stdout_lower
-
-    # DBMS
     dbms = ""
     for line in stdout.splitlines():
         if "back-end DBMS" in line and ":" in line:
             dbms = line.split(":", 1)[-1].strip()
-
-    # Injection types
     injection_types: list[str] = _INJECTION_TYPE_RE.findall(stdout)
-
-    # Vulnerable parameters
     params: list[str] = list(dict.fromkeys(_PARAM_RE.findall(stdout)))
-
-    # Extracted databases
     db_match = _DB_RE.search(stdout)
     databases: list[str] = []
     if db_match:
         databases = [m.strip() for m in _TABLE_RE.findall(db_match.group(0))]
-
-    # Extracted tables
     tables: list[str] = []
     table_section = re.search(
-        r"Database:\s*\S+\s*\n((?:\[\d+ tables?\]\n)?(?:\+[-+]+\+\n)?(?:\|\s*.+\n?)+)",
+        "Database:\\s*\\S+\\s*\\n((?:\\[\\d+ tables?\\]\\n)?(?:\\+[-+]+\\+\\n)?(?:\\|\\s*.+\\n?)+)",
         stdout,
     )
     if table_section:
         for line in table_section.group(0).splitlines():
             line = line.strip().strip("|").strip()
-            if line and not line.startswith("+") and not line.startswith("["):
+            if line and (not line.startswith("+")) and (not line.startswith("[")):
                 tables.append(line)
-
-    # -- Findings & Vulnerabilities ------------------------------------------
     findings: list[Finding] = []
     vulnerabilities: list[Vulnerability] = []
     if injectable:
@@ -183,40 +132,40 @@ def build_output(
             desc_parts.append(f"Types: {', '.join(injection_types[:5])}")
         if params:
             desc_parts.append(f"Parameters: {', '.join(params[:5])}")
-
-        findings.append(Finding(
-            finding_id=f"sqli-{url[:80]}",
-            title=f"SQL injection at {url}",
-            severity="critical",
-            description="; ".join(desc_parts),
-        ))
-        for param in params[:5]:
-            vulnerabilities.append(Vulnerability(
-                title=f"SQLi in parameter '{param}' at {url[:80]}",
+        findings.append(
+            Finding(
+                finding_id=f"sqli-{url[:80]}",
+                title=f"SQL injection at {url}",
                 severity="critical",
-                description=f"DBMS: {dbms or 'unknown'}; "
-                            f"Types: {', '.join(injection_types[:3]) or 'unknown'}",
-                source="sqlmap",
-            ))
-
-    # -- Flags ---------------------------------------------------------------
+                description="; ".join(desc_parts),
+            )
+        )
+        for param in params[:5]:
+            vulnerabilities.append(
+                Vulnerability(
+                    title=f"SQLi in parameter '{param}' at {url[:80]}",
+                    severity="critical",
+                    description=f"DBMS: {dbms or 'unknown'}; Types: {', '.join(injection_types[:3]) or 'unknown'}",
+                    source="sqlmap",
+                )
+            )
     flags = _flag_candidates_from(stdout, source="sqlmap")
-
-    # -- Endpoint ------------------------------------------------------------
     endpoints: list[Endpoint] = []
     if url:
         parsed_url = urlparse(url)
-        base = f"{parsed_url.scheme}://{parsed_url.netloc}" if parsed_url.scheme else url
-        endpoints.append(Endpoint(
-            url=base,
-            hostname=parsed_url.hostname or None,
-            port=parsed_url.port,
-            protocol="https" if parsed_url.scheme == "https" else "http",
-            metadata={"sqlmap_tested": True, "injectable": injectable},
-        ))
-
-    # -- Summary -------------------------------------------------------------
-    summary = f"sqlmap {url}: {'INJECTABLE' if injectable else 'not injectable'}"
+        base = (
+            f"{parsed_url.scheme}://{parsed_url.netloc}" if parsed_url.scheme else url
+        )
+        endpoints.append(
+            Endpoint(
+                url=base,
+                hostname=parsed_url.hostname or None,
+                port=parsed_url.port,
+                protocol="https" if parsed_url.scheme == "https" else "http",
+                metadata={"sqlmap_tested": True, "injectable": injectable},
+            )
+        )
+    summary = f"sqlmap {url}: {('INJECTABLE' if injectable else 'not injectable')}"
     if dbms:
         summary += f" ({dbms})"
     if params:
@@ -227,8 +176,6 @@ def build_output(
         summary += f" [session:{session_id}]"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
-
-    # -- output_context ------------------------------------------------------
     output_context: dict[str, Any] = {
         "url": url,
         "injectable": injectable,
@@ -244,7 +191,6 @@ def build_output(
         output_context["tables"] = tables[:30]
     if session_id:
         output_context["session_id"] = session_id
-
     return ToolOutput(
         status=status,
         summary=summary,

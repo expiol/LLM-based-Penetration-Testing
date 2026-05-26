@@ -40,7 +40,9 @@ _BROAD_FILE_TOOL_RE = re.compile(
     r"(?<![.\w])(?:find|grep|rg|ag|ack|ls|cat|sed|awk|head|tail)(?![\w])",
     re.IGNORECASE,
 )
-_FLAG_HUNT_RE = re.compile(r"\b(?:flag|secret|token|credential|password)\b", re.IGNORECASE)
+_FLAG_HUNT_RE = re.compile(
+    r"\b(?:flag|secret|token|credential|password)\b", re.IGNORECASE
+)
 _ENV_DOTFILE_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])/(?:home/[^/\s;&|]+|root)/"
     r"(?:\.bashrc|\.profile|\.bash_profile|\.bash_history|\.zshrc|"
@@ -250,13 +252,23 @@ def _python_call_name(node: ast.AST) -> str:
 
 def _literal_shell_command(node: ast.AST) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
-        return node.value.decode("utf-8", "ignore") if isinstance(node.value, bytes) else node.value
+        return (
+            node.value.decode("utf-8", "ignore")
+            if isinstance(node.value, bytes)
+            else node.value
+        )
     if isinstance(node, (ast.List, ast.Tuple)):
         parts: list[str] = []
         for element in node.elts:
-            if not isinstance(element, ast.Constant) or not isinstance(element.value, (str, bytes)):
+            if not isinstance(element, ast.Constant) or not isinstance(
+                element.value, (str, bytes)
+            ):
                 return None
-            value = element.value.decode("utf-8", "ignore") if isinstance(element.value, bytes) else element.value
+            value = (
+                element.value.decode("utf-8", "ignore")
+                if isinstance(element.value, bytes)
+                else element.value
+            )
             parts.append(value)
         return " ".join(parts)
     return None
@@ -267,7 +279,11 @@ def _literal_path_values(node: ast.AST | None) -> list[str]:
         return []
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return [node.value]
-    if isinstance(node, ast.Call) and _python_call_name(node.func) == "pathlib.Path" and node.args:
+    if (
+        isinstance(node, ast.Call)
+        and _python_call_name(node.func) == "pathlib.Path"
+        and node.args
+    ):
         return _literal_path_values(node.args[0])
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         values: list[str] = []
@@ -277,7 +293,9 @@ def _literal_path_values(node: ast.AST | None) -> list[str]:
     return []
 
 
-def _ambient_path_reason(path: str, *, files_root: object = DEFAULT_FILES_ROOT) -> str | None:
+def _ambient_path_reason(
+    path: str, *, files_root: object = DEFAULT_FILES_ROOT
+) -> str | None:
     body = _remove_allowed_files_root(str(path or ""), files_root)
     if _ENV_DOTFILE_RE.search(body):
         return "ambient home/root startup files are outside the challenge scope"
@@ -300,12 +318,17 @@ def todo_loopback_block_reason(
 
     fields = [
         str(goal or ""),
-        *(str(context.get(key) or "") for key in ("scope", "url", "base_url", "host", "hostname", "server_name")),
+        *(
+            str(context.get(key) or "")
+            for key in ("scope", "url", "base_url", "host", "hostname", "server_name")
+        ),
     ]
     return loopback_reference_block_reason("\n".join(fields), authorized_scope)
 
 
-def todo_scratch_dependency_reason(*, goal: object, context: dict[str, object]) -> str | None:
+def todo_scratch_dependency_reason(
+    *, goal: object, context: dict[str, object]
+) -> str | None:
     """Block planner todos that depend on prior scratch-directory files."""
 
     fields = [str(goal or ""), *(str(value) for value in (context or {}).values())]
@@ -318,7 +341,9 @@ def _remove_allowed_paths(text: str, allowed_paths: object = None) -> str:
     if not isinstance(allowed_paths, (list, tuple, set, frozenset)):
         return text
     cleaned = text
-    for raw in sorted((str(path or "") for path in allowed_paths), key=len, reverse=True):
+    for raw in sorted(
+        (str(path or "") for path in allowed_paths), key=len, reverse=True
+    ):
         path = raw.strip()
         if not path:
             continue
@@ -370,7 +395,9 @@ def todo_ephemeral_artifact_dependency_reason(
     """
 
     text = _remove_allowed_paths(
-        "\n".join([str(goal or ""), *(str(value) for value in (context or {}).values())]),
+        "\n".join(
+            [str(goal or ""), *(str(value) for value in (context or {}).values())]
+        ),
         allowed_artifact_paths,
     )
     if not _PREVIOUS_GENERATED_ARTIFACT_RE.search(text):
@@ -379,17 +406,25 @@ def todo_ephemeral_artifact_dependency_reason(
     root = str(files_root or DEFAULT_FILES_ROOT).rstrip("/")
     if not root:
         return None
-    path_re = re.compile(
-        re.escape(root) + r"/([A-Za-z0-9][A-Za-z0-9._@%+=,/-]{0,200})"
-    )
+    path_re = re.compile(re.escape(root) + r"/([A-Za-z0-9][A-Za-z0-9._@%+=,/-]{0,200})")
     referenced = [match.group(1).strip("/ ") for match in path_re.finditer(text)]
     if not referenced:
         return None
 
-    raw_files = challenge_files if isinstance(challenge_files, (list, tuple, set, frozenset)) else []
-    original = {str(path).strip("/").split("/")[-1] for path in raw_files if str(path or "").strip()}
+    raw_files = (
+        challenge_files
+        if isinstance(challenge_files, (list, tuple, set, frozenset))
+        else []
+    )
+    original = {
+        str(path).strip("/").split("/")[-1]
+        for path in raw_files
+        if str(path or "").strip()
+    }
     for path in referenced:
-        if path == ".autopentest_artifacts" or path.startswith(".autopentest_artifacts/"):
+        if path == ".autopentest_artifacts" or path.startswith(
+            ".autopentest_artifacts/"
+        ):
             continue
         basename = path.split("/")[-1]
         if basename and basename not in original:

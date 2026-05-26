@@ -81,30 +81,142 @@ BRACKET_SPAN_PATTERN = re.compile(
 
 #: Python introspection / debug tokens mistaken for flag prefixes when a
 #: script echoes introspection output (e.g. ``repr{bytes...}``-style glue).
-PYTHON_DUMP_PREFIX_DENYLIST: frozenset[str] = frozenset({
-    "repr", "ascii", "vars", "locals", "globals", "getattr", "setattr",
-    "hasattr", "super", "object",     "help",
-})
+PYTHON_DUMP_PREFIX_DENYLIST: frozenset[str] = frozenset(
+    {
+        "repr",
+        "ascii",
+        "vars",
+        "locals",
+        "globals",
+        "getattr",
+        "setattr",
+        "hasattr",
+        "super",
+        "object",
+        "help",
+    }
+)
 
 #: Keyword prefixes that look like ``word{...}`` but are HTML/CSS/code tokens.
-CODE_FALSE_POSITIVE_PREFIXES: frozenset[str] = frozenset({
-    "html", "body", "div", "span", "input", "button", "textarea",
-    "select", "label", "form", "table", "thead", "tbody", "tr", "td", "th",
-    "ul", "ol", "li", "nav", "header", "footer", "section", "article",
-    "aside", "main", "summary", "details", "dialog", "fieldset", "legend",
-    "img", "video", "audio", "canvas", "svg", "path", "circle", "rect",
-    "code", "pre", "blockquote", "cite", "abbr", "address", "figure",
-    "figcaption", "picture", "source", "track", "embed", "object", "param",
-    "var", "function", "return", "if", "else", "for", "while", "switch",
-    "case", "class", "interface", "struct", "enum", "type", "export",
-    "import", "from", "const", "let", "new", "delete", "typeof", "void",
-    "null", "undefined", "true", "false", "try", "catch", "throw",
-    "this", "self", "super", "extends", "implements", "abstract",
-    "static", "final", "public", "private", "protected", "virtual",
-    "override", "default", "break", "continue", "goto", "do", "elsif",
-    "elif", "def", "lambda", "yield", "async", "await", "with",
-    "create", "drop", "alter", "insert", "update", "select",
-})
+CODE_FALSE_POSITIVE_PREFIXES: frozenset[str] = frozenset(
+    {
+        "html",
+        "body",
+        "div",
+        "span",
+        "input",
+        "button",
+        "textarea",
+        "select",
+        "label",
+        "form",
+        "table",
+        "thead",
+        "tbody",
+        "tr",
+        "td",
+        "th",
+        "ul",
+        "ol",
+        "li",
+        "nav",
+        "header",
+        "footer",
+        "section",
+        "article",
+        "aside",
+        "main",
+        "summary",
+        "details",
+        "dialog",
+        "fieldset",
+        "legend",
+        "img",
+        "video",
+        "audio",
+        "canvas",
+        "svg",
+        "path",
+        "circle",
+        "rect",
+        "code",
+        "pre",
+        "blockquote",
+        "cite",
+        "abbr",
+        "address",
+        "figure",
+        "figcaption",
+        "picture",
+        "source",
+        "track",
+        "embed",
+        "object",
+        "param",
+        "var",
+        "function",
+        "return",
+        "if",
+        "else",
+        "for",
+        "while",
+        "switch",
+        "case",
+        "class",
+        "interface",
+        "struct",
+        "enum",
+        "type",
+        "export",
+        "import",
+        "from",
+        "const",
+        "let",
+        "new",
+        "delete",
+        "typeof",
+        "void",
+        "null",
+        "undefined",
+        "true",
+        "false",
+        "try",
+        "catch",
+        "throw",
+        "this",
+        "self",
+        "super",
+        "extends",
+        "implements",
+        "abstract",
+        "static",
+        "final",
+        "public",
+        "private",
+        "protected",
+        "virtual",
+        "override",
+        "default",
+        "break",
+        "continue",
+        "goto",
+        "do",
+        "elsif",
+        "elif",
+        "def",
+        "lambda",
+        "yield",
+        "async",
+        "await",
+        "with",
+        "create",
+        "drop",
+        "alter",
+        "insert",
+        "update",
+        "select",
+    }
+)
 
 #: CSS property-value body pattern — rejects ``word{color: red; ...}`` shapes.
 CSS_BODY_RE = re.compile(
@@ -148,16 +260,56 @@ CODE_STATEMENT_BODY_RE = re.compile(
 
 #: Common template-echo bodies that CSS / HTML / Mustache produce.  Any
 #: ``prefix{<noise>}`` whose body is one of these is unambiguously not a flag.
-TEMPLATE_NOISE_BODIES: frozenset[str] = frozenset({
-    "pagination", "link", "links", "count", "title", "description",
-    "name", "value", "key", "thing", "tablename", "fieldname",
-    "id", "type", "class", "label", "placeholder", "input", "output",
-    "filepath", "filename", "path", "file", "content", "data",
-    "text", "string", "result", "flag", "secret", "token", "hash",
-    "variable", "param", "argument", "option", "config", "setting",
-    "compressed", "decompressed", "standard", "non-standard",
-    "metadata", "comment", "chunk", "chunks",
-})
+TEMPLATE_NOISE_BODIES: frozenset[str] = frozenset(
+    {
+        "pagination",
+        "link",
+        "links",
+        "count",
+        "title",
+        "description",
+        "name",
+        "value",
+        "key",
+        "thing",
+        "tablename",
+        "fieldname",
+        "id",
+        "type",
+        "class",
+        "label",
+        "placeholder",
+        "input",
+        "output",
+        "filepath",
+        "filename",
+        "path",
+        "file",
+        "content",
+        "data",
+        "text",
+        "string",
+        "result",
+        "flag",
+        "secret",
+        "token",
+        "hash",
+        "variable",
+        "param",
+        "argument",
+        "option",
+        "config",
+        "setting",
+        "compressed",
+        "decompressed",
+        "standard",
+        "non-standard",
+        "metadata",
+        "comment",
+        "chunk",
+        "chunks",
+    }
+)
 
 # Literal challenge descriptions often show examples like ``flag{....}`` or
 # ``ctf{xxxx}``.  Those are format placeholders, not candidates worth sending
@@ -171,36 +323,107 @@ PLACEHOLDER_FLAG_BODY_RE = re.compile(
 )
 
 FLAG_VALIDATION_SOURCE_NEEDLES: tuple[str, ...] = (
-    "re.findall", "re.search", "re.match",
-    "subprocess.", "os.system", "shell=true",
-    "{thing}", "{tablename}", "{fieldname}",
-    "{0}", "{1}", "{name}", "{flag}",
+    "re.findall",
+    "re.search",
+    "re.match",
+    "subprocess.",
+    "os.system",
+    "shell=true",
+    "{thing}",
+    "{tablename}",
+    "{fieldname}",
+    "{0}",
+    "{1}",
+    "{name}",
+    "{flag}",
 )
 FLAG_BARE_TOKEN_NOISE_NEEDLES: tuple[str, ...] = (
-    "no_flag_found", "noflagfound",
-    "flag_not_found", "flag_not_recovered",
+    "no_flag_found",
+    "noflagfound",
+    "flag_not_found",
+    "flag_not_recovered",
     "no_flag_recovered",
-    "manual_review_required", "manual_review",
-    "todo_replace_me", "your_flag_here", "insert_flag",
-    "placeholder", "not_implemented",
+    "manual_review_required",
+    "manual_review",
+    "todo_replace_me",
+    "your_flag_here",
+    "insert_flag",
+    "placeholder",
+    "not_implemented",
 )
-FLAG_BARE_TOKEN_NOISE_WORDS: frozenset[str] = frozenset({
-    "candidate", "candidates", "sequence", "sequences", "plaintext",
-    "ciphertext", "decoded", "decrypted", "printable", "preview",
-    "output", "result", "results", "matches", "pattern", "patterns",
-    "little-endian", "big-endian", "native-endian", "little_endian",
-    "big_endian", "native_endian", "endianness", "byteorder",
-    "byte-order", "word-order", "xor-mode", "xor_mode",
-    "decrypted.bin", "plaintext.bin", "output.bin", "candidate.bin",
-    "result.bin", "decoded.bin",
-})
-FLAG_BARE_TOKEN_DESCRIPTOR_WORDS: frozenset[str] = frozenset({
-    "ascii", "base64", "brace", "braces", "bracket", "bracketed",
-    "candidate", "candidates", "common", "ctf", "decoded", "decrypted",
-    "enclosed", "flag", "format", "hex", "long", "match", "matches",
-    "output", "pattern", "plaintext", "recovered", "result", "search",
-    "searched", "short", "string", "token", "tokens", "wrapped",
-})
+FLAG_BARE_TOKEN_NOISE_WORDS: frozenset[str] = frozenset(
+    {
+        "candidate",
+        "candidates",
+        "sequence",
+        "sequences",
+        "plaintext",
+        "ciphertext",
+        "decoded",
+        "decrypted",
+        "printable",
+        "preview",
+        "output",
+        "result",
+        "results",
+        "matches",
+        "pattern",
+        "patterns",
+        "little-endian",
+        "big-endian",
+        "native-endian",
+        "little_endian",
+        "big_endian",
+        "native_endian",
+        "endianness",
+        "byteorder",
+        "byte-order",
+        "word-order",
+        "xor-mode",
+        "xor_mode",
+        "decrypted.bin",
+        "plaintext.bin",
+        "output.bin",
+        "candidate.bin",
+        "result.bin",
+        "decoded.bin",
+    }
+)
+FLAG_BARE_TOKEN_DESCRIPTOR_WORDS: frozenset[str] = frozenset(
+    {
+        "ascii",
+        "base64",
+        "brace",
+        "braces",
+        "bracket",
+        "bracketed",
+        "candidate",
+        "candidates",
+        "common",
+        "ctf",
+        "decoded",
+        "decrypted",
+        "enclosed",
+        "flag",
+        "format",
+        "hex",
+        "long",
+        "match",
+        "matches",
+        "output",
+        "pattern",
+        "plaintext",
+        "recovered",
+        "result",
+        "search",
+        "searched",
+        "short",
+        "string",
+        "token",
+        "tokens",
+        "wrapped",
+    }
+)
 
 FLAG_BARE_TOKEN_VERSION_RE = re.compile(
     r"^[A-Za-z]{2,}[A-Za-z0-9_-]*\d+(?:[.-]\d+)+[A-Za-z0-9_-]*$"
@@ -216,18 +439,21 @@ FLAG_BARE_TOKEN_UUID_RE = re.compile(
 FLAG_BARE_TOKEN_LOWER_DOTTED_NAMESPACE_RE = re.compile(
     r"^(?:[a-z0-9-]{2,}\.)+[a-z][a-z0-9-]{1,}$"
 )
-FLAG_BARE_TOKEN_METADATA_NOISE: frozenset[str] = frozenset({
-    "22-rdf-syntax-ns",
-    "chromaticity",
-    "com.adobe.xmp",
-    "ctf_temp_dir",
-    "ns.adobe.com",
-    "rdf-syntax-ns",
-})
+FLAG_BARE_TOKEN_METADATA_NOISE: frozenset[str] = frozenset(
+    {
+        "22-rdf-syntax-ns",
+        "chromaticity",
+        "com.adobe.xmp",
+        "ctf_temp_dir",
+        "ns.adobe.com",
+        "rdf-syntax-ns",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Plausibility helpers
 # ---------------------------------------------------------------------------
+
 
 def flag_prefix_shape(candidate: str) -> bool:
     """Return True for canonical ``prefix{body}`` shape without regex."""
@@ -311,7 +537,9 @@ def _known_nonflag_bare_token(text: str) -> bool:
         return True
     if FLAG_BARE_TOKEN_UUID_RE.fullmatch(text):
         return True
-    if text == text.lower() and FLAG_BARE_TOKEN_LOWER_DOTTED_NAMESPACE_RE.fullmatch(text):
+    if text == text.lower() and FLAG_BARE_TOKEN_LOWER_DOTTED_NAMESPACE_RE.fullmatch(
+        text
+    ):
         return True
     if FLAG_BARE_TOKEN_SERVICE_FINGERPRINT_RE.fullmatch(text):
         return True
@@ -376,8 +604,7 @@ def _noisy_short_flag_body(body: str) -> bool:
     if not stripped:
         return True
     uncommon_symbols = [
-        ch for ch in stripped
-        if not (ch.isalnum() or ch in {" ", "_", "-", "."})
+        ch for ch in stripped if not (ch.isalnum() or ch in {" ", "_", "-", "."})
     ]
     if "\\" in stripped:
         return True

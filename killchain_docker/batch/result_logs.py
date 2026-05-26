@@ -5,12 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 
-BATCH_ARTIFACT_JSON_NAMES = frozenset({
-    "_batch_monitor.json",
-    "_batch_summary.json",
-    "_rag_ablation.json",
-    "_rag_ablation_audit.json",
-})
+BATCH_ARTIFACT_JSON_NAMES = frozenset(
+    {
+        "_batch_monitor.json",
+        "_batch_summary.json",
+        "_rag_ablation.json",
+        "_rag_ablation_audit.json",
+    }
+)
 
 
 def is_result_log_path(path: Path) -> bool:

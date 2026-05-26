@@ -7,12 +7,10 @@ Supports:
 """
 
 from __future__ import annotations
-
 import re
 import shlex
 from typing import Any
-
-from killchain_docker.state import Artifact
+from killchain_docker.state.domain import Artifact
 from killchain_docker.state.constants import DEFAULT_FILES_ROOT
 from killchain_docker.tools.core import (
     ExecutionMode,
@@ -20,19 +18,17 @@ from killchain_docker.tools.core import (
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
     _status,
-    _truncate,
 )
 from killchain_docker.tools.plugins.workspace import protected_shell_command
 
-
-# audit.txt line: "Num  Name (bs=512)      Size  File Offset  Comment"
-_AUDIT_RE = re.compile(r"^\d+:\s+(\S+)\s+(\d+)\s+(\d+)", re.MULTILINE)
+_AUDIT_RE = re.compile("^\\d+:\\s+(\\S+)\\s+(\\d+)\\s+(\\d+)", re.MULTILINE)
 _FILES_MARKER = "__KILLCHAIN_FOREMOST_FILES__"
 _AUDIT_MARKER = "__KILLCHAIN_FOREMOST_AUDIT__"
 _KNOWN_TYPE_DIRS = {
@@ -64,25 +60,9 @@ class ForemostPlugin:
         files_root = str(request.metadata.get("files_root") or DEFAULT_FILES_ROOT)
         output_dir = str(request.metadata.get("output_dir") or "").strip()
         output_expr = _durable_output_expr(
-            source_path=path,
-            requested_output_dir=output_dir,
-            files_root=files_root,
+            source_path=path, requested_output_dir=output_dir, files_root=files_root
         )
-        cmd = (
-            f"_kc_src={shlex.quote(path)}; "
-            f"_kc_out={output_expr}; "
-            'rm -rf "$_kc_out"; '
-            'mkdir -p "$(dirname "$_kc_out")"; '
-            'foremost -i "$_kc_src" -o "$_kc_out"; '
-            "_kc_rc=$?; "
-            f'printf "%s\\n" "{_FILES_MARKER}"; '
-            'find "$_kc_out" -type f ! -name audit.txt -printf "%p\\t%s\\n" '
-            '2>/dev/null | sort; '
-            f'printf "%s\\n" "{_AUDIT_MARKER}"; '
-            'find "$_kc_out" -name audit.txt -type f -print -exec sed -n "1,200p" {} \\; '
-            '2>/dev/null || true; '
-            'exit "$_kc_rc"'
-        )
+        cmd = f'_kc_src={shlex.quote(path)}; _kc_out={output_expr}; rm -rf "$_kc_out"; mkdir -p "$(dirname "$_kc_out")"; foremost -i "$_kc_src" -o "$_kc_out"; _kc_rc=$?; printf "%s\\n" "{_FILES_MARKER}"; find "$_kc_out" -type f ! -name audit.txt -printf "%p\\t%s\\n" 2>/dev/null | sort; printf "%s\\n" "{_AUDIT_MARKER}"; find "$_kc_out" -name audit.txt -type f -print -exec sed -n "1,200p" {{}} \\; 2>/dev/null || true; exit "$_kc_rc"'
         return _run(
             self.name,
             [
@@ -90,9 +70,7 @@ class ForemostPlugin:
                 "bash",
                 "-c",
                 protected_shell_command(
-                    cmd,
-                    files_root,
-                    preserve_relative_paths=(".autopentest_artifacts",),
+                    cmd, files_root, preserve_relative_paths=(".autopentest_artifacts",)
                 ),
             ],
             request.timeout_s,
@@ -101,17 +79,13 @@ class ForemostPlugin:
 
 def _safe_stem(path: str) -> str:
     stem = path.rsplit("/", 1)[-1].rsplit(".", 1)[0] or "artifact"
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", stem)[:48] or "artifact"
+    return re.sub("[^A-Za-z0-9_.-]+", "_", stem)[:48] or "artifact"
 
 
 def _durable_output_expr(
-    *,
-    source_path: str,
-    requested_output_dir: str,
-    files_root: str,
+    *, source_path: str, requested_output_dir: str, files_root: str
 ) -> str:
     """Return a shell expression for a preserved foremost output directory."""
-
     root = str(files_root or DEFAULT_FILES_ROOT).rstrip("/")
     durable_root = f"{root}/.autopentest_artifacts"
     requested = requested_output_dir.strip()
@@ -119,14 +93,10 @@ def _durable_output_expr(
         requested == durable_root or requested.startswith(f"{durable_root}/")
     ):
         return shlex.quote(requested)
-
     suffix = ""
     if requested:
         suffix = f"_{_safe_stem(requested)}"
-    return (
-        '"$CTF_FILES_ROOT/.autopentest_artifacts/foremost_'
-        f'{_safe_stem(source_path)}{suffix}_$$"'
-    )
+    return f'"$CTF_FILES_ROOT/.autopentest_artifacts/foremost_{_safe_stem(source_path)}{suffix}_$$"'
 
 
 def build_output(
@@ -138,43 +108,35 @@ def build_output(
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     status = _status(result)
-
-    # -- Parse carved files from sentinel-delimited find output -------------
     carved_records = _parse_carved_records(stdout)
     carved_files = [record["path"] for record in carved_records]
-
-    # -- Categorize by extension --------------------------------------------
     type_counts: dict[str, int] = {}
     for record in carved_records:
         kind = _carved_kind(record["path"])
         type_counts[kind] = type_counts.get(kind, 0) + 1
-
-    # -- Artifacts -----------------------------------------------------------
     artifacts: list[Artifact] = []
     for record in carved_records[:80]:
         fpath = record["path"]
         kind = _carved_kind(fpath)
-        artifacts.append(Artifact(
-            path=fpath,
-            kind=f"foremost_{kind}",
-            source="foremost",
-            size=record.get("size"),
-            metadata={"source_file": path},
-        ))
-
-    # -- Flags ---------------------------------------------------------------
+        artifacts.append(
+            Artifact(
+                path=fpath,
+                kind=f"foremost_{kind}",
+                source="foremost",
+                size=record.get("size"),
+                metadata={"source_file": path},
+            )
+        )
     flags = _flag_candidates_from(stdout, source="foremost")
-
-    # -- Summary -------------------------------------------------------------
     summary = f"foremost {path}: {len(carved_files)} file(s) carved"
     if type_counts:
-        type_parts = [f"{count} {kind}" for kind, count in
-                      sorted(type_counts.items(), key=lambda x: -x[1])[:4]]
+        type_parts = [
+            f"{count} {kind}"
+            for kind, count in sorted(type_counts.items(), key=lambda x: -x[1])[:4]
+        ]
         summary += f" ({', '.join(type_parts)})"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
-
-    # -- output_context ------------------------------------------------------
     output_context: dict[str, Any] = {
         "path": path,
         "carved_count": len(carved_files),
@@ -184,7 +146,6 @@ def build_output(
     }
     if type_counts:
         output_context["type_counts"] = type_counts
-
     return ToolOutput(
         status=status,
         summary=summary,
@@ -214,33 +175,18 @@ def _parse_carved_records(stdout: str) -> list[dict[str, Any]]:
         if not path or path.endswith("/audit.txt"):
             continue
         records.append({"path": path, "size": size})
-    if records:
-        return records
-
-    # Older logs did not delimit find output. Keep a strict fallback for direct
-    # builder tests and partial historical artifacts, but ignore audit tokens
-    # such as "foundat=ppt/media/image0.gifUT".
-    for line in lines:
-        line_s = line.strip()
-        if not line_s or line_s.startswith("Foremost") or "audit.txt" in line_s:
-            continue
-        if not line_s.startswith("/"):
-            continue
-        path, size = _split_find_record(line_s)
-        if path:
-            records.append({"path": path, "size": size})
     return records
 
 
 def _split_find_record(line: str) -> tuple[str, int | None]:
     if "\t" not in line:
-        return line, None
+        return (line, None)
     path, raw_size = line.rsplit("\t", 1)
     try:
         size = int(raw_size)
     except ValueError:
         size = None
-    return path, size
+    return (path, size)
 
 
 def _carved_kind(path: str) -> str:

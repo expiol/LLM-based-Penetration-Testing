@@ -194,7 +194,10 @@ class CachedEmbeddingMatrix:
                 LOGGER.debug(
                     "embedding cache read failed; re-encoding corpus",
                     exc_info=True,
-                    extra={"cache_path": str(cache_path), "model_id": self._backend.model_id},
+                    extra={
+                        "cache_path": str(cache_path),
+                        "model_id": self._backend.model_id,
+                    },
                 )
         matrix = self._backend.encode(text_list)
         tmp_path: Path | None = None
@@ -211,7 +214,10 @@ class CachedEmbeddingMatrix:
             LOGGER.debug(
                 "embedding cache write failed; continuing without cache",
                 exc_info=True,
-                extra={"cache_path": str(cache_path), "model_id": self._backend.model_id},
+                extra={
+                    "cache_path": str(cache_path),
+                    "model_id": self._backend.model_id,
+                },
             )
         finally:
             if tmp_path is not None:
@@ -221,7 +227,10 @@ class CachedEmbeddingMatrix:
                     LOGGER.debug(
                         "embedding cache temporary file cleanup failed",
                         exc_info=True,
-                        extra={"tmp_path": str(tmp_path), "cache_path": str(cache_path)},
+                        extra={
+                            "tmp_path": str(tmp_path),
+                            "cache_path": str(cache_path),
+                        },
                     )
         return matrix
 
@@ -239,6 +248,8 @@ class CachedEmbeddingMatrix:
 
 def build_default_embedder() -> FastEmbedBackend:
     """Construct the default fastembed backend honoring env-var overrides."""
-    model_id = (os.getenv("AUTOPENTEST_RAG_EMBED_MODEL") or "").strip() or DEFAULT_EMBEDDING_MODEL
+    model_id = (
+        os.getenv("AUTOPENTEST_RAG_EMBED_MODEL") or ""
+    ).strip() or DEFAULT_EMBEDDING_MODEL
     cache_dir = (os.getenv("AUTOPENTEST_RAG_EMBED_CACHE_DIR") or "").strip() or None
     return FastEmbedBackend(model_id=model_id, cache_dir=cache_dir)

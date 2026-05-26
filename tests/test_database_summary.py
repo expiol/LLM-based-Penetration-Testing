@@ -31,13 +31,18 @@ class DatabaseSummaryTests(unittest.TestCase):
             with self.assertLogs(database_summary.LOGGER.name, level="WARNING"):
                 rows = database_summary.build_summary(root)
 
-        self.assertEqual(rows, [{
-            "year": "2026",
-            "event": "Quals",
-            "category": "crypto",
-            "name": "demo",
-            "description": "recover the flag",
-        }])
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "year": "2026",
+                    "event": "Quals",
+                    "category": "crypto",
+                    "name": "demo",
+                    "description": "recover the flag",
+                }
+            ],
+        )
 
     def test_main_writes_summary_from_argv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -50,10 +55,14 @@ class DatabaseSummaryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            code = database_summary.main([
-                "--dataset-root", str(root),
-                "--output", str(output),
-            ])
+            code = database_summary.main(
+                [
+                    "--dataset-root",
+                    str(root),
+                    "--output",
+                    str(output),
+                ]
+            )
             payload = json.loads(output.read_text(encoding="utf-8"))
 
         self.assertEqual(code, 0)

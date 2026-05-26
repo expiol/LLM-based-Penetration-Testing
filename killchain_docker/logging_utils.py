@@ -18,7 +18,10 @@ DEFAULT_LOG_FORMAT = (
     "%(asctime)s %(levelname)s %(name)s "
     "[pid=%(process)d thread=%(threadName)s thread_id=%(thread)d]: %(message)s"
 )
-_RESERVED_RECORD_KEYS = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
+_RESERVED_RECORD_KEYS = frozenset(logging.makeLogRecord({}).__dict__) | {
+    "message",
+    "asctime",
+}
 
 
 def _json_default(value: Any) -> str:
@@ -64,7 +67,9 @@ class ContextFormatter(logging.Formatter):
         fields = _extra_fields(record)
         if not fields:
             return message
-        context = json.dumps(fields, ensure_ascii=True, sort_keys=True, default=_json_default)
+        context = json.dumps(
+            fields, ensure_ascii=True, sort_keys=True, default=_json_default
+        )
         return f"{message} context={context}"
 
 
@@ -87,8 +92,12 @@ class JsonFormatter(logging.Formatter):
         if fields:
             payload["context"] = fields
         if record.exc_info:
-            payload["traceback"] = "".join(traceback.format_exception(*record.exc_info)).rstrip()
-        return json.dumps(payload, ensure_ascii=True, sort_keys=True, default=_json_default)
+            payload["traceback"] = "".join(
+                traceback.format_exception(*record.exc_info)
+            ).rstrip()
+        return json.dumps(
+            payload, ensure_ascii=True, sort_keys=True, default=_json_default
+        )
 
 
 def configure_logging(*, debug: bool = False, quiet: bool = False) -> None:
@@ -104,7 +113,12 @@ def configure_logging(*, debug: bool = False, quiet: bool = False) -> None:
     root = logging.getLogger()
     if not root.handlers:
         handler = logging.StreamHandler()
-        if (os.environ.get("AUTOPENTEST_LOG_JSON") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        if (os.environ.get("AUTOPENTEST_LOG_JSON") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
             handler.setFormatter(JsonFormatter())
         else:
             handler.setFormatter(ContextFormatter(DEFAULT_LOG_FORMAT))
@@ -184,7 +198,9 @@ def write_json_file(path: str | Path, payload: Any) -> None:
 
 
 def write_jsonl_file(path: str | Path, rows: Iterable[Any]) -> None:
-    content = "".join(json_dumps(row, indent=None, sort_keys=True) + "\n" for row in rows)
+    content = "".join(
+        json_dumps(row, indent=None, sort_keys=True) + "\n" for row in rows
+    )
     write_text_file(path, content)
 
 

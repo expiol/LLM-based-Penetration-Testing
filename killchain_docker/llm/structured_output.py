@@ -180,7 +180,12 @@ def close_array_before_object_field(text: str) -> str:
             out.append(char)
             index += 1
             continue
-        if char == "," and stack and stack[-1] == "[" and _object_field_follows(text, index + 1):
+        if (
+            char == ","
+            and stack
+            and stack[-1] == "["
+            and _object_field_follows(text, index + 1)
+        ):
             stack.pop()
             out.append("],")
             index += 1

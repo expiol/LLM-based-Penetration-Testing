@@ -107,7 +107,9 @@ def lab_down(
 def lab_health_check(url: str, *, timeout_s: float = 15.0) -> bool:
     """Return True if an HTTP GET to ``url`` reaches a listening server (2xx–4xx count as up)."""
 
-    req = request.Request(url, method="GET", headers={"User-Agent": "autopentest-lab-health/1"})
+    req = request.Request(
+        url, method="GET", headers={"User-Agent": "autopentest-lab-health/1"}
+    )
     try:
         with request.urlopen(req, timeout=timeout_s) as resp:
             return 200 <= getattr(resp, "status", 200) < 600

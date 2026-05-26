@@ -8,12 +8,12 @@ import threading
 import time
 from contextlib import contextmanager
 from collections.abc import Callable, Mapping, Sequence
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from killchain_docker._compat import StrEnum
 from killchain_docker.llm.structured_output import (
     completion_content,
     loads_lenient_json_object,
@@ -23,7 +23,9 @@ from killchain_docker.llm.structured_output import (
 log = logging.getLogger(__name__)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
-FIXED_LLM_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "llm_gateway.json"
+FIXED_LLM_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2] / "configs" / "llm_gateway.json"
+)
 
 
 class LLMClientError(RuntimeError):
@@ -40,8 +42,10 @@ class LLMClientError(RuntimeError):
         attempts: int | None = None,
     ) -> None:
         super().__init__(message)
-        self.kind = LLMFailureKind.coerce(kind) if kind is not None else (
-            LLMFailureKind.TRANSIENT if transient else LLMFailureKind.UNKNOWN
+        self.kind = (
+            LLMFailureKind.coerce(kind)
+            if kind is not None
+            else (LLMFailureKind.TRANSIENT if transient else LLMFailureKind.UNKNOWN)
         )
         self.transient = transient or self.kind.is_transient
         self.schema_name = schema_name
@@ -228,7 +232,7 @@ class LLMSettings(BaseModel):
     provider: str = "openai_compatible"
     base_url: str | None = None
     api_key: str | None = None
-    default_model: str | None = Field(default=None, alias="model")
+    default_model: str | None = Field(default=None)
     schema_models: dict[str, str] = Field(default_factory=dict)
     timeout_s: int = Field(default=60, ge=1)
     max_retries: int = Field(default=4, ge=0)
@@ -238,27 +242,31 @@ class LLMSettings(BaseModel):
     @classmethod
     def from_env(cls) -> "LLMSettings":
         payload = _load_runtime_config_payload(FIXED_LLM_CONFIG_PATH)
-        default_model = payload.get("default_model") or payload.get("model")
+        configured_default = payload.get("default_model")
         schema_models = _normalize_schema_model_map(payload.get("schema_models"))
-        if not default_model or not isinstance(default_model, str):
+        if not configured_default or not isinstance(configured_default, str):
             raise LLMClientError(
                 "LLM default model is required (llm_gateway.json::default_model).",
                 kind=LLMFailureKind.CONFIG,
             )
-        _validate_model_names(default_model.strip(), schema_models)
+        _validate_model_names(configured_default.strip(), schema_models)
 
         resolved_api_key = str(payload.get("api_key") or "").strip()
         try:
             return cls(
-                provider=str(payload.get("provider") or "openai_compatible").strip().lower(),
+                provider=str(payload.get("provider") or "openai_compatible")
+                .strip()
+                .lower(),
                 base_url=payload.get("base_url"),
                 api_key=(resolved_api_key or None),
-                model=default_model.strip(),
+                default_model=configured_default.strip(),
                 schema_models=schema_models,
                 timeout_s=_config_int(payload, "timeout_s", 60),
                 max_retries=_config_int(payload, "max_retries", 4),
                 total_deadline_s=_config_int(payload, "total_deadline_s", None),
-                max_completion_tokens=_config_int(payload, "max_completion_tokens", 16384),
+                max_completion_tokens=_config_int(
+                    payload, "max_completion_tokens", 16384
+                ),
             )
         except ValidationError as exc:
             raise LLMClientError(
@@ -287,13 +295,16 @@ class StaticLLMClient:
 
     def __init__(
         self,
-        responses: Sequence[dict[str, Any] | str] | Callable[[str, str], dict[str, Any] | str],
+        responses: Sequence[dict[str, Any] | str]
+        | Callable[[str, str], dict[str, Any] | str],
     ) -> None:
         self._responses = responses
         self._cursor = 0
         self.token_ledger = TokenLedger()
 
-    def _next_payload(self, system_prompt: str, user_prompt: str) -> dict[str, Any] | str:
+    def _next_payload(
+        self, system_prompt: str, user_prompt: str
+    ) -> dict[str, Any] | str:
         if callable(self._responses):
             return self._responses(system_prompt, user_prompt)
         if self._cursor >= len(self._responses):
@@ -354,7 +365,9 @@ class GatewayLLMClient:
         self.api_key = api_key
         self.default_model = default_model.strip()
         self.schema_models = dict(schema_models or {})
-        self.base_url = (base_url or _PROVIDER_DEFAULT_BASE_URL.get(self.provider) or "").rstrip("/")
+        self.base_url = (
+            base_url or _PROVIDER_DEFAULT_BASE_URL.get(self.provider) or ""
+        ).rstrip("/")
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.total_deadline_s = total_deadline_s
@@ -392,7 +405,9 @@ class GatewayLLMClient:
         # retries are owned by generate_json(), not by instructor/openai.
         return instructor.from_openai(raw, mode=instructor.Mode.JSON)
 
-    def _completion_from_exception(self, exc: BaseException) -> tuple[str | None, Any | None]:
+    def _completion_from_exception(
+        self, exc: BaseException
+    ) -> tuple[str | None, Any | None]:
         seen: set[int] = set()
         stack: list[BaseException] = [exc]
         while stack:
@@ -475,7 +490,12 @@ class GatewayLLMClient:
             return LLMFailureKind.TIMEOUT
         if "connection" in message:
             return LLMFailureKind.CONNECTION
-        if "service unavailable" in message or "502" in message or "503" in message or "504" in message:
+        if (
+            "service unavailable" in message
+            or "502" in message
+            or "503" in message
+            or "504" in message
+        ):
             return LLMFailureKind.SERVICE_UNAVAILABLE
         if "temporarily" in message:
             return LLMFailureKind.TRANSIENT
@@ -568,7 +588,9 @@ class GatewayLLMClient:
         effective_timeout = float(timeout_s)
 
         def _raise_timeout(_signum: int, _frame: Any) -> None:
-            raise TimeoutError(f"LLM request exceeded {effective_timeout:.1f}s hard deadline")
+            raise TimeoutError(
+                f"LLM request exceeded {effective_timeout:.1f}s hard deadline"
+            )
 
         signal.signal(signal.SIGALRM, _raise_timeout)
         signal.setitimer(signal.ITIMER_REAL, effective_timeout)
@@ -665,7 +687,9 @@ class GatewayLLMClient:
                 transient = self._is_transient(exc)
                 if not transient or attempt >= self.max_retries:
                     break
-                base_delay = min(self._RETRY_BASE_DELAY * (2 ** attempt), self._RETRY_MAX_DELAY)
+                base_delay = min(
+                    self._RETRY_BASE_DELAY * (2**attempt), self._RETRY_MAX_DELAY
+                )
                 jitter = base_delay * self._RETRY_JITTER_FRAC
                 delay = max(0.1, base_delay + random.uniform(-jitter, jitter))
                 if delay >= deadline - time.monotonic():

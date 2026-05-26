@@ -1,23 +1,25 @@
 """Prompt bounding invariants for LLM-facing agent payloads."""
 
 from __future__ import annotations
-
 import json
 import unittest
-
-from killchain_docker.llm import StaticLLMClient
-from killchain_docker.prompt_projection import planner_todo, router_todo, worker_todo, working_memory
-from killchain_docker.prompts.planner import build_planner_system_prompt
-from killchain_docker.state import (
-    Artifact,
-    EvidenceRecord,
-    ExecutionRecord,
-    RunState,
-    TodoItem,
-    WorkerResult,
+from killchain_docker.llm.gateway import StaticLLMClient
+from killchain_docker.prompt_projection import (
+    planner_todo,
+    router_todo,
+    worker_todo,
+    run_memory,
 )
-from killchain_docker.tools import ExecutionPlane, ToolCapability
-from killchain_docker.workers.base import WorkerAgent
+from killchain_docker.prompts.planner import build_planner_system_prompt
+from killchain_docker.state.domain import Artifact, EvidenceRecord, ExecutionRecord
+from killchain_docker.state.run_state import RunState
+from killchain_docker.state.todos import TodoItem, WorkerResult
+from killchain_docker.tools.core import ExecutionPlane
+from killchain_docker.tools.capabilities import ToolCapability
+from killchain_docker.workers.worker_agent import WorkerAgent
+from killchain_docker.workers.correction_instructions import (
+    script_correction_instruction,
+)
 
 
 class _PromptWorker(WorkerAgent):
@@ -27,17 +29,13 @@ class _PromptWorker(WorkerAgent):
     def run(self, task: TodoItem, state: RunState) -> WorkerResult:
         del state
         return WorkerResult(
-            todo_id=task.todo_id,
-            worker_name=self.name,
-            success=True,
-            summary="unused",
+            todo_id=task.todo_id, worker_name=self.name, success=True, summary="unused"
         )
 
 
 class WorkerPromptBoundsTests(unittest.TestCase):
     def test_planner_prompt_keeps_evaluation_terms_out_of_summaries(self) -> None:
         prompt = build_planner_system_prompt("crypto")
-
         self.assertIn("technical rationale only", prompt)
         self.assertIn("mode labels", prompt)
         self.assertIn("writeups", prompt)
@@ -62,7 +60,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
     def test_prompt_projection_profiles_share_bounding_rules(self) -> None:
         huge_text = "X" * 5000
         state = RunState(objective="Solve.")
-        state.working_memory["huge"] = huge_text
+        state.run_memory["huge"] = huge_text
         todo = TodoItem(
             goal=huge_text,
             context={
@@ -75,18 +73,14 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 },
             },
         )
-
         planner_projection = planner_todo(todo)
         router_projection = router_todo(todo)
         worker_projection = worker_todo(todo)
-
         self.assertNotIn(
-            "completion_contract",
-            planner_projection["context"]["dispatch_intent"],
+            "completion_contract", planner_projection["context"]["dispatch_intent"]
         )
         self.assertNotIn(
-            "repair_policy_id",
-            planner_projection["context"]["dispatch_intent"],
+            "repair_policy_id", planner_projection["context"]["dispatch_intent"]
         )
         self.assertLessEqual(len(router_projection["goal"]), 400)
         self.assertLessEqual(len(router_projection["context"]["blob"]), 400)
@@ -95,16 +89,14 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         self.assertEqual(len(router_projection["context"]["items"]), 8)
         self.assertEqual(len(worker_projection["context"]["items"]), 8)
         self.assertNotIn(
-            "completion_contract",
-            router_projection["context"]["dispatch_intent"],
+            "completion_contract", router_projection["context"]["dispatch_intent"]
         )
         self.assertNotIn(
-            "repair_policy_id",
-            worker_projection["context"]["dispatch_intent"],
+            "repair_policy_id", worker_projection["context"]["dispatch_intent"]
         )
         self.assertNotIn("completion_contract", router_projection["dispatch_intent"])
         self.assertNotIn("repair_policy_id", worker_projection["dispatch_intent"])
-        self.assertLessEqual(len(working_memory(state)["huge"]), 400)
+        self.assertLessEqual(len(run_memory(state)["huge"]), 400)
 
     def test_worker_tool_selection_prompt_bounds_state_sections(self) -> None:
         captured: dict[str, object] = {}
@@ -120,7 +112,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
 
         huge_text = "X" * 5000
         state = RunState(objective="Solve.")
-        state.working_memory["huge"] = huge_text
+        state.run_memory["huge"] = huge_text
         state.artifacts["artifact-large"] = Artifact(
             artifact_id="artifact-large",
             path="/home/ctfplayer/ctf_files/.autopentest_artifacts/" + huge_text,
@@ -160,14 +152,15 @@ class WorkerPromptBoundsTests(unittest.TestCase):
             },
         )
         worker = _PromptWorker(
-            llm_client=StaticLLMClient(respond),
-            execution_plane=ExecutionPlane(),
+            llm_client=StaticLLMClient(respond), execution_plane=ExecutionPlane()
         )
-
         worker.choose_tool_use(
             task=task,
             state=state,
-            allowed_capabilities=[ToolCapability.SHELL_EXEC, ToolCapability.SCRIPT_EXEC],
+            allowed_capabilities=[
+                ToolCapability.SHELL_EXEC,
+                ToolCapability.SCRIPT_EXEC,
+            ],
             prior_steps=[
                 {
                     "capability": "script.exec",
@@ -179,27 +172,26 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 }
             ],
         )
-
         snapshot = captured["snapshot"]
-        todo_context = snapshot["todo"]["context"]  # type: ignore[index]
+        todo_context = snapshot["todo"]["context"]
         self.assertLessEqual(len(todo_context["blob"]), 460)
         self.assertEqual(len(todo_context["items"]), 8)
-        artifacts = snapshot["artifacts"]  # type: ignore[index]
+        artifacts = snapshot["artifacts"]
         self.assertEqual(artifacts[0]["kind"], "foremost_gif")
         self.assertLessEqual(len(artifacts[0]["path"]), 460)
-        self.assertLessEqual(len(snapshot["working_memory"]["huge"]), 400)  # type: ignore[index]
+        self.assertLessEqual(len(snapshot["run_memory"]["huge"]), 400)
         self.assertNotIn("knowledge_hints", snapshot)
         self.assertNotIn("REFERENCE-CODE", json.dumps(snapshot))
         self.assertNotIn("solution_sketch", json.dumps(snapshot))
         self.assertNotIn("challenge_id", json.dumps(snapshot))
-        recent_failures = snapshot["recent_failures"]  # type: ignore[index]
+        recent_failures = snapshot["recent_failures"]
         self.assertLessEqual(len(recent_failures[0]["summary"]), 360)
-        prior_steps = snapshot["prior_steps"]  # type: ignore[index]
+        prior_steps = snapshot["prior_steps"]
         self.assertLessEqual(len(prior_steps[0]["stdout_preview"]), 740)
-        correction_context = snapshot["correction_context"]  # type: ignore[index]
+        correction_context = snapshot["correction_context"]
         self.assertLessEqual(len(correction_context["last_stdout"]), 740)
         self.assertIn("last_traceback", correction_context["instruction"])
-        rules = "\n".join(snapshot["tool_use_rules"])  # type: ignore[index]
+        rules = "\n".join(snapshot["tool_use_rules"])
         self.assertIn("bound loops", rules)
         self.assertIn("third-party Python packages", rules)
         self.assertIn("Prefer stdlib", rules)
@@ -216,12 +208,14 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         self.assertNotIn("low-quality possible candidate", rules)
         self.assertNotIn("search the full plaintext", rules)
         self.assertNotIn("low-quality possible flag", correction_context["instruction"])
-        catalog = json.dumps(snapshot["tool_catalog"])  # type: ignore[index]
+        catalog = json.dumps(snapshot["tool_catalog"])
         self.assertIn("bounded source", catalog)
         self.assertNotIn("reflexion_context", snapshot)
         self.assertNotIn("X" * 1000, json.dumps(snapshot))
 
-    def test_worker_tool_selection_keeps_artifact_projection_task_relevant(self) -> None:
+    def test_worker_tool_selection_keeps_artifact_projection_task_relevant(
+        self,
+    ) -> None:
         captured: dict[str, object] = {}
 
         def respond(_system_prompt: str, user_prompt: str) -> dict[str, object]:
@@ -238,10 +232,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         state = RunState(objective="Solve.")
         target_paths: list[str] = []
         for index in range(40):
-            path = (
-                f"/home/ctfplayer/ctf_files/.autopentest_artifacts/"
-                f"batch_{index}/scratch/item_{index}.bin"
-            )
+            path = f"/home/ctfplayer/ctf_files/.autopentest_artifacts/batch_{index}/scratch/item_{index}.bin"
             artifact_id = f"artifact-{index}"
             state.artifacts[artifact_id] = Artifact(
                 artifact_id=artifact_id,
@@ -286,24 +277,22 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 "artifact_ids": ["artifact-3"],
                 "paths": target_paths,
                 "prior_evidence_ids": ["evidence-17"],
-                "capability_hint": "script.exec",
+                "dispatch_intent": {
+                    "profile": "execution_closure",
+                    "required_capability": "script.exec",
+                },
             },
         )
         worker = _PromptWorker(
-            llm_client=StaticLLMClient(respond),
-            execution_plane=ExecutionPlane(),
+            llm_client=StaticLLMClient(respond), execution_plane=ExecutionPlane()
         )
-
         worker.choose_tool_use(
-            task=task,
-            state=state,
-            allowed_capabilities=[ToolCapability.SCRIPT_EXEC],
+            task=task, state=state, allowed_capabilities=[ToolCapability.SCRIPT_EXEC]
         )
-
         snapshot = captured["snapshot"]
         payload_text = captured["user_prompt"]
         self.assertLessEqual(len(payload_text), 18000)
-        artifacts = snapshot["artifacts"]  # type: ignore[index]
+        artifacts = snapshot["artifacts"]
         artifact_ids = {artifact["artifact_id"] for artifact in artifacts}
         self.assertLessEqual(len(artifacts), 10)
         self.assertIn("artifact-3", artifact_ids)
@@ -325,13 +314,15 @@ class WorkerPromptBoundsTests(unittest.TestCase):
             }
 
         worker = _PromptWorker(
-            llm_client=StaticLLMClient(respond),
-            execution_plane=ExecutionPlane(),
+            llm_client=StaticLLMClient(respond), execution_plane=ExecutionPlane()
         )
         worker.choose_tool_use(
             task=TodoItem(goal="Parse a binary header with Python."),
             state=RunState(objective="Solve."),
-            allowed_capabilities=[ToolCapability.SHELL_EXEC, ToolCapability.SCRIPT_EXEC],
+            allowed_capabilities=[
+                ToolCapability.SHELL_EXEC,
+                ToolCapability.SCRIPT_EXEC,
+            ],
             prior_steps=[
                 {
                     "capability": "shell.exec",
@@ -341,10 +332,9 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 }
             ],
         )
-
-        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        correction = captured["snapshot"]["correction_context"]
         self.assertIn("choose script.exec", correction["instruction"])
-        rules = "\n".join(captured["snapshot"]["tool_use_rules"])  # type: ignore[index]
+        rules = "\n".join(captured["snapshot"]["tool_use_rules"])
         self.assertIn("complex Python one-liners", rules)
 
     def test_script_syntax_failure_includes_raw_traceback(self) -> None:
@@ -360,8 +350,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
             }
 
         worker = _PromptWorker(
-            llm_client=StaticLLMClient(respond),
-            execution_plane=ExecutionPlane(),
+            llm_client=StaticLLMClient(respond), execution_plane=ExecutionPlane()
         )
         worker.choose_tool_use(
             task=TodoItem(goal="Repair generated Python solver syntax."),
@@ -371,11 +360,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 {
                     "capability": "script.exec",
                     "stdout_preview": "",
-                    "traceback": (
-                        "Traceback (most recent call last):\n"
-                        "  File \"/workspace/solver.py\", line 1\n"
-                        "SyntaxError: 'return' outside function"
-                    ),
+                    "traceback": "Traceback (most recent call last):\n  File \"/workspace/solver.py\", line 1\nSyntaxError: 'return' outside function",
                     "stderr_preview": "SyntaxError: 'return' outside function",
                     "returncode": 1,
                     "failure_kind": "syntax_error",
@@ -383,11 +368,12 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 }
             ],
         )
-
-        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        correction = captured["snapshot"]["correction_context"]
         self.assertIn("last_traceback", correction["instruction"])
         self.assertIn("Correct the syntax", correction["instruction"])
-        self.assertIn("Traceback (most recent call last):", correction["last_traceback"])
+        self.assertIn(
+            "Traceback (most recent call last):", correction["last_traceback"]
+        )
 
     def test_bytes_text_failure_exposes_raw_feedback_without_recipe(self) -> None:
         captured: dict[str, object] = {}
@@ -402,8 +388,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
             }
 
         worker = _PromptWorker(
-            llm_client=StaticLLMClient(respond),
-            execution_plane=ExecutionPlane(),
+            llm_client=StaticLLMClient(respond), execution_plane=ExecutionPlane()
         )
         worker.choose_tool_use(
             task=TodoItem(goal="Repair generated Python XOR solver."),
@@ -420,13 +405,12 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 }
             ],
         )
-
         snapshot = captured["snapshot"]
-        correction = snapshot["correction_context"]  # type: ignore[index]
+        correction = snapshot["correction_context"]
         self.assertEqual(correction["failure_kind"], "bytes_text_mismatch")
         self.assertIn("TypeError: byte indices", correction["last_stderr"])
         self.assertIn("traceback line", correction["instruction"])
-        rules = "\n".join(snapshot["tool_use_rules"])  # type: ignore[index]
+        rules = "\n".join(snapshot["tool_use_rules"])
         self.assertNotIn("bytes.fromhex()", rules)
         self.assertNotIn("integer-safe XOR helpers", rules)
 
@@ -437,14 +421,15 @@ class WorkerPromptBoundsTests(unittest.TestCase):
             captured["snapshot"] = json.loads(user_prompt)
             return {
                 "capability": "script.exec",
-                "metadata": {"script_code": "from pathlib import Path\nprint(Path('.'))"},
+                "metadata": {
+                    "script_code": "from pathlib import Path\nprint(Path('.'))"
+                },
                 "rationale": "fix path API",
                 "expected_signal": "script builds paths",
             }
 
         worker = _PromptWorker(
-            llm_client=StaticLLMClient(respond),
-            execution_plane=ExecutionPlane(),
+            llm_client=StaticLLMClient(respond), execution_plane=ExecutionPlane()
         )
         worker.choose_tool_use(
             task=TodoItem(goal="Repair generated Python artifact solver paths."),
@@ -461,8 +446,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 }
             ],
         )
-
-        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        correction = captured["snapshot"]["correction_context"]
         self.assertIn("incompatible path values", correction["instruction"])
         self.assertIn("TypeError: unsupported operand", correction["last_stderr"])
 
@@ -479,8 +463,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
             }
 
         worker = _PromptWorker(
-            llm_client=StaticLLMClient(respond),
-            execution_plane=ExecutionPlane(),
+            llm_client=StaticLLMClient(respond), execution_plane=ExecutionPlane()
         )
         worker.choose_tool_use(
             task=TodoItem(goal="Probe an interactive TCP service without hanging."),
@@ -497,8 +480,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 }
             ],
         )
-
-        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        correction = captured["snapshot"]["correction_context"]
         self.assertIn("observed connection failure", correction["instruction"])
         self.assertIn("authorized scope", correction["instruction"])
         self.assertIn("ConnectionRefusedError", correction["last_stderr"])
@@ -516,11 +498,12 @@ class WorkerPromptBoundsTests(unittest.TestCase):
             }
 
         worker = _PromptWorker(
-            llm_client=StaticLLMClient(respond),
-            execution_plane=ExecutionPlane(),
+            llm_client=StaticLLMClient(respond), execution_plane=ExecutionPlane()
         )
         worker.choose_tool_use(
-            task=TodoItem(goal="Fix an interactive TCP solver that mis-parsed prompts."),
+            task=TodoItem(
+                goal="Fix an interactive TCP solver that mis-parsed prompts."
+            ),
             state=RunState(objective="Solve."),
             allowed_capabilities=[ToolCapability.SCRIPT_EXEC],
             prior_steps=[
@@ -534,34 +517,29 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 }
             ],
         )
-
-        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        correction = captured["snapshot"]["correction_context"]
         self.assertIn("observed raw output", correction["instruction"])
         self.assertIn("quarters", correction["last_stdout"])
 
     def test_timeout_correction_warns_about_non_newline_prompts(self) -> None:
-        instruction = WorkerAgent._script_correction_instruction("timeout")
-
+        instruction = script_correction_instruction("timeout")
         self.assertIn("last_traceback", instruction)
         self.assertIn("terminates within the tool timeout", instruction)
         self.assertNotIn("full recovery only on finalists", instruction)
 
     def test_binary_structure_error_correction_preserves_artifact_path(self) -> None:
-        instruction = WorkerAgent._script_correction_instruction("binary_structure_error")
-
+        instruction = script_correction_instruction("binary_structure_error")
         self.assertIn("observed lengths", instruction)
         self.assertIn("bounds checks", instruction)
 
     def test_scope_violation_correction_constrains_script_paths(self) -> None:
-        instruction = WorkerAgent._script_correction_instruction("scope_violation_blocked")
-
+        instruction = script_correction_instruction("scope_violation_blocked")
         self.assertIn("CTF_FILES_ROOT", instruction)
         self.assertIn("CTF_TEMP_DIR", instruction)
         self.assertIn("do not hard-code /tmp", instruction)
 
     def test_scratch_space_correction_uses_disposable_temp_dir(self) -> None:
-        instruction = WorkerAgent._script_correction_instruction("scratch_space_exhausted")
-
+        instruction = script_correction_instruction("scratch_space_exhausted")
         self.assertIn("provided writable locations", instruction)
 
     def test_same_todo_unbounded_failure_survives_local_no_candidate_step(self) -> None:
@@ -596,10 +574,8 @@ class WorkerPromptBoundsTests(unittest.TestCase):
             },
         )
         worker = _PromptWorker(
-            llm_client=StaticLLMClient(respond),
-            execution_plane=ExecutionPlane(),
+            llm_client=StaticLLMClient(respond), execution_plane=ExecutionPlane()
         )
-
         worker.choose_tool_use(
             task=task,
             state=state,
@@ -615,8 +591,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
                 }
             ],
         )
-
-        correction = captured["snapshot"]["correction_context"]  # type: ignore[index]
+        correction = captured["snapshot"]["correction_context"]
         self.assertEqual(correction["failure_kind"], "unbounded_loop_guard")
         self.assertIn("1082458112", correction["last_stderr"])
         self.assertIn("terminates within the tool timeout", correction["instruction"])

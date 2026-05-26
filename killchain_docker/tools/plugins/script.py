@@ -1,914 +1,76 @@
-"""script.exec — write LLM-generated code to a temp file and execute it."""
+"""script.exec plugin entrypoint."""
 
 from __future__ import annotations
 
 import ast
-import io
-import re
 import shlex
-import tokenize
 
-from killchain_docker.state.constants import DEFAULT_FILES_ROOT, bare_token_shape
-from killchain_docker.state import ExploitAttempt
 from killchain_docker.scope_guard import (
     ambient_filesystem_block_reason,
     loopback_reference_block_reason,
     python_ambient_filesystem_block_reason,
     scratch_path_reference_block_reason,
 )
+from killchain_docker.state.constants import DEFAULT_FILES_ROOT
+from killchain_docker.state.domain import ExploitAttempt
 from killchain_docker.tools.core import (
     ExecutionMode,
+    ParsedToolOutput,
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
-    ParsedToolOutput,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
+    _err_tail,
     _run,
     _status,
-    _flag_candidates_from,
-    _truncate,
-    _err_tail,
-    _infrastructure_failure_signal,
     ToolExecutionError,
 )
 from killchain_docker.tools.plugins.generated_artifacts import (
-    ARTIFACTS_END,
-    ARTIFACTS_START,
     artifact_records_from_stdout,
     artifacts_from_records,
 )
+from killchain_docker.tools.plugins.script_output import (
+    flag_candidates_from_script_stdout,
+    readable_near_misses,
+    script_failure_signal,
+    success_output_failure_kind_is_primary,
+    traceback_excerpt,
+)
+from killchain_docker.tools.plugins.script_runtime import (
+    effective_timeout_s,
+    python_runtime_guard_wrapper,
+    python_scope_scan_text,
+    script_uses_network_io,
+)
 from killchain_docker.tools.plugins.workspace import disposable_script_command
 
-_INTERPRETER_MAP = {
-    "python": ["python3", "-u"], "bash": ["bash"], "sh": ["sh"],
-    "javascript": ["node"], "node": ["node"], "ruby": ["ruby"], "perl": ["perl"],
+
+INTERPRETER_MAP = {
+    "python": ["python3", "-u"],
+    "bash": ["bash"],
+    "sh": ["sh"],
+    "javascript": ["node"],
+    "node": ["node"],
+    "ruby": ["ruby"],
+    "perl": ["perl"],
 }
-_GRAPHIC_CHARS = set("#$%&*+-/:;<=>?@[\\]^_`{|}~")
-_MIN_READABLE_NEAR_MISS_LEN = 240
-_PYTHON_RANGE_LIMIT = 5_000_000
-_PYTHON_SCRIPT_RUNTIME_LIMIT_S = 0
-_PYTHON_SOCKET_DEFAULT_TIMEOUT_S = 5
-_NETWORK_SCRIPT_TIMEOUT_CAP_S = 45
-_NETWORK_SCRIPT_RE = re.compile(
-    r"\b(?:socket|telnetlib|http\.client|urllib|requests|pexpect|pwntools|"
-    r"pwn|remote|create_connection|connect|nc|netcat|socat)\b",
-    re.IGNORECASE,
-)
-_PYTHON_NETWORK_IMPORTS = {
-    "http.client",
-    "pexpect",
-    "pwn",
-    "pwntools",
-    "requests",
-    "socket",
-    "telnetlib",
-    "urllib",
-    "urllib.request",
-}
-_PYTHON_NETWORK_CALLS = {
-    "connect",
-    "create_connection",
-    "remote",
-    "urlopen",
-}
-_PLAINTEXT_LABEL_RE = re.compile(
-    r"^\s*(?:\[[^\]\n]{1,24}\]\s*|[>*+-]\s*)*"
-    r"(?:best\s+result|plaintext|plain\s+text|decrypted|decoded|preview|"
-    r"first\s+\d+\s+(?:bytes|chars)|output)\b\s*:?",
-    re.IGNORECASE,
-)
-_STATUS_PREFIX_RE = re.compile(r"^\s*(?:\[[^\]]{1,16}\]\s*|[-+*!]\s*)+")
-_DIAGNOSTIC_LINE_RE = re.compile(
-    r"^(?:"
-    r"\d+\.\s+"
-    r"|=+\s*(?:top|best|testing)"
-    r"|analyzing|attempting|checking|connecting|connected|connection\s+closed"
-    r"|banner|context\s+around|ciphertexts?\s+found"
-    r"|decoded\s+preview|hex\s+dump"
-    r"|disassembl|dynamic\s+symbols|extract(?:ed|ing)?|file\s+not\s+found"
-    r"|file\s+size|file\s+type|found|header|initial\s+response|magic"
-    r"|interesting\s+strings|line\s+\d+|looking\s+for"
-    r"|no\s+flag|flag\s+pattern"
-    r"|received|reading|running|saved|scanner|search(?:ed|ing)?|sent"
-    r"|source|string\s+dump|symbol\s+table|target|total|warning|welcome|wrote|writing"
-    r"|ct\s+size|raw\s+tap|seed|skip|tap"
-    r"|ciphertext|printable|ratio|score|braces|flags|first\s+bytes"
-    r"|case\s+\d+|trying|testing|using|skipping|candidate"
-    r"|actual|error|stdout|stderr|returncode|length|num\s*:"
-    r")\b",
-    re.IGNORECASE,
-)
-_HEXDUMP_LINE_RE = re.compile(
-    r"^\s*(?:0x)?[0-9a-fA-F]{1,10}\s*[:|]\s*"
-    r"(?:[0-9a-fA-F]{2}(?:\s+|$)){6,}(?:\s{2,}.*)?$"
-)
-_ASSEMBLY_LINE_RE = re.compile(
-    r"^\s*(?:0x)?[0-9a-fA-F]{4,16}:\s+"
-    r"(?:[0-9a-fA-F]{2}\s+){1,12}(?:[A-Za-z_.][\w.$@<>+-]*)?"
-)
-_SYMBOL_TABLE_ENTRY_RE = re.compile(
-    r"^\s*\d+:\s+[0-9a-fA-F]{6,}\s+\d+\s+"
-    r"(?:FUNC|OBJECT|NOTYPE|SECTION|FILE|TLS)\b"
-)
-_BYTES_REPR_LINE_RE = re.compile(r"^\s*b[\"'].{40,}[\"']\s*$")
-_PATH_LISTING_LINE_RE = re.compile(r"^\s*(?:\.{0,2}/)?(?:[\w.+@-]+/){1,}\S+\s*$")
-_INDEXED_HEX_VALUE_RE = re.compile(r"^\s*\w+\[\d+\]:\s*[0-9a-fA-F]{24,}\b")
-_LONG_HEX_LINE_RE = re.compile(r"^\s*[0-9a-fA-F]{64,}\s*$")
-_PROTOCOL_DUMP_TOKEN_RE = re.compile(
-    r"\b(?:banner|command|connect(?:ion|ed)?|error|listen|login|pass(?:word)?|"
-    r"port|request|response|retr|socket|stor|tcp|transfer|udp|user)\b",
-    re.IGNORECASE,
-)
-_DIAGNOSTIC_REPORT_RE = re.compile(
-    r"(?im)^\s*(?:\[[^\]]+\]\s*)?"
-    r"(?:=+\s*top\s+|=+\s*local\s+self-test|=+\s*differential\s+test|"
-    r"score\s*=|\d+\.\s+seed=|testing\s+\d+.+candidates|braces\s*=|"
-    r"first\s+bytes:|all\s+tests\s+passed|solver\s+function|sum\s+verification|"
-    r"=+\s*png\s+chunk\s+analysis|=+\s*string\s+search\s+in\s+decrypted\s+png|"
-    r"chunk\s+'(?:ihdr|idat|iend|itxt|text|ztxt)'|found\s+\d+\s+printable\s+strings|"
-    r"offset\s+\d+\s*:)"
-)
-
-def _script_uses_network_io(code: str, language: str) -> bool:
-    if language == "python":
-        return _python_script_uses_network_io(code)
-    if language in {"bash", "sh"}:
-        return bool(_NETWORK_SCRIPT_RE.search(code))
-    return False
-
-
-def _python_scope_scan_text(code: str) -> str:
-    try:
-        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
-        kept: list[str] = []
-        for token in tokens:
-            if token.type == tokenize.COMMENT:
-                continue
-            kept.append(token.string)
-        return " ".join(kept)
-    except tokenize.TokenError:
-        return code
-
-
-def _python_script_uses_network_io(code: str) -> bool:
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return bool(_NETWORK_SCRIPT_RE.search(_python_scope_scan_text(code)))
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                name = alias.name.lower()
-                if (
-                    name in _PYTHON_NETWORK_IMPORTS
-                    or name.split(".", 1)[0] in _PYTHON_NETWORK_IMPORTS
-                ):
-                    return True
-        elif isinstance(node, ast.ImportFrom):
-            module = (node.module or "").lower()
-            if (
-                module in _PYTHON_NETWORK_IMPORTS
-                or module.split(".", 1)[0] in _PYTHON_NETWORK_IMPORTS
-            ):
-                return True
-        elif isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name) and func.id.lower() in _PYTHON_NETWORK_CALLS:
-                return True
-            if isinstance(func, ast.Attribute):
-                attr = func.attr.lower()
-                if attr in _PYTHON_NETWORK_CALLS:
-                    return True
-    return False
-
-
-def _effective_timeout_s(request_timeout_s: int, code: str, language: str) -> int:
-    timeout_s = max(1, int(request_timeout_s))
-    if _script_uses_network_io(code, language):
-        return min(timeout_s, _NETWORK_SCRIPT_TIMEOUT_CAP_S)
-    return timeout_s
-
-
-def _python_runtime_guard_wrapper(timeout_s: int) -> str:
-    runtime_limit_s = 0
-    if timeout_s > 2:
-        runtime_limit_s = timeout_s - 1
-        if _PYTHON_SCRIPT_RUNTIME_LIMIT_S > 0:
-            runtime_limit_s = min(runtime_limit_s, _PYTHON_SCRIPT_RUNTIME_LIMIT_S)
-    socket_timeout_s = min(
-        _PYTHON_SOCKET_DEFAULT_TIMEOUT_S,
-        max(1, timeout_s - 2),
-    )
-
-    return f"""\
-import builtins as _kc_builtins
-import itertools as _kc_itertools
-import linecache as _kc_linecache
-import runpy as _kc_runpy
-import signal as _kc_signal
-import socket as _kc_socket
-import sys as _kc_sys
-_kc_original_range = _kc_builtins.range
-_kc_original_product = _kc_itertools.product
-_kc_range_limit = {_PYTHON_RANGE_LIMIT}
-_kc_runtime_limit_s = {runtime_limit_s}
-_kc_socket.setdefaulttimeout({socket_timeout_s})
-
-def _kc_int_locals(_kc_frame):
-    if _kc_frame is None:
-        return ""
-    _kc_items = []
-    for _kc_name, _kc_value in sorted(_kc_frame.f_locals.items()):
-        if isinstance(_kc_value, int) and abs(_kc_value) >= _kc_range_limit:
-            _kc_items.append(f"{{_kc_name}}={{_kc_value}}")
-        if len(_kc_items) >= 8:
-            break
-    return ", ".join(_kc_items)
-
-def _kc_callsite(_kc_frame):
-    if _kc_frame is None:
-        return ""
-    _kc_line = _kc_linecache.getline(
-        _kc_frame.f_code.co_filename, _kc_frame.f_lineno
-    ).strip()
-    _kc_locals = _kc_int_locals(_kc_frame)
-    _kc_parts = [f"line {{_kc_frame.f_lineno}}"]
-    if _kc_line:
-        _kc_parts.append(f"code={{_kc_line!r}}")
-    if _kc_locals:
-        _kc_parts.append(f"large_int_locals={{_kc_locals}}")
-    return "; ".join(_kc_parts)
-
-def _kc_timeout(_signum, _frame):
-    _kc_where = _kc_callsite(_frame)
-    _kc_suffix = f" at {{_kc_where}}" if _kc_where else ""
-    raise RuntimeError(
-        "script.exec Python time limit exceeded"
-        f"{{_kc_suffix}}; use bounded loops or fast-forward math"
-    )
-
-_kc_original_signal = _kc_signal.signal
-_kc_original_alarm = getattr(_kc_signal, "alarm", None)
-_kc_original_setitimer = getattr(_kc_signal, "setitimer", None)
-_kc_user_sigalrm_handler = None
-
-def _kc_dispatch_sigalrm(_kc_signum, _kc_frame):
-    _kc_handler = _kc_user_sigalrm_handler
-    if _kc_handler not in (None, _kc_signal.SIG_DFL, _kc_signal.SIG_IGN):
-        _kc_handler(_kc_signum, _kc_frame)
-    _kc_timeout(_kc_signum, _kc_frame)
-
-def _kc_clamped_alarm_seconds(_kc_seconds):
-    if not _kc_runtime_limit_s:
-        return _kc_seconds
-    try:
-        _kc_seconds_f = float(_kc_seconds)
-    except (TypeError, ValueError):
-        return _kc_seconds
-    if _kc_seconds_f <= 0:
-        return _kc_seconds
-    _kc_cap = max(1, _kc_runtime_limit_s - 1)
-    if _kc_seconds_f >= _kc_runtime_limit_s:
-        return _kc_cap
-    return _kc_seconds
-
-def _kc_guarded_alarm(_kc_seconds):
-    return _kc_original_alarm(_kc_clamped_alarm_seconds(_kc_seconds))
-
-def _kc_guarded_setitimer(_kc_which, _kc_seconds, _kc_interval=0.0):
-    if _kc_which == _kc_signal.ITIMER_REAL:
-        _kc_seconds = _kc_clamped_alarm_seconds(_kc_seconds)
-    return _kc_original_setitimer(_kc_which, _kc_seconds, _kc_interval)
-
-def _kc_guarded_signal(_kc_signum, _kc_handler):
-    global _kc_user_sigalrm_handler
-    if _kc_signum == _kc_signal.SIGALRM and _kc_runtime_limit_s:
-        _kc_previous = _kc_user_sigalrm_handler
-        _kc_user_sigalrm_handler = _kc_handler
-        _kc_original_signal(_kc_signum, _kc_dispatch_sigalrm)
-        return _kc_previous if _kc_previous is not None else _kc_timeout
-    return _kc_original_signal(_kc_signum, _kc_handler)
-
-if _kc_runtime_limit_s:
-    _kc_signal.signal(_kc_signal.SIGALRM, _kc_timeout)
-    _kc_signal.setitimer(_kc_signal.ITIMER_REAL, _kc_runtime_limit_s)
-    _kc_signal.signal = _kc_guarded_signal
-    if _kc_original_alarm is not None:
-        _kc_signal.alarm = _kc_guarded_alarm
-    if _kc_original_setitimer is not None:
-        _kc_signal.setitimer = _kc_guarded_setitimer
-
-def _kc_guarded_range(*args):
-    _kc_range = _kc_original_range(*args)
-    _kc_frame = _kc_sys._getframe(1)
-    if _kc_frame.f_code.co_filename != globals().get("_kc_script_path"):
-        return _kc_range
-    try:
-        _kc_size = len(_kc_range)
-    except OverflowError as _kc_exc:
-        _kc_where = _kc_callsite(_kc_frame)
-        _kc_suffix = f" at {{_kc_where}}" if _kc_where else ""
-        raise RuntimeError(
-            "range too large for script.exec"
-            f"{{_kc_suffix}}; use fast-forward math or bounded sampling"
-        ) from _kc_exc
-    if _kc_size > _kc_range_limit:
-        _kc_where = _kc_callsite(_kc_frame)
-        _kc_suffix = f" at {{_kc_where}}" if _kc_where else ""
-        raise RuntimeError(
-            f"range too large for script.exec: {{_kc_size}} > {{_kc_range_limit}}; "
-            f"{{_kc_suffix}}; "
-            "use fast-forward math or bounded sampling"
-        )
-    return _kc_range
-
-_kc_builtins.range = _kc_guarded_range
-
-def _kc_guarded_product(*_kc_iterables, repeat=1):
-    _kc_frame = _kc_sys._getframe(1)
-    if _kc_frame.f_code.co_filename != globals().get("_kc_script_path"):
-        return _kc_original_product(*_kc_iterables, repeat=repeat)
-    try:
-        _kc_repeat = int(repeat)
-    except (TypeError, ValueError) as _kc_exc:
-        raise RuntimeError("itertools.product repeat must be an integer") from _kc_exc
-    if _kc_repeat < 0:
-        raise ValueError("repeat argument cannot be negative")
-    _kc_lengths = []
-    for _kc_iterable in _kc_iterables:
-        try:
-            _kc_lengths.append(len(_kc_iterable))
-        except TypeError:
-            return _kc_original_product(*_kc_iterables, repeat=repeat)
-    _kc_size = 1
-    for _ in _kc_original_range(_kc_repeat):
-        for _kc_length in _kc_lengths:
-            _kc_size *= _kc_length
-            if _kc_size > _kc_range_limit:
-                _kc_where = _kc_callsite(_kc_frame)
-                _kc_suffix = f" at {{_kc_where}}" if _kc_where else ""
-                raise RuntimeError(
-                    f"product too large for script.exec: {{_kc_size}} > {{_kc_range_limit}}; "
-                    f"{{_kc_suffix}}; "
-                    "use fast-forward math or bounded sampling"
-                )
-    return _kc_original_product(*_kc_iterables, repeat=repeat)
-
-_kc_itertools.product = _kc_guarded_product
-del _kc_guarded_range, _kc_guarded_product, _kc_builtins, _kc_itertools
-
-if len(_kc_sys.argv) < 2:
-    raise RuntimeError("script.exec wrapper missing script path")
-_kc_script_path = _kc_sys.argv[1]
-_kc_sys.argv = [_kc_script_path, *_kc_sys.argv[2:]]
-_kc_runpy.run_path(_kc_script_path, run_name="__main__")
-
-"""
-
-
-def _printable_ratio(text: str) -> float:
-    if not text:
-        return 0.0
-    sample = text[:12000]
-    printable = sum(1 for ch in sample if ch in "\n\r\t" or 32 <= ord(ch) <= 126)
-    return printable / len(sample)
-
-
-def _graphic_density(line: str) -> float:
-    visible = [ch for ch in line if not ch.isspace()]
-    if not visible:
-        return 0.0
-    graphic = sum(1 for ch in visible if ch in _GRAPHIC_CHARS)
-    return graphic / len(visible)
-
-
-def _collapse_visual_runs(line: str) -> str:
-    return re.sub(r"([^\s])\1{2,}", r"\1", line.strip())
-
-
-def _escaped_repr_density(text: str) -> float:
-    if not text:
-        return 0.0
-    escaped = re.findall(
-        r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[0abfnrtv]",
-        text,
-    )
-    return len(escaped) / len(text)
-
-
-def _diagnostic_line_ratio(lines: list[str]) -> float:
-    non_empty = [line.strip() for line in lines if line.strip()]
-    if not non_empty:
-        return 1.0
-    diagnostic = sum(1 for line in non_empty if _is_diagnostic_line(line))
-    return diagnostic / len(non_empty)
-
-
-def _is_diagnostic_line(line: str) -> bool:
-    stripped = line.strip()
-    if not stripped:
-        return False
-    if stripped in {ARTIFACTS_START, ARTIFACTS_END}:
-        return True
-
-    normalized = _STATUS_PREFIX_RE.sub("", stripped).strip().strip("=- ")
-    if not normalized:
-        return True
-
-    protocol_dump_tokens = _PROTOCOL_DUMP_TOKEN_RE.findall(normalized)
-    return bool(
-        _DIAGNOSTIC_LINE_RE.match(normalized)
-        or _HEXDUMP_LINE_RE.match(stripped)
-        or _HEXDUMP_LINE_RE.match(normalized)
-        or _ASSEMBLY_LINE_RE.match(stripped)
-        or _ASSEMBLY_LINE_RE.match(normalized)
-        or _SYMBOL_TABLE_ENTRY_RE.match(stripped)
-        or _SYMBOL_TABLE_ENTRY_RE.match(normalized)
-        or _BYTES_REPR_LINE_RE.match(stripped)
-        or _PATH_LISTING_LINE_RE.match(stripped)
-        or _INDEXED_HEX_VALUE_RE.match(stripped)
-        or _LONG_HEX_LINE_RE.match(stripped)
-        or len(protocol_dump_tokens) >= 2
-    )
-
-
-def _strip_script_artifact_manifest(stdout: str) -> str:
-    lines = stdout.replace("\r", "\n").splitlines()
-    kept: list[str] = []
-    in_manifest = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped == ARTIFACTS_START:
-            in_manifest = True
-            continue
-        if in_manifest:
-            if stripped == ARTIFACTS_END:
-                in_manifest = False
-            continue
-        kept.append(line)
-    return "\n".join(kept)
-
-
-def _looks_like_visual_art_block(lines: list[str]) -> bool:
-    non_empty = [line for line in lines if line.strip()]
-    if len(non_empty) < 3:
-        return False
-    if any(_is_diagnostic_line(line) for line in non_empty):
-        return False
-    graphic_lines = [
-        line for line in non_empty
-        if len(line) >= 20 and _graphic_density(line) >= 0.25
-    ]
-    banner_text_lines = [
-        line for line in non_empty
-        if _looks_like_visual_banner_text_line(line)
-    ]
-    visual_lines = len(graphic_lines) + len(banner_text_lines)
-    return visual_lines >= 3 and visual_lines / len(non_empty) >= 0.50
-
-
-def _looks_like_visual_banner_text_line(line: str) -> bool:
-    if len(line) < 60:
-        return False
-    letters = [ch for ch in line if ch.isalpha()]
-    if len(letters) < 20:
-        return False
-    uppercase = sum(1 for ch in letters if ch.isupper())
-    whitespace = sum(1 for ch in line if ch.isspace())
-    return uppercase / len(letters) >= 0.80 and whitespace / len(line) >= 0.18
-
-
-def _plaintext_blocks(stdout: str) -> list[str]:
-    lines = stdout.replace("\r", "\n").splitlines()
-    blocks: list[str] = []
-
-    for index, line in enumerate(lines):
-        match = _PLAINTEXT_LABEL_RE.match(line)
-        if not match:
-            continue
-
-        inline = line[match.end():].strip(" :")
-        if inline:
-            blocks.append(inline)
-
-        following: list[str] = []
-        for next_line in lines[index + 1:index + 12]:
-            stripped = next_line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("=" * 8) or stripped.startswith("-" * 8):
-                if following:
-                    break
-                continue
-            if (
-                _PLAINTEXT_LABEL_RE.match(next_line)
-                or _is_diagnostic_line(stripped)
-            ):
-                if following:
-                    break
-                continue
-            following.append(next_line.rstrip())
-        if following:
-            blocks.append("\n".join(following))
-
-    if blocks:
-        return blocks
-    if _DIAGNOSTIC_REPORT_RE.search(stdout):
-        return []
-    if _diagnostic_line_ratio(lines) >= 0.45:
-        return []
-    return []
-
-
-def _readable_near_misses(stdout: str) -> list[str]:
-    stdout = _strip_script_artifact_manifest(stdout)
-    if len(stdout) < _MIN_READABLE_NEAR_MISS_LEN:
-        return []
-
-    labelled_blocks = _plaintext_blocks(stdout)
-    blocks = [(block, False) for block in labelled_blocks]
-    if not blocks:
-        stdout_lines = [line.rstrip() for line in stdout.replace("\r", "\n").splitlines()]
-        if _looks_like_visual_art_block(stdout_lines):
-            blocks = [(stdout, True)]
-
-    for block, require_visual in blocks:
-        if _DIAGNOSTIC_REPORT_RE.search(block):
-            continue
-        if len(block) < _MIN_READABLE_NEAR_MISS_LEN:
-            continue
-        if _printable_ratio(block) < 0.92:
-            continue
-        if _escaped_repr_density(block) > 0.03:
-            continue
-
-        lines = [line.rstrip() for line in block.replace("\r", "\n").splitlines()]
-        non_empty = [line for line in lines if line.strip()]
-        if _diagnostic_line_ratio(non_empty) >= 0.45:
-            continue
-        graphic_lines = [
-            line for line in non_empty
-            if len(line) >= 20 and _graphic_density(line) >= 0.25
-        ]
-        banner_text_lines = [
-            line for line in non_empty
-            if _looks_like_visual_banner_text_line(line)
-        ]
-        long_text_lines = [line for line in non_empty if len(line) >= 60]
-        if require_visual:
-            if len(graphic_lines) + len(banner_text_lines) < 3:
-                continue
-        elif len(graphic_lines) < 3 and len(long_text_lines) < 3:
-            continue
-
-        compact_lines: list[str] = []
-        seen: set[str] = set()
-        for line in non_empty[:24]:
-            compact = _collapse_visual_runs(line)
-            if compact in seen:
-                continue
-            seen.add(compact)
-            compact_lines.append(compact[:180])
-            if len("\n".join(compact_lines)) >= 900:
-                break
-
-        preview = _truncate("\n".join(compact_lines), 900)
-        if preview:
-            return [f"readable/plaintext-or-ascii-art preview:\n{preview}"]
-    return []
-
-
-def _script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str, str]:
-    infrastructure = _infrastructure_failure_signal(output_text, "", exit_code)
-    if infrastructure is not None:
-        return infrastructure
-    text = output_text.lower()
-    if "brokenpipeerror" in text or "broken pipe" in text:
-        return "network_pipe_closed", "remote endpoint closed the socket while the script was writing"
-    if "connectionreseterror" in text or "connection reset by peer" in text:
-        return "connection_reset", "remote endpoint reset the connection"
-    if "connectionrefusederror" in text or "connection refused" in text:
-        return "connection_refused", "remote endpoint refused the connection"
-    if _network_incomplete_read_signal(text):
-        return (
-            "network_incomplete_read",
-            "remote endpoint closed or stopped sending before the script received expected data",
-        )
-    if (
-        "socket.gaierror" in text
-        or "name or service not known" in text
-        or "nodename nor servname provided" in text
-        or "temporary failure in name resolution" in text
-    ):
-        return (
-            "host_resolution_error",
-            "script could not resolve the target hostname; parse URLs into scheme, hostname, port, and path before connecting",
-        )
-    if "scope_violation_blocked" in text or "outside authorized_scope" in text:
-        return "scope_violation_blocked", "script attempted to leave authorized_scope or files_root"
-    if (
-        "no space left on device" in text
-        or "mktemp: failed to create directory" in text
-        or "workspace budget exceeded" in text
-    ):
-        return "scratch_space_exhausted", "script scratch workspace could not be created or filled the container overlay"
-    if (
-        "modulenotfounderror:" in text
-        or "importerror:" in text
-        or "no module named" in text
-    ):
-        return (
-            "missing_tool",
-            "script imported a Python module unavailable in the execution environment; use stdlib or guard optional imports",
-        )
-    if "range too large for script.exec" in text or "product too large for script.exec" in text:
-        return "unbounded_loop_guard", "script attempted an oversized range/search; use fast-forward math or bounded sampling"
-    if "script.exec python time limit exceeded" in text:
-        return "unbounded_loop_guard", "script exceeded Python runtime guard; use bounded loops or fast-forward math"
-    hard_timeout = "[timeout after" in text
-    runtime_timeout = (
-        "timed out" in text
-        or "timeouterror" in text
-        or "socket timeout" in text
-        or "timeout during" in text
-    )
-    if hard_timeout or (runtime_timeout and exit_code not in (None, 0)):
-        return "timeout", "script exceeded its execution or socket timeout"
-    if (
-        "failed to parse" in text
-        or "cannot parse" in text
-        or "could not parse" in text
-        or "parse error" in text
-        or "re.error:" in text
-        or "invalid literal for int" in text
-        or "binascii.error: odd-length string" in text
-        or "binascii.error: non-hexadecimal digit found" in text
-        or ("fromhex()" in text and "non-hexadecimal" in text)
-    ):
-        return "parse_error", "script parsing logic rejected tool or service output; validate delimiters, regex quoting, and exact field shape"
-    if "filenotfounderror" in text or "no such file or directory" in text:
-        return (
-            "path_resolution_error",
-            "script referenced a path that was not present in the execution workspace",
-        )
-    if (
-        ("struct.error" in text and "buffer" in text)
-        or "unpack requires a buffer" in text
-        or "unpack_from requires a buffer" in text
-        or "not enough values to unpack" in text
-        or "unexpected end of data" in text
-        or "truncated file" in text
-    ):
-        return (
-            "binary_structure_error",
-            "script parsed binary structures without sufficient bounds checks",
-        )
-    if (
-        "a bytes-like object is required" in text
-        or "can't concat str to bytes" in text
-        or "can't concat bytes to str" in text
-        or "must be str, not bytes" in text
-        or "must be bytes, not str" in text
-        or "byte indices must be integers or slices" in text
-        or "ord() expected string of length 1, but int found" in text
-        or "unicodedecodeerror" in text
-        or "unicodeencodeerror" in text
-    ):
-        return "bytes_text_mismatch", "script mixed bytes and text across an IO boundary"
-    if (
-        "unsupported operand type(s) for /: 'str' and 'str'" in text
-        or "unsupported operand type(s) for /: \"str\" and \"str\"" in text
-        or "'str' object has no attribute 'glob'" in text
-        or "'str' object has no attribute 'iterdir'" in text
-    ):
-        return "path_type_mismatch", "script mixed string paths with pathlib operations"
-    if (
-        ("nameerror:" in text and "is not defined" in text)
-        or ("unboundlocalerror:" in text and "referenced before assignment" in text)
-    ):
-        return (
-            "undefined_name",
-            "script referenced a variable, function, or module before assignment",
-        )
-    if "attributeerror:" in text and "object has no attribute" in text:
-        return (
-            "type_error",
-            "script used a method on an incompatible value type; inspect and convert the value deliberately",
-        )
-    if "typeerror:" in text:
-        return (
-            "type_error",
-            "script used incompatible value types or an invalid operator",
-        )
-    if "syntaxerror" in text:
-        return "syntax_error", "script failed Python or shell syntax validation"
-    subcommand_error = _subcommand_error_line(output_text)
-    if subcommand_error:
-        return (
-            "subcommand_error",
-            "script completed but an invoked command reported an error: "
-            f"{subcommand_error}",
-        )
-    diagnostic = _script_reported_error_line(output_text)
-    if diagnostic:
-        return "nonzero_exit", f"script exited with status {exit_code}: {diagnostic}"
-    return "nonzero_exit", f"script exited with status {exit_code}"
-
-
-def _network_incomplete_read_signal(text: str) -> bool:
-    if not text:
-        return False
-    missing_expected_data = bool(re.search(
-        r"\b(?:no|missing|failed\s+to\s+receive|unable\s+to\s+receive|"
-        r"did\s+not\s+receive|could\s+not\s+read|unexpected\s+eof|eof)\b"
-        r".{0,80}\b(?:data|response|banner|header|line|prompt|message|"
-        r"round|payload|final|bytes?)\b",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    ))
-    if not missing_expected_data:
-        missing_expected_data = bool(re.search(
-            r"\b(?:connection|socket|server|remote|endpoint)\b"
-            r".{0,80}\b(?:closed|disconnected|dropped)\b"
-            r".{0,80}\b(?:before|while|during|expected|missing|no\s+data)\b",
-            text,
-            re.IGNORECASE | re.DOTALL,
-        ))
-    if not missing_expected_data:
-        return False
-    return bool(re.search(
-        r"\b(?:connect(?:ed|ing|ion)?|socket|tcp|server|remote|endpoint|"
-        r"send(?:ing)?|sent|recv|receive(?:d|ing)?|read(?:ing)?|"
-        r"response|banner|header|prompt|round)\b",
-        text,
-        re.IGNORECASE,
-    ))
-
-
-def _script_reported_error_line(output_text: str) -> str:
-    for line in reversed((output_text or "").splitlines()):
-        text = line.strip()
-        if not text:
-            continue
-        if re.match(r"(?i)^(?:error|failed|failure|fatal|warning)\b\s*:?", text):
-            return _truncate(text, 300)
-        if re.search(r"(?i)\b(?:error|failed|failure|fatal)\b", text):
-            return _truncate(text, 300)
-    return ""
-
-
-def _subcommand_error_line(output_text: str) -> str:
-    for line in reversed((output_text or "").splitlines()):
-        text = line.strip()
-        if not text:
-            continue
-        return_code = re.search(r"(?i)\breturn\s+code\s*:\s*(-?\d+)\b", text)
-        if return_code and return_code.group(1) not in {"0", "+0"}:
-            return _truncate(text, 300)
-        if re.search(r"(?i)\b(?:error|failed|failure|fatal)\b", text) and re.search(
-            r"(?i)(?:\bmake\b|\bgcc\b|\bclang\b|\bld\b|\btar\b|\bunzip\b|\bzip\b|\bjava\b|\bnode\b|\bruby\b|\bgo\b|\bcargo\b|\bcmake\b|\bninja\b|\bperl\b|\bbash\b|\bsh\b|\bpython\b|\bpython3\b|\*\*\*)",
-            text,
-        ):
-            return _truncate(text, 300)
-    return ""
-
-
-def _traceback_excerpt(output_text: str, *, width: int = 4000) -> str:
-    marker = "Traceback (most recent call last):"
-    index = output_text.find(marker)
-    if index < 0:
-        return ""
-    return _truncate(output_text[index:].strip(), width)
-
-
-def _flag_candidates_from_script_stdout(stdout: str, *, source: str):
-    candidates = _flag_candidates_from(stdout, source=source)
-    if not candidates:
-        return []
-    has_visual_text = bool(_readable_near_misses(stdout))
-    filtered = [
-        candidate for candidate in candidates
-        if _candidate_has_readable_context(
-            stdout,
-            candidate.value,
-            allow_derived_visual=has_visual_text,
-        )
-    ]
-    if has_visual_text:
-        filtered.sort(key=lambda candidate: _script_candidate_rank(candidate.value, stdout))
-    return filtered
-
-
-def _script_candidate_rank(candidate: str, stdout: str) -> tuple[int, int]:
-    if "{" in candidate and candidate in stdout:
-        return (0, 0)
-    if candidate not in stdout and _looks_like_visual_text_candidate(candidate):
-        return (1, 0)
-    return (2, 0)
-
-
-def _candidate_has_readable_context(
-    stdout: str,
-    candidate: str,
-    *,
-    allow_derived_visual: bool = False,
-) -> bool:
-    if allow_derived_visual and _looks_like_visual_text_candidate(candidate):
-        return True
-
-    if "{" in candidate and candidate not in stdout:
-        if _candidate_body_has_readable_context(stdout, candidate):
-            return True
-
-    labels = (
-        "flag found", "candidate flag", "possible flag", "valid flag",
-        "recovered flag", "validated flag",
-    )
-    start = 0
-    while True:
-        index = stdout.find(candidate, start)
-        if index < 0:
-            return False
-        line_start = stdout.rfind("\n", 0, index) + 1
-        line_end = stdout.find("\n", index)
-        if line_end < 0:
-            line_end = len(stdout)
-        window_start = max(line_start, index - 120)
-        window_end = min(line_end, index + len(candidate) + 120)
-        window = stdout[window_start:window_end]
-        lowered = window.lower()
-        if any(label in lowered for label in labels):
-            return True
-        if "\ufffd" not in window and _printable_ratio(window) >= 0.90:
-            return True
-        start = index + len(candidate)
-
-
-def _candidate_body_has_readable_context(stdout: str, candidate: str) -> bool:
-    prefix, _sep, body_with_brace = candidate.partition("{")
-    body = body_with_brace[:-1] if body_with_brace.endswith("}") else ""
-    if not prefix or not body:
-        return False
-
-    labels = (
-        "answer",
-        "flag",
-        "key",
-        "plaintext",
-        "recovered",
-        "secret",
-        "validated",
-    )
-    negative = ("no flag", "not found", "mismatch", "invalid", "rejected")
-    for needle in (f"{{{body}}}", body):
-        start = 0
-        while True:
-            index = stdout.find(needle, start)
-            if index < 0:
-                break
-            line_start = stdout.rfind("\n", 0, index) + 1
-            line_end = stdout.find("\n", index)
-            if line_end < 0:
-                line_end = len(stdout)
-            window_start = max(line_start, index - 160)
-            window_end = min(line_end, index + len(needle) + 160)
-            context = stdout[window_start:window_end].lower()
-            if any(label in context for label in labels) and not any(
-                item in context for item in negative
-            ):
-                return True
-            start = index + len(needle)
-    return False
-
-
-def _looks_like_visual_text_candidate(candidate: str) -> bool:
-    text = str(candidate or "").strip()
-    if "{" in text or "}" in text:
-        return False
-    if "_" not in text:
-        return False
-    if not bare_token_shape(text):
-        return False
-    parts = [part for part in text.split("_") if part]
-    if len(parts) < 2:
-        return False
-    letters = [ch for ch in text if ch.isalpha()]
-    if not letters:
-        return False
-    uppercase = sum(1 for ch in letters if ch.isupper())
-    return uppercase / len(letters) >= 0.70
 
 
 class ScriptPlugin:
-    """Write LLM-generated code to a temp file and execute it."""
+    """Write generated code to an isolated workspace and execute it."""
 
     name = "script_exec"
     mode = ExecutionMode.LOCAL_COMMAND
     python_executable: str = "python3"
 
-    def __init__(self, *, argv_prefix: list[str] | None = None, python_executable: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        argv_prefix: list[str] | None = None,
+        python_executable: str | None = None,
+    ) -> None:
         self.argv_prefix = list(argv_prefix or [])
         if python_executable:
             self.python_executable = python_executable
@@ -917,13 +79,11 @@ class ScriptPlugin:
         script_code = str(request.metadata.get("script_code") or "").strip()
         if not script_code:
             raise ToolExecutionError("script.exec requires metadata.script_code")
-
         language = str(request.metadata.get("script_language") or "python").lower()
-        interpreter = _INTERPRETER_MAP.get(language, [self.python_executable])
+        interpreter = INTERPRETER_MAP.get(language, [self.python_executable])
         if language == "python":
             interpreter = [self.python_executable, "-u"]
 
-        # Syntax check before execution — fail fast without wasting container time
         syntax_error = self._check_syntax(script_code, language)
         if syntax_error:
             return ToolExecutionResult(
@@ -937,11 +97,9 @@ class ScriptPlugin:
         files_root = request.metadata.get("files_root") or DEFAULT_FILES_ROOT
         scope_reason = scratch_path_reference_block_reason(script_code)
         scope_scan_text = (
-            _python_scope_scan_text(script_code)
-            if language == "python"
-            else script_code
+            python_scope_scan_text(script_code) if language == "python" else script_code
         )
-        if _script_uses_network_io(script_code, language):
+        if script_uses_network_io(script_code, language):
             scope_reason = scope_reason or loopback_reference_block_reason(
                 scope_scan_text,
                 request.metadata.get("authorized_scope"),
@@ -965,31 +123,28 @@ class ScriptPlugin:
                 exit_code=126,
                 stdout="",
                 stderr=(
-                    f"scope_violation_blocked: {scope_reason}; stay within "
-                    "authorized_scope, files_root, and CTF_TEMP_DIR."
+                    "scope_violation_blocked: "
+                    f"{scope_reason}; stay within authorized_scope, files_root, and CTF_TEMP_DIR."
                 ),
             )
-        timeout_s = _effective_timeout_s(request.timeout_s, script_code, language)
-        interpreter_cmd = shlex.join(interpreter)
+
+        timeout_s = effective_timeout_s(request.timeout_s, script_code, language)
         shell_cmd = disposable_script_command(
             files_root=files_root,
-            interpreter_cmd=interpreter_cmd,
+            interpreter_cmd=shlex.join(interpreter),
             max_workspace_mb=request.metadata.get("max_workspace_mb"),
             max_memory_mb=request.metadata.get("max_memory_mb"),
             max_cpu_s=request.metadata.get("max_cpu_s"),
-            guard_source=(
-                _python_runtime_guard_wrapper(timeout_s)
-                if language == "python"
-                else None
-            ),
+            guard_source=python_runtime_guard_wrapper(timeout_s)
+            if language == "python"
+            else None,
         )
-        input_text = script_code
         argv = [*self.argv_prefix, "bash", "-c", shell_cmd]
-        return _run(self.name, argv, timeout_s, input_text=input_text)
+        return _run(self.name, argv, timeout_s, input_text=script_code)
 
     @staticmethod
     def _check_syntax(code: str, language: str) -> str | None:
-        """Return an error message if the script has syntax errors, else None."""
+        """Return an error message if the script has syntax errors."""
         if language == "python":
             try:
                 ast.parse(code)
@@ -1006,9 +161,12 @@ class ScriptPlugin:
                     max_output_bytes=4000,
                 )
                 if result.exit_code != 0:
-                    return result.stderr.strip() or f"bash -n failed (exit {result.exit_code})"
+                    return (
+                        result.stderr.strip()
+                        or f"bash -n failed (exit {result.exit_code})"
+                    )
             except ToolExecutionError:
-                pass  # Cannot check locally — let it run in container
+                pass
         return None
 
 
@@ -1019,29 +177,29 @@ def build_output(
 ) -> ToolOutput:
     language = str(request.metadata.get("script_language") or "python")
     status = _status(result)
-    stdout, stderr = result.stdout or "", result.stderr or ""
+    stdout, stderr = (result.stdout or "", result.stderr or "")
     artifact_records = artifact_records_from_stdout(stdout)
-
     summary = f"script ({language})"
     if status.value == "failure":
         summary = f"script failed: {_err_tail(stderr) or f'exit {result.exit_code}'}"
 
-    flags = _flag_candidates_from_script_stdout(stdout, source=f"script:{language}")
-    near_misses = [] if flags else _readable_near_misses(stdout)
+    flags = flag_candidates_from_script_stdout(stdout, source=f"script:{language}")
+    near_misses = [] if flags else readable_near_misses(stdout)
     if flags:
-        summary += f" — {len(flags)} flag candidate(s)"
+        summary += f" - {len(flags)} flag candidate(s)"
     elif near_misses:
-        summary += " — readable near-miss output"
+        summary += " - readable near-miss output"
 
-    output_context: dict = {
+    output_context: dict[str, object] = {
         "stdout": _truncate(stdout, 4000),
         "stderr": _truncate(stderr, 1500),
         "returncode": result.exit_code,
-        "flag_candidates": [fc.value for fc in flags],
+        "flag_candidates": [candidate.value for candidate in flags],
     }
-    traceback = _traceback_excerpt("\n".join(part for part in (stderr, stdout) if part))
+    traceback = traceback_excerpt("\n".join(part for part in (stderr, stdout) if part))
     if traceback:
         output_context["traceback"] = traceback
+
     artifacts = artifacts_from_records(
         artifact_records,
         source="script_exec",
@@ -1052,19 +210,27 @@ def build_output(
         output_context["generated_artifacts_durable"] = True
     if near_misses:
         output_context["near_miss_candidates"] = near_misses
+
     if status.value == "failure":
         failure_text = "\n".join(part for part in (stderr, stdout) if part)
-        failure_kind, failure_detail = _script_failure_signal(failure_text, result.exit_code)
+        failure_kind, failure_detail = script_failure_signal(
+            failure_text,
+            result.exit_code,
+        )
         output_context["failure_kind"] = failure_kind
         output_context["failure_detail"] = failure_detail
+
     if status.value == "success" and not flags:
         if near_misses:
             output_context["result_quality"] = "near_miss"
         else:
             output_text = "\n".join(part for part in (stderr, stdout) if part)
-            failure_kind, failure_detail = _script_failure_signal(output_text, result.exit_code)
+            failure_kind, failure_detail = script_failure_signal(
+                output_text,
+                result.exit_code,
+            )
             output_context["result_quality"] = "partial_no_candidate"
-            if _success_output_failure_kind_is_primary(
+            if success_output_failure_kind_is_primary(
                 failure_kind,
                 output_text,
                 stdout=stdout,
@@ -1073,21 +239,27 @@ def build_output(
                 output_context["failure_kind"] = failure_kind
                 output_context["failure_detail"] = failure_detail
             else:
-                output_context["partial_reason"] = "script exited successfully but no flag candidate was recovered"
+                output_context["partial_reason"] = (
+                    "script exited successfully but no flag candidate was recovered"
+                )
                 output_context["failure_kind"] = "no_candidate"
                 output_context["failure_detail"] = output_context["partial_reason"]
 
     exploit_attempts: list[ExploitAttempt] = []
     if flags or status.value == "failure":
-        exploit_attempts.append(ExploitAttempt(
-            technique=f"script:{language}", success=bool(flags),
-            summary=summary,
-            flag_candidate_refs=[fc.value for fc in flags],
-            metadata={"returncode": result.exit_code},
-        ))
+        exploit_attempts.append(
+            ExploitAttempt(
+                technique=f"script:{language}",
+                success=bool(flags),
+                summary=summary,
+                flag_candidate_refs=[candidate.value for candidate in flags],
+                metadata={"returncode": result.exit_code},
+            )
+        )
 
     return ToolOutput(
-        status=status, summary=summary,
+        status=status,
+        summary=summary,
         output_text=_truncate(stdout, 4000),
         raw_log=_truncate(stdout + stderr, 6000),
         output_context=output_context,
@@ -1095,34 +267,3 @@ def build_output(
         flag_candidates=flags,
         exploit_attempts=exploit_attempts,
     )
-
-
-def _success_output_failure_kind_is_primary(
-    failure_kind: str,
-    output_text: str,
-    *,
-    stdout: str,
-) -> bool:
-    """Return true when a zero-exit script's diagnostic is the main outcome."""
-
-    if failure_kind == "nonzero_exit":
-        return False
-    if failure_kind != "path_resolution_error":
-        return True
-    text = output_text.strip()
-    if not text:
-        return True
-    if "traceback (most recent call last)" in text.lower():
-        return True
-    lines = [line.strip() for line in stdout.replace("\r", "\n").splitlines() if line.strip()]
-    if not lines:
-        return True
-    path_error_lines = [
-        line for line in lines
-        if re.search(r"(?i)(filenotfounderror|no such file or directory)", line)
-    ]
-    progress_lines = [
-        line for line in lines
-        if line not in path_error_lines and _is_diagnostic_line(line)
-    ]
-    return not progress_lines

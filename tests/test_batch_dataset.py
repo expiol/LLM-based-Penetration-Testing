@@ -52,7 +52,9 @@ class BatchDatasetTests(unittest.TestCase):
     def test_non_oracle_random_candidates_keep_original_names(self) -> None:
         args = argparse.Namespace(rag_mode="strict", split="development", category=None)
 
-        with patch("killchain_docker.batch.dataset.actionable_oracle_challenge_ids") as scan:
+        with patch(
+            "killchain_docker.batch.dataset.actionable_oracle_challenge_ids"
+        ) as scan:
             self.assertEqual(
                 _oracle_random_candidates(args, _Dataset(), ["alpha", "beta"]),
                 ["alpha", "beta"],
@@ -113,7 +115,9 @@ class BatchDatasetTests(unittest.TestCase):
                 ["gamma"],
             )
 
-    def test_oracle_full_selection_keeps_unavailable_entries_for_skip_accounting(self) -> None:
+    def test_oracle_full_selection_keeps_unavailable_entries_for_skip_accounting(
+        self,
+    ) -> None:
         args = argparse.Namespace(
             rag_mode="oracle",
             split="development",
@@ -123,7 +127,9 @@ class BatchDatasetTests(unittest.TestCase):
             sample_strategy="random",
         )
 
-        with patch("killchain_docker.batch.dataset.actionable_oracle_challenge_ids") as scan:
+        with patch(
+            "killchain_docker.batch.dataset.actionable_oracle_challenge_ids"
+        ) as scan:
             self.assertEqual(
                 sample_challenge_names(_Dataset(), args, ["alpha", "beta", "gamma"]),
                 ["alpha", "beta", "gamma"],

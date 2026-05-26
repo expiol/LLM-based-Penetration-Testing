@@ -107,7 +107,9 @@ def _event_thread(event: dict[str, Any] | None) -> dict[str, Any] | None:
     return {"id": event.get("thread_id"), "name": event.get("thread_name")}
 
 
-def _attach_current_todo(entry: dict[str, Any] | None, todo: dict[str, Any] | None) -> None:
+def _attach_current_todo(
+    entry: dict[str, Any] | None, todo: dict[str, Any] | None
+) -> None:
     if entry is None or not isinstance(todo, dict):
         return
     if str(todo.get("status") or "") not in CURRENT_TODO_STATUSES:
@@ -119,7 +121,9 @@ def _attach_current_todo(entry: dict[str, Any] | None, todo: dict[str, Any] | No
     }
 
 
-def _attach_latest_event(entry: dict[str, Any] | None, event: dict[str, Any] | None) -> None:
+def _attach_latest_event(
+    entry: dict[str, Any] | None, event: dict[str, Any] | None
+) -> None:
     if entry is None or not isinstance(event, dict):
         return
     entry["latest_event"] = {
@@ -153,7 +157,9 @@ def _attach_event_work(entry: dict[str, Any] | None, event: dict[str, Any]) -> N
         entry["cycle"] = context.get("cycle")
 
 
-def _attach_runtime_error(entry: dict[str, Any] | None, error: dict[str, Any] | None) -> None:
+def _attach_runtime_error(
+    entry: dict[str, Any] | None, error: dict[str, Any] | None
+) -> None:
     if entry is None or not isinstance(error, dict):
         return
     entry["error"] = {

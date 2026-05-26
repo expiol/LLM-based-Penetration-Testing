@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from killchain_docker.tools.capabilities import ToolCapability
-from killchain_docker.tools.plugins.shell import (
+from killchain_docker.tools.plugins.shell_guard import (
     http_client_non_http_url_block_reason,
     package_install_block_reason,
     stderr_suppression_block_reason,
@@ -68,14 +68,28 @@ class ToolGuardPolicy:
             return "unbounded_extraction_blocked"
         if "curl supports only http/https" in lowered or "non-http url" in lowered:
             return "non_http_url_blocked"
-        if "scratch files must use ctf_temp_dir" in lowered or "hard-code /tmp" in lowered:
+        if (
+            "scratch files must use ctf_temp_dir" in lowered
+            or "hard-code /tmp" in lowered
+        ):
             return "scope_violation_blocked"
         if (
             "outside authorized_scope" in lowered
             or "ambient filesystem" in lowered
             or (
                 "blocked:" in lowered
-                and any(token in lowered for token in ("/home", "/root", "/etc", "/tmp", "/var", "/opt", "files_root"))
+                and any(
+                    token in lowered
+                    for token in (
+                        "/home",
+                        "/root",
+                        "/etc",
+                        "/tmp",
+                        "/var",
+                        "/opt",
+                        "files_root",
+                    )
+                )
             )
         ):
             return "scope_violation_blocked"

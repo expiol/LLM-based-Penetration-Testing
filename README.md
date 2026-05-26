@@ -247,7 +247,7 @@ conda run -n autopentest python scripts/plot_results.py logs/hy/batch_name/
 
 ## Requirements
 
-- Python ≥ 3.10
+- Python ≥ 3.11
 - Docker
 - An OpenAI-compatible LLM API endpoint
 

@@ -9,7 +9,7 @@ import zlib
 from pathlib import Path
 from unittest.mock import patch
 
-from killchain_docker.tools import ToolExecutionRequest, ToolExecutionResult
+from killchain_docker.tools.core import ToolExecutionRequest, ToolExecutionResult
 from killchain_docker.tools.core import ExecutionMode, ParsedToolOutput
 from killchain_docker.tools.plugins.png_inspect import (
     PngInspectPlugin,
@@ -61,7 +61,9 @@ class PngInspectTests(unittest.TestCase):
         self.assertEqual(output.output_context["width"], 64)
         self.assertEqual(output.output_context["chunks"][0]["type"], "IHDR")
         self.assertEqual(output.output_context["visual_previews"][0]["plane"], "luma")
-        self.assertEqual(output.output_context["visual_previews"][0]["preview"], "##..\n..##")
+        self.assertEqual(
+            output.output_context["visual_previews"][0]["preview"], "##..\n..##"
+        )
         self.assertEqual(output.artifacts[0].path, artifact_path)
         self.assertEqual(output.artifacts[0].source, "png_inspect")
         self.assertEqual(output.artifacts[0].digest, digest)
@@ -94,22 +96,36 @@ class PngInspectTests(unittest.TestCase):
             self.assertEqual(output.output_context["width"], 64)
             self.assertTrue(output.output_context["lsb"])
             self.assertTrue(output.output_context["visual_previews"])
-            self.assertIn("comment text", output.output_context["text_items"][0]["text"])
-            self.assertIn("flag{lsb_png_ok_123}", [c.value for c in output.flag_candidates])
+            self.assertIn(
+                "comment text", output.output_context["text_items"][0]["text"]
+            )
+            self.assertIn(
+                "flag{lsb_png_ok_123}", [c.value for c in output.flag_candidates]
+            )
             self.assertTrue(output.artifacts)
-            self.assertTrue(Path(output.artifacts[0].path).exists(), output.artifacts[0].path)
+            self.assertTrue(
+                Path(output.artifacts[0].path).exists(), output.artifacts[0].path
+            )
 
     def test_plugin_preserves_durable_artifact_directory(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             captured["timeout_s"] = timeout_s
-            return ToolExecutionResult(tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0)
+            return ToolExecutionResult(
+                tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("killchain_docker.tools.plugins.png_inspect._run", side_effect=fake_run):
-                PngInspectPlugin(argv_prefix=["docker", "exec", "-i", "container"]).execute(
+            with patch(
+                "killchain_docker.tools.plugins.png_inspect._run", side_effect=fake_run
+            ):
+                PngInspectPlugin(
+                    argv_prefix=["docker", "exec", "-i", "container"]
+                ).execute(
                     ToolExecutionRequest(
                         tool_name="png_inspect",
                         timeout_s=5,
@@ -176,13 +192,18 @@ class PngInspectTests(unittest.TestCase):
 
         output = build_output(request, result, ParsedToolOutput(summary="raw"))
 
-        self.assertEqual([candidate.value for candidate in output.flag_candidates], ["flag{valid_body_123}"])
+        self.assertEqual(
+            [candidate.value for candidate in output.flag_candidates],
+            ["flag{valid_body_123}"],
+        )
 
 
 def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
     crc = binascii.crc32(chunk_type)
     crc = binascii.crc32(payload, crc) & 0xFFFFFFFF
-    return struct.pack(">I", len(payload)) + chunk_type + payload + struct.pack(">I", crc)
+    return (
+        struct.pack(">I", len(payload)) + chunk_type + payload + struct.pack(">I", crc)
+    )
 
 
 def _png_with_text_and_lsb_flag(message: str) -> bytes:
@@ -200,7 +221,7 @@ def _png_with_text_and_lsb_flag(message: str) -> bytes:
     for row in range(height):
         rows.append(0)
         start = row * stride
-        rows.extend(pixels[start:start + stride])
+        rows.extend(pixels[start : start + stride])
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     return b"".join(
         [

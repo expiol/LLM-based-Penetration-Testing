@@ -22,7 +22,9 @@ from pathlib import Path
 # ``## Solution`` (case-insensitive) anywhere in the README, until the next
 # ``##`` heading.  We deliberately stop at the next heading so unrelated
 # sections (``## Setup``, ``## Build``) don't leak into the sketch.
-_SOLUTION_HEADING_RE = re.compile(r"^\s*##+\s*solution\b.*$", re.IGNORECASE | re.MULTILINE)
+_SOLUTION_HEADING_RE = re.compile(
+    r"^\s*##+\s*solution\b.*$", re.IGNORECASE | re.MULTILINE
+)
 _NEXT_HEADING_RE = re.compile(r"^\s*##+\s+", re.MULTILINE)
 _SOLUTION_FILE_RE = re.compile(
     r"(?i)(?:^|[-_.])(solve|solver|solution|writeup|exploit|decrypt)(?:[-_.]|$)"
@@ -111,7 +113,7 @@ def extract_solution_sketch(readme: str) -> str:
     match = _SOLUTION_HEADING_RE.search(readme)
     if match is None:
         return ""
-    tail = readme[match.end():]
+    tail = readme[match.end() :]
     next_heading = _NEXT_HEADING_RE.search(tail)
     body = tail[: next_heading.start()] if next_heading else tail
     return body.strip()
@@ -198,7 +200,7 @@ def _readme_description(readme: str) -> str:
     match = _DESCRIPTION_HEADING_RE.search(readme)
     if match is None:
         return ""
-    tail = readme[match.end():]
+    tail = readme[match.end() :]
     next_heading = _NEXT_HEADING_RE.search(tail)
     body = tail[: next_heading.start()] if next_heading else tail
     return body.strip()
@@ -242,22 +244,21 @@ def augment_solution_sketch(
         rel = path.relative_to(challenge_dir).as_posix()
         suffix = path.suffix.lstrip(".") or "text"
         excerpt = _compact_companion_text(text, suffix)[:_MAX_COMPANION_CHARS]
-        sections.append(
-            f"Companion solution file: {rel}\n"
-            f"```{suffix}\n{excerpt}\n```"
-        )
+        sections.append(f"Companion solution file: {rel}\n```{suffix}\n{excerpt}\n```")
     return "\n\n".join(sections).strip()
 
 
-def _knowledge_companion_files(challenge_dir: Path, challenge_files: list[str]) -> list[Path]:
+def _knowledge_companion_files(
+    challenge_dir: Path, challenge_files: list[str]
+) -> list[Path]:
     if not challenge_dir.is_dir():
         return []
     solution_files = [
-        path
-        for path in challenge_dir.iterdir()
-        if _is_solution_companion(path)
+        path for path in challenge_dir.iterdir() if _is_solution_companion(path)
     ]
-    selected = sorted(solution_files, key=lambda path: path.name.lower())[:_MAX_COMPANION_FILES]
+    selected = sorted(solution_files, key=lambda path: path.name.lower())[
+        :_MAX_COMPANION_FILES
+    ]
     if len(selected) >= _MAX_COMPANION_FILES:
         return selected
 
@@ -300,6 +301,9 @@ def _is_supporting_source(
 ) -> bool:
     if not path.is_file() or path.name in selected_names:
         return False
-    if path.name in excluded_names or path.name.lower() in {"readme.md", "challenge.json"}:
+    if path.name in excluded_names or path.name.lower() in {
+        "readme.md",
+        "challenge.json",
+    }:
         return False
     return path.suffix.lower() in _SUPPORTING_SOURCE_SUFFIXES

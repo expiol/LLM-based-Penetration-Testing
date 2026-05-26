@@ -44,9 +44,17 @@ class BatchMonitorTests(unittest.TestCase):
             self.assertIsInstance(payload["status_writer_thread_id"], int)
             self.assertIsInstance(payload["status_writer_thread_name"], str)
             self.assertEqual(payload["threads"]["observed"]["id"], payload["thread_id"])
-            self.assertEqual(payload["threads"]["observed"]["name"], payload["thread_name"])
-            self.assertEqual(payload["threads"]["status_writer"]["id"], payload["status_writer_thread_id"])
-            self.assertEqual(payload["threads"]["status_writer"]["name"], payload["status_writer_thread_name"])
+            self.assertEqual(
+                payload["threads"]["observed"]["name"], payload["thread_name"]
+            )
+            self.assertEqual(
+                payload["threads"]["status_writer"]["id"],
+                payload["status_writer_thread_id"],
+            )
+            self.assertEqual(
+                payload["threads"]["status_writer"]["name"],
+                payload["status_writer_thread_name"],
+            )
             self.assertEqual(payload["threads"]["registry"][0]["challenge"], "demo")
             self.assertIn("observed", payload["threads"]["registry"][0]["roles"])
             self.assertIn("status_writer", payload["threads"]["registry"][0]["roles"])
@@ -125,8 +133,12 @@ class BatchMonitorTests(unittest.TestCase):
                 ],
             )
 
-            states = {entry["challenge"]: entry["state"] for entry in snapshot["entries"]}
-            self.assertEqual(states, {"alpha": "completed", "beta": "active", "gamma": "queued"})
+            states = {
+                entry["challenge"]: entry["state"] for entry in snapshot["entries"]
+            }
+            self.assertEqual(
+                states, {"alpha": "completed", "beta": "active", "gamma": "queued"}
+            )
             self.assertEqual(snapshot["counts"]["completed"], 1)
             self.assertEqual(snapshot["counts"]["active"], 1)
             self.assertEqual(snapshot["entries"][0]["status_file"], "alpha.status.json")
@@ -138,7 +150,11 @@ class BatchMonitorTests(unittest.TestCase):
                 challenge_names=["failed", "interrupted"],
                 results=[
                     {"challenge": "failed", "status": "failed", "solved": False},
-                    {"challenge": "interrupted", "status": "interrupted", "solved": False},
+                    {
+                        "challenge": "interrupted",
+                        "status": "interrupted",
+                        "solved": False,
+                    },
                 ],
                 batch_start=0,
                 finished=True,
@@ -197,7 +213,9 @@ class BatchMonitorTests(unittest.TestCase):
                 challenge_names=["alpha"],
                 results=[{"challenge": "alpha", "status": "failed"}],
                 batch_start=0,
-                active_runs=[{"challenge": "alpha", "status_file": "alpha.status.json"}],
+                active_runs=[
+                    {"challenge": "alpha", "status_file": "alpha.status.json"}
+                ],
             )
 
             self.assertEqual(snapshot["entries"][0]["state"], "completed")
@@ -235,7 +253,12 @@ class BatchMonitorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             snapshot = build_monitor_snapshot(
                 logdir=Path(tmp),
-                challenge_names=["alpha", "../escape", r"..\escape", "javascript:alert(1)"],
+                challenge_names=[
+                    "alpha",
+                    "../escape",
+                    r"..\escape",
+                    "javascript:alert(1)",
+                ],
                 results=[],
                 batch_start=0,
             )
@@ -347,10 +370,13 @@ class BatchMonitorTests(unittest.TestCase):
             self.assertEqual(result["error"]["type"], "ValueError")
             self.assertLessEqual(len(result["error"]["message"]), 360)
             self.assertNotIn("traceback", result["error"])
-            self.assertEqual(result["runtime_error"], {
-                "type": "RuntimeError",
-                "message": "runtime failed",
-            })
+            self.assertEqual(
+                result["runtime_error"],
+                {
+                    "type": "RuntimeError",
+                    "message": "runtime failed",
+                },
+            )
 
     def test_monitor_result_rejects_parent_traversal_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -423,7 +449,9 @@ class BatchMonitorTests(unittest.TestCase):
 
             payload = json.loads(status_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["logfile"], "alpha.json")
-            self.assertEqual(payload["artifacts"]["report_path"], "artifacts/alpha/report.md")
+            self.assertEqual(
+                payload["artifacts"]["report_path"], "artifacts/alpha/report.md"
+            )
             self.assertNotIn("compact_markdown_path", payload["artifacts"])
 
     def test_sanitize_monitor_paths_handles_nested_dicts_and_lists(self) -> None:
@@ -476,12 +504,16 @@ class BatchMonitorTests(unittest.TestCase):
                 challenge_names=["alpha"],
                 results=[],
                 batch_start=0,
-                active_runs=[{"challenge": "alpha", "status_file": "alpha.status.json"}],
+                active_runs=[
+                    {"challenge": "alpha", "status_file": "alpha.status.json"}
+                ],
             )
 
             self.assertEqual(html_path, logdir / MONITOR_HTML_NAME)
             self.assertTrue((logdir / MONITOR_HTML_NAME).exists())
-            payload = json.loads((logdir / MONITOR_JSON_NAME).read_text(encoding="utf-8"))
+            payload = json.loads(
+                (logdir / MONITOR_JSON_NAME).read_text(encoding="utf-8")
+            )
             self.assertEqual(payload["entries"][0]["state"], "active")
             html = html_path.read_text(encoding="utf-8")
             self.assertIn("_batch_monitor.json", html)
@@ -516,7 +548,9 @@ class BatchMonitorTests(unittest.TestCase):
             self.assertIn("statusError", html)
             self.assertIn('if (row.statusError) return "stale"', html)
             self.assertIn("status read failed", html)
-            self.assertIn("runtimeError = live.runtime_error || result.runtime_error", html)
+            self.assertIn(
+                "runtimeError = live.runtime_error || result.runtime_error", html
+            )
             self.assertIn("runError = live.error || result.error", html)
             self.assertIn("function fmtTokenUsage", html)
             self.assertIn("function sumTokenUsage", html)
@@ -625,7 +659,9 @@ global.setInterval = () => 0;
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_write_batch_monitor_snapshot_updates_json_without_rewriting_html(self) -> None:
+    def test_write_batch_monitor_snapshot_updates_json_without_rewriting_html(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             logdir = Path(tmp)
             html_path = logdir / MONITOR_HTML_NAME
@@ -636,7 +672,9 @@ global.setInterval = () => 0;
                 challenge_names=["alpha"],
                 results=[],
                 batch_start=0,
-                active_runs=[{"challenge": "alpha", "status_file": "alpha.status.json"}],
+                active_runs=[
+                    {"challenge": "alpha", "status_file": "alpha.status.json"}
+                ],
             )
 
             payload = json.loads(json_path.read_text(encoding="utf-8"))
@@ -1146,7 +1184,9 @@ global.setInterval = () => 0;
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_generated_monitor_script_renders_unsolved_terminal_status_as_failed(self) -> None:
+    def test_generated_monitor_script_renders_unsolved_terminal_status_as_failed(
+        self,
+    ) -> None:
         node = shutil.which("node")
         if not node:
             self.skipTest("node is not available")
@@ -1248,7 +1288,9 @@ global.setInterval = () => 0;
                 challenge_names=["alpha"],
                 results=[],
                 batch_start=0,
-                active_runs=[{"challenge": "alpha", "status_file": "alpha.status.json"}],
+                active_runs=[
+                    {"challenge": "alpha", "status_file": "alpha.status.json"}
+                ],
             )
             write_run_status(
                 logdir / "alpha.status.json",
@@ -1339,7 +1381,9 @@ global.setInterval = () => 0;
                 challenge_names=["alpha"],
                 results=[],
                 batch_start=0,
-                active_runs=[{"challenge": "alpha", "status_file": "alpha.status.json"}],
+                active_runs=[
+                    {"challenge": "alpha", "status_file": "alpha.status.json"}
+                ],
             )
             write_run_status(
                 logdir / "alpha.status.json",
@@ -1428,7 +1472,9 @@ global.setInterval = () => 0;
                 challenge_names=["alpha"],
                 results=[],
                 batch_start=0,
-                active_runs=[{"challenge": "alpha", "status_file": "alpha.status.json"}],
+                active_runs=[
+                    {"challenge": "alpha", "status_file": "alpha.status.json"}
+                ],
             )
             status_path = logdir / "alpha.status.json"
             write_run_status(
@@ -1480,7 +1526,11 @@ global.setInterval = () => 0;
             ]
             status_path.write_text(json.dumps(status), encoding="utf-8")
 
-            match = re.search(r"<script>\s*(.*?)\s*</script>", html_path.read_text(encoding="utf-8"), flags=re.DOTALL)
+            match = re.search(
+                r"<script>\s*(.*?)\s*</script>",
+                html_path.read_text(encoding="utf-8"),
+                flags=re.DOTALL,
+            )
             self.assertIsNotNone(match)
             assert match is not None
             script_path = logdir / "monitor.js"
@@ -1552,7 +1602,9 @@ global.setInterval = () => 0;
                 challenge_names=["alpha"],
                 results=[],
                 batch_start=0,
-                active_runs=[{"challenge": "alpha", "status_file": "alpha.status.json"}],
+                active_runs=[
+                    {"challenge": "alpha", "status_file": "alpha.status.json"}
+                ],
             )
             write_run_status(
                 logdir / "alpha.status.json",

@@ -7,7 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from killchain_docker.batch.docker import docker_compose_down, start_challenge_with_retry
+from killchain_docker.batch.docker import (
+    docker_compose_down,
+    start_challenge_with_retry,
+)
 from killchain_docker.processes import BoundedProcessResult
 
 
@@ -78,9 +81,13 @@ class DockerLifecycleTests(unittest.TestCase):
 
             with patch(
                 "killchain_docker.batch.docker.run_bounded_process",
-                return_value=BoundedProcessResult(exit_code=1, stdout="", stderr="cleanup failed"),
+                return_value=BoundedProcessResult(
+                    exit_code=1, stdout="", stderr="cleanup failed"
+                ),
             ):
-                with self.assertLogs("killchain_docker.batch.docker", level="WARNING") as captured:
+                with self.assertLogs(
+                    "killchain_docker.batch.docker", level="WARNING"
+                ) as captured:
                     docker_compose_down(challenge)  # type: ignore[arg-type]
 
             self.assertEqual(len(captured.records), 1)
@@ -94,7 +101,9 @@ class DockerLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             challenge = _FakeChallenge(Path(tmp))
 
-            with patch("killchain_docker.batch.docker.run_bounded_process") as run_process:
+            with patch(
+                "killchain_docker.batch.docker.run_bounded_process"
+            ) as run_process:
                 docker_compose_down(challenge)  # type: ignore[arg-type]
 
             run_process.assert_not_called()
@@ -105,7 +114,9 @@ class DockerLifecycleTests(unittest.TestCase):
 
             with (
                 patch("killchain_docker.batch.docker.time.sleep"),
-                self.assertLogs("killchain_docker.batch.docker", level="WARNING") as captured,
+                self.assertLogs(
+                    "killchain_docker.batch.docker", level="WARNING"
+                ) as captured,
             ):
                 start_challenge_with_retry(challenge, attempts=2)
 
@@ -150,11 +161,16 @@ class DockerLifecycleTests(unittest.TestCase):
                         stderr="",
                     )
                 if "up" in command:
-                    generated_configs.append(json.loads(Path(command[3]).read_text(encoding="utf-8")))
+                    generated_configs.append(
+                        json.loads(Path(command[3]).read_text(encoding="utf-8"))
+                    )
                     return BoundedProcessResult(exit_code=0, stdout="", stderr="")
                 raise AssertionError(f"unexpected command: {command}")
 
-            with patch("killchain_docker.batch.docker.run_bounded_process", side_effect=fake_run):
+            with patch(
+                "killchain_docker.batch.docker.run_bounded_process",
+                side_effect=fake_run,
+            ):
                 start_challenge_with_retry(challenge, attempts=2)  # type: ignore[arg-type]
 
             self.assertEqual(challenge.starts, 1)

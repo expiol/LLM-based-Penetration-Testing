@@ -12,7 +12,7 @@ from typing import Any
 from nyuctf.challenge import CTFChallenge
 from nyuctf.dataset import CTFDataset
 
-from killchain_docker.knowledge import actionable_oracle_challenge_ids
+from killchain_docker.knowledge.retriever import actionable_oracle_challenge_ids
 from killchain_docker.logging_utils import get_logger
 
 
@@ -45,7 +45,9 @@ def normalize_category(value: str | None) -> str | None:
     return normalized or None
 
 
-def challenge_names_for_category(dataset: CTFDataset, category: str | None) -> list[str]:
+def challenge_names_for_category(
+    dataset: CTFDataset, category: str | None
+) -> list[str]:
     category_filter = normalize_category(category)
     all_names = sorted(dict(dataset.all()).keys())
     if not category_filter:
@@ -127,7 +129,10 @@ def _challenge_expected_flag(dataset: CTFDataset, name: str) -> str:
     try:
         # nyuctf emits stdout warnings for non-standard flags; keep selection
         # deterministic and let our own logging own user-visible messages.
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
             return str(CTFChallenge(info, dataset.basedir).flag or "").strip()
     except Exception:
         LOGGER.debug(
@@ -273,7 +278,9 @@ def derive_authorized_scope(challenge: CTFChallenge) -> list[str]:
     is_web = challenge.server_type == "web" or category == "web"
 
     if is_web and port:
-        proto = str(challenge.challenge.get("proto") or "http").strip().lower() or "http"
+        proto = (
+            str(challenge.challenge.get("proto") or "http").strip().lower() or "http"
+        )
         if proto not in {"http", "https"}:
             proto = "http"
         return [f"{proto}://{challenge.server_name}:{port}"]
@@ -284,7 +291,9 @@ def derive_authorized_scope(challenge: CTFChallenge) -> list[str]:
     return [challenge.server_name]
 
 
-def estimate_max_cycles(challenge: CTFChallenge, authorized_scope: list[str], base_cycles: int = 8) -> int:
+def estimate_max_cycles(
+    challenge: CTFChallenge, authorized_scope: list[str], base_cycles: int = 8
+) -> int:
     cycles = base_cycles
     num_files = len(challenge.files) if challenge.files else 0
     has_server = bool(challenge.server_name and _challenge_port(challenge))
@@ -308,9 +317,13 @@ def derive_objective(challenge: CTFChallenge, authorized_scope: list[str]) -> st
     if authorized_scope:
         lines.append("Authorized scope: " + ", ".join(authorized_scope))
     if challenge.files:
-        lines.append("Challenge files are available inside the agent container under /home/ctfplayer/ctf_files.")
+        lines.append(
+            "Challenge files are available inside the agent container under /home/ctfplayer/ctf_files."
+        )
 
-    lines.append("Derive and validate a concrete flag candidate using only authorized artifacts and services.")
+    lines.append(
+        "Derive and validate a concrete flag candidate using only authorized artifacts and services."
+    )
     return "\n".join(lines)
 
 
@@ -328,7 +341,11 @@ def resolve_flag_format(challenge: CTFChallenge) -> str:
 
 
 def challenge_metadata(challenge: CTFChallenge) -> dict[str, Any]:
-    raw = challenge.challenge if isinstance(getattr(challenge, "challenge", None), dict) else {}
+    raw = (
+        challenge.challenge
+        if isinstance(getattr(challenge, "challenge", None), dict)
+        else {}
+    )
     year = getattr(challenge, "year", None) or raw.get("year") or ""
     event = getattr(challenge, "event", None) or raw.get("event") or ""
     return {

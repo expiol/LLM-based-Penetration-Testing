@@ -8,31 +8,28 @@ Supports:
 """
 
 from __future__ import annotations
-
 import re
 from typing import Any
-
-from killchain_docker.state import Artifact
+from killchain_docker.state.domain import Artifact
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
     _status,
-    _truncate,
 )
 
-
-_EMBEDDED_FILE_RE = re.compile(r'embedded file "(.+?)"', re.IGNORECASE)
-_CAPACITY_RE = re.compile(r"capacity:\s*(.+)", re.IGNORECASE)
-_ENCRYPTION_RE = re.compile(r"encryption.*?:\s*(.+)", re.IGNORECASE)
-_EXTRACTED_RE = re.compile(r'wrote extracted data to "(.+?)"', re.IGNORECASE)
+_EMBEDDED_FILE_RE = re.compile('embedded file "(.+?)"', re.IGNORECASE)
+_CAPACITY_RE = re.compile("capacity:\\s*(.+)", re.IGNORECASE)
+_ENCRYPTION_RE = re.compile("encryption.*?:\\s*(.+)", re.IGNORECASE)
+_EXTRACTED_RE = re.compile('wrote extracted data to "(.+?)"', re.IGNORECASE)
 
 
 class SteghidePlugin:
@@ -51,7 +48,9 @@ class SteghidePlugin:
             cmd = f"steghide extract -sf {path} -p '{passphrase}' -xf {out_file} -f && cat {out_file}"
         else:
             cmd = f"steghide info {path} -p '{passphrase}'"
-        return _run(self.name, [*self.argv_prefix, "bash", "-c", cmd], request.timeout_s)
+        return _run(
+            self.name, [*self.argv_prefix, "bash", "-c", cmd], request.timeout_s
+        )
 
 
 def build_output(
@@ -65,48 +64,41 @@ def build_output(
     stderr = result.stderr or ""
     combined = stdout + "\n" + stderr
     status = _status(result)
-
-    # -- Parse embedded file info -------------------------------------------
     embedded_files = _EMBEDDED_FILE_RE.findall(combined)
     has_embedded = bool(embedded_files) or "embedded file" in combined.lower()
-
     capacity = ""
     m = _CAPACITY_RE.search(combined)
     if m:
         capacity = m.group(1).strip()
-
     encryption = ""
     m = _ENCRYPTION_RE.search(combined)
     if m:
         encryption = m.group(1).strip()
-
     extracted_path = ""
     m = _EXTRACTED_RE.search(combined)
     if m:
         extracted_path = m.group(1).strip()
-
-    # -- Artifacts -----------------------------------------------------------
     artifacts: list[Artifact] = []
     if extracted_path:
-        artifacts.append(Artifact(
-            path=extracted_path,
-            kind="steghide_extract",
-            source="steghide",
-            metadata={"cover_file": path},
-        ))
+        artifacts.append(
+            Artifact(
+                path=extracted_path,
+                kind="steghide_extract",
+                source="steghide",
+                metadata={"cover_file": path},
+            )
+        )
     for ef in embedded_files:
         if ef != extracted_path:
-            artifacts.append(Artifact(
-                path=ef,
-                kind="steghide_embedded",
-                source="steghide",
-                metadata={"cover_file": path, "detected_only": action != "extract"},
-            ))
-
-    # -- Flags ---------------------------------------------------------------
+            artifacts.append(
+                Artifact(
+                    path=ef,
+                    kind="steghide_embedded",
+                    source="steghide",
+                    metadata={"cover_file": path, "detected_only": action != "extract"},
+                )
+            )
     flags = _flag_candidates_from(stdout, source="steghide")
-
-    # -- Summary -------------------------------------------------------------
     summary = f"steghide {action} {path}"
     if has_embedded:
         summary += f" — embedded data detected"
@@ -116,8 +108,6 @@ def build_output(
         summary += f" → {extracted_path}"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
-
-    # -- output_context ------------------------------------------------------
     output_context: dict[str, Any] = {
         "path": path,
         "action": action,
@@ -131,7 +121,6 @@ def build_output(
         output_context["encryption"] = encryption
     if extracted_path:
         output_context["extracted_path"] = extracted_path
-
     return ToolOutput(
         status=status,
         summary=summary,

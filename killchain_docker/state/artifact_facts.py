@@ -12,28 +12,34 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-_GENERATED_SOURCES = frozenset({
-    "artifact_triage_archive",
-    "artifact_triage_png",
-    "disk_extract",
-    "foremost",
-    "media_scan",
-    "office_inspect",
-    "png_inspect",
-    "script_exec",
-})
-_TERMINAL_SOURCES = frozenset({
-    "artifact_triage",
-    "exiftool",
-    "file",
-    "strings",
-})
-_LOW_SIGNAL_ROLES = frozenset({
-    "font",
-    "low_signal",
-    "os_metadata",
-    "thumbnail",
-})
+_GENERATED_SOURCES = frozenset(
+    {
+        "artifact_triage_archive",
+        "artifact_triage_png",
+        "disk_extract",
+        "foremost",
+        "media_scan",
+        "office_inspect",
+        "png_inspect",
+        "script_exec",
+    }
+)
+_TERMINAL_SOURCES = frozenset(
+    {
+        "artifact_triage",
+        "exiftool",
+        "file",
+        "strings",
+    }
+)
+_LOW_SIGNAL_ROLES = frozenset(
+    {
+        "font",
+        "low_signal",
+        "os_metadata",
+        "thumbnail",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -157,24 +163,21 @@ def facts_from_artifact(artifact: Any) -> ArtifactFacts:
         )
         or any(token in kind_signal for token in ("archive", "compressed", "container"))
     )
-    is_disk_image = (
-        any(
-            token in content_text
-            for token in (
-                "boot sector",
-                "ext2 filesystem",
-                "ext3 filesystem",
-                "ext4 filesystem",
-                "fat",
-                "filesystem image",
-                "iso 9660",
-                "ntfs",
-                "partition table",
-                "udf filesystem",
-            )
+    is_disk_image = any(
+        token in content_text
+        for token in (
+            "boot sector",
+            "ext2 filesystem",
+            "ext3 filesystem",
+            "ext4 filesystem",
+            "fat",
+            "filesystem image",
+            "iso 9660",
+            "ntfs",
+            "partition table",
+            "udf filesystem",
         )
-        or _kind_indicates_disk_image(kind_signal)
-    )
+    ) or _kind_indicates_disk_image(kind_signal)
     is_database = (
         mime in {"application/vnd.sqlite3", "application/x-sqlite3"}
         or any(token in content_text for token in ("database", "sqlite"))
@@ -195,9 +198,7 @@ def facts_from_artifact(artifact: Any) -> ArtifactFacts:
         )
         or kind_signal == "text"
     )
-    is_embedded_media = source == "office_inspect" and (
-        role == "media" or is_media
-    )
+    is_embedded_media = source == "office_inspect" and (role == "media" or is_media)
     is_low_signal = (
         _metadata_bool(metadata, "low_signal")
         or role in _LOW_SIGNAL_ROLES
@@ -224,7 +225,9 @@ def facts_from_artifact(artifact: Any) -> ArtifactFacts:
         generated=source in _GENERATED_SOURCES or "/.autopentest_artifacts/" in path,
         terminal_source=source in _TERMINAL_SOURCES,
         has_content_identity=has_content_identity,
-        has_interesting_strings=_has_nonempty_sequence(metadata.get("interesting_strings")),
+        has_interesting_strings=_has_nonempty_sequence(
+            metadata.get("interesting_strings")
+        ),
         has_signatures=_has_signatures(metadata),
         is_png=is_png,
         is_media=is_media,
@@ -278,20 +281,6 @@ def artifact_followup_capability(artifact: Any) -> str:
     if facts.is_media:
         return "media.scan"
     return "artifact.triage"
-
-
-def artifact_followup_profile(capability: str) -> str:
-    """Map a deterministic capability to a dispatch profile."""
-
-    if capability == "office.inspect":
-        return "office_inspection"
-    if capability == "media.scan":
-        return "media_inspection"
-    if capability == "png.inspect":
-        return "image_inspection"
-    if capability == "disk.extract":
-        return "container_extraction"
-    return "artifact_analysis"
 
 
 def _metadata_text(metadata: dict[str, Any], *keys: str) -> str:
@@ -374,6 +363,5 @@ __all__ = [
     "ArtifactFacts",
     "artifact_followup_capability",
     "artifact_followup_priority",
-    "artifact_followup_profile",
     "facts_from_artifact",
 ]

@@ -1,7 +1,7 @@
 """curl — HTTP requests with cookie jar session persistence.
 
 Supports:
-  - Stateless single requests (default, backward-compatible)
+  - Stateless single requests
   - Persistent sessions via session_id → shared cookie jar file
   - Redirect following (-L)
   - HTTP basic auth (-u)
@@ -10,45 +10,34 @@ Supports:
 """
 
 from __future__ import annotations
-
 import os
 import re
 from typing import Any
 from urllib.parse import urlparse
-
-from killchain_docker.state import Credential, Endpoint, Route, Session
+from killchain_docker.state.domain import Credential, Endpoint, Route, Session
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
     _status,
-    _truncate,
 )
 
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 _JAR_DIR = "/tmp/_curl_sessions"
-_SESSION_ID_RE = re.compile(r"[^a-zA-Z0-9_-]")
+_SESSION_ID_RE = re.compile("[^a-zA-Z0-9_-]")
 _MAX_SESSION_ID_LEN = 64
-_HTTP_STATUS_RE = re.compile(r"HTTP/[\d.]+ (\d+)")
-_SET_COOKIE_RE = re.compile(r"^set-cookie:\s*(.+)", re.IGNORECASE)
-_HEADER_KV_RE = re.compile(r"^([\w-]+):\s*(.+)")
+_HTTP_STATUS_RE = re.compile("HTTP/[\\d.]+ (\\d+)")
+_SET_COOKIE_RE = re.compile("^set-cookie:\\s*(.+)", re.IGNORECASE)
+_HEADER_KV_RE = re.compile("^([\\w-]+):\\s*(.+)")
 _HTTP_SCHEMES = {"http", "https"}
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _sanitize_session_id(raw: str) -> str:
     """Strip unsafe characters and clamp length for filesystem safety."""
@@ -92,20 +81,12 @@ def _extract_base_url(url: str) -> str:
 
 def unsupported_url_scheme_reason(url: str) -> str | None:
     """Return a block reason when an explicit URL scheme is not HTTP(S)."""
-
     parsed = urlparse(str(url or "").strip())
     scheme = parsed.scheme.lower()
     if scheme and scheme not in _HTTP_SCHEMES:
-        return (
-            f"curl supports only HTTP/HTTPS URLs, not {scheme}://; "
-            "use script.exec with a bounded socket harness for raw TCP services"
-        )
+        return f"curl supports only HTTP/HTTPS URLs, not {scheme}://; use script.exec with a bounded socket harness for raw TCP services"
     return None
 
-
-# ---------------------------------------------------------------------------
-# Plugin
-# ---------------------------------------------------------------------------
 
 class CurlPlugin:
     """HTTP client plugin with optional cookie jar session persistence.
@@ -121,9 +102,7 @@ class CurlPlugin:
 
     def __init__(self, *, argv_prefix: list[str] | None = None) -> None:
         self.argv_prefix = list(argv_prefix or [])
-        self._sessions: dict[str, str] = {}  # session_id → jar path
-
-    # -- cookie jar management -----------------------------------------------
+        self._sessions: dict[str, str] = {}
 
     def _resolve_jar(self, session_id: str) -> str:
         """Return the cookie jar path for a session, creating dir if needed."""
@@ -137,18 +116,13 @@ class CurlPlugin:
         self._sessions[safe_id] = jar_path
         return jar_path
 
-    # -- execute -------------------------------------------------------------
-
     def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
         meta = request.metadata
         url = _require(meta, "url", self.name)
         scheme_reason = unsupported_url_scheme_reason(url)
         if scheme_reason:
             return ToolExecutionResult(
-                tool_name=self.name,
-                mode=self.mode,
-                exit_code=126,
-                stderr=scheme_reason,
+                tool_name=self.name, mode=self.mode, exit_code=126, stderr=scheme_reason
             )
         method = str(meta.get("method") or "GET").upper()
         headers = meta.get("headers") or {}
@@ -158,45 +132,26 @@ class CurlPlugin:
         cookies = str(meta.get("cookies") or "").strip()
         follow = meta.get("follow_redirects")
         auth = str(meta.get("auth") or "").strip()
-
-        # Build curl command
         parts: list[str] = ["curl", "-s", "-S", "-i", "-X", method]
-
-        # Cookie jar (persistent session)
         if session_id:
             jar = self._resolve_jar(session_id)
             parts.extend(["-b", jar, "-c", jar])
         elif cookies:
-            # One-shot cookies (no persistence)
             parts.extend(["-b", cookies])
-
-        # Follow redirects
         if follow and str(follow).lower() not in ("false", "0", "no", ""):
             parts.append("-L")
-
-        # HTTP basic auth
         if auth:
             parts.extend(["-u", auth])
-
-        # Custom headers
-        for k, v in (headers.items() if isinstance(headers, dict) else []):
+        for k, v in headers.items() if isinstance(headers, dict) else []:
             parts.extend(["-H", f"{k}: {v}"])
-
-        # Request body
         if data:
             parts.extend(["-d", data])
-
-        # Extra args (appended raw — for advanced use)
         if extra:
-            # Use shell to expand extra_args safely
-            cmd = " ".join(_shell_quote(p) for p in parts)
+            cmd = " ".join((_shell_quote(p) for p in parts))
             cmd += f" {extra} {_shell_quote(url)}"
             return _run(
-                self.name,
-                [*self.argv_prefix, "bash", "-c", cmd],
-                request.timeout_s,
+                self.name, [*self.argv_prefix, "bash", "-c", cmd], request.timeout_s
             )
-
         parts.append(url)
         return _run(self.name, [*self.argv_prefix, *parts], request.timeout_s)
 
@@ -205,14 +160,10 @@ def _shell_quote(s: str) -> str:
     """Minimal POSIX shell quoting."""
     if not s:
         return "''"
-    if re.fullmatch(r"[a-zA-Z0-9_./:@=,-]+", s):
+    if re.fullmatch("[a-zA-Z0-9_./:@=,-]+", s):
         return s
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
-
-# ---------------------------------------------------------------------------
-# Output builder
-# ---------------------------------------------------------------------------
 
 def build_output(
     request: ToolExecutionRequest,
@@ -225,16 +176,11 @@ def build_output(
     method = str(meta.get("method") or "GET").upper()
     session_id = str(meta.get("session_id") or "").strip()
     auth = str(meta.get("auth") or "").strip()
-
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     status = _status(result)
-
-    # -- Split headers / body ------------------------------------------------
-    # curl -i may produce multiple header blocks on redirects; take the last
-    parts = re.split(r"\r?\n\r?\n", stdout)
+    parts = re.split("\\r?\\n\\r?\\n", stdout)
     if len(parts) >= 2:
-        # Find the last header block (starts with HTTP/)
         last_header_idx = 0
         for i, part in enumerate(parts[:-1]):
             if part.strip().upper().startswith("HTTP/"):
@@ -242,31 +188,19 @@ def build_output(
         headers_text = "\r\n\r\n".join(parts[: last_header_idx + 1])
         body = "\r\n\r\n".join(parts[last_header_idx + 1 :])
     else:
-        headers_text, body = "", stdout
-
-    # -- Parse HTTP status (final response) ----------------------------------
+        headers_text, body = ("", stdout)
     http_status: int | None = None
     all_statuses = _HTTP_STATUS_RE.findall(stdout)
     if all_statuses:
-        http_status = int(all_statuses[-1])  # Final status after redirects
-
-    # -- Parse response headers ----------------------------------------------
+        http_status = int(all_statuses[-1])
     parsed_headers = _parse_headers_block(headers_text)
     server = parsed_headers.get("server", "")
     content_type = parsed_headers.get("content-type", "")
     content_length = parsed_headers.get("content-length", "")
     location = parsed_headers.get("location", "")
-
-    # -- Parse cookies -------------------------------------------------------
     set_cookies = _parse_set_cookies(headers_text)
-
-    # -- Parse redirect chain ------------------------------------------------
     redirect_chain = _parse_redirect_chain(stdout)
-
-    # -- Flag candidates -----------------------------------------------------
     flags = _flag_candidates_from(body, source="curl")
-
-    # -- Summary -------------------------------------------------------------
     summary = f"curl {method} {url}: HTTP {http_status or '?'}"
     if len(redirect_chain) > 1:
         summary += f" ({len(redirect_chain)} redirects)"
@@ -280,8 +214,6 @@ def build_output(
         summary = f"curl blocked for non-HTTP URL: {url}"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
-
-    # -- output_context ------------------------------------------------------
     output_context: dict[str, Any] = {
         "url": url,
         "method": method,
@@ -308,65 +240,58 @@ def build_output(
         output_context["failure_detail"] = (
             "curl handles HTTP/HTTPS only; use script.exec with socket timeouts for raw TCP"
         )
-
-    # -- Typed state signals -------------------------------------------------
-
-    # Endpoint: base URL of the target
     endpoints: list[Endpoint] = []
     if url and output_context.get("failure_kind") != "non_http_url_blocked":
         base = _extract_base_url(url)
         parsed_url = urlparse(url)
-        endpoints.append(Endpoint(
-            url=base,
-            hostname=parsed_url.hostname or None,
-            port=parsed_url.port,
-            protocol="https" if parsed_url.scheme == "https" else "http",
-            status_code=http_status,
-            metadata={"server": server} if server else {},
-        ))
-
-    # Route: the specific URL + method
+        endpoints.append(
+            Endpoint(
+                url=base,
+                hostname=parsed_url.hostname or None,
+                port=parsed_url.port,
+                protocol="https" if parsed_url.scheme == "https" else "http",
+                status_code=http_status,
+                metadata={"server": server} if server else {},
+            )
+        )
     routes: list[Route] = []
     if (
         url
         and http_status is not None
-        and output_context.get("failure_kind") != "non_http_url_blocked"
+        and (output_context.get("failure_kind") != "non_http_url_blocked")
     ):
         parsed_url = urlparse(url)
-        routes.append(Route(
-            url=url,
-            path=parsed_url.path or "/",
-            method=method,
-            status_code=http_status,
-            source="curl",
-        ))
-
-    # Session: emit when session_id is active and cookies were set
+        routes.append(
+            Route(
+                url=url,
+                path=parsed_url.path or "/",
+                method=method,
+                status_code=http_status,
+                source="curl",
+            )
+        )
     sessions: list[Session] = []
     if session_id and set_cookies:
-        sessions.append(Session(
-            session_type="http_cookie",
-            status="active",
-            metadata={
-                "session_id": session_id,
-                "cookies": set_cookies,
-                "url": url,
-            },
-        ))
-
-    # Credential: emit when basic auth was used successfully
+        sessions.append(
+            Session(
+                session_type="http_cookie",
+                status="active",
+                metadata={"session_id": session_id, "cookies": set_cookies, "url": url},
+            )
+        )
     credentials: list[Credential] = []
-    if auth and ":" in auth and http_status and http_status < 400:
+    if auth and ":" in auth and http_status and (http_status < 400):
         username, secret = auth.split(":", 1)
-        credentials.append(Credential(
-            credential_id=f"curl-auth-{username[:32]}",
-            username=username,
-            secret_ref=f"basic-auth:{username}:***",
-            credential_type="http_basic",
-            source="curl",
-            metadata={"url": url, "http_status": http_status},
-        ))
-
+        credentials.append(
+            Credential(
+                credential_id=f"curl-auth-{username[:32]}",
+                username=username,
+                secret_ref=f"basic-auth:{username}:***",
+                credential_type="http_basic",
+                source="curl",
+                metadata={"url": url, "http_status": http_status},
+            )
+        )
     return ToolOutput(
         status=status,
         summary=summary,

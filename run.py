@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Sequence
 
-from killchain_docker.batch import (
+from killchain_docker.batch.runner import (
     run_all_challenges,
     run_single_challenge_replicas,
 )

@@ -23,10 +23,8 @@ or the dataset is missing — in that case ``augment`` simply returns
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any
-
 from killchain_docker.logging_utils import get_logger
 from killchain_docker.knowledge.embedder import EmbeddingUnavailable
 from killchain_docker.knowledge.retriever import (
@@ -39,21 +37,14 @@ from killchain_docker.knowledge.retriever import (
     rag_mode,
 )
 from killchain_docker.knowledge.status import public_rag_payload
-from killchain_docker.state import RunState
-
+from killchain_docker.state.run_state import RunState
 
 LOGGER = get_logger(__name__)
 PLANNER_SOLUTION_CHARS = 9000
 PLANNER_DESCRIPTION_CHARS = 280
 PLANNER_DESCRIPTION_ONLY_CHARS = 1200
 PLANNER_FILES = 8
-
-# Cap the number of hits we ever feed to a single prompt. More hits quickly
-# spend tokens on lower-confidence noise instead of actionable context.
 MAX_HITS = 3
-
-# Snapshot key on ``state.metadata`` where the augmenter caches its last
-# call.  See :meth:`_cache_run_result`.
 _STATE_RAG_KEY = "rag"
 
 
@@ -70,11 +61,7 @@ class RagContext:
     hits: list[RetrievalHit] | None = None
 
     def prompt_hits(
-        self,
-        *,
-        max_solution_chars: int,
-        max_description_chars: int,
-        max_files: int,
+        self, *, max_solution_chars: int, max_description_chars: int, max_files: int
     ) -> list[dict[str, Any]]:
         rendered: list[dict[str, Any]] = []
         for rank, hit in enumerate(list(self.hits or []), start=1):
@@ -109,10 +96,6 @@ class KnowledgeAugmenter:
         self._configured_top_k = top_k
         self._configured_mode = mode
 
-    # ------------------------------------------------------------------
-    # Construction helpers
-    # ------------------------------------------------------------------
-
     @classmethod
     def from_default(cls, *, mode: str | None = None) -> "KnowledgeAugmenter":
         """Build using the process-wide retriever singleton.
@@ -139,13 +122,8 @@ class KnowledgeAugmenter:
         configured = self._configured_top_k or default_top_k()
         return max(1, min(configured, MAX_HITS))
 
-    # ------------------------------------------------------------------
-    # Primary entry points
-    # ------------------------------------------------------------------
-
     def for_planner(self, state: RunState) -> list[dict[str, Any]]:
         """Return redacted, provenance-free method hints for planner context."""
-
         return self.context_for(state).prompt_hits(
             max_solution_chars=PLANNER_SOLUTION_CHARS,
             max_description_chars=PLANNER_DESCRIPTION_CHARS,
@@ -161,27 +139,28 @@ class KnowledgeAugmenter:
         """
         mode = self.mode
         if mode == "disabled":
-            self._cache_run_result(state, [], enabled=False, mode=mode, status="disabled")
+            self._cache_run_result(
+                state, [], enabled=False, mode=mode, status="disabled"
+            )
             self._log_context_result(state, mode=mode, category=None, query="", top_k=0)
             return RagContext(enabled=False, mode=mode, status="disabled", hits=[])
         if not self.enabled:
-            self._cache_run_result(state, [], enabled=False, mode=mode, status="unavailable")
+            self._cache_run_result(
+                state, [], enabled=False, mode=mode, status="unavailable"
+            )
             self._log_context_result(state, mode=mode, category=None, query="", top_k=0)
             return RagContext(enabled=False, mode=mode, status="unavailable", hits=[])
         category = self._infer_category(state)
         query = self._build_query(state, category)
         if not query:
-            self._cache_run_result(state, [], enabled=True, mode=mode, status="empty_query")
+            self._cache_run_result(
+                state, [], enabled=True, mode=mode, status="empty_query"
+            )
             self._log_context_result(
-                state,
-                mode=mode,
-                category=category,
-                query=query,
-                top_k=self.top_k,
+                state, mode=mode, category=category, query=query, top_k=self.top_k
             )
             return RagContext(enabled=True, mode=mode, status="empty_query", hits=[])
         excluded_ids, excluded_events = self._exclusion_keys(state, mode)
-
         try:
             assert self.retriever is not None
             raw_hits = self.retriever.retrieve(
@@ -199,52 +178,58 @@ class KnowledgeAugmenter:
                 extra={"rag_mode": mode, "category": category, "top_k": self.top_k},
             )
             self.retriever = None
-            self._cache_run_result(state, [], enabled=False, mode=mode, status="unavailable")
+            self._cache_run_result(
+                state, [], enabled=False, mode=mode, status="unavailable"
+            )
             self._log_context_result(
-                state,
-                mode=mode,
-                category=category,
-                query=query,
-                top_k=self.top_k,
+                state, mode=mode, category=category, query=query, top_k=self.top_k
             )
             return RagContext(enabled=False, mode=mode, status="unavailable", hits=[])
         except Exception:
             LOGGER.exception(
-                "RAG retrieval failed",
-                extra={"rag_mode": mode, "category": category},
+                "RAG retrieval failed", extra={"rag_mode": mode, "category": category}
             )
             self._cache_run_result(state, [], enabled=True, mode=mode, status="error")
             self._log_context_result(
-                state,
-                mode=mode,
-                category=category,
-                query=query,
-                top_k=self.top_k,
+                state, mode=mode, category=category, query=query, top_k=self.top_k
             )
             return RagContext(enabled=True, mode=mode, status="error", hits=[])
-
-        identity_hit = self._direct_identity_hit(state, mode, require_solution_sketch=False)
+        identity_hit = self._direct_identity_hit(
+            state, mode, require_solution_sketch=False
+        )
         identity_solution_hit = (
             identity_hit
             if identity_hit is not None and identity_hit.solution_sketch.strip()
             else None
         )
-        ranked_hits = self._ranked_hits_with_identity(raw_hits, state, mode, identity_solution_hit)
+        ranked_hits = self._ranked_hits_with_identity(
+            raw_hits, state, mode, identity_solution_hit
+        )
         metadata_only_identity = (
             mode != RAG_MODE_STRICT
             and identity_hit is not None
-            and identity_solution_hit is None
+            and (identity_solution_hit is None)
         )
-        hits = [] if metadata_only_identity else self._select_prompt_hits(ranked_hits, state, mode)
+        hits = (
+            []
+            if metadata_only_identity
+            else self._select_prompt_hits(ranked_hits, state, mode)
+        )
         canonical_id = str(
             (state.metadata.get("challenge", {}) or {}).get("canonical_name") or ""
         ).strip()
         top_hit = hits[0] if hits else None
-        challenge_identity_hit = bool(top_hit and canonical_id and top_hit.challenge_id == canonical_id)
-        status = "metadata_only" if metadata_only_identity else ("hit" if hits else "miss")
+        challenge_identity_hit = bool(
+            top_hit and canonical_id and (top_hit.challenge_id == canonical_id)
+        )
+        status = (
+            "metadata_only" if metadata_only_identity else "hit" if hits else "miss"
+        )
         self._cache_run_result(
             state,
-            [identity_hit, *ranked_hits] if metadata_only_identity and identity_hit else ranked_hits,
+            [identity_hit, *ranked_hits]
+            if metadata_only_identity and identity_hit
+            else ranked_hits,
             enabled=True,
             mode=mode,
             status=status,
@@ -255,11 +240,7 @@ class KnowledgeAugmenter:
             excluded_event_keys=excluded_events,
         )
         self._log_context_result(
-            state,
-            mode=mode,
-            category=category,
-            query=query,
-            top_k=self.top_k,
+            state, mode=mode, category=category, query=query, top_k=self.top_k
         )
         return RagContext(
             enabled=True,
@@ -270,10 +251,6 @@ class KnowledgeAugmenter:
             challenge_identity_hit=challenge_identity_hit,
             hits=hits,
         )
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _infer_category(state: RunState) -> str:
@@ -295,8 +272,7 @@ class KnowledgeAugmenter:
         name = str(challenge_meta.get("name") or "").strip()
         description = (state.objective or "").strip()
         files = challenge_meta.get("files") or []
-        files_part = ", ".join(str(f) for f in files[:6])
-
+        files_part = ", ".join((str(f) for f in files[:6]))
         parts: list[str] = []
         if name:
             parts.append(f"name: {name}")
@@ -309,10 +285,7 @@ class KnowledgeAugmenter:
         return "\n".join(parts).strip()
 
     @staticmethod
-    def _exclusion_keys(
-        state: RunState,
-        mode: str,
-    ) -> tuple[list[str], list[str]]:
+    def _exclusion_keys(state: RunState, mode: str) -> tuple[list[str], list[str]]:
         """Honor the strict-exclude env var.
 
         Supplemental-context runs keep same-challenge hints available. Strict
@@ -320,8 +293,7 @@ class KnowledgeAugmenter:
         retrieval checks.
         """
         if mode != RAG_MODE_STRICT:
-            return [], []
-
+            return ([], [])
         challenge_meta = state.metadata.get("challenge", {}) or {}
         canonical_id = str(challenge_meta.get("canonical_name") or "").strip()
         challenge_year = str(challenge_meta.get("year") or "").strip()
@@ -330,17 +302,16 @@ class KnowledgeAugmenter:
         if not challenge_event_key:
             challenge_event_key = event_key(challenge_year, challenge_event)
         excluded_ids: list[str] = [canonical_id] if canonical_id else []
-        excluded_events: list[str] = [challenge_event_key] if challenge_event_key else []
-        return excluded_ids, excluded_events
+        excluded_events: list[str] = (
+            [challenge_event_key] if challenge_event_key else []
+        )
+        return (excluded_ids, excluded_events)
 
     @staticmethod
     def _select_prompt_hits(
-        hits: list[RetrievalHit],
-        state: RunState,
-        mode: str,
+        hits: list[RetrievalHit], state: RunState, mode: str
     ) -> list[RetrievalHit]:
         """Keep planner hints precise when retrieval has an identity match."""
-
         if mode == RAG_MODE_STRICT:
             return hits
         canonical_id = str(
@@ -361,20 +332,17 @@ class KnowledgeAugmenter:
         if mode == RAG_MODE_STRICT:
             return hits
         direct = identity_hit or self._direct_identity_hit(
-            state,
-            mode,
-            require_solution_sketch=True,
+            state, mode, require_solution_sketch=True
         )
         if direct is None:
             return hits
-        return [direct, *[hit for hit in hits if hit.challenge_id != direct.challenge_id]]
+        return [
+            direct,
+            *[hit for hit in hits if hit.challenge_id != direct.challenge_id],
+        ]
 
     def _direct_identity_hit(
-        self,
-        state: RunState,
-        mode: str,
-        *,
-        require_solution_sketch: bool,
+        self, state: RunState, mode: str, *, require_solution_sketch: bool
     ) -> RetrievalHit | None:
         if mode == RAG_MODE_STRICT or self.retriever is None:
             return None
@@ -382,18 +350,12 @@ class KnowledgeAugmenter:
             (state.metadata.get("challenge", {}) or {}).get("canonical_name") or ""
         ).strip()
         return self.retriever.hit_by_challenge_id(
-            canonical_id,
-            require_solution_sketch=require_solution_sketch,
+            canonical_id, require_solution_sketch=require_solution_sketch
         )
 
     @staticmethod
     def _log_context_result(
-        state: RunState,
-        *,
-        mode: str,
-        category: str | None,
-        query: str,
-        top_k: int,
+        state: RunState, *, mode: str, category: str | None, query: str, top_k: int
     ) -> None:
         cache = state.metadata.get(_STATE_RAG_KEY)
         if not isinstance(cache, dict):
@@ -408,15 +370,15 @@ class KnowledgeAugmenter:
                 "rag_policy": public.get("policy"),
                 "hint_count": int(public.get("hint_count") or 0),
                 "retrieved_hit_count": int(cache.get("retrieved_hit_count") or 0),
-                "excluded_challenge_count": len(cache.get("excluded_challenge_ids") or []),
+                "excluded_challenge_count": len(
+                    cache.get("excluded_challenge_ids") or []
+                ),
                 "excluded_event_count": len(cache.get("excluded_event_keys") or []),
                 "category": category or "",
                 "query_chars": len(query or ""),
                 "top_k": top_k,
             },
         )
-
-    # ----------------------- cache helpers ----------------------------
 
     @staticmethod
     def _cache_run_result(
@@ -458,27 +420,31 @@ class KnowledgeAugmenter:
             )
             for rank, hit in enumerate(prompt_hits, start=1)
         ]
-        cache.update({
-            "enabled": enabled,
-            "mode": mode,
-            "strict_exclude": mode == RAG_MODE_STRICT,
-            "status": status,
-            "top_score": float(prompt_hits[0].score) if prompt_hits else 0.0,
-            "top_challenge_id": prompt_hits[0].challenge_id if prompt_hits else None,
-            "top_year": prompt_hits[0].year if prompt_hits else None,
-            "top_event": prompt_hits[0].event if prompt_hits else None,
-            "top_event_key": prompt_hits[0].event_key if prompt_hits else None,
-            "hit_count": len(prompt_hits),
-            "retrieved_hit_count": (
-                len(hits) if retrieved_hit_count is None else retrieved_hit_count
-            ),
-            "challenge_identity_hit": challenge_identity_hit,
-            "challenge_event_key": challenge_event_key or None,
-            "excluded_challenge_ids": list(excluded_challenge_ids or []),
-            "excluded_event_keys": list(excluded_event_keys or []),
-            "hit_provenance": [_hit_provenance(hit) for hit in hits],
-            "hint_count": len(prompt_hits),
-        })
+        cache.update(
+            {
+                "enabled": enabled,
+                "mode": mode,
+                "strict_exclude": mode == RAG_MODE_STRICT,
+                "status": status,
+                "top_score": float(prompt_hits[0].score) if prompt_hits else 0.0,
+                "top_challenge_id": prompt_hits[0].challenge_id
+                if prompt_hits
+                else None,
+                "top_year": prompt_hits[0].year if prompt_hits else None,
+                "top_event": prompt_hits[0].event if prompt_hits else None,
+                "top_event_key": prompt_hits[0].event_key if prompt_hits else None,
+                "hit_count": len(prompt_hits),
+                "retrieved_hit_count": len(hits)
+                if retrieved_hit_count is None
+                else retrieved_hit_count,
+                "challenge_identity_hit": challenge_identity_hit,
+                "challenge_event_key": challenge_event_key or None,
+                "excluded_challenge_ids": list(excluded_challenge_ids or []),
+                "excluded_event_keys": list(excluded_event_keys or []),
+                "hit_provenance": [_hit_provenance(hit) for hit in hits],
+                "hint_count": len(prompt_hits),
+            }
+        )
         if knowledge_hints:
             cache["knowledge_hints"] = knowledge_hints
         else:
@@ -497,11 +463,7 @@ def _prompt_hit_dict(
     description_chars = max_description_chars
     if not hit.solution_sketch.strip():
         description_chars = max(description_chars, PLANNER_DESCRIPTION_ONLY_CHARS)
-    item = hit.to_prompt_dict(
-        max_solution_chars,
-        description_chars,
-        max_files,
-    )
+    item = hit.to_prompt_dict(max_solution_chars, description_chars, max_files)
     return {
         "rank": rank,
         "category": item["category"],

@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from killchain_docker.batch.monitor import utc_timestamp, write_json
-from killchain_docker.logging_utils import configure_logging, get_logger, write_json_stdout
+from killchain_docker.logging_utils import (
+    configure_logging,
+    get_logger,
+    write_json_stdout,
+)
 from killchain_docker.processes import run_bounded_process
 
 
@@ -37,11 +41,15 @@ def success_rate_requirement(value: str) -> tuple[str, float]:
         mode, raw_rate = "all", raw
     if mode not in QUALITY_GATE_RATE_MODES:
         choices = ", ".join(sorted(QUALITY_GATE_RATE_MODES))
-        raise argparse.ArgumentTypeError(f"unknown success-rate mode {mode!r}; expected one of: {choices}")
+        raise argparse.ArgumentTypeError(
+            f"unknown success-rate mode {mode!r}; expected one of: {choices}"
+        )
     try:
         rate = float(raw_rate)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"invalid success-rate value {raw_rate!r}") from exc
+        raise argparse.ArgumentTypeError(
+            f"invalid success-rate value {raw_rate!r}"
+        ) from exc
     if rate < 0.0 or rate > 1.0:
         raise argparse.ArgumentTypeError("success-rate value must be between 0 and 1")
     return mode, rate
@@ -52,13 +60,28 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the same benchmark slice with multiple RAG modes and compare summaries.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--challenge", default="__all__", help="Challenge name, __all__, or __random__")
-    parser.add_argument("--challenges", nargs="+", help="Run a named subset of challenges in order")
-    parser.add_argument("--run-all", action="store_true", help="Run all challenges in the selected split/category")
+    parser.add_argument(
+        "--challenge", default="__all__", help="Challenge name, __all__, or __random__"
+    )
+    parser.add_argument(
+        "--challenges", nargs="+", help="Run a named subset of challenges in order"
+    )
+    parser.add_argument(
+        "--run-all",
+        action="store_true",
+        help="Run all challenges in the selected split/category",
+    )
     parser.add_argument("--category")
     parser.add_argument("--dataset")
-    parser.add_argument("--split", default="development", choices=["test", "development"])
-    parser.add_argument("--modes", nargs="+", default=list(DEFAULT_MODES), choices=["oracle", "strict", "disabled"])
+    parser.add_argument(
+        "--split", default="development", choices=["test", "development"]
+    )
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        default=list(DEFAULT_MODES),
+        choices=["oracle", "strict", "disabled"],
+    )
     parser.add_argument("--max-cycles", type=int, default=8)
     parser.add_argument(
         "--auto-max-cycles",
@@ -82,9 +105,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-exist", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--dry-run", action="store_true", help="Write the manifest without executing commands")
-    parser.add_argument("--audit", action="store_true", help="Write an audit JSON after the ablation finishes")
-    parser.add_argument("--audit-output", help="Optional path for the audit JSON payload")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write the manifest without executing commands",
+    )
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="Write an audit JSON after the ablation finishes",
+    )
+    parser.add_argument(
+        "--audit-output", help="Optional path for the audit JSON payload"
+    )
     parser.add_argument("--audit-allow-unfinished", action="store_true")
     parser.add_argument("--audit-allow-empty", action="store_true")
     parser.add_argument("--audit-allow-missing-rag", action="store_true")
@@ -173,7 +206,9 @@ def read_json_object(path: Path) -> dict[str, Any]:
             return {}
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        LOGGER.warning("failed to read JSON payload", exc_info=True, extra={"path": str(path)})
+        LOGGER.warning(
+            "failed to read JSON payload", exc_info=True, extra={"path": str(path)}
+        )
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -185,7 +220,9 @@ def load_mode_summary(args: argparse.Namespace, mode: str) -> dict[str, Any]:
     return {
         "logdir": str(logdir),
         "summary_path": str(logdir / "_batch_summary.json") if summary else None,
-        "monitor_path": str(logdir / "_batch_monitor.html") if (logdir / "_batch_monitor.html").exists() else None,
+        "monitor_path": str(logdir / "_batch_monitor.html")
+        if (logdir / "_batch_monitor.html").exists()
+        else None,
         "monitor_json_path": str(logdir / "_batch_monitor.json") if monitor else None,
         "summary": summary,
         "monitor": monitor,
@@ -196,7 +233,9 @@ def summarize_mode(payload: dict[str, Any]) -> dict[str, Any]:
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     monitor = payload.get("monitor") if isinstance(payload.get("monitor"), dict) else {}
     counts = monitor.get("counts") if isinstance(monitor.get("counts"), dict) else {}
-    total_attempted = _count(summary.get("total_attempted"), _count(counts.get("completed")))
+    total_attempted = _count(
+        summary.get("total_attempted"), _count(counts.get("completed"))
+    )
     skipped = _count(summary.get("skipped_count"), _count(counts.get("skipped")))
     evaluated = _int_or_none(summary.get("evaluated_count"))
     rag_health = _rag_health(
@@ -205,7 +244,9 @@ def summarize_mode(payload: dict[str, Any]) -> dict[str, Any]:
         attempted_default=total_attempted,
     )
     return {
-        "attempted": evaluated if evaluated is not None else max(0, total_attempted - skipped),
+        "attempted": evaluated
+        if evaluated is not None
+        else max(0, total_attempted - skipped),
         "total_attempted": total_attempted,
         "solved": _count(summary.get("solved_count"), _count(counts.get("solved"))),
         "failed": _count(summary.get("failed_count"), _count(counts.get("failed"))),
@@ -224,10 +265,17 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
 
 
 def write_audit_report(report_path: Path, args: argparse.Namespace) -> dict[str, Any]:
-    from killchain_docker.batch.audit import audit_ablation_manifest, audit_dry_run_manifest
+    from killchain_docker.batch.audit import (
+        audit_ablation_manifest,
+        audit_dry_run_manifest,
+    )
 
     raw_output = getattr(args, "audit_output", None)
-    output_path = Path(raw_output).expanduser().resolve() if raw_output else report_path.with_name("_rag_ablation_audit.json")
+    output_path = (
+        Path(raw_output).expanduser().resolve()
+        if raw_output
+        else report_path.with_name("_rag_ablation_audit.json")
+    )
     if getattr(args, "dry_run", False):
         payload = audit_dry_run_manifest(
             report_path,
@@ -296,7 +344,8 @@ def _interrupted_returncode(exc: BaseException) -> int:
 def run_ablation(
     args: argparse.Namespace,
     *,
-    run_command: Callable[[Sequence[str]], subprocess.CompletedProcess[Any]] | None = None,
+    run_command: Callable[[Sequence[str]], subprocess.CompletedProcess[Any]]
+    | None = None,
 ) -> dict[str, Any]:
     run_command = run_command or run_mode_command
     report_dir = Path(args.logdir).expanduser().resolve() / args.name
@@ -315,7 +364,9 @@ def run_ablation(
     for mode in args.modes:
         cmd = build_mode_command(args, mode)
         started = time.time()
-        LOGGER.info("starting RAG ablation mode", extra={"rag_mode": mode, "command": cmd})
+        LOGGER.info(
+            "starting RAG ablation mode", extra={"rag_mode": mode, "command": cmd}
+        )
         returncode = 0
         completed: subprocess.CompletedProcess[Any] | None = None
         error_payload: dict[str, Any] | None = None
@@ -340,22 +391,29 @@ def run_ablation(
                 )
         mode_payload = load_mode_summary(args, mode)
         mode_payload["mode"] = mode
-        mode_payload.update({
-            "command": cmd,
-            "returncode": returncode,
-            "runtime_sec": round(time.time() - started, 3),
-            "dry_run": bool(args.dry_run),
-            "metrics": summarize_mode(mode_payload),
-            "stdout_tail": stream_tail(getattr(completed, "stdout", None)),
-            "stderr_tail": stream_tail(getattr(completed, "stderr", None)),
-            "error": error_payload,
-        })
+        mode_payload.update(
+            {
+                "command": cmd,
+                "returncode": returncode,
+                "runtime_sec": round(time.time() - started, 3),
+                "dry_run": bool(args.dry_run),
+                "metrics": summarize_mode(mode_payload),
+                "stdout_tail": stream_tail(getattr(completed, "stdout", None)),
+                "stderr_tail": stream_tail(getattr(completed, "stderr", None)),
+                "error": error_payload,
+            }
+        )
         report["modes"][mode] = mode_payload
         report["updated_at"] = utc_timestamp()
         write_report(report_path, report)
         if _should_stop(returncode):
-            LOGGER.error("RAG ablation mode failed", extra={"rag_mode": mode, "returncode": returncode})
-            report["stop_reason"] = "interrupted" if returncode == 130 else "mode_failed"
+            LOGGER.error(
+                "RAG ablation mode failed",
+                extra={"rag_mode": mode, "returncode": returncode},
+            )
+            report["stop_reason"] = (
+                "interrupted" if returncode == 130 else "mode_failed"
+            )
             break
 
     report["finished"] = len(report["modes"]) == len(args.modes)
@@ -374,17 +432,27 @@ def run_ablation(
 
 
 def quality_gate_configured(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "min_success_rate", None) or getattr(args, "require_rag_ok", False))
+    return bool(
+        getattr(args, "min_success_rate", None)
+        or getattr(args, "require_rag_ok", False)
+    )
 
 
-def evaluate_quality_gate(report: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+def evaluate_quality_gate(
+    report: dict[str, Any], args: argparse.Namespace
+) -> dict[str, Any]:
     thresholds = _success_rate_thresholds(getattr(args, "min_success_rate", None) or [])
     require_rag_ok = bool(getattr(args, "require_rag_ok", False))
     modes = report.get("modes") if isinstance(report.get("modes"), dict) else {}
     issues: list[dict[str, Any]] = []
 
     if not modes:
-        issues.append(_quality_issue("quality_no_modes", "quality gate has no completed mode payloads to check"))
+        issues.append(
+            _quality_issue(
+                "quality_no_modes",
+                "quality gate has no completed mode payloads to check",
+            )
+        )
 
     all_threshold = thresholds.get("all")
     for mode, payload in modes.items():
@@ -419,14 +487,18 @@ def evaluate_quality_gate(report: dict[str, Any], args: argparse.Namespace) -> d
     }
 
 
-def _success_rate_thresholds(requirements: Sequence[tuple[str, float]]) -> dict[str, float]:
+def _success_rate_thresholds(
+    requirements: Sequence[tuple[str, float]],
+) -> dict[str, float]:
     thresholds: dict[str, float] = {}
     for mode, rate in requirements:
         thresholds[mode] = rate
     return thresholds
 
 
-def _check_success_rate(mode: str, payload: dict[str, Any], threshold: float) -> list[dict[str, Any]]:
+def _check_success_rate(
+    mode: str, payload: dict[str, Any], threshold: float
+) -> list[dict[str, Any]]:
     metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
     success_rate = metrics.get("success_rate")
     if not isinstance(success_rate, (int, float)):
@@ -508,8 +580,7 @@ def build_comparison(modes: dict[str, Any]) -> dict[str, Any]:
             "metrics": metrics,
         }
     deltas = {
-        mode: _comparison_delta(payload, oracle)
-        for mode, payload in comparable.items()
+        mode: _comparison_delta(payload, oracle) for mode, payload in comparable.items()
     }
     comparison = {
         "available": True,
@@ -565,13 +636,18 @@ def _rag_health(
         for entry in details
         if isinstance(entry, dict) and isinstance(entry.get("rag"), dict)
     ]
-    enabled = [
-        rag for rag in payloads
-        if rag.get("enabled")
-    ]
-    unavailable_statuses = {"unavailable", "disabled", "error", "miss", "empty_query", "metadata_only"}
+    enabled = [rag for rag in payloads if rag.get("enabled")]
+    unavailable_statuses = {
+        "unavailable",
+        "disabled",
+        "error",
+        "miss",
+        "empty_query",
+        "metadata_only",
+    }
     unavailable = [
-        rag for rag in payloads
+        rag
+        for rag in payloads
         if (
             not rag.get("enabled")
             or rag.get("status") in unavailable_statuses
@@ -579,8 +655,7 @@ def _rag_health(
         )
     ]
     mismatched = [
-        rag for rag in enabled
-        if not _rag_payload_matches_mode(rag, requested_mode)
+        rag for rag in enabled if not _rag_payload_matches_mode(rag, requested_mode)
     ]
     missing = max(0, attempted - len(payloads))
     return {
@@ -621,14 +696,16 @@ def _comparison_rag_issues(metrics: dict[str, dict[str, Any]]) -> list[dict[str,
     for mode, payload in metrics.items():
         rag = payload.get("rag") if isinstance(payload.get("rag"), dict) else {}
         if rag.get("required") and not rag.get("ok"):
-            issues.append({
-                "mode": mode,
-                "missing": rag.get("missing", 0),
-                "unavailable": rag.get("unavailable", 0),
-                "enabled": rag.get("enabled", 0),
-                "attempted": rag.get("attempted", 0),
-                "mode_mismatch": rag.get("mode_mismatch", 0),
-            })
+            issues.append(
+                {
+                    "mode": mode,
+                    "missing": rag.get("missing", 0),
+                    "unavailable": rag.get("unavailable", 0),
+                    "enabled": rag.get("enabled", 0),
+                    "attempted": rag.get("attempted", 0),
+                    "mode_mismatch": rag.get("mode_mismatch", 0),
+                }
+            )
     return issues
 
 
@@ -641,7 +718,9 @@ def _rate_delta(left: Any, right: Any) -> float | None:
 def _comparison_delta(left: dict[str, Any], oracle: dict[str, Any]) -> dict[str, Any]:
     return {
         "solved": _count(left.get("solved")) - _count(oracle.get("solved")),
-        "success_rate": _rate_delta(left.get("success_rate"), oracle.get("success_rate")),
+        "success_rate": _rate_delta(
+            left.get("success_rate"), oracle.get("success_rate")
+        ),
         "total_tokens": _token_delta(left, oracle, "total_tokens"),
     }
 
@@ -663,13 +742,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     configure_logging(debug=args.debug, quiet=args.quiet)
     report = run_ablation(args)
-    write_json_stdout({
-        "finished": report["finished"],
-        "comparison": report["comparison"],
-        "audit": report.get("audit"),
-        "quality_gate": report.get("quality_gate"),
-        "report_path": str(Path(args.logdir).expanduser().resolve() / args.name / "_rag_ablation.json"),
-    })
+    write_json_stdout(
+        {
+            "finished": report["finished"],
+            "comparison": report["comparison"],
+            "audit": report.get("audit"),
+            "quality_gate": report.get("quality_gate"),
+            "report_path": str(
+                Path(args.logdir).expanduser().resolve()
+                / args.name
+                / "_rag_ablation.json"
+            ),
+        }
+    )
     returncodes = [
         int(payload.get("returncode") or 0)
         for payload in report["modes"].values()

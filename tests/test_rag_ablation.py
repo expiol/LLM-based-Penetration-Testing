@@ -185,7 +185,9 @@ class RagAblationTests(unittest.TestCase):
         self.assertNotIn("--run-all", command)
         self.assertEqual(_arg_value(command, "--challenge"), "demo-challenge")
         self.assertEqual(_arg_value(command, "--rag-mode"), "strict")
-        self.assertTrue(_arg_value(command, "--output-root").endswith("/artifacts/strict"))
+        self.assertTrue(
+            _arg_value(command, "--output-root").endswith("/artifacts/strict")
+        )
         self.assertIn("--quiet", command)
 
     def test_build_mode_command_omits_challenge_for_run_all(self) -> None:
@@ -205,11 +207,13 @@ class RagAblationTests(unittest.TestCase):
 
         self.assertIn("--challenges", command)
         index = command.index("--challenges")
-        self.assertEqual(command[index + 1:index + 3], ["alpha", "beta"])
+        self.assertEqual(command[index + 1 : index + 3], ["alpha", "beta"])
         self.assertNotIn("--challenge", command)
         self.assertNotIn("--run-all", command)
 
-    def test_build_mode_command_forwards_auto_max_cycles_only_when_enabled(self) -> None:
+    def test_build_mode_command_forwards_auto_max_cycles_only_when_enabled(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = _args(Path(tmp))
             command = build_mode_command(args, "oracle")
@@ -244,15 +248,17 @@ class RagAblationTests(unittest.TestCase):
             success_rate_requirement("strict=1.5")
 
     def test_run_mode_command_uses_bounded_capture(self) -> None:
-        result = run_mode_command([
-            sys.executable,
-            "-c",
-            (
-                "import sys; "
-                "sys.stdout.write('A' * 1200000); "
-                "sys.stderr.write('B' * 1200000)"
-            ),
-        ])
+        result = run_mode_command(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "sys.stdout.write('A' * 1200000); "
+                    "sys.stderr.write('B' * 1200000)"
+                ),
+            ]
+        )
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("[output truncated:", result.stdout)
@@ -269,7 +275,9 @@ class RagAblationTests(unittest.TestCase):
                 solved = 2 if mode == "oracle" else 1
                 success_rate = 1.0 if mode == "oracle" else 0.5
                 logdir = mode_logdir(args, mode)
-                policy = "supplemental_context" if mode == "oracle" else "filtered_context"
+                policy = (
+                    "supplemental_context" if mode == "oracle" else "filtered_context"
+                )
                 write_json(
                     logdir / "_batch_summary.json",
                     {
@@ -319,13 +327,23 @@ class RagAblationTests(unittest.TestCase):
             self.assertTrue(report["finished"])
             self.assertEqual(report["modes"]["oracle"]["metrics"]["solved"], 2)
             self.assertEqual(report["modes"]["strict"]["metrics"]["solved"], 1)
-            self.assertEqual(report["modes"]["oracle"]["stdout_tail"], "oracle child stdout")
-            self.assertEqual(report["modes"]["strict"]["stderr_tail"], "strict child stderr")
+            self.assertEqual(
+                report["modes"]["oracle"]["stdout_tail"], "oracle child stdout"
+            )
+            self.assertEqual(
+                report["modes"]["strict"]["stderr_tail"], "strict child stderr"
+            )
             self.assertEqual(report["comparison"]["strict_minus_oracle"]["solved"], -1)
-            self.assertEqual(report["comparison"]["strict_minus_oracle"]["success_rate"], -0.5)
-            self.assertEqual(report["comparison"]["strict_minus_oracle"]["total_tokens"], -100)
+            self.assertEqual(
+                report["comparison"]["strict_minus_oracle"]["success_rate"], -0.5
+            )
+            self.assertEqual(
+                report["comparison"]["strict_minus_oracle"]["total_tokens"], -100
+            )
             report_path = Path(tmp) / "rag_exp" / "_rag_ablation.json"
-            self.assertEqual(json.loads(report_path.read_text(encoding="utf-8"))["schema_version"], 1)
+            self.assertEqual(
+                json.loads(report_path.read_text(encoding="utf-8"))["schema_version"], 1
+            )
 
     def test_run_ablation_writes_audit_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -335,7 +353,9 @@ class RagAblationTests(unittest.TestCase):
             def fake_run(command: Sequence[str]) -> subprocess.CompletedProcess[Any]:
                 mode = _arg_value(command, "--rag-mode")
                 _write_finished_mode(args, mode, solved=mode == "oracle")
-                return subprocess.CompletedProcess(list(command), 0 if mode == "oracle" else 1)
+                return subprocess.CompletedProcess(
+                    list(command), 0 if mode == "oracle" else 1
+                )
 
             report = run_ablation(args, run_command=fake_run)
             report_path = Path(tmp) / "rag_exp" / "_rag_ablation.json"
@@ -356,12 +376,20 @@ class RagAblationTests(unittest.TestCase):
             def fake_run(command: Sequence[str]) -> subprocess.CompletedProcess[Any]:
                 mode = _arg_value(command, "--rag-mode")
                 _write_finished_mode(args, mode, solved=mode == "oracle")
-                return subprocess.CompletedProcess(list(command), 0 if mode == "oracle" else 1)
+                return subprocess.CompletedProcess(
+                    list(command), 0 if mode == "oracle" else 1
+                )
 
             report = run_ablation(args, run_command=fake_run)
-            manifest = json.loads((Path(tmp) / "rag_exp" / "_rag_ablation.json").read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (Path(tmp) / "rag_exp" / "_rag_ablation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
 
-            self.assertTrue(report["quality_gate"]["ok"], report["quality_gate"]["issues"])
+            self.assertTrue(
+                report["quality_gate"]["ok"], report["quality_gate"]["issues"]
+            )
             self.assertEqual(report["quality_gate"]["issue_count"], 0)
             self.assertTrue(manifest["quality_gate"]["ok"])
 
@@ -372,7 +400,9 @@ class RagAblationTests(unittest.TestCase):
             args.min_success_rate = [("oracle", 1.0)]
 
             def fake_run(command: Sequence[str]) -> subprocess.CompletedProcess[Any]:
-                _write_finished_mode(args, _arg_value(command, "--rag-mode"), solved=False)
+                _write_finished_mode(
+                    args, _arg_value(command, "--rag-mode"), solved=False
+                )
                 return subprocess.CompletedProcess(list(command), 1)
 
             report = run_ablation(args, run_command=fake_run)
@@ -401,7 +431,11 @@ class RagAblationTests(unittest.TestCase):
                         "details": [
                             {
                                 "challenge": "demo",
-                                "rag": {"mode": mode, "enabled": False, "status": "unavailable"},
+                                "rag": {
+                                    "mode": mode,
+                                    "enabled": False,
+                                    "status": "unavailable",
+                                },
                             }
                         ],
                     },
@@ -424,7 +458,10 @@ class RagAblationTests(unittest.TestCase):
 
             def fake_run(command: Sequence[str]) -> subprocess.CompletedProcess[Any]:
                 mode = _arg_value(command, "--rag-mode")
-                write_json(mode_logdir(args, mode) / "_batch_monitor.json", {"counts": {"completed": 1}})
+                write_json(
+                    mode_logdir(args, mode) / "_batch_monitor.json",
+                    {"counts": {"completed": 1}},
+                )
                 return subprocess.CompletedProcess(list(command), 1)
 
             report = run_ablation(args, run_command=fake_run)
@@ -436,35 +473,37 @@ class RagAblationTests(unittest.TestCase):
             self.assertEqual(issue["rag"]["attempted"], 1)
 
     def test_summarize_mode_tolerates_malformed_counts_and_rag_hint_count(self) -> None:
-        metrics = summarize_mode({
-            "mode": "oracle",
-            "summary": {
-                "total_attempted": "bad",
-                "solved_count": "bad",
-                "failed_count": "bad",
-                "skipped_count": "bad",
-                "experiment_config": {"rag_mode": "oracle"},
-                "details": [
-                    {
-                        "rag": {
-                            "mode": "oracle",
-                            "enabled": True,
-                            "status": "hit",
-                            "policy": "supplemental_context",
-                            "hint_count": "bad",
+        metrics = summarize_mode(
+            {
+                "mode": "oracle",
+                "summary": {
+                    "total_attempted": "bad",
+                    "solved_count": "bad",
+                    "failed_count": "bad",
+                    "skipped_count": "bad",
+                    "experiment_config": {"rag_mode": "oracle"},
+                    "details": [
+                        {
+                            "rag": {
+                                "mode": "oracle",
+                                "enabled": True,
+                                "status": "hit",
+                                "policy": "supplemental_context",
+                                "hint_count": "bad",
+                            }
                         }
+                    ],
+                },
+                "monitor": {
+                    "counts": {
+                        "completed": "2",
+                        "solved": "1",
+                        "failed": "bad",
+                        "skipped": "bad",
                     }
-                ],
-            },
-            "monitor": {
-                "counts": {
-                    "completed": "2",
-                    "solved": "1",
-                    "failed": "bad",
-                    "skipped": "bad",
-                }
-            },
-        })
+                },
+            }
+        )
 
         self.assertEqual(metrics["attempted"], 2)
         self.assertEqual(metrics["total_attempted"], 2)
@@ -475,26 +514,28 @@ class RagAblationTests(unittest.TestCase):
         self.assertEqual(metrics["rag"]["missing"], 1)
 
     def test_comparison_tolerates_malformed_numeric_deltas(self) -> None:
-        comparison = build_comparison({
-            "oracle": {
-                "metrics": {
-                    "attempted": 1,
-                    "solved": "bad",
-                    "success_rate": 1.0,
-                    "token_usage": {"total": {"total_tokens": "bad"}},
-                    "rag": {"required": False, "ok": True},
-                }
-            },
-            "strict": {
-                "metrics": {
-                    "attempted": 1,
-                    "solved": 1,
-                    "success_rate": 0.5,
-                    "token_usage": {"total": {"total_tokens": 10}},
-                    "rag": {"required": False, "ok": True},
-                }
-            },
-        })
+        comparison = build_comparison(
+            {
+                "oracle": {
+                    "metrics": {
+                        "attempted": 1,
+                        "solved": "bad",
+                        "success_rate": 1.0,
+                        "token_usage": {"total": {"total_tokens": "bad"}},
+                        "rag": {"required": False, "ok": True},
+                    }
+                },
+                "strict": {
+                    "metrics": {
+                        "attempted": 1,
+                        "solved": 1,
+                        "success_rate": 0.5,
+                        "token_usage": {"total": {"total_tokens": 10}},
+                        "rag": {"required": False, "ok": True},
+                    }
+                },
+            }
+        )
 
         self.assertTrue(comparison["available"], comparison)
         self.assertEqual(comparison["strict_minus_oracle"]["solved"], 1)
@@ -549,8 +590,12 @@ class RagAblationTests(unittest.TestCase):
             self.assertTrue(report["comparison"]["available"], report["comparison"])
             self.assertEqual(deltas["strict"]["solved"], -1)
             self.assertEqual(deltas["disabled"]["solved"], -2)
-            self.assertEqual(report["comparison"]["strict_minus_oracle"], deltas["strict"])
-            self.assertEqual(report["comparison"]["disabled_minus_oracle"], deltas["disabled"])
+            self.assertEqual(
+                report["comparison"]["strict_minus_oracle"], deltas["strict"]
+            )
+            self.assertEqual(
+                report["comparison"]["disabled_minus_oracle"], deltas["disabled"]
+            )
 
     def test_comparison_unavailable_when_required_rag_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -570,7 +615,11 @@ class RagAblationTests(unittest.TestCase):
                         "details": [
                             {
                                 "challenge": "demo",
-                                "rag": {"mode": mode, "enabled": False, "status": "unavailable"},
+                                "rag": {
+                                    "mode": mode,
+                                    "enabled": False,
+                                    "status": "unavailable",
+                                },
                             }
                         ],
                     },
@@ -589,7 +638,9 @@ class RagAblationTests(unittest.TestCase):
 
             def fake_run(command: Sequence[str]) -> subprocess.CompletedProcess[Any]:
                 mode = _arg_value(command, "--rag-mode")
-                policy = "supplemental_context" if mode == "oracle" else "filtered_context"
+                policy = (
+                    "supplemental_context" if mode == "oracle" else "filtered_context"
+                )
                 logdir = mode_logdir(args, mode)
                 write_json(
                     logdir / "_batch_summary.json",
@@ -811,7 +862,9 @@ class RagAblationTests(unittest.TestCase):
                 write_json(logdir / "_batch_monitor.json", {"counts": {"completed": 1}})
                 raise KeyboardInterrupt
 
-            with self.assertLogs("killchain_docker.batch.ablation", level="WARNING") as captured:
+            with self.assertLogs(
+                "killchain_docker.batch.ablation", level="WARNING"
+            ) as captured:
                 report = run_ablation(args, run_command=fake_run)
             report_path = Path(tmp) / "rag_exp" / "_rag_ablation.json"
             manifest = json.loads(report_path.read_text(encoding="utf-8"))
@@ -821,11 +874,18 @@ class RagAblationTests(unittest.TestCase):
             self.assertIn("oracle", report["modes"])
             self.assertNotIn("strict", report["modes"])
             self.assertEqual(report["modes"]["oracle"]["returncode"], 130)
-            self.assertEqual(report["modes"]["oracle"]["error"]["type"], "KeyboardInterrupt")
+            self.assertEqual(
+                report["modes"]["oracle"]["error"]["type"], "KeyboardInterrupt"
+            )
             self.assertEqual(report["modes"]["oracle"]["metrics"]["attempted"], 1)
             self.assertEqual(manifest["stop_reason"], "interrupted")
             self.assertEqual(manifest["modes"]["oracle"]["returncode"], 130)
-            self.assertTrue(any("RAG ablation mode interrupted" in message for message in captured.output))
+            self.assertTrue(
+                any(
+                    "RAG ablation mode interrupted" in message
+                    for message in captured.output
+                )
+            )
             self.assertTrue(any("Traceback" in message for message in captured.output))
 
     def test_run_ablation_persists_crashed_mode(self) -> None:
@@ -841,7 +901,9 @@ class RagAblationTests(unittest.TestCase):
             self.assertEqual(report["stop_reason"], "mode_failed")
             self.assertEqual(report["modes"]["oracle"]["returncode"], 2)
             self.assertEqual(report["modes"]["oracle"]["error"]["type"], "RuntimeError")
-            self.assertEqual(report["modes"]["oracle"]["error"]["message"], "runner crashed")
+            self.assertEqual(
+                report["modes"]["oracle"]["error"]["message"], "runner crashed"
+            )
             self.assertNotIn("strict", report["modes"])
 
     def test_main_returns_quality_gate_failure_code(self) -> None:

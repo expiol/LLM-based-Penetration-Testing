@@ -238,7 +238,9 @@ class LoggingUtilsTests(unittest.TestCase):
                 for future in futures:
                     future.result()
 
-            self.assertIn(json.loads(json_path.read_text(encoding="utf-8"))["index"], range(80))
+            self.assertIn(
+                json.loads(json_path.read_text(encoding="utf-8"))["index"], range(80)
+            )
             self.assertIn(int(text_path.read_text(encoding="utf-8").strip()), range(80))
             self.assertEqual(list(root.glob(".*.tmp")), [])
 

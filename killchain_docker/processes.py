@@ -20,7 +20,9 @@ class BoundedProcessResult:
     timed_out: bool = False
 
 
-def _decode_limited_output(stream, *, max_bytes: int = DEFAULT_MAX_CAPTURE_BYTES) -> str:
+def _decode_limited_output(
+    stream, *, max_bytes: int = DEFAULT_MAX_CAPTURE_BYTES
+) -> str:
     stream.flush()
     size = stream.tell()
     stream.seek(0)
@@ -72,7 +74,10 @@ def run_bounded_process(
 ) -> BoundedProcessResult:
     """Run a subprocess with bounded captured output and process-group timeout cleanup."""
     input_bytes = input_text.encode("utf-8") if input_text is not None else None
-    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+    with (
+        tempfile.TemporaryFile() as stdout_file,
+        tempfile.TemporaryFile() as stderr_file,
+    ):
         proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,

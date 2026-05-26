@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import re
 import subprocess
@@ -10,11 +11,6 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows compatibility
-    fcntl = None
 
 from killchain_docker.logging_utils import get_logger
 from killchain_docker.processes import run_bounded_process
@@ -37,7 +33,9 @@ _HOST_PORT_CONFLICT_RE = re.compile(
     re.IGNORECASE,
 )
 
-COMPOSE_CHALLENGE_LOCK = Path(tempfile.gettempdir()) / "killchain_docker_compose_challenges.lock"
+COMPOSE_CHALLENGE_LOCK = (
+    Path(tempfile.gettempdir()) / "killchain_docker_compose_challenges.lock"
+)
 
 
 def _subprocess_stream_text(chunk: str | bytes | None) -> str:
@@ -57,13 +55,15 @@ def _challenge_compose_path(challenge: CTFChallenge) -> Path | None:
 
 
 def _uses_compose(challenge: CTFChallenge) -> bool:
-    return bool(getattr(challenge, "container", False) and _challenge_compose_path(challenge))
+    return bool(
+        getattr(challenge, "container", False) and _challenge_compose_path(challenge)
+    )
 
 
 @contextmanager
 def compose_challenge_run_lock(challenge: CTFChallenge):
     """Serialize compose-backed challenges across process workers."""
-    if not _uses_compose(challenge) or fcntl is None:
+    if not _uses_compose(challenge):
         yield
         return
 
@@ -98,7 +98,15 @@ def docker_compose_down(challenge: CTFChallenge) -> None:
         return
     try:
         result = run_bounded_process(
-            ["docker", "compose", "-f", str(compose), "down", "--volumes", "--remove-orphans"],
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(compose),
+                "down",
+                "--volumes",
+                "--remove-orphans",
+            ],
             timeout_s=120,
             max_output_bytes=20_000,
         )
@@ -158,7 +166,11 @@ def _without_host_port_bindings(config: dict) -> tuple[dict, bool]:
             target = item.get("target")
             if target:
                 protocol = str(item.get("protocol") or "").strip().lower()
-                exposed.add(f"{target}/{protocol}" if protocol and protocol != "tcp" else str(target))
+                exposed.add(
+                    f"{target}/{protocol}"
+                    if protocol and protocol != "tcp"
+                    else str(target)
+                )
         if exposed:
             service["expose"] = sorted(exposed)
     return config, changed
@@ -185,7 +197,15 @@ def _start_compose_without_host_ports(challenge: CTFChallenge) -> bool:
 
     try:
         result = run_bounded_process(
-            ["docker", "compose", "-f", str(override_path), "up", "-d", "--force-recreate"],
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(override_path),
+                "up",
+                "-d",
+                "--force-recreate",
+            ],
             timeout_s=180,
             max_output_bytes=80_000,
         )
@@ -196,7 +216,10 @@ def _start_compose_without_host_ports(challenge: CTFChallenge) -> bool:
             LOGGER.debug(
                 "failed to remove temporary compose override",
                 exc_info=True,
-                extra={"challenge": challenge.canonical_name, "override_path": str(override_path)},
+                extra={
+                    "challenge": challenge.canonical_name,
+                    "override_path": str(override_path),
+                },
             )
 
     if result.exit_code != 0:
@@ -240,13 +263,18 @@ def start_challenge_with_retry(
                     "challenge": challenge.canonical_name,
                     "attempt": attempt,
                     "attempts": attempts,
-                    "reason": "port/container conflict" if conflict else "transient error",
+                    "reason": "port/container conflict"
+                    if conflict
+                    else "transient error",
                 },
             )
             if debug and combined:
                 LOGGER.debug(
                     "challenge container start output tail",
-                    extra={"challenge": challenge.canonical_name, "output_tail": combined[-600:]},
+                    extra={
+                        "challenge": challenge.canonical_name,
+                        "output_tail": combined[-600:],
+                    },
                 )
             if conflict:
                 docker_compose_down(challenge)
@@ -254,11 +282,18 @@ def start_challenge_with_retry(
                     try:
                         if _start_compose_without_host_ports(challenge):
                             return
-                    except (OSError, json.JSONDecodeError, subprocess.CalledProcessError):
+                    except (
+                        OSError,
+                        json.JSONDecodeError,
+                        subprocess.CalledProcessError,
+                    ):
                         LOGGER.warning(
                             "host-port-free compose start failed; retrying original start",
                             exc_info=True,
-                            extra={"challenge": challenge.canonical_name, "attempt": attempt},
+                            extra={
+                                "challenge": challenge.canonical_name,
+                                "attempt": attempt,
+                            },
                         )
             else:
                 time.sleep(5)

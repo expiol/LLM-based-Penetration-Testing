@@ -62,7 +62,9 @@ def _args(logdir: Path) -> argparse.Namespace:
 
 
 class RunConcurrencyTests(unittest.TestCase):
-    def test_selected_challenge_names_preserves_requested_order_and_dedupes(self) -> None:
+    def test_selected_challenge_names_preserves_requested_order_and_dedupes(
+        self,
+    ) -> None:
         args = _args(Path("/tmp/logs"))
         args.challenges = ["beta", "alpha", "beta"]
 
@@ -90,7 +92,9 @@ class RunConcurrencyTests(unittest.TestCase):
         self.assertIsInstance(entry["scheduler_pid"], int)
         self.assertIsInstance(entry["scheduler_thread_id"], int)
         self.assertIsInstance(entry["scheduler_thread_name"], str)
-        self.assertEqual(entry["threads"]["scheduler"]["id"], entry["scheduler_thread_id"])
+        self.assertEqual(
+            entry["threads"]["scheduler"]["id"], entry["scheduler_thread_id"]
+        )
         self.assertEqual(entry["threads"]["registry"][0]["challenge"], "alpha")
         self.assertEqual(entry["threads"]["registry"][0]["roles"], ["scheduler"])
 
@@ -118,7 +122,10 @@ class RunConcurrencyTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("killchain_docker.batch.runner.compose_challenge_run_lock", fake_lock),
+                patch(
+                    "killchain_docker.batch.runner.compose_challenge_run_lock",
+                    fake_lock,
+                ),
                 patch(
                     "killchain_docker.batch.runner._run_single_challenge_inner",
                     side_effect=lambda *_args: events.append("inner") or {"ok": True},
@@ -160,16 +167,27 @@ class RunConcurrencyTests(unittest.TestCase):
                 return future
 
         def fake_write_batch_monitor(**kwargs):
-            active_snapshots.append([item["challenge"] for item in kwargs.get("active_runs") or []])
+            active_snapshots.append(
+                [item["challenge"] for item in kwargs.get("active_runs") or []]
+            )
             return Path(kwargs["logdir"]) / "_batch_monitor.html"
 
         with tempfile.TemporaryDirectory() as tmp:
             args = _args(Path(tmp))
             args.parallel_workers = 2
             with (
-                patch("killchain_docker.batch.runner.load_dataset", return_value=_FakeDataset()),
-                patch("killchain_docker.batch.runner.concurrent.futures.ProcessPoolExecutor", FakeExecutor),
-                patch("killchain_docker.batch.runner.write_batch_monitor", fake_write_batch_monitor),
+                patch(
+                    "killchain_docker.batch.runner.load_dataset",
+                    return_value=_FakeDataset(),
+                ),
+                patch(
+                    "killchain_docker.batch.runner.concurrent.futures.ProcessPoolExecutor",
+                    FakeExecutor,
+                ),
+                patch(
+                    "killchain_docker.batch.runner.write_batch_monitor",
+                    fake_write_batch_monitor,
+                ),
             ):
                 rc = run_all_challenges(args)
 
@@ -177,7 +195,10 @@ class RunConcurrencyTests(unittest.TestCase):
         self.assertEqual(observed_workers, [2])
         self.assertEqual(
             submissions,
-            [("_run_named_challenge_worker", "alpha"), ("_run_named_challenge_worker", "beta")],
+            [
+                ("_run_named_challenge_worker", "alpha"),
+                ("_run_named_challenge_worker", "beta"),
+            ],
         )
         self.assertIn(["alpha", "beta"], active_snapshots)
 
@@ -210,16 +231,27 @@ class RunConcurrencyTests(unittest.TestCase):
                 return future
 
         def fake_write_batch_monitor(**kwargs):
-            active_snapshots.append([item["challenge"] for item in kwargs.get("active_runs") or []])
+            active_snapshots.append(
+                [item["challenge"] for item in kwargs.get("active_runs") or []]
+            )
             return Path(kwargs["logdir"]) / "_batch_monitor.html"
 
         with tempfile.TemporaryDirectory() as tmp:
             args = _args(Path(tmp))
             args.parallel_workers = 2
             with (
-                patch("killchain_docker.batch.runner.load_dataset", return_value=_FakeDataset()),
-                patch("killchain_docker.batch.runner.concurrent.futures.ProcessPoolExecutor", FakeExecutor),
-                patch("killchain_docker.batch.runner.write_batch_monitor", fake_write_batch_monitor),
+                patch(
+                    "killchain_docker.batch.runner.load_dataset",
+                    return_value=_FakeDataset(),
+                ),
+                patch(
+                    "killchain_docker.batch.runner.concurrent.futures.ProcessPoolExecutor",
+                    FakeExecutor,
+                ),
+                patch(
+                    "killchain_docker.batch.runner.write_batch_monitor",
+                    fake_write_batch_monitor,
+                ),
             ):
                 rc = run_all_challenges(args)
 
@@ -231,14 +263,21 @@ class RunConcurrencyTests(unittest.TestCase):
             args = _args(Path(tmp))
 
             with (
-                patch("killchain_docker.batch.runner.load_dataset", return_value=_FakeDataset()),
-                patch("killchain_docker.batch.runner.CTFChallenge", return_value=object()),
+                patch(
+                    "killchain_docker.batch.runner.load_dataset",
+                    return_value=_FakeDataset(),
+                ),
+                patch(
+                    "killchain_docker.batch.runner.CTFChallenge", return_value=object()
+                ),
                 patch(
                     "killchain_docker.batch.runner.run_single_challenge",
                     side_effect=KeyboardInterrupt(),
                 ),
             ):
-                with self.assertLogs("killchain_docker.batch.runner", level="WARNING") as captured:
+                with self.assertLogs(
+                    "killchain_docker.batch.runner", level="WARNING"
+                ) as captured:
                     rc = run_all_challenges(args)
 
             status_path = Path(tmp) / "alpha.status.json"
@@ -252,7 +291,12 @@ class RunConcurrencyTests(unittest.TestCase):
         self.assertEqual(status["error"]["type"], "KeyboardInterrupt")
         self.assertEqual(summary["interrupted_count"], 1)
         self.assertEqual(summary["details"][0]["status_file"], "alpha.status.json")
-        self.assertTrue(any("batch interrupted; saving progress" in message for message in captured.output))
+        self.assertTrue(
+            any(
+                "batch interrupted; saving progress" in message
+                for message in captured.output
+            )
+        )
         self.assertTrue(any("Traceback" in message for message in captured.output))
 
     def test_single_replica_path_starts_monitor_heartbeat(self) -> None:
@@ -273,7 +317,10 @@ class RunConcurrencyTests(unittest.TestCase):
             args.challenge = "alpha"
             args.run_all = False
             with (
-                patch("killchain_docker.batch.runner.load_challenge", return_value=_DummyChallenge()),
+                patch(
+                    "killchain_docker.batch.runner.load_challenge",
+                    return_value=_DummyChallenge(),
+                ),
                 patch(
                     "killchain_docker.batch.runner.run_single_challenge",
                     return_value={
@@ -284,7 +331,10 @@ class RunConcurrencyTests(unittest.TestCase):
                         "llm_error": False,
                     },
                 ),
-                patch("killchain_docker.batch.runner._BatchMonitorHeartbeat", FakeHeartbeat),
+                patch(
+                    "killchain_docker.batch.runner._BatchMonitorHeartbeat",
+                    FakeHeartbeat,
+                ),
             ):
                 rc = run_single_challenge_replicas(args)
 
@@ -337,20 +387,37 @@ class RunConcurrencyTests(unittest.TestCase):
             args.parallel_workers = 2
             args.name = "replicas"
             with (
-                patch("killchain_docker.batch.runner.concurrent.futures.ProcessPoolExecutor", FakeExecutor),
-                patch("killchain_docker.batch.runner._BatchMonitorHeartbeat", FakeHeartbeat),
+                patch(
+                    "killchain_docker.batch.runner.concurrent.futures.ProcessPoolExecutor",
+                    FakeExecutor,
+                ),
+                patch(
+                    "killchain_docker.batch.runner._BatchMonitorHeartbeat",
+                    FakeHeartbeat,
+                ),
             ):
                 rc = run_single_challenge_replicas(args)
 
-            summary = json.loads((Path(tmp) / "replicas" / "_batch_summary.json").read_text(encoding="utf-8"))
-            monitor = json.loads((Path(tmp) / "replicas" / "_batch_monitor.json").read_text(encoding="utf-8"))
+            summary = json.loads(
+                (Path(tmp) / "replicas" / "_batch_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            monitor = json.loads(
+                (Path(tmp) / "replicas" / "_batch_monitor.json").read_text(
+                    encoding="utf-8"
+                )
+            )
 
         self.assertEqual(rc, 0)
         self.assertEqual(observed_workers, [2])
         self.assertEqual(heartbeat_events, ["start", "stop"])
         self.assertEqual(summary["total_attempted"], 2)
         self.assertEqual(monitor["counts"]["completed"], 2)
-        self.assertEqual({entry["challenge"] for entry in monitor["entries"]}, {"alpha#replica-1", "alpha#replica-2"})
+        self.assertEqual(
+            {entry["challenge"] for entry in monitor["entries"]},
+            {"alpha#replica-1", "alpha#replica-2"},
+        )
 
     def test_multi_replica_worker_exception_logs_traceback_result(self) -> None:
         class FakeHeartbeat:
@@ -386,19 +453,40 @@ class RunConcurrencyTests(unittest.TestCase):
             args.parallel_workers = 2
             args.name = "replica-errors"
             with (
-                patch("killchain_docker.batch.runner.concurrent.futures.ProcessPoolExecutor", FakeExecutor),
-                patch("killchain_docker.batch.runner._BatchMonitorHeartbeat", FakeHeartbeat),
-                self.assertLogs("killchain_docker.batch.runner", level="ERROR") as captured,
+                patch(
+                    "killchain_docker.batch.runner.concurrent.futures.ProcessPoolExecutor",
+                    FakeExecutor,
+                ),
+                patch(
+                    "killchain_docker.batch.runner._BatchMonitorHeartbeat",
+                    FakeHeartbeat,
+                ),
+                self.assertLogs(
+                    "killchain_docker.batch.runner", level="ERROR"
+                ) as captured,
             ):
                 rc = run_single_challenge_replicas(args)
 
-            summary = json.loads((Path(tmp) / "replica-errors" / "_batch_summary.json").read_text(encoding="utf-8"))
+            summary = json.loads(
+                (Path(tmp) / "replica-errors" / "_batch_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
 
         self.assertEqual(rc, 1)
         self.assertEqual(summary["failed_count"], 2)
-        self.assertTrue(all(item["error_type"] == "RuntimeError" for item in summary["details"]))
-        self.assertTrue(all(str(item["status_file"]).endswith(".status.json") for item in summary["details"]))
-        self.assertTrue(any("replica worker failed" in message for message in captured.output))
+        self.assertTrue(
+            all(item["error_type"] == "RuntimeError" for item in summary["details"])
+        )
+        self.assertTrue(
+            all(
+                str(item["status_file"]).endswith(".status.json")
+                for item in summary["details"]
+            )
+        )
+        self.assertTrue(
+            any("replica worker failed" in message for message in captured.output)
+        )
         self.assertTrue(any("Traceback" in message for message in captured.output))
 
 

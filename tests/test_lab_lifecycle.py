@@ -17,10 +17,14 @@ class LabLifecycleTests(unittest.TestCase):
             compose = Path(tmpdir) / "docker-compose.lab.yml"
             compose.write_text("services: {}\n", encoding="utf-8")
             with (
-                patch("killchain_docker.lab.shutil.which", return_value="/usr/bin/docker"),
+                patch(
+                    "killchain_docker.lab.shutil.which", return_value="/usr/bin/docker"
+                ),
                 patch(
                     "killchain_docker.lab.run_bounded_process",
-                    return_value=BoundedProcessResult(exit_code=7, stdout="", stderr=""),
+                    return_value=BoundedProcessResult(
+                        exit_code=7, stdout="", stderr=""
+                    ),
                 ) as run_bounded,
             ):
                 exit_code = lab.lab_up(compose, detach=True, timeout_s=123)
@@ -37,10 +41,14 @@ class LabLifecycleTests(unittest.TestCase):
             compose = Path(tmpdir) / "docker-compose.lab.yml"
             compose.write_text("services: {}\n", encoding="utf-8")
             with (
-                patch("killchain_docker.lab.shutil.which", return_value="/usr/bin/docker"),
+                patch(
+                    "killchain_docker.lab.shutil.which", return_value="/usr/bin/docker"
+                ),
                 patch(
                     "killchain_docker.lab.run_bounded_process",
-                    return_value=BoundedProcessResult(exit_code=0, stdout="", stderr=""),
+                    return_value=BoundedProcessResult(
+                        exit_code=0, stdout="", stderr=""
+                    ),
                 ) as run_bounded,
             ):
                 exit_code = lab.lab_down(compose, remove_volumes=True, timeout_s=321)

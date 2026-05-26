@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from killchain_docker.tools import ToolExecutionRequest, ToolExecutionResult
+from killchain_docker.tools.core import ToolExecutionRequest, ToolExecutionResult
 from killchain_docker.tools.core import ExecutionMode, ParsedToolOutput
 from killchain_docker.tools.plugins.office_inspect import (
     OfficeInspectPlugin,
@@ -55,10 +55,17 @@ class OfficeInspectTests(unittest.TestCase):
         self.assertEqual(output.artifacts[0].kind, "office_media_image")
         self.assertEqual(output.artifacts[0].source, "office_inspect")
         self.assertEqual(output.artifacts[0].digest, digest)
-        self.assertEqual([candidate.value for candidate in output.flag_candidates], ["flag{office_literal}"])
-        self.assertEqual(output.flag_candidates[0].metadata["zip_part"], "ppt/slides/slide1.xml")
+        self.assertEqual(
+            [candidate.value for candidate in output.flag_candidates],
+            ["flag{office_literal}"],
+        )
+        self.assertEqual(
+            output.flag_candidates[0].metadata["zip_part"], "ppt/slides/slide1.xml"
+        )
 
-    def test_plugin_extracts_ooxml_text_and_embedded_media_to_durable_artifact(self) -> None:
+    def test_plugin_extracts_ooxml_text_and_embedded_media_to_durable_artifact(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             deck = root / "deck.pptx"
@@ -96,25 +103,41 @@ class OfficeInspectTests(unittest.TestCase):
 
             self.assertEqual(result.exit_code, 0, result.stderr)
             self.assertEqual(output.output_context["document_type"], "pptx")
-            text = "\n".join(item["text"] for item in output.output_context["text_items"])
+            text = "\n".join(
+                item["text"] for item in output.output_context["text_items"]
+            )
             self.assertIn("Hello slide text", text)
             self.assertIn("Speaker notes", text)
-            self.assertEqual([candidate.value for candidate in output.flag_candidates], ["flag{from_alt_text}"])
+            self.assertEqual(
+                [candidate.value for candidate in output.flag_candidates],
+                ["flag{from_alt_text}"],
+            )
             self.assertEqual(len(output.artifacts), 1)
             self.assertIsNotNone(output.artifacts[0].digest)
-            self.assertTrue(Path(output.artifacts[0].path).exists(), output.artifacts[0].path)
+            self.assertTrue(
+                Path(output.artifacts[0].path).exists(), output.artifacts[0].path
+            )
 
     def test_plugin_preserves_durable_artifact_directory(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_run(name: str, argv: list[str], timeout_s: int, **_: object) -> ToolExecutionResult:
+        def fake_run(
+            name: str, argv: list[str], timeout_s: int, **_: object
+        ) -> ToolExecutionResult:
             captured["argv"] = argv
             captured["timeout_s"] = timeout_s
-            return ToolExecutionResult(tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0)
+            return ToolExecutionResult(
+                tool_name=name, mode=ExecutionMode.LOCAL_COMMAND, exit_code=0
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("killchain_docker.tools.plugins.office_inspect._run", side_effect=fake_run):
-                OfficeInspectPlugin(argv_prefix=["docker", "exec", "-i", "container"]).execute(
+            with patch(
+                "killchain_docker.tools.plugins.office_inspect._run",
+                side_effect=fake_run,
+            ):
+                OfficeInspectPlugin(
+                    argv_prefix=["docker", "exec", "-i", "container"]
+                ).execute(
                     ToolExecutionRequest(
                         tool_name="office_inspect",
                         timeout_s=5,

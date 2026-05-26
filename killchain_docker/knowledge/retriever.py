@@ -114,11 +114,7 @@ def redact_flag_literals(text: str, *, file_path: bool = False) -> str:
 def _bare_file_literal_context(token: str) -> bool:
     if _high_uppercase_ratio(token):
         return True
-    parts = {
-        part
-        for part in re.split(r"[_.-]+", token.lower())
-        if part
-    }
+    parts = {part for part in re.split(r"[_.-]+", token.lower()) if part}
     return bool(parts & _FILE_ANSWER_WORDS)
 
 
@@ -131,7 +127,7 @@ def _high_uppercase_ratio(token: str) -> bool:
 
 
 def _bare_flag_literal_context(text: str, token_start: int, token: str) -> bool:
-    prefix = text[max(0, token_start - 80):token_start]
+    prefix = text[max(0, token_start - 80) : token_start]
     if _high_uppercase_ratio(token):
         return True
     return bool(_BARE_FLAG_CONTEXT_RE.search(prefix))
@@ -178,9 +174,15 @@ class RetrievalHit:
             "category": self.category,
             "year": self.year,
             "event": self.event,
-            "description": redact_flag_literals(self.description)[:max_description_chars],
-            "files": [redact_file_path_literals(path) for path in self.files[:max_files]],
-            "solution_sketch": redact_flag_literals(self.solution_sketch)[:max_solution_chars],
+            "description": redact_flag_literals(self.description)[
+                :max_description_chars
+            ],
+            "files": [
+                redact_file_path_literals(path) for path in self.files[:max_files]
+            ],
+            "solution_sketch": redact_flag_literals(self.solution_sketch)[
+                :max_solution_chars
+            ],
             "score": round(float(self.score), 4),
         }
 
@@ -204,9 +206,7 @@ class KnowledgeRetriever:
         self.entries = list(entries)
         self.embedder = embedder
         self._by_challenge_id = {
-            entry.challenge_id: entry
-            for entry in self.entries
-            if entry.challenge_id
+            entry.challenge_id: entry for entry in self.entries if entry.challenge_id
         }
         self._by_category: dict[str, list[int]] = {}
         for i, entry in enumerate(self.entries):
@@ -365,7 +365,11 @@ def rag_mode(override: str | None = None) -> str:
     runs. ``disabled`` turns augmentation off entirely.
     """
 
-    raw = (override if override is not None else os.getenv(RAG_MODE_ENV) or "").strip().lower()
+    raw = (
+        (override if override is not None else os.getenv(RAG_MODE_ENV) or "")
+        .strip()
+        .lower()
+    )
     if raw in RAG_MODES:
         return raw
     if raw:
@@ -431,7 +435,9 @@ def oracle_context_status(
     try:
         entries = load_corpus(root, index_path)
     except Exception:
-        LOGGER.exception("RAG oracle preflight failed", extra={"dataset_root": str(root)})
+        LOGGER.exception(
+            "RAG oracle preflight failed", extra={"dataset_root": str(root)}
+        )
         payload["status"] = "error"
         return payload
 
@@ -461,7 +467,9 @@ def actionable_oracle_challenge_ids(*, dataset_root: str | None = None) -> set[s
     try:
         entries = load_corpus(root, index_path)
     except Exception:
-        LOGGER.exception("RAG oracle corpus scan failed", extra={"dataset_root": str(root)})
+        LOGGER.exception(
+            "RAG oracle corpus scan failed", extra={"dataset_root": str(root)}
+        )
         return set()
     return {
         entry.challenge_id
@@ -588,7 +596,10 @@ def get_retriever(
             entries = load_corpus(root, idx)
             if not entries:
                 _LOAD_FAILED_PERMANENTLY = True
-                LOGGER.warning("RAG disabled because corpus is empty", extra={"dataset_root": str(root)})
+                LOGGER.warning(
+                    "RAG disabled because corpus is empty",
+                    extra={"dataset_root": str(root)},
+                )
                 return None
             embedder = build_default_embedder()
             _ = embedder.dimension
@@ -596,7 +607,11 @@ def get_retriever(
             _RETRIEVER_KEY = key
             LOGGER.info(
                 "RAG retriever initialized",
-                extra={"dataset_root": str(root), "entries": len(entries), "rag_mode": resolved_mode},
+                extra={
+                    "dataset_root": str(root),
+                    "entries": len(entries),
+                    "rag_mode": resolved_mode,
+                },
             )
             return _RETRIEVER
         except EmbeddingUnavailable:

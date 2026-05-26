@@ -204,10 +204,9 @@ def _looks_like_bare_flag_token(token: str, context: str) -> bool:
         return False
     if _NEGATIVE_BARE_CONTEXT_RE.search(context):
         return False
-    if (
-        _KEY_MATERIAL_CONTEXT_RE.search(context)
-        and not _FLAG_OR_ANSWER_CONTEXT_RE.search(context)
-    ):
+    if _KEY_MATERIAL_CONTEXT_RE.search(
+        context
+    ) and not _FLAG_OR_ANSWER_CONTEXT_RE.search(context):
         return False
 
     high_signal = _looks_like_high_signal_bare_token(token)
@@ -390,16 +389,69 @@ def _collapse_spurious_single_letter_splits(candidate: str) -> str:
 # candidate prefixes because they're never CTF flag prefixes — and burning
 # top-N validation slots on them locks the real prefix out.  Match is
 # case-insensitive against the lowered token.
-_BRACKET_SPAN_NOISY_PREFIXES: frozenset[str] = frozenset({
-    "is", "are", "was", "were", "be", "been", "being",
-    "the", "a", "an", "this", "that", "these", "those",
-    "in", "on", "at", "by", "to", "of", "for", "with", "as",
-    "and", "or", "but", "so", "yet", "if", "else", "then",
-    "you", "i", "we", "they", "he", "she", "it",
-    "my", "your", "our", "their", "his", "her", "its",
-    "got", "get", "found", "see", "saw", "have", "has", "had",
-    "value", "result", "answer", "output", "input", "data",
-})
+_BRACKET_SPAN_NOISY_PREFIXES: frozenset[str] = frozenset(
+    {
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "the",
+        "a",
+        "an",
+        "this",
+        "that",
+        "these",
+        "those",
+        "in",
+        "on",
+        "at",
+        "by",
+        "to",
+        "of",
+        "for",
+        "with",
+        "as",
+        "and",
+        "or",
+        "but",
+        "so",
+        "yet",
+        "if",
+        "else",
+        "then",
+        "you",
+        "i",
+        "we",
+        "they",
+        "he",
+        "she",
+        "it",
+        "my",
+        "your",
+        "our",
+        "their",
+        "his",
+        "her",
+        "its",
+        "got",
+        "get",
+        "found",
+        "see",
+        "saw",
+        "have",
+        "has",
+        "had",
+        "value",
+        "result",
+        "answer",
+        "output",
+        "input",
+        "data",
+    }
+)
 
 
 _LOCAL_CONTEXT_WINDOW = 200
@@ -428,8 +480,7 @@ def _bracket_span_candidates(
     seen_bodies: set[str] = set()
     for match in BRACKET_SPAN_PATTERN.finditer(text):
         if match.start() > 0 and (
-            text[match.start() - 1].isalnum()
-            or text[match.start() - 1] == "_"
+            text[match.start() - 1].isalnum() or text[match.start() - 1] == "_"
         ):
             continue
         body = match.group(1)
@@ -466,7 +517,7 @@ def _bracket_span_candidates(
                 cleaned = cleaned[:-1]
             if cleaned and cleaned.replace("_", "").isalnum():
                 prefixes.append(cleaned)
-        local = text[max(0, match.start() - _LOCAL_CONTEXT_WINDOW): match.start()]
+        local = text[max(0, match.start() - _LOCAL_CONTEXT_WINDOW) : match.start()]
         words = re.findall(r"[A-Za-z0-9_]{2,}", local)
         for word in reversed(words):
             if (
@@ -578,7 +629,11 @@ def encoding_cascade(near_miss: str) -> list[str]:
 
     def _try(transformed_body: str) -> None:
         candidate = f"{prefix}{{{transformed_body}}}"
-        if candidate not in candidates and candidate != near_miss and plausible_flag(candidate):
+        if (
+            candidate not in candidates
+            and candidate != near_miss
+            and plausible_flag(candidate)
+        ):
             candidates.append(candidate)
 
     # Strip non-printable characters
@@ -610,7 +665,11 @@ def encoding_cascade(near_miss: str) -> list[str]:
 
     # Try interpreting body as hex and decoding
     hex_clean = body.replace(" ", "").replace("-", "")
-    if hex_clean and all(ch in "0123456789abcdefABCDEF" for ch in hex_clean) and len(hex_clean) % 2 == 0:
+    if (
+        hex_clean
+        and all(ch in "0123456789abcdefABCDEF" for ch in hex_clean)
+        and len(hex_clean) % 2 == 0
+    ):
         try:
             decoded = binascii.unhexlify(hex_clean).decode("utf-8", errors="ignore")
             _try(decoded)
@@ -621,7 +680,9 @@ def encoding_cascade(near_miss: str) -> list[str]:
     if body and all(ch.isalnum() or ch in "+/=" for ch in body):
         for variant in (body, body + "=", body + "=="):
             try:
-                decoded = base64.b64decode(variant, validate=True).decode("utf-8", errors="ignore")
+                decoded = base64.b64decode(variant, validate=True).decode(
+                    "utf-8", errors="ignore"
+                )
                 _try(decoded)
             except Exception as exc:
                 _debug_decode_failure("base64_near_miss_body", exc, value=body)

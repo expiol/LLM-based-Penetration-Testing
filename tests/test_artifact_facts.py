@@ -1,13 +1,11 @@
 from __future__ import annotations
-
 import unittest
-
-from killchain_docker.state import Artifact
 from killchain_docker.state.artifact_facts import (
     artifact_followup_capability,
     artifact_followup_priority,
     facts_from_artifact,
 )
+from killchain_docker.state.domain import Artifact
 
 
 class ArtifactFactsTests(unittest.TestCase):
@@ -22,7 +20,6 @@ class ArtifactFactsTests(unittest.TestCase):
             "/home/ctfplayer/ctf_files/.autopentest_artifacts/a/out.random",
             "/home/ctfplayer/ctf_files/.autopentest_artifacts/a/out with spaces",
         ]
-
         artifacts = [
             Artifact(
                 path=path,
@@ -32,14 +29,12 @@ class ArtifactFactsTests(unittest.TestCase):
             )
             for path in paths
         ]
-
         self.assertEqual(
             {artifact_followup_capability(artifact) for artifact in artifacts},
             {"png.inspect"},
         )
         self.assertEqual(
-            {artifact_followup_priority(artifact) for artifact in artifacts},
-            {85},
+            {artifact_followup_priority(artifact) for artifact in artifacts}, {85}
         )
 
     def test_unknown_generated_content_is_triaged_without_name_signal(self) -> None:
@@ -51,7 +46,6 @@ class ArtifactFactsTests(unittest.TestCase):
             )
             for name in ("out", "out.random", "out with spaces")
         ]
-
         self.assertEqual(
             {artifact_followup_capability(artifact) for artifact in artifacts},
             {"artifact.triage"},
@@ -64,9 +58,7 @@ class ArtifactFactsTests(unittest.TestCase):
             source="script_exec",
             metadata={"file_type": "Web Open Font Format, TrueType"},
         )
-
         facts = facts_from_artifact(artifact)
-
         self.assertTrue(facts.is_low_signal)
         self.assertEqual(artifact_followup_priority(artifact), 0)
 
@@ -77,9 +69,7 @@ class ArtifactFactsTests(unittest.TestCase):
             source="disk_extract",
             metadata={"file_type": "data"},
         )
-
         facts = facts_from_artifact(artifact)
-
         self.assertFalse(facts.is_disk_image)
         self.assertNotEqual(artifact_followup_capability(artifact), "disk.extract")
 

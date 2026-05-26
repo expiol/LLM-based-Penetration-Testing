@@ -7,28 +7,24 @@ Supports:
 """
 
 from __future__ import annotations
-
 import re
 from typing import Any
-
-from killchain_docker.state import Artifact
+from killchain_docker.state.domain import Artifact
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolOutput,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
     _status,
-    _truncate,
 )
 
-
-# Map file(1) output keywords → artifact kind
 _KIND_MAP: list[tuple[str, str]] = [
     ("elf", "binary"),
     ("pe32", "binary"),
@@ -73,10 +69,12 @@ _KIND_MAP: list[tuple[str, str]] = [
     ("pgp", "key"),
     ("ssh", "key"),
 ]
-
-_ARCH_RE = re.compile(r"\b(x86-64|x86_64|i386|i686|ARM|aarch64|MIPS|PowerPC|SPARC|RISC-V)\b", re.IGNORECASE)
-_STRIPPED_RE = re.compile(r"\b(not stripped|stripped)\b", re.IGNORECASE)
-_LINKED_RE = re.compile(r"\b(statically linked|dynamically linked)\b", re.IGNORECASE)
+_ARCH_RE = re.compile(
+    "\\b(x86-64|x86_64|i386|i686|ARM|aarch64|MIPS|PowerPC|SPARC|RISC-V)\\b",
+    re.IGNORECASE,
+)
+_STRIPPED_RE = re.compile("\\b(not stripped|stripped)\\b", re.IGNORECASE)
+_LINKED_RE = re.compile("\\b(statically linked|dynamically linked)\\b", re.IGNORECASE)
 
 
 class FilePlugin:
@@ -90,7 +88,12 @@ class FilePlugin:
         path = _require(request.metadata, "path", self.name)
         return _run(
             self.name,
-            [*self.argv_prefix, "bash", "-c", f"file -b {path} && file -b --mime-type {path}"],
+            [
+                *self.argv_prefix,
+                "bash",
+                "-c",
+                f"file -b {path} && file -b --mime-type {path}",
+            ],
             request.timeout_s,
         )
 
@@ -104,36 +107,27 @@ def build_output(
     stdout = (result.stdout or "").strip()
     stderr = result.stderr or ""
     status = _status(result)
-
     lines = stdout.splitlines()
     file_type = lines[0].strip() if lines else ""
     mime_type = lines[1].strip() if len(lines) > 1 else ""
-
-    # -- Classify kind -------------------------------------------------------
     kind = "unknown"
     lower = file_type.lower()
     for keyword, classified_kind in _KIND_MAP:
         if keyword in lower:
             kind = classified_kind
             break
-
-    # -- Binary traits -------------------------------------------------------
     arch = ""
     m = _ARCH_RE.search(file_type)
     if m:
         arch = m.group(1)
-
     stripped = ""
     m = _STRIPPED_RE.search(file_type)
     if m:
         stripped = m.group(1).lower()
-
     linking = ""
     m = _LINKED_RE.search(file_type)
     if m:
         linking = m.group(1).lower()
-
-    # -- Artifact ------------------------------------------------------------
     artifacts: list[Artifact] = []
     if path:
         meta: dict[str, Any] = {"file_type": file_type}
@@ -145,19 +139,11 @@ def build_output(
             meta["stripped"] = stripped
         if linking:
             meta["linking"] = linking
-        artifacts.append(Artifact(
-            path=path, kind=kind, source="file", metadata=meta,
-        ))
-
-    # -- Flags ---------------------------------------------------------------
+        artifacts.append(Artifact(path=path, kind=kind, source="file", metadata=meta))
     flags = _flag_candidates_from(file_type, source="file")
-
-    # -- Summary -------------------------------------------------------------
     summary = f"file {path}: {file_type[:120]}"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
-
-    # -- output_context ------------------------------------------------------
     output_context: dict[str, Any] = {
         "path": path,
         "file_type": file_type,
@@ -171,7 +157,6 @@ def build_output(
         output_context["stripped"] = stripped == "stripped"
     if linking:
         output_context["linking"] = linking
-
     return ToolOutput(
         status=status,
         summary=summary,

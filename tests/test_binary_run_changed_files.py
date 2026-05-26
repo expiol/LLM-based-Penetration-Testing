@@ -1,14 +1,10 @@
-"""Tests for binary run changed files — updated for 2-capability architecture.
-
-The old test ran the deleted binary_run plugin directly via subprocess.
-This test now validates the shell/script plugin approach.
-"""
+"""Tests for binary-output flag extraction through the execution core."""
 
 from __future__ import annotations
 
 import unittest
 
-from killchain_docker.tools import ToolExecutionRequest
+from killchain_docker.tools.core import ToolExecutionRequest
 from killchain_docker.tools.core import extract_flags_from_text
 
 

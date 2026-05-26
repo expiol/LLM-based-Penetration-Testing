@@ -7,11 +7,15 @@ Supports:
 """
 
 from __future__ import annotations
-
 import re
 from typing import Any
-
-from killchain_docker.state import Asset, AssetKind, Endpoint, NetworkEdge, Service
+from killchain_docker.state.domain import (
+    Asset,
+    AssetKind,
+    Endpoint,
+    NetworkEdge,
+    Service,
+)
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
@@ -19,35 +23,28 @@ from killchain_docker.tools.core import (
     ToolExecutionResult,
     ToolOutput,
     ToolOutputStatus,
+    _truncate,
 )
 from killchain_docker.tools.plugins._base import (
     _flag_candidates_from,
     _require,
     _run,
     _status,
-    _truncate,
 )
 
-
-# ---------------------------------------------------------------------------
-# Regex patterns
-# ---------------------------------------------------------------------------
-
-_PORT_RE = re.compile(r"(\d+)/(\w+)\s+open\s+(\S+)(?:\s+(.*))?")
-_OS_RE = re.compile(r"OS details?:\s*(.+)", re.IGNORECASE)
-_HOSTNAME_RE = re.compile(r"Nmap scan report for\s+(\S+?)(?:\s+\((\d+\.\d+\.\d+\.\d+)\))?$", re.MULTILINE)
-_MAC_RE = re.compile(r"MAC Address:\s*([0-9A-Fa-f:]+)(?:\s+\((.+?)\))?")
+_PORT_RE = re.compile("(\\d+)/(\\w+)\\s+open\\s+(\\S+)(?:\\s+(.*))?")
+_OS_RE = re.compile("OS details?:\\s*(.+)", re.IGNORECASE)
+_HOSTNAME_RE = re.compile(
+    "Nmap scan report for\\s+(\\S+?)(?:\\s+\\((\\d+\\.\\d+\\.\\d+\\.\\d+)\\))?$",
+    re.MULTILINE,
+)
+_MAC_RE = re.compile("MAC Address:\\s*([0-9A-Fa-f:]+)(?:\\s+\\((.+?)\\))?")
 _HOST_TIMEOUT_RE = re.compile(
-    r"(?:skipping host .+? due to host timeout|host timeout)",
-    re.IGNORECASE,
+    "(?:skipping host .+? due to host timeout|host timeout)", re.IGNORECASE
 )
 _DEFAULT_HOST_TIMEOUT_CAP_S = 45
 _DEFAULT_NMAP_TIMEOUT_SLACK_S = 15
 
-
-# ---------------------------------------------------------------------------
-# Plugin
-# ---------------------------------------------------------------------------
 
 class NmapPlugin:
     name = "nmap"
@@ -64,9 +61,7 @@ class NmapPlugin:
         cmd = f"nmap {scan_type}"
         timeout_s = request.timeout_s
         timing_args, bounded_timeout = _default_timing_args(
-            scan_type=scan_type,
-            extra=extra,
-            timeout_s=request.timeout_s,
+            scan_type=scan_type, extra=extra, timeout_s=request.timeout_s
         )
         if timing_args:
             cmd += f" {timing_args}"
@@ -79,18 +74,16 @@ class NmapPlugin:
         return _run(self.name, [*self.argv_prefix, "bash", "-c", cmd], timeout_s)
 
 
-def _default_timing_args(*, scan_type: str, extra: str, timeout_s: int) -> tuple[str, int]:
+def _default_timing_args(
+    *, scan_type: str, extra: str, timeout_s: int
+) -> tuple[str, int]:
     existing = f"{scan_type} {extra}".lower()
     if "--host-timeout" in existing or "--max-retries" in existing:
-        return "", timeout_s
+        return ("", timeout_s)
     host_timeout = max(5, min(_DEFAULT_HOST_TIMEOUT_CAP_S, max(1, timeout_s - 5)))
     bounded_timeout = min(timeout_s, host_timeout + _DEFAULT_NMAP_TIMEOUT_SLACK_S)
-    return f"--host-timeout {host_timeout}s --max-retries 1", bounded_timeout
+    return (f"--host-timeout {host_timeout}s --max-retries 1", bounded_timeout)
 
-
-# ---------------------------------------------------------------------------
-# Output builder
-# ---------------------------------------------------------------------------
 
 def build_output(
     request: ToolExecutionRequest,
@@ -101,13 +94,11 @@ def build_output(
     requested_ports = str(request.metadata.get("ports") or "").strip()
     stdout = result.stdout or ""
     stderr = result.stderr or ""
-    combined = "\n".join(part for part in (stdout, stderr) if part)
+    combined = "\n".join((part for part in (stdout, stderr) if part))
     status = _status(result)
     timeout_signal = _HOST_TIMEOUT_RE.search(combined) is not None
     if timeout_signal:
         status = ToolOutputStatus.FAILURE
-
-    # -- Parse open ports and services --------------------------------------
     services: list[Service] = []
     open_ports: list[dict[str, Any]] = []
     for m in _PORT_RE.finditer(stdout):
@@ -115,20 +106,22 @@ def build_output(
         proto = m.group(2)
         svc = m.group(3)
         ver = (m.group(4) or "").strip()
-        # Split version into product/version when possible
-        product, version = "", ver
+        product, version = ("", ver)
         if ver and " " in ver:
             parts = ver.split(" ", 1)
-            product, version = parts[0], parts[1]
-        services.append(Service(
-            port=port, protocol=proto, name=svc,
-            product=product or None, version=version or None,
-        ))
-        open_ports.append({
-            "port": port, "protocol": proto, "service": svc, "version": ver,
-        })
-
-    # -- Parse hostname / IP -------------------------------------------------
+            product, version = (parts[0], parts[1])
+        services.append(
+            Service(
+                port=port,
+                protocol=proto,
+                name=svc,
+                product=product or None,
+                version=version or None,
+            )
+        )
+        open_ports.append(
+            {"port": port, "protocol": proto, "service": svc, "version": ver}
+        )
     hostname: str | None = None
     ip_address: str | None = None
     m = _HOSTNAME_RE.search(stdout)
@@ -138,29 +131,21 @@ def build_output(
         if resolved_ip:
             hostname = host_or_ip
             ip_address = resolved_ip
-        elif re.match(r"\d+\.\d+\.\d+\.\d+", host_or_ip):
+        elif re.match("\\d+\\.\\d+\\.\\d+\\.\\d+", host_or_ip):
             ip_address = host_or_ip
         else:
             hostname = host_or_ip
-
-    # -- Parse OS detection --------------------------------------------------
     os_info = ""
     m = _OS_RE.search(stdout)
     if m:
         os_info = m.group(1).strip()
-
-    # -- Parse MAC address ---------------------------------------------------
     mac_address = ""
     mac_vendor = ""
     m = _MAC_RE.search(stdout)
     if m:
         mac_address = m.group(1)
         mac_vendor = (m.group(2) or "").strip()
-
-    # -- Detect filtered/closed counts for summary --------------------------
     filtered_count = stdout.lower().count("filtered")
-
-    # -- Assets --------------------------------------------------------------
     assets: list[Asset] = []
     if services:
         asset_meta: dict[str, Any] = {}
@@ -170,57 +155,66 @@ def build_output(
             asset_meta["mac_address"] = mac_address
         if mac_vendor:
             asset_meta["mac_vendor"] = mac_vendor
-
-        # Detect if this looks like a web application
-        web_ports = {s.port for s in services if s.name in ("http", "https", "http-proxy")}
+        web_ports = {
+            s.port for s in services if s.name in ("http", "https", "http-proxy")
+        }
         kind = AssetKind.WEB_APPLICATION if web_ports else AssetKind.HOST
-
-        assets.append(Asset(
-            asset_id=f"nmap-{target}",
-            kind=kind,
-            hostname=hostname or target,
-            ip_address=ip_address,
-            services=services,
-            tags={"nmap"},
-            metadata=asset_meta,
-        ))
-
-    # -- Endpoints (one per open port) ---------------------------------------
+        assets.append(
+            Asset(
+                asset_id=f"nmap-{target}",
+                kind=kind,
+                hostname=hostname or target,
+                ip_address=ip_address,
+                services=services,
+                tags={"nmap"},
+                metadata=asset_meta,
+            )
+        )
     endpoints: list[Endpoint] = []
     for svc in services:
         host = hostname or ip_address or target
         if svc.name in ("http", "https", "http-proxy"):
             scheme = "https" if svc.name == "https" or svc.port == 443 else "http"
-            port_suffix = "" if (scheme == "http" and svc.port == 80) or (scheme == "https" and svc.port == 443) else f":{svc.port}"
+            port_suffix = (
+                ""
+                if scheme == "http"
+                and svc.port == 80
+                or (scheme == "https" and svc.port == 443)
+                else f":{svc.port}"
+            )
             ep_url = f"{scheme}://{host}{port_suffix}"
-            endpoints.append(Endpoint(
-                url=ep_url,
-                hostname=hostname or host,
-                port=svc.port,
-                protocol=scheme,
-                metadata={"service": svc.name, "product": svc.product, "version": svc.version},
-            ))
+            endpoints.append(
+                Endpoint(
+                    url=ep_url,
+                    hostname=hostname or host,
+                    port=svc.port,
+                    protocol=scheme,
+                    metadata={
+                        "service": svc.name,
+                        "product": svc.product,
+                        "version": svc.version,
+                    },
+                )
+            )
         else:
-            endpoints.append(Endpoint(
-                hostname=hostname or host,
-                port=svc.port,
-                protocol=svc.protocol,
-                metadata={"service": svc.name, "product": svc.product, "version": svc.version},
-            ))
-
-    # -- Network edges -------------------------------------------------------
+            endpoints.append(
+                Endpoint(
+                    hostname=hostname or host,
+                    port=svc.port,
+                    protocol=svc.protocol,
+                    metadata={
+                        "service": svc.name,
+                        "product": svc.product,
+                        "version": svc.version,
+                    },
+                )
+            )
     network_edges: list[NetworkEdge] = []
-    if ip_address and hostname and hostname != ip_address:
-        network_edges.append(NetworkEdge(
-            source=hostname,
-            target=ip_address,
-            relationship="resolves_to",
-        ))
-
-    # -- Flags ---------------------------------------------------------------
+    if ip_address and hostname and (hostname != ip_address):
+        network_edges.append(
+            NetworkEdge(source=hostname, target=ip_address, relationship="resolves_to")
+        )
     flags = _flag_candidates_from(combined, source="nmap")
-
-    # -- Summary -------------------------------------------------------------
     summary = f"nmap {target}: {len(open_ports)} open port(s)"
     if os_info:
         summary += f" [{os_info[:60]}]"
@@ -235,8 +229,6 @@ def build_output(
             summary = f"nmap {target} failed (exit {result.exit_code})"
     if flags:
         summary += f" — {len(flags)} flag candidate(s)"
-
-    # -- output_context ------------------------------------------------------
     output_context: dict[str, Any] = {
         "target": target,
         "open_ports": open_ports,
@@ -254,9 +246,10 @@ def build_output(
         output_context["mac_address"] = mac_address
     if timeout_signal:
         output_context["failure_kind"] = "scan_timeout"
-        output_context["failure_detail"] = "nmap reported that the host scan exceeded its host timeout"
+        output_context["failure_detail"] = (
+            "nmap reported that the host scan exceeded its host timeout"
+        )
         output_context["result_quality"] = "scan_incomplete"
-
     return ToolOutput(
         status=status,
         summary=summary,

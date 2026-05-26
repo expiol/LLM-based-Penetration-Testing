@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from killchain_docker.knowledge import public_rag_payload
+from killchain_docker.knowledge.status import public_rag_payload
 from killchain_docker.logging_utils import get_logger, write_json_file, write_text_file
 from killchain_docker.thread_status import build_thread_registry, thread_info
 
@@ -20,53 +20,59 @@ MONITOR_JSON_NAME = "_batch_monitor.json"
 STATUS_SUFFIX = ".status.json"
 _URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _PATH_KEYS = frozenset({"logfile", "status_file", "run_dir"})
-_MONITOR_RESULT_KEYS = frozenset({
-    "challenge",
-    "monitor_challenge",
-    "replica",
-    "run_id",
-    "solved",
-    "status",
-    "finish_reason",
-    "skip_reason",
-    "runtime_sec",
-    "rag_mode",
-    "category",
-    "files_count",
-    "has_server",
-    "server_type",
-    "authorized_scope_count",
-    "max_cycles",
-    "token_usage",
-    "state_metrics",
-    "artifacts",
-    "rag",
-    "threads",
-    "runtime_error",
-    "error",
-    "error_type",
-    "logfile",
-    "status_file",
-    "failure_buckets",
-})
+_MONITOR_RESULT_KEYS = frozenset(
+    {
+        "challenge",
+        "monitor_challenge",
+        "replica",
+        "run_id",
+        "solved",
+        "status",
+        "finish_reason",
+        "skip_reason",
+        "runtime_sec",
+        "rag_mode",
+        "category",
+        "files_count",
+        "has_server",
+        "server_type",
+        "authorized_scope_count",
+        "max_cycles",
+        "token_usage",
+        "state_metrics",
+        "artifacts",
+        "rag",
+        "threads",
+        "runtime_error",
+        "error",
+        "error_type",
+        "logfile",
+        "status_file",
+        "failure_buckets",
+    }
+)
 _MONITOR_TEXT_LIMIT = 360
-_STATUS_CORE_FIELDS = frozenset({
-    "schema_version",
-    "challenge",
-    "pid",
-    "thread_id",
-    "thread_name",
-    "status_writer_thread_id",
-    "status_writer_thread_name",
-    "threads",
-    "stage",
-    "status",
-    "updated_at",
-})
+_STATUS_CORE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "challenge",
+        "pid",
+        "thread_id",
+        "thread_name",
+        "status_writer_thread_id",
+        "status_writer_thread_name",
+        "threads",
+        "stage",
+        "status",
+        "updated_at",
+    }
+)
 
 
 def utc_timestamp(ts: float | None = None) -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts if ts is not None else time.time()))
+    return time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts if ts is not None else time.time())
+    )
 
 
 def status_path_for_logfile(logfile: Path) -> Path:
@@ -94,7 +100,12 @@ def monitor_path(path: Any, root: Path) -> str | None:
             return None
         if "\\" in posix:
             return None
-        if posix == ".." or posix.startswith("../") or "/../" in posix or posix.endswith("/.."):
+        if (
+            posix == ".."
+            or posix.startswith("../")
+            or "/../" in posix
+            or posix.endswith("/..")
+        ):
             return None
         return posix
     try:
@@ -157,7 +168,9 @@ def monitor_error(value: Any) -> dict[str, str] | None:
     return None
 
 
-def monitor_result(result: dict[str, Any] | None, logdir: Path) -> dict[str, Any] | None:
+def monitor_result(
+    result: dict[str, Any] | None, logdir: Path
+) -> dict[str, Any] | None:
     """Trim result payloads to fields the static monitor can safely link to."""
 
     if not isinstance(result, dict):
@@ -225,7 +238,9 @@ def write_run_status(
         observed=observed,
         status_writer=status_writer,
         latest_event=latest_event if isinstance(latest_event, dict) else None,
-        current_todo=extra.get("current_todo") if isinstance(extra.get("current_todo"), dict) else None,
+        current_todo=extra.get("current_todo")
+        if isinstance(extra.get("current_todo"), dict)
+        else None,
         runtime_error=_status_error(extra),
         message=extra.get("message"),
     )
@@ -242,11 +257,13 @@ def write_run_status(
         "status": status,
         "updated_at": utc_timestamp(),
     }
-    payload.update({
-        key: value
-        for key, value in extra.items()
-        if value is not None and key not in _STATUS_CORE_FIELDS
-    })
+    payload.update(
+        {
+            key: value
+            for key, value in extra.items()
+            if value is not None and key not in _STATUS_CORE_FIELDS
+        }
+    )
     payload = sanitize_monitor_paths(payload, path.parent)
     try:
         write_json(path, payload)
@@ -283,13 +300,15 @@ def build_monitor_snapshot(
 
         safe_result = monitor_result(result, logdir)
         safe_active = sanitize_monitor_paths(active, logdir) if active else None
-        entries.append({
-            "challenge": name,
-            "state": "completed" if result else ("active" if active else "queued"),
-            "status_file": status_file,
-            "result": safe_result,
-            "active": safe_active,
-        })
+        entries.append(
+            {
+                "challenge": name,
+                "state": "completed" if result else ("active" if active else "queued"),
+                "status_file": status_file,
+                "result": safe_result,
+                "active": safe_active,
+            }
+        )
 
     active_count = sum(1 for entry in entries if entry["state"] == "active")
     return {
@@ -312,8 +331,12 @@ def build_monitor_snapshot(
                     and result.get("status") not in {"skipped", "interrupted"}
                 )
             ),
-            "skipped": sum(1 for result in results if result.get("status") == "skipped"),
-            "interrupted": sum(1 for result in results if result.get("status") == "interrupted"),
+            "skipped": sum(
+                1 for result in results if result.get("status") == "skipped"
+            ),
+            "interrupted": sum(
+                1 for result in results if result.get("status") == "interrupted"
+            ),
         },
         "entries": entries,
     }

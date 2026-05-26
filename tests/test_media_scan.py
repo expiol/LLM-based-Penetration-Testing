@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from killchain_docker.tools import ToolExecutionRequest
+from killchain_docker.tools.core import ToolExecutionRequest
 from killchain_docker.tools.core import ParsedToolOutput
 from killchain_docker.tools.plugins.media_scan import MediaScanPlugin, build_output
 
@@ -33,14 +33,18 @@ class MediaScanTests(unittest.TestCase):
 
             self.assertEqual(result.exit_code, 0, result.stderr)
             self.assertEqual(output.output_context["media"][0]["kind"], "gif")
-            self.assertEqual(output.output_context["media"][0]["appended_size"], len(payload))
+            self.assertEqual(
+                output.output_context["media"][0]["appended_size"], len(payload)
+            )
             self.assertEqual(
                 [candidate.value for candidate in output.flag_candidates],
                 ["flag{media_scan_appended_ok_123}"],
             )
             self.assertEqual(len(output.artifacts), 1)
             self.assertEqual(output.artifacts[0].source, "media_scan")
-            self.assertEqual(output.artifacts[0].digest, hashlib.sha256(payload).hexdigest())
+            self.assertEqual(
+                output.artifacts[0].digest, hashlib.sha256(payload).hexdigest()
+            )
             self.assertTrue(Path(output.artifacts[0].path).exists())
 
 

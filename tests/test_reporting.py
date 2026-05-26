@@ -1,9 +1,7 @@
 from __future__ import annotations
-
 import unittest
-
 from killchain_docker.reporting import render_markdown_report
-from killchain_docker.state import RunState
+from killchain_docker.state.run_state import RunState
 
 
 class ReportingTests(unittest.TestCase):
@@ -13,10 +11,11 @@ class ReportingTests(unittest.TestCase):
             "type": "RuntimeError",
             "message": "router crashed\nbefore finalizing state",
         }
-
         report = render_markdown_report(state)
-
-        self.assertIn("- Runtime Error: `RuntimeError` router crashed before finalizing state", report)
+        self.assertIn(
+            "- Runtime Error: `RuntimeError` router crashed before finalizing state",
+            report,
+        )
 
     def test_report_surfaces_public_rag_status(self) -> None:
         state = RunState(objective="Solve strict run", authorized_scope=[])
@@ -27,10 +26,11 @@ class ReportingTests(unittest.TestCase):
             "knowledge_hints": [{"solution_sketch": "raw hint"}],
             "hit_provenance": [{"challenge_id": "hidden"}],
         }
-
         report = render_markdown_report(state)
-
-        self.assertIn("- RAG: enabled=`True` status=`hit` policy=`filtered_context` hints=1", report)
+        self.assertIn(
+            "- RAG: enabled=`True` status=`hit` policy=`filtered_context` hints=1",
+            report,
+        )
         self.assertNotIn("hidden", report)
 
 

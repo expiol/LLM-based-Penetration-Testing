@@ -30,7 +30,9 @@ def _write_events(path: Path, run_id: str, challenge: str) -> None:
             "context": {"run_id": run_id, "challenge": challenge},
         }
     ]
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8"
+    )
 
 
 def _mode_payload(
@@ -82,10 +84,14 @@ def _mode_payload(
         "excluded_event_keys": ["2013:demo-event"] if mode == "strict" else [],
         "hit_provenance": [
             {
-                "challenge_id": challenge if challenge_identity_hit else "other-challenge",
+                "challenge_id": challenge
+                if challenge_identity_hit
+                else "other-challenge",
                 "year": "2013",
                 "event": "Demo-Event" if same_event_hit else "Other-Event",
-                "event_key": "2013:demo-event" if same_event_hit else "2013:other-event",
+                "event_key": "2013:demo-event"
+                if same_event_hit
+                else "2013:other-event",
                 "score": 0.9,
             }
         ],
@@ -167,7 +173,12 @@ def _mode_payload(
         "solved": False,
         "status": "unsolved_exhausted",
         "rag_mode": mode,
-        "token_usage": {"llm_calls": 1, "prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        "token_usage": {
+            "llm_calls": 1,
+            "prompt_tokens": 2,
+            "completion_tokens": 3,
+            "total_tokens": 5,
+        },
         "artifacts": artifacts,
         "status_file": f"{challenge}.status.json",
         "failure_buckets": ["unsolved_exhausted"],
@@ -286,7 +297,10 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": _mode_payload(root, "oracle"),
                         "strict": _mode_payload(root, "strict"),
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
@@ -445,14 +459,16 @@ class RagAblationAuditTests(unittest.TestCase):
             )
 
             with redirect_stdout(StringIO()):
-                rc = audit_main([
-                    str(report_path),
-                    "--expected-modes",
-                    "disabled",
-                    "--output",
-                    str(output_path),
-                    "--quiet",
-                ])
+                rc = audit_main(
+                    [
+                        str(report_path),
+                        "--expected-modes",
+                        "disabled",
+                        "--output",
+                        str(output_path),
+                        "--quiet",
+                    ]
+                )
 
             payload = json.loads(output_path.read_text(encoding="utf-8"))
 
@@ -485,7 +501,10 @@ class RagAblationAuditTests(unittest.TestCase):
                             "logdir": str(root / "strict"),
                         },
                     },
-                    "comparison": {"available": False, "reason": "insufficient_results"},
+                    "comparison": {
+                        "available": False,
+                        "reason": "insufficient_results",
+                    },
                 },
             )
 
@@ -533,7 +552,9 @@ class RagAblationAuditTests(unittest.TestCase):
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
             disabled_payload = _mode_payload(root, "disabled")
-            status_path = Path(str(disabled_payload["logdir"])) / "demo-challenge.status.json"
+            status_path = (
+                Path(str(disabled_payload["logdir"])) / "demo-challenge.status.json"
+            )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             status["rag"] = {
                 "enabled": True,
@@ -566,7 +587,9 @@ class RagAblationAuditTests(unittest.TestCase):
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
             oracle_payload = _mode_payload(root, "oracle")
-            status_path = Path(str(oracle_payload["logdir"])) / "demo-challenge.status.json"
+            status_path = (
+                Path(str(oracle_payload["logdir"])) / "demo-challenge.status.json"
+            )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             status["rag"] = {
                 "enabled": True,
@@ -599,7 +622,9 @@ class RagAblationAuditTests(unittest.TestCase):
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
             oracle_payload = _mode_payload(root, "oracle")
-            status_path = Path(str(oracle_payload["logdir"])) / "demo-challenge.status.json"
+            status_path = (
+                Path(str(oracle_payload["logdir"])) / "demo-challenge.status.json"
+            )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             status["rag"]["hint_count"] = "bad"
             write_json(status_path, status)
@@ -632,16 +657,23 @@ class RagAblationAuditTests(unittest.TestCase):
                     "finished": True,
                     "modes": {
                         "oracle": _mode_payload(root, "oracle"),
-                        "strict": _mode_payload(root, "strict", challenge_identity_hit=True),
+                        "strict": _mode_payload(
+                            root, "strict", challenge_identity_hit=True
+                        ),
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
 
             self.assertFalse(payload["ok"])
-            self.assertIn("rag_strict_identity_hit", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "rag_strict_identity_hit", {item["code"] for item in payload["issues"]}
+            )
 
     def test_audit_rejects_strict_same_event_hit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -656,16 +688,24 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": _mode_payload(root, "oracle"),
                         "strict": _mode_payload(root, "strict", same_event_hit=True),
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
 
             self.assertFalse(payload["ok"])
-            self.assertIn("rag_strict_same_event_hit", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "rag_strict_same_event_hit",
+                {item["code"] for item in payload["issues"]},
+            )
 
-    def test_audit_reports_invalid_artifact_rag_hit_count_without_crashing(self) -> None:
+    def test_audit_reports_invalid_artifact_rag_hit_count_without_crashing(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
@@ -716,22 +756,31 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
 
             self.assertFalse(payload["ok"])
-            self.assertIn("public_rag_raw_payload", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "public_rag_raw_payload", {item["code"] for item in payload["issues"]}
+            )
 
     def test_audit_rejects_raw_rag_payload_in_artifact_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
             strict_payload = _mode_payload(root, "strict")
-            artifact_summary_path = root / "artifacts" / "strict" / "run-demo" / "summary.json"
-            artifact_summary = json.loads(artifact_summary_path.read_text(encoding="utf-8"))
+            artifact_summary_path = (
+                root / "artifacts" / "strict" / "run-demo" / "summary.json"
+            )
+            artifact_summary = json.loads(
+                artifact_summary_path.read_text(encoding="utf-8")
+            )
             artifact_summary["rag"]["mode"] = "strict"
             artifact_summary["rag"]["knowledge_hints"] = [{"solution_sketch": "raw"}]
             write_json(artifact_summary_path, artifact_summary)
@@ -750,7 +799,9 @@ class RagAblationAuditTests(unittest.TestCase):
             payload = audit_ablation_manifest(report_path, expected_modes=("strict",))
 
             self.assertFalse(payload["ok"])
-            self.assertIn("public_rag_raw_payload", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "public_rag_raw_payload", {item["code"] for item in payload["issues"]}
+            )
 
     def test_audit_rejects_inconsistent_runtime_error_observability(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -815,12 +866,21 @@ class RagAblationAuditTests(unittest.TestCase):
             write_json(monitor_path, monitor)
 
             artifact_summary_path = artifact_dir / "summary.json"
-            artifact_summary = json.loads(artifact_summary_path.read_text(encoding="utf-8"))
+            artifact_summary = json.loads(
+                artifact_summary_path.read_text(encoding="utf-8")
+            )
             artifact_summary["runtime_error"] = runtime_error
             write_json(artifact_summary_path, artifact_summary)
-            write_json(artifact_dir / "compact_log.json", {"run": {"runtime_error": runtime_error}})
-            (artifact_dir / "report.md").write_text("Runtime Error: RuntimeError\n", encoding="utf-8")
-            (artifact_dir / "compact_log.md").write_text("Runtime error: RuntimeError\n", encoding="utf-8")
+            write_json(
+                artifact_dir / "compact_log.json",
+                {"run": {"runtime_error": runtime_error}},
+            )
+            (artifact_dir / "report.md").write_text(
+                "Runtime Error: RuntimeError\n", encoding="utf-8"
+            )
+            (artifact_dir / "compact_log.md").write_text(
+                "Runtime error: RuntimeError\n", encoding="utf-8"
+            )
 
             write_json(
                 report_path,
@@ -857,14 +917,19 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
 
             self.assertFalse(payload["ok"])
-            self.assertIn("monitor_detail_missing", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "monitor_detail_missing", {item["code"] for item in payload["issues"]}
+            )
 
     def test_audit_rejects_finished_monitor_active_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -885,14 +950,20 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
 
             self.assertFalse(payload["ok"])
-            self.assertIn("monitor_entry_not_completed", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "monitor_entry_not_completed",
+                {item["code"] for item in payload["issues"]},
+            )
 
     def test_audit_rejects_finished_summary_with_unfinished_monitor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -913,14 +984,19 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
 
             self.assertFalse(payload["ok"])
-            self.assertIn("monitor_unfinished", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "monitor_unfinished", {item["code"] for item in payload["issues"]}
+            )
 
     def test_audit_rejects_unsafe_monitor_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -946,17 +1022,28 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
-            path_issues = [item for item in payload["issues"] if item["code"] == "monitor_path_unsafe"]
+            path_issues = [
+                item
+                for item in payload["issues"]
+                if item["code"] == "monitor_path_unsafe"
+            ]
 
             self.assertFalse(payload["ok"])
             self.assertGreaterEqual(len(path_issues), 4)
-            self.assertTrue(any(item["field"] == "monitor.logdir" for item in path_issues))
-            self.assertTrue(any(item["field"].endswith("status_file") for item in path_issues))
+            self.assertTrue(
+                any(item["field"] == "monitor.logdir" for item in path_issues)
+            )
+            self.assertTrue(
+                any(item["field"].endswith("status_file") for item in path_issues)
+            )
 
     def test_audit_rejects_unsafe_status_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -964,7 +1051,9 @@ class RagAblationAuditTests(unittest.TestCase):
             report_path = root / "rag" / "_rag_ablation.json"
             oracle_payload = _mode_payload(root, "oracle")
             strict_payload = _mode_payload(root, "strict")
-            status_path = Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            status_path = (
+                Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             status["logfile"] = "/tmp/outside.json"
             status["artifacts"] = {
@@ -981,12 +1070,19 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
-            path_issues = [item for item in payload["issues"] if item["code"] == "status_path_unsafe"]
+            path_issues = [
+                item
+                for item in payload["issues"]
+                if item["code"] == "status_path_unsafe"
+            ]
             fields = {item["field"] for item in path_issues}
 
             self.assertFalse(payload["ok"])
@@ -1012,16 +1108,23 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
 
             self.assertFalse(payload["ok"])
-            self.assertIn("monitor_html_stale", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "monitor_html_stale", {item["code"] for item in payload["issues"]}
+            )
 
-    def test_audit_rejects_monitor_without_status_error_liveness_downgrade(self) -> None:
+    def test_audit_rejects_monitor_without_status_error_liveness_downgrade(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
@@ -1042,16 +1145,25 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
-            stale_issues = [item for item in payload["issues"] if item["code"] == "monitor_html_stale"]
+            stale_issues = [
+                item
+                for item in payload["issues"]
+                if item["code"] == "monitor_html_stale"
+            ]
 
             self.assertFalse(payload["ok"])
             self.assertTrue(stale_issues)
-            self.assertIn("status polling failure liveness downgrade", stale_issues[0]["missing"])
+            self.assertIn(
+                "status polling failure liveness downgrade", stale_issues[0]["missing"]
+            )
 
     def test_audit_rejects_monitor_without_terminal_status_badge_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1074,16 +1186,25 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
-            stale_issues = [item for item in payload["issues"] if item["code"] == "monitor_html_stale"]
+            stale_issues = [
+                item
+                for item in payload["issues"]
+                if item["code"] == "monitor_html_stale"
+            ]
 
             self.assertFalse(payload["ok"])
             self.assertTrue(stale_issues)
-            self.assertIn("unsolved terminal status badge mapping", stale_issues[0]["missing"])
+            self.assertIn(
+                "unsolved terminal status badge mapping", stale_issues[0]["missing"]
+            )
 
     def test_audit_rejects_monitor_without_thread_registry_rendering(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1093,7 +1214,9 @@ class RagAblationAuditTests(unittest.TestCase):
             html_path = Path(str(strict_payload["monitor_path"]))
             html = html_path.read_text(encoding="utf-8")
             html_path.write_text(
-                html.replace("function threadRegistrySummary", "function legacyThreadSummary"),
+                html.replace(
+                    "function threadRegistrySummary", "function legacyThreadSummary"
+                ),
                 encoding="utf-8",
             )
             write_json(
@@ -1109,7 +1232,11 @@ class RagAblationAuditTests(unittest.TestCase):
             )
 
             payload = audit_ablation_manifest(report_path, expected_modes=("strict",))
-            stale_issues = [item for item in payload["issues"] if item["code"] == "monitor_html_stale"]
+            stale_issues = [
+                item
+                for item in payload["issues"]
+                if item["code"] == "monitor_html_stale"
+            ]
 
             self.assertFalse(payload["ok"])
             self.assertTrue(stale_issues)
@@ -1139,11 +1266,17 @@ class RagAblationAuditTests(unittest.TestCase):
             )
 
             payload = audit_ablation_manifest(report_path, expected_modes=("strict",))
-            stale_issues = [item for item in payload["issues"] if item["code"] == "monitor_html_stale"]
+            stale_issues = [
+                item
+                for item in payload["issues"]
+                if item["code"] == "monitor_html_stale"
+            ]
 
             self.assertFalse(payload["ok"])
             self.assertTrue(stale_issues)
-            self.assertIn("per-thread latest event message rendering", stale_issues[0]["missing"])
+            self.assertIn(
+                "per-thread latest event message rendering", stale_issues[0]["missing"]
+            )
 
     def test_audit_rejects_monitor_without_thread_worker_rendering(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1169,7 +1302,11 @@ class RagAblationAuditTests(unittest.TestCase):
             )
 
             payload = audit_ablation_manifest(report_path, expected_modes=("strict",))
-            stale_issues = [item for item in payload["issues"] if item["code"] == "monitor_html_stale"]
+            stale_issues = [
+                item
+                for item in payload["issues"]
+                if item["code"] == "monitor_html_stale"
+            ]
 
             self.assertFalse(payload["ok"])
             self.assertTrue(stale_issues)
@@ -1196,16 +1333,25 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
-            stale_issues = [item for item in payload["issues"] if item["code"] == "monitor_html_stale"]
+            stale_issues = [
+                item
+                for item in payload["issues"]
+                if item["code"] == "monitor_html_stale"
+            ]
 
             self.assertFalse(payload["ok"])
             self.assertTrue(stale_issues)
-            self.assertIn("browser refresh status rendering", stale_issues[0]["missing"])
+            self.assertIn(
+                "browser refresh status rendering", stale_issues[0]["missing"]
+            )
 
     def test_audit_rejects_raw_rag_payload_in_status_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1213,7 +1359,9 @@ class RagAblationAuditTests(unittest.TestCase):
             report_path = root / "rag" / "_rag_ablation.json"
             oracle_payload = _mode_payload(root, "oracle")
             strict_payload = _mode_payload(root, "strict")
-            status_path = Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            status_path = (
+                Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             status["rag"] = {
                 "enabled": True,
@@ -1232,14 +1380,19 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
 
             self.assertFalse(payload["ok"])
-            self.assertIn("public_rag_raw_payload", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "public_rag_raw_payload", {item["code"] for item in payload["issues"]}
+            )
 
     def test_audit_rejects_status_summary_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1247,7 +1400,9 @@ class RagAblationAuditTests(unittest.TestCase):
             report_path = root / "rag" / "_rag_ablation.json"
             oracle_payload = _mode_payload(root, "oracle")
             strict_payload = _mode_payload(root, "strict")
-            status_path = Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            status_path = (
+                Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             status["status"] = "solved"
             status["run_id"] = "other-run"
@@ -1262,7 +1417,10 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
@@ -1280,7 +1438,9 @@ class RagAblationAuditTests(unittest.TestCase):
             report_path = root / "rag" / "_rag_ablation.json"
             oracle_payload = _mode_payload(root, "oracle")
             strict_payload = _mode_payload(root, "strict")
-            status_path = Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            status_path = (
+                Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             for key in (
                 "pid",
@@ -1301,7 +1461,10 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
@@ -1317,7 +1480,9 @@ class RagAblationAuditTests(unittest.TestCase):
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
             strict_payload = _mode_payload(root, "strict")
-            status_path = Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            status_path = (
+                Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             status.pop("threads", None)
             write_json(status_path, status)
@@ -1336,14 +1501,19 @@ class RagAblationAuditTests(unittest.TestCase):
             payload = audit_ablation_manifest(report_path, expected_modes=("strict",))
 
             self.assertFalse(payload["ok"])
-            self.assertIn("status_thread_registry_missing", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "status_thread_registry_missing",
+                {item["code"] for item in payload["issues"]},
+            )
 
     def test_audit_rejects_registry_missing_latest_event_thread(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report_path = root / "rag" / "_rag_ablation.json"
             strict_payload = _mode_payload(root, "strict")
-            status_path = Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            status_path = (
+                Path(str(strict_payload["logdir"])) / "demo-challenge.status.json"
+            )
             status = json.loads(status_path.read_text(encoding="utf-8"))
             status["latest_event"] = {
                 "event_type": "worker_progress",
@@ -1406,7 +1576,9 @@ class RagAblationAuditTests(unittest.TestCase):
             payload = audit_ablation_manifest(report_path, expected_modes=("strict",))
 
             self.assertFalse(payload["ok"])
-            self.assertIn("event_worker_context", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "event_worker_context", {item["code"] for item in payload["issues"]}
+            )
 
     def test_audit_rejects_unredacted_rag_hint_literals(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1439,14 +1611,19 @@ class RagAblationAuditTests(unittest.TestCase):
                         "oracle": oracle_payload,
                         "strict": strict_payload,
                     },
-                    "comparison": {"available": True, "strict_minus_oracle": {"solved": 0}},
+                    "comparison": {
+                        "available": True,
+                        "strict_minus_oracle": {"solved": 0},
+                    },
                 },
             )
 
             payload = audit_ablation_manifest(report_path)
 
             self.assertFalse(payload["ok"])
-            self.assertIn("rag_hint_literal_leak", {item["code"] for item in payload["issues"]})
+            self.assertIn(
+                "rag_hint_literal_leak", {item["code"] for item in payload["issues"]}
+            )
 
 
 if __name__ == "__main__":

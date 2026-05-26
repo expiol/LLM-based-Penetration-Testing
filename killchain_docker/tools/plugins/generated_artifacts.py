@@ -1,14 +1,15 @@
 """Shared parsing for tool-generated durable artifact manifests."""
 
 from __future__ import annotations
-
-from killchain_docker.state import Artifact
+from killchain_docker.state.domain import Artifact
 
 ARTIFACTS_START = "__KILLCHAIN_SCRIPT_ARTIFACTS__"
 ARTIFACTS_END = "__KILLCHAIN_SCRIPT_ARTIFACTS_END__"
 
 
-def artifact_records_from_stdout(stdout: str, *, limit: int = 40) -> list[dict[str, object]]:
+def artifact_records_from_stdout(
+    stdout: str, *, limit: int = 40
+) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     in_section = False
     for line in stdout.splitlines():
@@ -49,11 +50,7 @@ def artifact_records_from_stdout(stdout: str, *, limit: int = 40) -> list[dict[s
 
 
 def artifacts_from_records(
-    records: list[dict[str, object]],
-    *,
-    source: str,
-    kind_prefix: str,
-    limit: int = 40,
+    records: list[dict[str, object]], *, source: str, kind_prefix: str, limit: int = 40
 ) -> list[Artifact]:
     artifacts: list[Artifact] = []
     for record in records[:limit]:
@@ -68,9 +65,7 @@ def artifacts_from_records(
             Artifact(
                 path=path,
                 kind=artifact_kind(
-                    file_type=file_type,
-                    mime_type=mime_type,
-                    prefix=kind_prefix,
+                    file_type=file_type, mime_type=mime_type, prefix=kind_prefix
                 ),
                 source=source,
                 size=size if isinstance(size, int) else None,
