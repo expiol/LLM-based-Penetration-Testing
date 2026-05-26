@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import re
 import shlex
+from urllib.parse import urlparse
 
 from killchain_docker.scope_guard import (
     ambient_filesystem_block_reason,
@@ -12,7 +14,7 @@ from killchain_docker.scope_guard import (
     scratch_path_reference_block_reason,
 )
 from killchain_docker.state.constants import DEFAULT_FILES_ROOT
-from killchain_docker.state.domain import ExploitAttempt
+from killchain_docker.state.domain import Credential, ExploitAttempt, Session
 from killchain_docker.tools.core import (
     ExecutionMode,
     ParsedToolOutput,
@@ -56,6 +58,44 @@ INTERPRETER_MAP = {
     "ruby": ["ruby"],
     "perl": ["perl"],
 }
+
+_AUTH_SUCCESS_RE = re.compile(
+    r"\b(?:"
+    r"login\s+successful|logged\s+in|authenticated|authentication\s+successful|"
+    r"access\s+obtained|access\s+granted|session\s+established"
+    r")\b",
+    re.IGNORECASE,
+)
+_AUTH_NEGATIVE_RE = re.compile(
+    r"\b(?:"
+    r"all\s+login\s+attempts\s+failed|login\s+failed|authentication\s+failed|"
+    r"not\s+authenticated|access\s+denied|cannot\s+log\s+in|invalid\s+credentials"
+    r")\b",
+    re.IGNORECASE,
+)
+_USERNAME_RE = re.compile(r"^\s*(?:user(?:name)?|login)\s*[:=]\s*(.+?)\s*$", re.I)
+_PASSWORD_RE = re.compile(r"^\s*(?:pass(?:word)?)\s*[:=]\s*(.*?)\s*$", re.I)
+_TRYING_CREDENTIAL_RE = re.compile(
+    r"^\s*(?:\[[^\]]+\]\s*)?trying\s+([^\s:/]+)/(.*?)\s*$", re.I
+)
+_TARGET_URL_RE = re.compile(
+    r"^\s*(?:target|url|login\s+url|base\s+url)\s*[:=]\s*(https?://\S+)\s*$",
+    re.IGNORECASE,
+)
+_AUTH_RUNTIME_LINE_RE = re.compile(
+    r"^\s*(?:\[[^\]]*(?:success|info|ok)[^\]]*\]\s*)?"
+    r"(?:"
+    r"login\s+successful!?|logged\s+in\b|"
+    r"successfully\s+authenticated\b|authentication\s+successful\b|"
+    r"access\s+(?:obtained|granted)\b|session\s+established\b"
+    r")",
+    re.IGNORECASE,
+)
+_CODE_DUMP_RE = re.compile(
+    r"<\?php|\b(?:public|private|protected)\s+function\b|"
+    r"\bclass\s+\w+|::|\bResponse::|\bSession::",
+    re.IGNORECASE,
+)
 
 
 class ScriptPlugin:
@@ -185,10 +225,13 @@ def build_output(
 
     flags = flag_candidates_from_script_stdout(stdout, source=f"script:{language}")
     near_misses = [] if flags else readable_near_misses(stdout)
+    authenticated_access = authenticated_access_from_stdout(request, stdout)
     if flags:
         summary += f" - {len(flags)} flag candidate(s)"
     elif near_misses:
         summary += " - readable near-miss output"
+    elif authenticated_access["detected"]:
+        summary += " - authenticated access"
 
     output_context: dict[str, object] = {
         "stdout": _truncate(stdout, 4000),
@@ -210,6 +253,8 @@ def build_output(
         output_context["generated_artifacts_durable"] = True
     if near_misses:
         output_context["near_miss_candidates"] = near_misses
+    if authenticated_access["detected"]:
+        output_context["authenticated_access"] = authenticated_access["context"]
 
     if status.value == "failure":
         failure_text = "\n".join(part for part in (stderr, stdout) if part)
@@ -221,7 +266,11 @@ def build_output(
         output_context["failure_detail"] = failure_detail
 
     if status.value == "success" and not flags:
-        if near_misses:
+        if authenticated_access["detected"]:
+            output_context["result_quality"] = "authenticated_access"
+            output_context.pop("failure_kind", None)
+            output_context.pop("failure_detail", None)
+        elif near_misses:
             output_context["result_quality"] = "near_miss"
         else:
             output_text = "\n".join(part for part in (stderr, stdout) if part)
@@ -246,14 +295,23 @@ def build_output(
                 output_context["failure_detail"] = output_context["partial_reason"]
 
     exploit_attempts: list[ExploitAttempt] = []
-    if flags or status.value == "failure":
+    credentials = list(authenticated_access["credentials"])
+    sessions = list(authenticated_access["sessions"])
+    if flags or status.value == "failure" or authenticated_access["detected"]:
         exploit_attempts.append(
             ExploitAttempt(
                 technique=f"script:{language}",
-                success=bool(flags),
+                success=bool(flags or authenticated_access["detected"]),
                 summary=summary,
                 flag_candidate_refs=[candidate.value for candidate in flags],
-                metadata={"returncode": result.exit_code},
+                metadata={
+                    "returncode": result.exit_code,
+                    **(
+                        {"authenticated_access": authenticated_access["context"]}
+                        if authenticated_access["detected"]
+                        else {}
+                    ),
+                },
             )
         )
 
@@ -266,4 +324,171 @@ def build_output(
         artifacts=artifacts,
         flag_candidates=flags,
         exploit_attempts=exploit_attempts,
+        sessions=sessions,
+        credentials=credentials,
     )
+
+
+def authenticated_access_from_stdout(
+    request: ToolExecutionRequest, stdout: str
+) -> dict[str, object]:
+    """Extract generic successful-authentication state from script diagnostics."""
+    if not stdout.strip():
+        return {"detected": False, "context": {}, "sessions": [], "credentials": []}
+    success_lines = authentication_success_lines(stdout)
+    if not success_lines:
+        return {"detected": False, "context": {}, "sessions": [], "credentials": []}
+    if looks_like_source_auth_message(stdout, success_lines):
+        return {"detected": False, "context": {}, "sessions": [], "credentials": []}
+    negative_hits = len(_AUTH_NEGATIVE_RE.findall(stdout))
+    positive_hits = len(success_lines)
+    if negative_hits and negative_hits >= positive_hits:
+        return {"detected": False, "context": {}, "sessions": [], "credentials": []}
+    username, password = extract_success_credentials(stdout)
+    target_url = access_target_url(request, stdout)
+    label = access_label(stdout, target_url)
+    context = {
+        "label": label,
+        "target_url": target_url,
+        "username": username,
+        "success_lines": success_lines,
+    }
+    if password is not None:
+        context["password_observed"] = True
+    credentials: list[Credential] = []
+    secret_ref = None
+    if username:
+        secret_ref = f"script-auth:{username}:***"
+        credentials.append(
+            Credential(
+                credential_id=f"script-auth-{stable_text_id(label, username)}",
+                username=username,
+                secret_ref=secret_ref,
+                credential_type="authenticated_access",
+                source="script.exec",
+                metadata={
+                    "target_url": target_url,
+                    "access_label": label,
+                    "password_observed": password is not None,
+                    "empty_password": password == "",
+                },
+            )
+        )
+    sessions = [
+        Session(
+            session_id=f"session-script-auth-{stable_text_id(label, username or 'unknown')}",
+            username=username or None,
+            session_type="authenticated_access",
+            status="active",
+            secret_ref=secret_ref,
+            metadata={"target_url": target_url, "access_label": label},
+        )
+    ]
+    return {
+        "detected": True,
+        "context": context,
+        "sessions": sessions,
+        "credentials": credentials,
+    }
+
+
+def extract_success_credentials(stdout: str) -> tuple[str | None, str | None]:
+    username: str | None = None
+    password: str | None = None
+    last_tried: tuple[str, str] | None = None
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        trying = _TRYING_CREDENTIAL_RE.match(line)
+        if trying:
+            last_tried = (trying.group(1).strip(), trying.group(2).strip())
+        user_match = _USERNAME_RE.match(line)
+        if user_match:
+            username = user_match.group(1).strip()
+        pass_match = _PASSWORD_RE.match(line)
+        if pass_match:
+            password = pass_match.group(1).strip()
+    if username is None and last_tried is not None:
+        username = last_tried[0]
+        password = last_tried[1]
+    return username, password
+
+
+def access_target_url(request: ToolExecutionRequest, stdout: str = "") -> str:
+    for key in (
+        "target_url",
+        "url",
+        "base_url",
+        "phpmyadmin_url",
+        "login_url",
+        "endpoint_url",
+    ):
+        value = str(request.metadata.get(key) or "").strip()
+        if value:
+            return value
+    scope = request.metadata.get("authorized_scope")
+    if isinstance(scope, list):
+        for value in scope:
+            text = str(value).strip()
+            if text:
+                return text
+    for line in stdout.splitlines():
+        match = _TARGET_URL_RE.match(line.strip())
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def access_label(stdout: str, target_url: str) -> str:
+    if target_url:
+        parsed = urlparse(target_url)
+        if parsed.netloc:
+            return f"{parsed.netloc}{parsed.path or '/'}"
+        return target_url
+    for line in stdout.splitlines():
+        stripped = line.strip(" :=\t")
+        if stripped and not stripped.startswith("["):
+            return stripped[:80]
+    return "script-authenticated-access"
+
+
+def authentication_success_lines(stdout: str) -> list[str]:
+    lines: list[str] = []
+    for line in stdout.splitlines():
+        if _AUTH_RUNTIME_LINE_RE.search(line):
+            lines.append(line.strip()[:180])
+            if len(lines) >= 4:
+                break
+    return lines
+
+
+def looks_like_source_auth_message(stdout: str, success_lines: list[str]) -> bool:
+    if not _CODE_DUMP_RE.search(stdout):
+        return False
+    has_dynamic_context = bool(
+        _USERNAME_RE.search(stdout)
+        or _PASSWORD_RE.search(stdout)
+        or _TRYING_CREDENTIAL_RE.search(stdout)
+        or re.search(
+            r"\b(?:target|logged\s+in|database\s+access|cookie|session\s+id)\s*:",
+            stdout,
+            re.IGNORECASE,
+        )
+    )
+    if has_dynamic_context:
+        return False
+    return any(
+        (
+            "set_flash" in line
+            or "redirect" in line.lower()
+            or line.rstrip().endswith((";", ");", "');", "\");"))
+        )
+        for line in success_lines
+    )
+
+
+def stable_text_id(*parts: str) -> str:
+    text = "-".join(part for part in parts if part).lower()
+    cleaned = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return cleaned[:48] or "unknown"

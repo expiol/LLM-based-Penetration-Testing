@@ -33,6 +33,8 @@ class PlannerContextBuilder:
     _MAX_ARTIFACTS = 40
     _MAX_ENDPOINTS = 20
     _MAX_FINDINGS = 20
+    _MAX_CREDENTIALS = 12
+    _MAX_SESSIONS = 12
     _MAX_ROUNDS = 8
     _MAX_EXECUTION_LOG = 12
     _MAX_WORKING_MEMORY = 20
@@ -65,6 +67,8 @@ class PlannerContextBuilder:
             artifacts=planner_projection.artifacts(limit=self._MAX_ARTIFACTS),
             endpoints=planner_projection.endpoints(limit=self._MAX_ENDPOINTS),
             findings=planner_projection.findings(limit=self._MAX_FINDINGS),
+            credentials=planner_projection.credentials(limit=self._MAX_CREDENTIALS),
+            sessions=planner_projection.sessions(limit=self._MAX_SESSIONS),
             flag_candidates=planner_projection.flag_candidates(),
             rejected_flag_candidates=planner_projection.rejected_flag_candidates(),
             todos=[

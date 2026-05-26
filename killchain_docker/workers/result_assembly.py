@@ -54,6 +54,7 @@ def worker_result_from_bundle(
         and success
         and (not flag_values)
         and needs_closure
+        and (not bundle_has_non_flag_progress(bundle))
     ):
         has_near_miss = bool(output_context.get("near_miss_candidates"))
         partial = True
@@ -109,4 +110,22 @@ def worker_result_from_bundle(
         partial=partial,
         result_quality=result_quality or None,
         partial_reason=partial_reason,
+    )
+
+
+def bundle_has_non_flag_progress(bundle: ToolExecutionBundle) -> bool:
+    """Return true when a no-flag script still produced durable state progress."""
+    delta = bundle.state_delta
+    return bool(
+        bundle.tool_output.credentials
+        or bundle.tool_output.findings
+        or bundle.tool_output.assets
+        or bundle.tool_output.network_edges
+        or delta.artifacts
+        or delta.endpoints
+        or delta.routes
+        or delta.hypotheses
+        or delta.vulnerabilities
+        or delta.exploit_attempts
+        or delta.sessions
     )

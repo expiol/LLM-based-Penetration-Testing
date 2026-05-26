@@ -25,6 +25,8 @@ def render_planner_prompt(
         "artifacts": ctx.artifacts,
         "endpoints": ctx.endpoints,
         "findings": ctx.findings,
+        "credentials": ctx.credentials,
+        "sessions": ctx.sessions,
         "flag_candidates": ctx.flag_candidates,
         "rejected_flag_candidates": ctx.rejected_flag_candidates,
         "todos": ctx.todos,

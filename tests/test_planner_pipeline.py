@@ -17,6 +17,7 @@ from killchain_docker.state.recon_facts import ReconFactStore
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.domain import (
     Artifact,
+    Credential,
     EvidenceRecord,
     Endpoint,
     ExecutionRecord,
@@ -24,6 +25,7 @@ from killchain_docker.state.domain import (
     FlagCandidate,
     Hypothesis,
     Severity,
+    Session,
     StateDelta,
     Vulnerability,
 )
@@ -3544,6 +3546,38 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertLessEqual(len(execution_log[0]["summary"]), 360)
         self.assertLessEqual(len(execution_log[0]["error"]), 260)
         self.assertNotIn("X" * 1000, json.dumps(snapshot))
+
+    def test_planner_prompt_includes_credentials_and_sessions(self) -> None:
+        captured: dict[str, object] = {}
+
+        def responder(_system_prompt: str, user_prompt: str) -> dict[str, object]:
+            captured["snapshot"] = json.loads(user_prompt)
+            return {"summary": "bounded", "todos": [], "notes": [], "stop_run": True}
+
+        state = _state([])
+        state.credentials["cred-1"] = Credential(
+            credential_id="cred-1",
+            username="root",
+            secret_ref="script-auth:root:***",
+            credential_type="authenticated_access",
+            source="script.exec",
+            metadata={"target_url": "http://target.example/admin/"},
+        )
+        state.sessions["session-1"] = Session(
+            session_id="session-1",
+            username="root",
+            session_type="authenticated_access",
+            status="active",
+            secret_ref="script-auth:root:***",
+            metadata={"target_url": "http://target.example/admin/"},
+        )
+
+        LLMPlanner(StaticLLMClient(responder)).plan(state)
+        snapshot = captured["snapshot"]
+        self.assertEqual(snapshot["credentials"][0]["credential_id"], "cred-1")
+        self.assertEqual(snapshot["credentials"][0]["username"], "root")
+        self.assertEqual(snapshot["sessions"][0]["session_id"], "session-1")
+        self.assertEqual(snapshot["sessions"][0]["status"], "active")
 
 
 class PlannedTodoPriorityTests(unittest.TestCase):

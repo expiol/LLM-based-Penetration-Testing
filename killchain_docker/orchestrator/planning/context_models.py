@@ -19,6 +19,8 @@ class PlannerContext:
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     endpoints: list[dict[str, Any]] = field(default_factory=list)
     findings: list[dict[str, Any]] = field(default_factory=list)
+    credentials: list[dict[str, Any]] = field(default_factory=list)
+    sessions: list[dict[str, Any]] = field(default_factory=list)
     flag_candidates: list[dict[str, Any]] = field(default_factory=list)
     rejected_flag_candidates: list[dict[str, Any]] = field(default_factory=list)
     todos: list[dict[str, Any]] = field(default_factory=list)

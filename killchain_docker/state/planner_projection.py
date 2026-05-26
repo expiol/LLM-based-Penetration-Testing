@@ -113,6 +113,35 @@ class PlannerStateProjection:
             for finding in list(self.state.findings.values())[-limit:]
         ]
 
+    def credentials(self, *, limit: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "credential_id": credential.credential_id,
+                "username": credential.username,
+                "credential_type": credential.credential_type,
+                "asset_ref": credential.asset_ref,
+                "source": credential.source,
+                "secret_ref": credential.secret_ref,
+                "metadata_preview": str(credential.metadata)[:360],
+            }
+            for credential in list(self.state.credentials.values())[-limit:]
+        ]
+
+    def sessions(self, *, limit: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "session_id": session.session_id,
+                "asset_ref": session.asset_ref,
+                "endpoint_ref": session.endpoint_ref,
+                "username": session.username,
+                "session_type": session.session_type,
+                "status": session.status,
+                "secret_ref": session.secret_ref,
+                "metadata_preview": str(session.metadata)[:360],
+            }
+            for session in list(self.state.sessions.values())[-limit:]
+        ]
+
     def flag_candidates(self, *, limit: int = 12) -> list[dict[str, Any]]:
         return [
             {

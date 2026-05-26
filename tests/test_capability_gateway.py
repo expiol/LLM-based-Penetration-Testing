@@ -201,6 +201,25 @@ class _NoCandidateScriptPlugin:
         )
 
 
+class _AuthenticatedScriptPlugin:
+    mode = ExecutionMode.SIMULATED
+    name = "script_exec"
+
+    def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            tool_name=self.name,
+            mode=self.mode,
+            exit_code=0,
+            stdout=(
+                "[SUCCESS] Login successful!\n"
+                "  Username: root\n"
+                "  Password: \n"
+                "[INFO] Successfully authenticated to admin console.\n"
+                "[INFO] Database access obtained - may need further exploration.\n"
+            ),
+        )
+
+
 class _RepairableScriptPlugin:
     mode = ExecutionMode.SIMULATED
     name = "script_exec"
@@ -944,6 +963,62 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertTrue(result.partial)
         self.assertEqual(result.memory_updates, {})
         self.assertEqual(state.run_memory, {})
+
+    def test_authenticated_script_output_persists_access_progress(self) -> None:
+        plane = ExecutionPlane()
+        plane.register(_AuthenticatedScriptPlugin(), script_output_builder)
+        worker = Worker(
+            persona=PersonaSpec(
+                name="exploit-worker",
+                allowed_capabilities=(ToolCapability.SCRIPT_EXEC,),
+            ),
+            llm_client=StaticLLMClient(
+                [
+                    {
+                        "capability": "script.exec",
+                        "metadata": {"script_code": "print('login')"},
+                        "rationale": "attempt bounded authenticated access",
+                    }
+                ]
+            ),
+            tool_gateway=ToolGateway(plane),
+        )
+        state = RunState(
+            objective="Solve.",
+            authorized_scope=["http://target.example/admin/"],
+        )
+        todo = todo_queue(state).enqueue(
+            TodoItem(
+                goal="Log into the management interface and access protected data.",
+                phase="exploit",
+                context={"target_url": "http://target.example/admin/"},
+                success_criteria=[
+                    "Authenticate to the management interface.",
+                    "Continue exploring protected data.",
+                ],
+            )
+        )
+        result = worker.run(todo, state)
+        WorkerResultApplier(state).apply(result)
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual(state.todos[0].status.value, "completed")
+        self.assertEqual(len(state.credentials), 1)
+        self.assertEqual(len(state.sessions), 1)
+        self.assertEqual(len(state.exploit_attempts), 1)
+        credential = next(iter(state.credentials.values()))
+        self.assertEqual(credential.username, "root")
+        self.assertEqual(credential.credential_type, "authenticated_access")
+        session = next(iter(state.sessions.values()))
+        self.assertEqual(session.username, "root")
+        self.assertEqual(session.status, "active")
+        attempt = next(iter(state.exploit_attempts.values()))
+        self.assertTrue(attempt.success)
+        self.assertIn(
+            "authenticated_access",
+            result.output_context["result_quality"],
+        )
 
     def test_analysis_script_without_candidate_completes_when_not_execution_closure(
         self,
@@ -1873,6 +1948,78 @@ class ShellPluginGuardrailTests(unittest.TestCase):
         self.assertEqual(
             output.output_context["failure_kind"], "scope_violation_blocked"
         )
+
+    def test_script_output_extracts_authenticated_access_state(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SCRIPT_EXEC.value,
+            tool_name="script_exec",
+            metadata={
+                "script_language": "python",
+                "target_url": "http://target.example/admin/",
+            },
+        )
+        result = ToolExecutionResult(
+            tool_name="script_exec",
+            mode=ExecutionMode.SIMULATED,
+            exit_code=0,
+            stdout=(
+                "Target: http://target.example/admin/\n"
+                "[SUCCESS] Login successful!\n"
+                "  Username: root\n"
+                "  Password: \n"
+                "[INFO] Successfully authenticated to admin console.\n"
+                "[INFO] Database access obtained - may need further exploration.\n"
+            ),
+        )
+        output = script_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.output_context["result_quality"], "authenticated_access")
+        self.assertEqual(len(output.credentials), 1)
+        self.assertEqual(output.credentials[0].username, "root")
+        self.assertEqual(
+            output.credentials[0].credential_type,
+            "authenticated_access",
+        )
+        self.assertEqual(
+            output.credentials[0].metadata["target_url"],
+            "http://target.example/admin/",
+        )
+        self.assertEqual(len(output.sessions), 1)
+        self.assertEqual(output.sessions[0].username, "root")
+        self.assertEqual(len(output.exploit_attempts), 1)
+        self.assertTrue(output.exploit_attempts[0].success)
+
+    def test_script_output_does_not_treat_source_strings_as_authenticated_access(
+        self,
+    ) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SCRIPT_EXEC.value,
+            tool_name="script_exec",
+            metadata={
+                "script_language": "python",
+                "target_url": "http://target.example/",
+            },
+        )
+        result = ToolExecutionResult(
+            tool_name="script_exec",
+            mode=ExecutionMode.SIMULATED,
+            exit_code=0,
+            stdout=(
+                "Found: fuel/app/classes/controller/users.php\n"
+                "<?php\n"
+                "public function action_login()\n"
+                "{\n"
+                "    Session::set_flash('success', 'Successfully logged in!');\n"
+                "    Response::redirect('users/home');\n"
+                "}\n"
+            ),
+        )
+        output = script_output_builder(request, result, ParsedToolOutput(summary="raw"))
+
+        self.assertEqual(output.output_context["result_quality"], "partial_no_candidate")
+        self.assertEqual(output.credentials, [])
+        self.assertEqual(output.sessions, [])
+        self.assertEqual(output.exploit_attempts, [])
 
 
 class PluginSubprocessRunnerTests(unittest.TestCase):
