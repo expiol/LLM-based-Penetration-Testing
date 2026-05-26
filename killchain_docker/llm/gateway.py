@@ -83,6 +83,14 @@ class LLMFailureKind(StrEnum):
 
     @property
     def is_transient(self) -> bool:
+        """Should the gateway *re-issue* the request for this kind?
+
+        Transient = transport-level — request never produced usable output, so
+        retrying the same messages may succeed.  Schema validation does NOT
+        belong here: the gateway already did its in-call correction-prompt
+        attempt, and re-issuing the same prompt is wasteful.
+        """
+
         return self in {
             LLMFailureKind.CONNECTION,
             LLMFailureKind.DEADLINE_EXCEEDED,
@@ -443,13 +451,14 @@ class GatewayLLMClient:
         try:
             return schema.model_validate(payload)
         except ValidationError as exc:
+            summary = self._summarise_validation_errors(exc)
             error = LLMClientError(
-                f"{schema.__name__} validation failed: {exc.error_count()} error(s)",
+                f"{schema.__name__} validation failed: {exc.error_count()} error(s); {summary}",
                 kind=LLMFailureKind.SCHEMA_VALIDATION,
                 schema_name=schema.__name__,
             )
             error.raw_content = content  # type: ignore[attr-defined]
-            error.validator_message = self._summarise_validation_errors(exc)  # type: ignore[attr-defined]
+            error.validator_message = summary  # type: ignore[attr-defined]
             raise error from exc
 
     @staticmethod

@@ -2588,6 +2588,44 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertFalse(hasattr(Orchestrator, "_handle_step_llm_error"))
         self.assertFalse(hasattr(RunTerminationController, "terminal_unsolved_reason"))
 
+    def test_handle_step_llm_error_skips_schema_validation_within_budget(self) -> None:
+        state = RunState(objective="Solve.")
+        events: list[str] = []
+        checkpoints: list[bool] = []
+        controller = RunTerminationController(
+            state,
+            events=self._runtime_events(state, events, checkpoints),
+            max_transient_skips=1,
+        )
+        first = controller.handle_step_llm_error(
+            cycle=2,
+            source="planner",
+            exc=LLMClientError(
+                "PlannerDecision validation failed",
+                kind="schema_validation",
+                schema_name="PlannerDecision",
+            ),
+            permanent_message="planner permanently failed",
+        )
+        second = controller.handle_step_llm_error(
+            cycle=3,
+            source="planner",
+            exc=LLMClientError(
+                "PlannerDecision validation failed again",
+                kind="schema_validation",
+                schema_name="PlannerDecision",
+            ),
+            permanent_message="planner permanently failed",
+        )
+        self.assertEqual(first, LLMFailureAction.RETRY_CYCLE)
+        self.assertEqual(second, LLMFailureAction.HALT_RUN)
+        self.assertEqual(state.stop_reason, "llm_transient_error")
+        self.assertEqual(len(checkpoints), 2)
+        self.assertTrue(
+            any("schema-validation LLM error" in event[0] for event in events),
+            events,
+        )
+
     def test_run_termination_controller_finalizes_terminal_outcomes(self) -> None:
         state = RunState(objective="Solve.")
         queue = _todo_queue(state)

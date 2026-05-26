@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from killchain_docker.llm.gateway import LLMClientError
+from killchain_docker.llm.gateway import LLMClientError, LLMFailureKind
 from killchain_docker.orchestrator.runtime_events import RuntimeEventController
 from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.journal import RunJournal
@@ -58,19 +58,40 @@ class RunTerminationController:
     ) -> bool:
         if not exc.transient or self.transient_skip_count >= self.max_transient_skips:
             return False
+        self._record_skip(cycle, source, exc, label="transient")
+        return True
+
+    def _skip_schema_validation_error(
+        self, cycle: int, source: str, exc: LLMClientError
+    ) -> bool:
+        kind = getattr(exc, "kind", None)
+        if kind is not LLMFailureKind.SCHEMA_VALIDATION:
+            return False
+        if self.transient_skip_count >= self.max_transient_skips:
+            return False
+        self._record_skip(cycle, source, exc, label="schema-validation")
+        return True
+
+    def _record_skip(
+        self,
+        cycle: int,
+        source: str,
+        exc: LLMClientError,
+        *,
+        label: str,
+    ) -> None:
         self.transient_skip_count += 1
         self.metadata.remember_transient_skip(cycle=cycle, source=source, exc=exc)
         if self.events is not None:
             self.events.emit(
-                f"[cycle {cycle}] transient LLM error in {source} "
+                f"[cycle {cycle}] {label} LLM error in {source} "
                 f"(skip {self.transient_skip_count}/{self.max_transient_skips}), "
                 f"continuing next cycle: {exc}"
             )
         RunJournal(self.state).orchestration_note(
-            f"cycle {cycle}: transient LLM error skipped in {source} "
+            f"cycle {cycle}: {label} LLM error skipped in {source} "
             f"({self.transient_skip_count}/{self.max_transient_skips})"
         )
-        return True
 
     def note_successful_step(self) -> None:
         """Reset the consecutive transient-skip counter.
@@ -92,11 +113,21 @@ class RunTerminationController:
         permanent_message: str,
         todo: TodoItem | None = None,
     ) -> LLMFailureAction:
-        """Apply the standard planner/router/summarizer LLM failure policy."""
+        """Apply the standard planner/router/summarizer LLM failure policy.
+
+        Schema-validation is treated as cycle-skippable here because the
+        offending step (planner/router/summarizer) re-runs from fresh state
+        next cycle.  Worker LLM errors take the strict transient-only path
+        in ``execution.routed_transient_llm_handling`` because retrying the
+        same todo with the same prompt would just re-trigger the failure.
+        """
         if self.skip_transient_llm_error(cycle, source, exc):
             self._checkpoint()
             return LLMFailureAction.RETRY_CYCLE
-        if exc.transient:
+        if self._skip_schema_validation_error(cycle, source, exc):
+            self._checkpoint()
+            return LLMFailureAction.RETRY_CYCLE
+        if exc.transient or getattr(exc, "kind", None) is LLMFailureKind.SCHEMA_VALIDATION:
             self.halt_after_transient_llm_error(cycle, source, exc, todo=todo)
             self._checkpoint()
             return LLMFailureAction.HALT_RUN
