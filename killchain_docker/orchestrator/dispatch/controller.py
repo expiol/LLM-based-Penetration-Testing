@@ -238,7 +238,7 @@ class DispatchCycleController:
             return DispatchCycleResult(halt_run=True)
         if round_execution.transient_skip:
             self.events.checkpoint()
-            return DispatchCycleResult(retry_cycle=True)
+            return DispatchCycleResult(retry_cycle=True, transient_skip=True)
         if round_execution.solved or self.outcome.is_solved:
             return DispatchCycleResult(halt_run=True)
         results = list(round_execution.results)
@@ -321,7 +321,7 @@ class DispatchCycleController:
         action: LLMFailureAction, *, exc: LLMClientError
     ) -> DispatchCycleResult:
         if action.retry_cycle:
-            return DispatchCycleResult(retry_cycle=True)
+            return DispatchCycleResult(retry_cycle=True, transient_skip=True)
         if action.halt_run:
             return DispatchCycleResult(halt_run=True)
         raise exc

@@ -74,6 +74,7 @@ class PlanningCycleController:
             return PlanningCycleResult(
                 summary=DETERMINISTIC_BACKLOG_SUMMARY,
                 retry_cycle=True,
+                transient_skip=True,
             )
         if action.halt_run:
             return PlanningCycleResult(summary="", halt_run=True)

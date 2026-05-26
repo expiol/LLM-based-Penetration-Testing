@@ -30,3 +30,4 @@ class PlanningCycleResult:
     summary: str
     retry_cycle: bool = False
     halt_run: bool = False
+    transient_skip: bool = False
