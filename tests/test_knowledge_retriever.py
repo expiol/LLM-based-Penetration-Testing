@@ -1083,6 +1083,7 @@ class PlannerInjectionTests(unittest.TestCase):
         self.assertGreaterEqual(payload["knowledge_augmentation"]["hint_count"], 1)
 
     def test_misleading_policy_suppresses_method_hints_in_planner_prompt(self):
+        self.state.metadata["challenge"]["canonical_name"] = "missing-challenge"
         for index in range(3):
             self.state.todos.append(
                 TodoItem(
@@ -1103,6 +1104,26 @@ class PlannerInjectionTests(unittest.TestCase):
         self.assertNotIn("knowledge_hints", knowledge)
         self.assertGreaterEqual(knowledge["suppressed_hint_count"], 1)
         self.assertNotIn("solution_sketch", json.dumps(knowledge))
+
+    def test_oracle_identity_hit_keeps_method_hints_despite_stalled_family(self):
+        for index in range(3):
+            self.state.todos.append(
+                TodoItem(
+                    goal=f"Decrypt attempt {index}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "crypto-decrypt"},
+                    status=TodoStatus.PARTIAL,
+                    result_summary="script ran without recovering a flag",
+                    error="no flag candidate",
+                )
+            )
+        ctx = PlannerContextBuilder(augmenter=self.augmenter).build(self.state)
+        payload = json.loads(render_planner_prompt(ctx))
+        knowledge = payload["knowledge_augmentation"]
+        self.assertNotEqual(knowledge.get("policy"), "possibly_misleading")
+        self.assertNotIn("suppressed_hint_count", knowledge)
+        self.assertGreaterEqual(len(knowledge["knowledge_hints"]), 1)
+        self.assertIn("solution_sketch", knowledge["knowledge_hints"][0])
 
     def test_disabled_augmenter_omits_knowledge_hints(self):
         ctx = PlannerContextBuilder(augmenter=KnowledgeAugmenter(retriever=None)).build(

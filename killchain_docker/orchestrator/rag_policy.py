@@ -18,6 +18,11 @@ class RagPolicy:
         rag = RunMetadataStore(state).mutable_rag()
         if rag is None:
             return
+        if rag.get("challenge_identity_hit"):
+            rag.pop("stalled_families", None)
+            if rag.get("policy") == "possibly_misleading":
+                rag.pop("policy", None)
+            return
         snapshot = stagnation_snapshot(state)
         failed = snapshot.get("failed_or_partial_family_counts", {})
         stalled_families = sorted(
