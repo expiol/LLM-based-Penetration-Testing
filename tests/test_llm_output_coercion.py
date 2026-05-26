@@ -124,18 +124,44 @@ class _PreflightClient:
 
 
 class _FakeCompletionsEndpoint:
-    def __init__(self) -> None:
-        self.captured_kwargs: dict[str, object] = {}
+    """Fake OpenAI chat.completions endpoint returning sequential JSON contents."""
 
-    def create_with_completion(self, **kwargs):
+    def __init__(self, contents: list[str] | None = None) -> None:
+        self.captured_kwargs: dict[str, object] = {}
+        self.calls: list[dict[str, object]] = []
+        if contents is None:
+            contents = [
+                '{"capability": "script.exec", "metadata": {"script_code": "print(\'ok\')"}}'
+            ]
+        self.contents = list(contents)
+        self.cursor = 0
+
+    def create(self, **kwargs):
         self.captured_kwargs = dict(kwargs)
-        return (
-            ToolUseDecision(
-                capability="script.exec",
-                metadata={"script_code": "print('ok')"},
-            ),
-            None,
-        )
+        self.calls.append(dict(kwargs))
+        if self.cursor >= len(self.contents):
+            content = self.contents[-1]
+        else:
+            content = self.contents[self.cursor]
+            self.cursor += 1
+        return _FakeChatCompletion(content)
+
+
+class _FakeChatCompletion:
+    def __init__(self, content: str) -> None:
+        self.choices = [_FakeChoice(content)]
+        self.model = "test-model"
+        self.usage = None
+
+
+class _FakeChoice:
+    def __init__(self, content: str) -> None:
+        self.message = _FakeMessage(content)
+
+
+class _FakeMessage:
+    def __init__(self, content: str) -> None:
+        self.content = content
 
 
 class _FakeChat:
@@ -340,7 +366,14 @@ class TestGatewayTransientClassification(unittest.TestCase):
         self.assertLess(client.request_timeouts[0], 180.0)
         self.assertLessEqual(client.request_timeouts[0], 45.0)
 
-    def test_tool_use_decision_stops_retry_at_schema_deadline(self) -> None:
+    def test_tool_use_decision_retries_transient_within_schema_deadline(self) -> None:
+        """Transient transport failures retry up to global max_retries.
+
+        Schema-level overrides bound per-call timeouts and total deadline; they
+        do not silently disable transport retries.  A single upstream timeout
+        must not collapse the whole call.
+        """
+
         client = _ToolDecisionDeadlineGateway(fail=True)
         with (
             patch("killchain_docker.llm.gateway.random.uniform", return_value=0.0),
@@ -352,8 +385,8 @@ class TestGatewayTransientClassification(unittest.TestCase):
                 user_prompt="",
                 schema=ToolUseDecision,
             )
-        self.assertEqual(ctx.exception.attempts, 1)
-        self.assertLess(ctx.exception.attempts, 1 + client.max_retries)
+        self.assertGreater(ctx.exception.attempts, 1)
+        self.assertLessEqual(ctx.exception.attempts, 1 + client.max_retries)
         self.assertEqual(len(client.request_timeouts), ctx.exception.attempts)
 
     def test_token_ledger_records_thread_safe_snapshots(self) -> None:
@@ -584,46 +617,70 @@ class TestLenientStructuredOutput(unittest.TestCase):
             escape_unescaped_inner_quotes_in_json_strings(payload), payload
         )
 
-    def test_gateway_recovers_completion_embedded_in_instructor_error(self) -> None:
+    def test_decode_recovers_bare_newline_inside_string(self) -> None:
         client = object.__new__(GatewayLLMClient)
-        exc = ValueError(
-            'InstructorRetryException: ChatCompletionMessage(content=\'{\\n  "capability": "script.exec",\\n  "metadata": {\\n    "script_code": "print(\\\'alpha\\nbeta\\\')"\\n  },\\n  "rationale": "run script",\\n  "expected_signal": "stdout"\\n}\', refusal=None, role=\'assistant\')'
-        )
-        recovered = client._recover_structured_from_exception(exc, ToolUseDecision)
-        self.assertIsNotNone(recovered)
-        assert recovered is not None
-        decision, completion = recovered
-        self.assertIsNone(completion)
+        content = '{\n  "capability": "script.exec",\n  "metadata": {\n    "script_code": "print(\'alpha\nbeta\')"\n  },\n  "rationale": "run script",\n  "expected_signal": "stdout"\n}'
+        decision = client._decode_into_schema(content, ToolUseDecision)
         self.assertEqual(decision.metadata["script_code"], "print('alpha\nbeta')")
 
-    def test_gateway_recovers_planner_completion_with_missing_notes_array_close(
-        self,
-    ) -> None:
+    def test_decode_recovers_planner_with_missing_notes_array_close(self) -> None:
         client = object.__new__(GatewayLLMClient)
-        exc = ValueError(
-            'InstructorRetryException: ChatCompletionMessage(content=\'{\\n  "summary": "retry plan",\\n  "todos": [],\\n  "notes": ["first note", "second note", "stop_run": false\\n}\', refusal=None, role=\'assistant\')'
-        )
-        recovered = client._recover_structured_from_exception(exc, PlannerDecision)
-        self.assertIsNotNone(recovered)
-        assert recovered is not None
-        decision, _completion = recovered
+        content = '{\n  "summary": "retry plan",\n  "todos": [],\n  "notes": ["first note", "second note", "stop_run": false\n}'
+        decision = client._decode_into_schema(content, PlannerDecision)
         self.assertEqual(decision.notes, ["first note", "second note"])
         self.assertFalse(decision.stop_run)
 
-    def test_gateway_recovers_planner_completion_with_bare_hex_context_values(
-        self,
-    ) -> None:
+    def test_decode_recovers_planner_with_bare_hex_context_values(self) -> None:
         client = object.__new__(GatewayLLMClient)
-        exc = ValueError(
-            'InstructorRetryException: ChatCompletionMessage(content=\'{\\n  "summary": "retry plan",\\n  "todos": [{\\n    "goal": "Use numeric deltas from evidence",\\n    "phase": "analysis",\\n    "context": {\\n      "negative_delta": -0x292d0,\\n      "positive_delta": 0x10d063,\\n      "quoted_delta": "0x10d063"\\n    }\\n  }],\\n  "notes": [],\\n  "stop_run": false\\n}\', refusal=None, role=\'assistant\')'
-        )
-        recovered = client._recover_structured_from_exception(exc, PlannerDecision)
-        self.assertIsNotNone(recovered)
-        assert recovered is not None
-        decision, _completion = recovered
+        content = '{\n  "summary": "retry plan",\n  "todos": [{\n    "goal": "Use numeric deltas from evidence",\n    "phase": "analysis",\n    "context": {\n      "negative_delta": -0x292d0,\n      "positive_delta": 0x10d063,\n      "quoted_delta": "0x10d063"\n    }\n  }],\n  "notes": [],\n  "stop_run": false\n}'
+        decision = client._decode_into_schema(content, PlannerDecision)
         self.assertEqual(decision.todos[0].context["negative_delta"], -168656)
         self.assertEqual(decision.todos[0].context["positive_delta"], 1101923)
         self.assertEqual(decision.todos[0].context["quoted_delta"], "0x10d063")
+
+    def test_decode_repairs_stray_backslash_between_object_fields(self) -> None:
+        client = object.__new__(GatewayLLMClient)
+        content = '{\n  "capability": "script.exec",\n  "metadata": {\n    "script_code": "print(\'ok\')",\\    "script_language": "python"\n  },\n  "rationale": "run",\n  "expected_signal": "stdout"\n}'
+        decision = client._decode_into_schema(content, ToolUseDecision)
+        self.assertEqual(decision.capability, "script.exec")
+        self.assertEqual(decision.metadata["script_language"], "python")
+
+    def test_decode_failure_carries_validator_message_and_raw_content(self) -> None:
+        client = object.__new__(GatewayLLMClient)
+        with self.assertRaises(LLMClientError) as ctx:
+            client._decode_into_schema("not json at all", ToolUseDecision)
+        self.assertEqual(ctx.exception.kind, LLMFailureKind.SCHEMA_VALIDATION)
+        self.assertEqual(ctx.exception.schema_name, "ToolUseDecision")
+        self.assertTrue(hasattr(ctx.exception, "raw_content"))
+        self.assertTrue(hasattr(ctx.exception, "validator_message"))
+
+    def test_correction_prompt_recovers_after_first_invalid_response(self) -> None:
+        bad = '{ "capability": 12 }'  # invalid: capability must be string-ish
+        good = '{"capability": "script.exec", "metadata": {"script_code": "print(\'ok\')"}}'
+        completions = _FakeCompletionsEndpoint([bad, good])
+        client = object.__new__(GatewayLLMClient)
+        client.default_model = "test-model"
+        client.schema_models = {}
+        client.timeout_s = 20
+        client.max_retries = 0
+        client.total_deadline_s = 5
+        client.max_completion_tokens = 1024
+        client.token_ledger = TokenLedger()
+        client._client = _FakeOpenAIClient(completions)
+        decision = client.generate_json(
+            system_prompt="sys",
+            user_prompt="user",
+            schema=ToolUseDecision,
+        )
+        self.assertEqual(decision.capability, "script.exec")
+        # Two completion requests: original + correction prompt.
+        self.assertEqual(len(completions.calls), 2)
+        correction_messages = completions.calls[1]["messages"]
+        # Correction prompt must include assistant turn echoing bad content
+        # plus user turn carrying validator feedback.
+        self.assertEqual(correction_messages[2]["role"], "assistant")
+        self.assertEqual(correction_messages[3]["role"], "user")
+        self.assertIn("schema", correction_messages[3]["content"])
 
 
 if __name__ == "__main__":

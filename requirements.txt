@@ -15,7 +15,6 @@
 # together
 pathlib
 openai
-instructor
 anthropic
 rich
 pyyaml

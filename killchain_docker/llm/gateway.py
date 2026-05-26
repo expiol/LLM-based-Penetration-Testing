@@ -1,4 +1,10 @@
-"""Unified LLM gateway with instructor-based structured output."""
+"""Unified LLM gateway with raw OpenAI-client structured output.
+
+The gateway owns the success-path JSON repair and the correction-prompt retry
+that feeds validator feedback back to the model.  Decoding is deliberately
+separate from transport so failures stay observable and the retry policy lives
+in one place (``generate_json``).
+"""
 
 import json
 import logging
@@ -17,7 +23,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from killchain_docker.llm.structured_output import (
     completion_content,
     loads_lenient_json_object,
-    python_string_literal_after,
 )
 
 log = logging.getLogger(__name__)
@@ -34,9 +39,6 @@ SCHEMA_REQUEST_TIMEOUT_S = {
 }
 SCHEMA_TOTAL_DEADLINE_S = {
     "ToolUseDecision": 90.0,
-}
-SCHEMA_MAX_RETRIES = {
-    "ToolUseDecision": 0,
 }
 
 
@@ -354,11 +356,12 @@ class StaticLLMClient:
 
 
 class GatewayLLMClient:
-    """Unified gateway that parses directly into Pydantic schemas via instructor."""
+    """Unified gateway that parses raw OpenAI JSON responses into Pydantic schemas."""
 
     _RETRY_BASE_DELAY = 3.0
     _RETRY_MAX_DELAY = 90.0
     _RETRY_JITTER_FRAC = 0.2
+    _MAX_CORRECTION_PROMPT_BYTES = 8000
 
     def __init__(
         self,
@@ -390,13 +393,6 @@ class GatewayLLMClient:
 
     def _build_client(self) -> Any:
         try:
-            import instructor
-        except ImportError as exc:
-            raise LLMClientError(
-                "Gateway mode requires 'instructor'. Install dependencies first.",
-                kind=LLMFailureKind.DEPENDENCY,
-            ) from exc
-        try:
             from openai import OpenAI
         except ImportError as exc:
             raise LLMClientError(
@@ -407,63 +403,154 @@ class GatewayLLMClient:
         kwargs: dict[str, Any] = {
             "api_key": self.api_key,
             "timeout": self.timeout_s,
+            "max_retries": 0,
         }
         if self.base_url:
             kwargs["base_url"] = self.base_url
-        raw = OpenAI(**kwargs, max_retries=0)
-        # JSON mode works on every OpenAI-compatible backend (including
-        # DeepSeek reasoner models that reject Mode.TOOLS).
-        # max_retries=0 is set on the OpenAI client itself so that
-        # retries are owned by generate_json(), not by instructor/openai.
-        return instructor.from_openai(raw, mode=instructor.Mode.JSON)
+        # max_retries=0: retries are owned by generate_json(), not by the
+        # OpenAI client, so we keep one centralised retry policy.  We use the
+        # raw client (not instructor) and run repair + validation ourselves on
+        # the success path so the JSON-coercion pipeline is observable.
+        return OpenAI(**kwargs)
 
-    def _completion_from_exception(
-        self, exc: BaseException
-    ) -> tuple[str | None, Any | None]:
-        seen: set[int] = set()
-        stack: list[BaseException] = [exc]
-        while stack:
-            current = stack.pop()
-            if id(current) in seen:
-                continue
-            seen.add(id(current))
-            for attr in (
-                "last_completion",
-                "completion",
-                "response",
-                "last_response",
-                "raw_response",
-            ):
-                completion = getattr(current, attr, None)
-                content = completion_content(completion)
-                if content:
-                    return content, completion
-            if current.__cause__ is not None:
-                stack.append(current.__cause__)
-            if current.__context__ is not None:
-                stack.append(current.__context__)
+    def _decode_into_schema(
+        self, content: str, schema: type[ModelT]
+    ) -> ModelT:
+        """Repair-then-validate raw model JSON against a pydantic schema.
 
-        content = python_string_literal_after(str(exc), "content=")
-        return content, None
+        Raises ``LLMClientError(SCHEMA_VALIDATION)`` if the content is not a
+        decodable JSON object or does not satisfy the schema.  The exception
+        carries the offending content so callers can build a correction prompt.
+        """
 
-    def _recover_structured_from_exception(
-        self,
-        exc: BaseException,
-        schema: type[ModelT],
-    ) -> tuple[ModelT, Any | None] | None:
-        content, completion = self._completion_from_exception(exc)
-        if not content:
-            return None
+        if not content or not content.strip():
+            raise LLMClientError(
+                f"empty response for {schema.__name__}",
+                kind=LLMFailureKind.SCHEMA_VALIDATION,
+                schema_name=schema.__name__,
+            )
         try:
             payload = loads_lenient_json_object(content)
-            return schema.model_validate(payload), completion
-        except Exception:
-            log.debug(
-                "structured output recovery from exception content failed",
-                exc_info=True,
-                extra={"schema": schema.__name__, "content_length": len(content)},
+        except (json.JSONDecodeError, ValueError) as exc:
+            error = LLMClientError(
+                f"JSON decode failed for {schema.__name__}: {exc}",
+                kind=LLMFailureKind.SCHEMA_VALIDATION,
+                schema_name=schema.__name__,
             )
-            return None
+            error.raw_content = content  # type: ignore[attr-defined]
+            error.validator_message = str(exc)  # type: ignore[attr-defined]
+            raise error from exc
+        try:
+            return schema.model_validate(payload)
+        except ValidationError as exc:
+            error = LLMClientError(
+                f"{schema.__name__} validation failed: {exc.error_count()} error(s)",
+                kind=LLMFailureKind.SCHEMA_VALIDATION,
+                schema_name=schema.__name__,
+            )
+            error.raw_content = content  # type: ignore[attr-defined]
+            error.validator_message = self._summarise_validation_errors(exc)  # type: ignore[attr-defined]
+            raise error from exc
+
+    @staticmethod
+    def _summarise_validation_errors(exc: ValidationError) -> str:
+        lines: list[str] = []
+        for err in exc.errors():
+            loc = ".".join(str(part) for part in err.get("loc", ()))
+            msg = err.get("msg", "invalid")
+            lines.append(f"- {loc or '<root>'}: {msg}")
+        return "\n".join(lines) or str(exc)
+
+    @staticmethod
+    def _truncate_for_prompt(content: str, max_bytes: int) -> str:
+        if len(content) <= max_bytes:
+            return content
+        head = content[: max_bytes // 2]
+        tail = content[-max_bytes // 2 :]
+        return f"{head}\n... [truncated {len(content) - max_bytes} chars] ...\n{tail}"
+
+    def _build_correction_messages(
+        self,
+        *,
+        original: list[dict[str, str]],
+        bad_content: str,
+        validator_message: str,
+        schema: type[ModelT],
+    ) -> list[dict[str, str]]:
+        """Append assistant + user turns asking the model to fix its prior reply."""
+
+        assistant_payload = self._truncate_for_prompt(
+            bad_content, self._MAX_CORRECTION_PROMPT_BYTES
+        )
+        feedback = (
+            f"Your previous reply did not satisfy the {schema.__name__} schema.\n"
+            f"Validator feedback:\n{validator_message}\n\n"
+            "Reply again with a single JSON object that fully satisfies the schema. "
+            "Do not apologise, do not add prose, and do not wrap the JSON in code "
+            "fences. Re-emit any unchanged fields verbatim."
+        )
+        return [
+            *original,
+            {"role": "assistant", "content": assistant_payload},
+            {"role": "user", "content": feedback},
+        ]
+
+    def _create_structured(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        schema: type[ModelT],
+        model: str,
+        temperature: float,
+        request_timeout_s: float | None = None,
+    ) -> tuple[ModelT, Any | None]:
+        """Issue one chat completion request and decode it.
+
+        On schema-validation failure, makes one in-call correction-prompt
+        attempt with the offending content + validator message embedded.  On
+        transport failure, propagates the exception so ``generate_json`` can
+        decide whether to retry.
+        """
+
+        endpoint = self._client.chat.completions
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": self._max_tokens_for_schema(schema),
+            "response_format": {"type": "json_object"},
+        }
+        if request_timeout_s is not None:
+            kwargs["timeout"] = request_timeout_s
+
+        completion = endpoint.create(**kwargs)
+        content = completion_content(completion) or ""
+        try:
+            return self._decode_into_schema(content, schema), completion
+        except LLMClientError as exc:
+            if exc.kind is not LLMFailureKind.SCHEMA_VALIDATION:
+                raise
+            log.info(
+                "structured output failed; sending correction prompt",
+                extra={
+                    "schema": schema.__name__,
+                    "model": model,
+                    "validator": getattr(exc, "validator_message", ""),
+                },
+            )
+            corrected_messages = self._build_correction_messages(
+                original=messages,
+                bad_content=getattr(exc, "raw_content", content) or content,
+                validator_message=getattr(exc, "validator_message", "") or str(exc),
+                schema=schema,
+            )
+            corrected_kwargs = dict(kwargs)
+            corrected_kwargs["messages"] = corrected_messages
+            corrected_kwargs["temperature"] = max(0.0, temperature * 0.5)
+            corrected = endpoint.create(**corrected_kwargs)
+            corrected_content = completion_content(corrected) or ""
+            parsed = self._decode_into_schema(corrected_content, schema)
+            return parsed, corrected
 
     def _select_model(self, schema: type[BaseModel]) -> str:
         schema_name = schema.__name__
@@ -612,43 +699,6 @@ class GatewayLLMClient:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, prior_handler)
 
-    def _create_structured(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        schema: type[ModelT],
-        model: str,
-        temperature: float,
-        request_timeout_s: float | None = None,
-    ) -> tuple[ModelT, Any | None]:
-        endpoint = self._client.chat.completions
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "response_model": schema,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": self._max_tokens_for_schema(schema),
-        }
-        if request_timeout_s is not None:
-            kwargs["timeout"] = request_timeout_s
-        if hasattr(endpoint, "create_with_completion"):
-            try:
-                parsed, completion = endpoint.create_with_completion(**kwargs)
-            except Exception as exc:
-                recovered = self._recover_structured_from_exception(exc, schema)
-                if recovered is not None:
-                    return recovered
-                raise
-            return parsed, completion
-        try:
-            parsed = endpoint.create(**kwargs)
-        except Exception as exc:
-            recovered = self._recover_structured_from_exception(exc, schema)
-            if recovered is not None:
-                return recovered
-            raise
-        return parsed, None
-
     def _max_tokens_for_schema(self, schema: type[BaseModel]) -> int:
         cap = SCHEMA_MAX_COMPLETION_TOKENS.get(schema.__name__)
         if cap is None:
@@ -661,20 +711,15 @@ class GatewayLLMClient:
             return float(self.timeout_s)
         return max(0.1, min(float(self.timeout_s), cap))
 
-    def _max_retries_for_schema(self, schema: type[BaseModel]) -> int:
-        cap = SCHEMA_MAX_RETRIES.get(schema.__name__)
-        if cap is None:
-            return self.max_retries
-        return max(0, min(self.max_retries, int(cap)))
-
     def _call_deadline_s(self, schema: type[BaseModel] | None = None) -> float:
         if schema is None:
             retry_budget = float(self.timeout_s * (1 + self.max_retries))
             if self.total_deadline_s is None:
                 return retry_budget
             return min(float(self.total_deadline_s), retry_budget)
-        max_retries = self._max_retries_for_schema(schema)
-        retry_budget = self._request_timeout_s_for_schema(schema) * (1 + max_retries)
+        retry_budget = self._request_timeout_s_for_schema(schema) * (
+            1 + self.max_retries
+        )
         deadline = self.total_deadline_s
         schema_deadline = SCHEMA_TOTAL_DEADLINE_S.get(schema.__name__)
         if schema_deadline is not None:
@@ -702,7 +747,7 @@ class GatewayLLMClient:
         ]
         # Total deadline across all retry attempts so a single generate_json
         # call never blocks a worker indefinitely.
-        max_retries = self._max_retries_for_schema(schema)
+        max_retries = self.max_retries
         deadline = time.monotonic() + self._call_deadline_s(schema)
         last_exc: Exception | None = None
         attempts_used = 0

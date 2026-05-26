@@ -270,6 +270,9 @@ class Orchestrator:
                 if dispatch.halt_run:
                     max_cycles_exhausted = False
                     break
+                # Cycle produced forward progress: clear consecutive
+                # transient-skip budget so a future blip starts fresh.
+                self._termination_controller.note_successful_step()
         except LLMClientError as exc:
             self._handle_uncaught_llm_error(cycle=current_cycle, exc=exc)
             max_cycles_exhausted = False

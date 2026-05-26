@@ -2524,6 +2524,26 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIn("skip 1/1", events[0])
         self.assertIn("transient LLM error skipped", state.orchestration_notes[0])
 
+    def test_transient_skip_counter_resets_on_successful_step(self) -> None:
+        """A successful cycle clears the consecutive transient-skip budget.
+
+        Without the reset, an upstream provider blip in cycle 2 + another in
+        cycle 4 would accumulate even if cycle 3 made progress, silently
+        dooming the run.
+        """
+
+        state = RunState(objective="Solve.")
+        controller = RunTerminationController(state, max_transient_skips=2)
+        transient = LLMClientError("temporary", transient=True)
+        controller.skip_transient_llm_error(1, "planner", transient)
+        controller.skip_transient_llm_error(2, "planner", transient)
+        self.assertEqual(controller.transient_skip_count, 2)
+        controller.note_successful_step()
+        self.assertEqual(controller.transient_skip_count, 0)
+        # After reset, two more transient skips are tolerated again.
+        self.assertTrue(controller.skip_transient_llm_error(3, "planner", transient))
+        self.assertTrue(controller.skip_transient_llm_error(4, "planner", transient))
+
     def test_run_termination_controller_owns_step_llm_failure_policy(self) -> None:
         transient_state = RunState(objective="Solve.")
         transient_checkpoints: list[bool] = []

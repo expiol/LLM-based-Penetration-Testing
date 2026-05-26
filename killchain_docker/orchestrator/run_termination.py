@@ -72,6 +72,17 @@ class RunTerminationController:
         )
         return True
 
+    def note_successful_step(self) -> None:
+        """Reset the consecutive transient-skip counter.
+
+        Called after any cycle that produced forward progress (planner output
+        or worker results).  This makes the budget a *consecutive* failure
+        budget: an upstream blip can't accumulate over many cycles to silently
+        kill a run that is otherwise healthy.
+        """
+
+        self.transient_skip_count = 0
+
     def handle_step_llm_error(
         self,
         *,

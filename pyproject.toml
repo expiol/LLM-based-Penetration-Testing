@@ -21,7 +21,6 @@ dependencies = [
   "pathlib",
   "pydantic>=2",
   "openai",
-  "instructor",
   "anthropic",
   "rich",
   "pyyaml",

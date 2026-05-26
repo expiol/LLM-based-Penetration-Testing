@@ -374,6 +374,38 @@ def _quote_can_end_json_string(text: str, quote_index: int) -> bool:
     return text[index] in '"{[-0123456789tfn'
 
 
+def strip_stray_backslashes_outside_strings(text: str) -> str:
+    """Drop lone backslashes that appear in structural (not string) positions.
+
+    Models occasionally emit a stray ``\\`` between two object fields when
+    line-continuing source code escaped into a JSON value, e.g.
+    ``"...code...",\\    "next_field": ...``.  These backslashes have no valid
+    JSON interpretation outside a string and would otherwise leave the parser
+    looking for a key where there is none.
+    """
+
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == "\\":
+            continue
+        out.append(char)
+        if char == '"':
+            in_string = True
+            escaped = False
+    return "".join(out)
+
+
 def loads_lenient_json_object(text: str) -> Any:
     """Load model JSON, repairing common deterministic JSON syntax drift."""
 
@@ -382,6 +414,7 @@ def loads_lenient_json_object(text: str) -> Any:
         return json.loads(candidate)
     except json.JSONDecodeError:
         repaired = candidate
+        repaired = strip_stray_backslashes_outside_strings(repaired)
         repaired = normalize_bare_hex_integer_values(repaired)
         repaired = escape_source_backslashes_in_json_strings(repaired)
         repaired = escape_unescaped_inner_quotes_in_json_strings(repaired)
