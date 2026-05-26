@@ -12,7 +12,7 @@ from killchain_docker.orchestrator.planning.refresh_results import (
     PlanningRefreshResult,
 )
 from killchain_docker.orchestrator.planning.schemas import PlannerAgent, PlannerDecision
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.run_state import RunState
 

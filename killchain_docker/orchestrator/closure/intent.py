@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from killchain_docker.orchestrator.goal_predicates import (
     goal_requires_executable_interaction,
 )
-from killchain_docker.orchestrator.todo_dispatch_intent import set_required_capability
+from killchain_docker.orchestrator.todo.dispatch_intent import set_required_capability
 from killchain_docker.state.todos import TodoPhase
 
 if TYPE_CHECKING:

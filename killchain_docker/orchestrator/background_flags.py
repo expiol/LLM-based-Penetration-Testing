@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from queue import Empty, PriorityQueue
 from threading import Event, Lock, Thread
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.maintenance import RunStateMaintenance
 from killchain_docker.state.domain import FlagCandidate, StateDelta

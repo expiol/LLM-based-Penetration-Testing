@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from killchain_docker.orchestrator.agent_lifecycle import AgentLifecycle
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.common import utc_now
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, WorkerResult

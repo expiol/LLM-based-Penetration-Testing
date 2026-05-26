@@ -14,7 +14,7 @@ from killchain_docker.orchestrator.planning.stagnation_context import (
 )
 from killchain_docker.orchestrator.planning.techniques import technique_matrix_for
 from killchain_docker.orchestrator.rag_policy import RagPolicy
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.prompt_projection import planner_todo as prompt_planner_todo
 from killchain_docker.prompts.planner import build_planner_system_prompt
 from killchain_docker.state.challenge_projection import ChallengeProjection

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 from typing import TYPE_CHECKING
-from killchain_docker.orchestrator.progress_families import stagnation_snapshot
-from killchain_docker.orchestrator.progress_limits import FAILURE_COOLDOWN_THRESHOLD
+from killchain_docker.orchestrator.progress.families import stagnation_snapshot
+from killchain_docker.orchestrator.progress.limits import FAILURE_COOLDOWN_THRESHOLD
 from killchain_docker.state.metadata import RunMetadataStore
 
 if TYPE_CHECKING:

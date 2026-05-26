@@ -5,8 +5,8 @@ import json
 import unittest
 from killchain_docker.llm.gateway import StaticLLMClient
 from killchain_docker.orchestrator.agent_directory import AgentDirectory
-from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
-from killchain_docker.orchestrator.router import RouterAgent
+from killchain_docker.orchestrator.todo.queue import TodoQueue as todo_queue
+from killchain_docker.orchestrator.dispatch.router import RouterAgent
 from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, TodoPhase, WorkerResult

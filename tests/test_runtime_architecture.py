@@ -13,8 +13,8 @@ from killchain_docker.orchestrator.agent_lifecycle import (
     AgentRuntimeState,
     AgentStatus,
 )
-from killchain_docker.orchestrator.dispatch_controller import DispatchCycleController
-from killchain_docker.orchestrator.dispatch_types import (
+from killchain_docker.orchestrator.dispatch.controller import DispatchCycleController
+from killchain_docker.orchestrator.dispatch.types import (
     DependencyState,
     DispatchCycleResult,
     EmptyDispatchAction,
@@ -23,9 +23,9 @@ from killchain_docker.orchestrator.dispatch_types import (
 from killchain_docker.orchestrator.background_flags import (
     BackgroundFlagValidationController,
 )
-from killchain_docker.orchestrator.assignment_planner import AssignmentPlanner
-from killchain_docker.orchestrator.closure_policy import DeterministicClosurePolicy
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.dispatch.planner import AssignmentPlanner
+from killchain_docker.orchestrator.closure.policy import DeterministicClosurePolicy
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.orchestrator.planning.cycle_controller import (
     PlanningCycleController,
 )
@@ -38,9 +38,9 @@ from killchain_docker.orchestrator.execution import (
     Execution,
     routed_transient_llm_handling,
 )
-from killchain_docker.orchestrator.closure_controller import ClosureExecutionController
+from killchain_docker.orchestrator.closure.controller import ClosureExecutionController
 from killchain_docker.orchestrator.runtime_events import RuntimeEventController
-from killchain_docker.orchestrator.run_progress import RunProgressController
+from killchain_docker.orchestrator.progress.run_progress import RunProgressController
 from killchain_docker.orchestrator.run_termination import (
     LLMFailureAction,
     RunTerminationController,
@@ -521,13 +521,13 @@ class RuntimeArchitectureTests(unittest.TestCase):
 
     def test_policy_modules_use_metadata_store_or_projection(self) -> None:
         todo_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/todo_normalization.py"
+            PROJECT_ROOT / "killchain_docker/orchestrator/todo/normalization.py"
         ).read_text()
         candidate_source = (
             PROJECT_ROOT / "killchain_docker/orchestrator/candidate_policy.py"
         ).read_text()
         progress_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/progress_gate.py"
+            PROJECT_ROOT / "killchain_docker/orchestrator/progress/gate.py"
         ).read_text()
         rag_source = (
             PROJECT_ROOT / "killchain_docker/orchestrator/rag_policy.py"
@@ -537,10 +537,10 @@ class RuntimeArchitectureTests(unittest.TestCase):
             importlib.util.find_spec("killchain_docker.orchestrator.todo_artifacts")
         )
         artifact_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/todo_artifact_targets.py"
+            PROJECT_ROOT / "killchain_docker/orchestrator/todo/artifact_targets.py"
         ).read_text()
         reference_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/todo_artifact_references.py"
+            PROJECT_ROOT / "killchain_docker/orchestrator/todo/artifact_references.py"
         ).read_text()
         self.assertIn("ArtifactProjectionStore", artifact_source)
         self.assertIn("ArtifactProjectionStore", reference_source)
@@ -562,13 +562,13 @@ class RuntimeArchitectureTests(unittest.TestCase):
 
     def test_todo_artifact_normalizers_own_artifact_path_and_target_logic(self) -> None:
         todo_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/todo_normalization.py"
+            PROJECT_ROOT / "killchain_docker/orchestrator/todo/normalization.py"
         ).read_text()
         reference_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/todo_artifact_references.py"
+            PROJECT_ROOT / "killchain_docker/orchestrator/todo/artifact_references.py"
         ).read_text()
         target_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/todo_artifact_targets.py"
+            PROJECT_ROOT / "killchain_docker/orchestrator/todo/artifact_targets.py"
         ).read_text()
         capability_source = (
             PROJECT_ROOT / "killchain_docker/orchestrator/artifact_capability.py"
@@ -650,8 +650,8 @@ class RuntimeArchitectureTests(unittest.TestCase):
     def test_core_artifact_reads_go_through_projection(self) -> None:
         source_paths = [
             "killchain_docker/orchestrator/planning/pipeline.py",
-            "killchain_docker/orchestrator/todo_normalization.py",
-            "killchain_docker/orchestrator/closure_policy.py",
+            "killchain_docker/orchestrator/todo/normalization.py",
+            "killchain_docker/orchestrator/closure/policy.py",
         ]
         for source_path in source_paths:
             with self.subTest(source_path=source_path):
@@ -674,7 +674,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertNotIn("state.endpoints", source)
 
     def test_dispatch_module_owns_orchestrator_todo_storage_access(self) -> None:
-        queue_storage_modules = {"orchestrator/todo_queue.py"}
+        queue_storage_modules = {"orchestrator/todo/queue.py"}
         offenders: list[str] = []
         for source_path in (PROJECT_ROOT / "killchain_docker/orchestrator").rglob(
             "*.py"
@@ -694,7 +694,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_router_uses_projection_for_round_history(self) -> None:
-        source = (PROJECT_ROOT / "killchain_docker/orchestrator/router.py").read_text()
+        source = (PROJECT_ROOT / "killchain_docker/orchestrator/dispatch/router.py").read_text()
         self.assertIn(".router_round_summaries()", source)
         self.assertNotIn("state.rounds", source)
 
@@ -1104,8 +1104,8 @@ class RuntimeArchitectureTests(unittest.TestCase):
 
     def test_run_state_maintenance_owns_touch_and_caps(self) -> None:
         source_paths = [
-            "killchain_docker/orchestrator/todo_queue.py",
-            "killchain_docker/orchestrator/closure_controller.py",
+            "killchain_docker/orchestrator/todo/queue.py",
+            "killchain_docker/orchestrator/closure/controller.py",
             "killchain_docker/orchestrator/run_termination.py",
             "killchain_docker/orchestrator/runtime_events.py",
             "killchain_docker/state/artifact_store.py",
@@ -1222,7 +1222,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
                     self.assertNotIn(call, text)
         direct_status_writes = []
         for source_path in (PROJECT_ROOT / "killchain_docker").rglob("*.py"):
-            if source_path.as_posix().endswith("orchestrator/todo_queue.py"):
+            if source_path.as_posix().endswith("orchestrator/todo/queue.py"):
                 continue
             tree = ast.parse(source_path.read_text())
             for node in ast.walk(tree):
@@ -1252,7 +1252,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
                 (PROJECT_ROOT / source_path).read_text()
                 for source_path in (
                     "killchain_docker/orchestrator/execution.py",
-                    "killchain_docker/orchestrator/dispatch_controller.py",
+                    "killchain_docker/orchestrator/dispatch/controller.py",
                 )
             )
         )
@@ -1282,9 +1282,6 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIsNone(importlib.util.find_spec("killchain_docker._compat"))
         self.assertIsNone(
             importlib.util.find_spec("killchain_docker.state.file_classification")
-        )
-        self.assertIsNone(
-            importlib.util.find_spec("killchain_docker.orchestrator.dispatch")
         )
         self.assertIsNone(
             importlib.util.find_spec("killchain_docker.orchestrator.policy")
@@ -1522,7 +1519,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertEqual(state.validated_flag, "flag{ok}")
         runtime_source_paths = [
             "killchain_docker/orchestrator/execution.py",
-            "killchain_docker/orchestrator/dispatch_controller.py",
+            "killchain_docker/orchestrator/dispatch/controller.py",
             "killchain_docker/orchestrator/planning/cycle_controller.py",
             "killchain_docker/runtime/session.py",
             "killchain_docker/runtime/persistence.py",
@@ -1587,7 +1584,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
 
     def test_runtime_metadata_writes_use_metadata_store(self) -> None:
         source_paths = [
-            "killchain_docker/orchestrator/run_progress.py",
+            "killchain_docker/orchestrator/progress/run_progress.py",
             "killchain_docker/orchestrator/run_termination.py",
             "killchain_docker/state/outcome.py",
         ]
@@ -2714,10 +2711,10 @@ class RuntimeArchitectureTests(unittest.TestCase):
             PROJECT_ROOT / "killchain_docker/orchestrator/execution.py"
         ).read_text()
         dispatch_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/dispatch_controller.py"
+            PROJECT_ROOT / "killchain_docker/orchestrator/dispatch/controller.py"
         ).read_text()
         batch_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/assignment_batches.py"
+            PROJECT_ROOT / "killchain_docker/orchestrator/dispatch/batches.py"
         ).read_text()
         self.assertIn("assignment_execution_batches(", dispatch_source)
         self.assertIn("ThreadPoolExecutor", execution_source)

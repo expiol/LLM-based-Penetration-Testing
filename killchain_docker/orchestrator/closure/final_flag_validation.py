@@ -8,7 +8,7 @@ from killchain_docker.orchestrator.agent_directory import AgentDirectory
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
 from killchain_docker.orchestrator.execution import Execution
 from killchain_docker.orchestrator.runtime_events import RuntimeEventController
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import (

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from killchain_docker.orchestrator.round_result_signals import (
+from killchain_docker.orchestrator.progress.result_signals import (
     has_near_miss_signal,
     has_observation_text,
     is_no_progress_result,

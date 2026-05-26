@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
-from killchain_docker.orchestrator.dispatch_types import (
+from killchain_docker.orchestrator.dispatch.types import (
     DependencyBlock,
     DependencyCheck,
     DependencyState,
     EnqueueReport,
 )
-from killchain_docker.orchestrator.todo_keys import default_key
+from killchain_docker.orchestrator.todo.keys import default_key
 from killchain_docker.state.common import utc_now
 from killchain_docker.state.maintenance import RunStateMaintenance
 from killchain_docker.state.run_state import RunState

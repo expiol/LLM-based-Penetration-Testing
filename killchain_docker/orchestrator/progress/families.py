@@ -5,12 +5,12 @@ from __future__ import annotations
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
-from killchain_docker.orchestrator.progress_limits import (
+from killchain_docker.orchestrator.progress.limits import (
     CONSECUTIVE_FAILURE_CAP,
     FAILURE_COOLDOWN_THRESHOLD,
 )
-from killchain_docker.orchestrator.todo_family import family_candidates_for, family_for
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.family import family_candidates_for, family_for
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.todos import TodoItem, TodoStatus
 
 if TYPE_CHECKING:

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 from typing import TYPE_CHECKING
-from killchain_docker.orchestrator.todo_context_paths import context_path
-from killchain_docker.orchestrator.todo_family import family_for
+from killchain_docker.orchestrator.todo.context_paths import context_path
+from killchain_docker.orchestrator.todo.family import family_for
 from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.todos import TodoItem
 

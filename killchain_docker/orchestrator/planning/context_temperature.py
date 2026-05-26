@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from killchain_docker.orchestrator.progress_families import stagnation_snapshot
+from killchain_docker.orchestrator.progress.families import stagnation_snapshot
 from killchain_docker.state.planner_projection import PlannerStateProjection
 from killchain_docker.state.run_state import RunState
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.artifact_projection import ArtifactProjection
 from killchain_docker.state.run_state import RunState
 from killchain_docker.tools.capabilities import dispatch_profile_for_capability

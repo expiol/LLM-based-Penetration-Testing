@@ -8,7 +8,7 @@ from killchain_docker.orchestrator.artifact_capability import (
     artifact_dispatch_profile,
     requested_capability_targets_artifact,
 )
-from killchain_docker.orchestrator.todo_context_paths import context_path
+from killchain_docker.orchestrator.todo.context_paths import context_path
 from killchain_docker.state.artifact_projection import ArtifactProjectionStore
 from killchain_docker.state.constants import DEFAULT_FILES_ROOT
 from killchain_docker.state.dispatch import DispatchIntent

@@ -5,13 +5,13 @@ import json
 import unittest
 from killchain_docker.rag.augmenter import RagAugmenter
 from killchain_docker.llm.gateway import LLMClientError, StaticLLMClient
-from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
+from killchain_docker.orchestrator.todo.queue import TodoQueue as todo_queue
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
 from killchain_docker.orchestrator.planning.planner import LLMPlanner
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo, PlannerDecision
 from killchain_docker.orchestrator.planning.techniques import technique_matrix_for
-from killchain_docker.orchestrator.todo_family import family_for
-from killchain_docker.orchestrator.todo_normalization import normalize_todo
+from killchain_docker.orchestrator.todo.family import family_for
+from killchain_docker.orchestrator.todo.normalization import normalize_todo
 from killchain_docker.state.evidence_facts import EvidenceFactStore
 from killchain_docker.state.recon_facts import ReconFactStore
 from killchain_docker.state.journal import RunJournal

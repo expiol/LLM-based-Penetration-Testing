@@ -5,12 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from killchain_docker.orchestrator.agent_directory import AgentDirectory
-from killchain_docker.orchestrator.closure_policy import DeterministicClosurePolicy
+from killchain_docker.orchestrator.closure.policy import DeterministicClosurePolicy
 from killchain_docker.orchestrator.execution import Execution
-from killchain_docker.orchestrator.final_flag_validation import FinalFlagValidationPass
+from killchain_docker.orchestrator.closure.final_flag_validation import FinalFlagValidationPass
 from killchain_docker.orchestrator.planning.schemas import PlannerDecision
 from killchain_docker.orchestrator.runtime_events import RuntimeEventController
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.maintenance import RunStateMaintenance
 from killchain_docker.state.outcome import RunOutcomeStore

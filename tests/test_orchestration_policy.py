@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 import unittest
-from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
+from killchain_docker.orchestrator.todo.queue import TodoQueue as todo_queue
 from killchain_docker.orchestrator.forced_pivot import forced_pivot_directive
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
-from killchain_docker.orchestrator.progress_gate import progress_allows
-from killchain_docker.orchestrator.progress_families import family_counts
-from killchain_docker.orchestrator.progress_limits import (
+from killchain_docker.orchestrator.progress.gate import progress_allows
+from killchain_docker.orchestrator.progress.families import family_counts
+from killchain_docker.orchestrator.progress.limits import (
     CONSECUTIVE_FAILURE_CAP,
     FAILURE_COOLDOWN_THRESHOLD,
     MAX_FLAG_VALIDATION_ATTEMPTS,
 )
-from killchain_docker.orchestrator.round_progress_signals import (
+from killchain_docker.orchestrator.progress.round_signals import (
     had_meaningful_progress,
 )
-from killchain_docker.orchestrator.round_result_signals import is_hollow_result
-from killchain_docker.orchestrator.todo_keys import default_key
-from killchain_docker.orchestrator.todo_normalization import normalize_todo
+from killchain_docker.orchestrator.progress.result_signals import is_hollow_result
+from killchain_docker.orchestrator.todo.keys import default_key
+from killchain_docker.orchestrator.todo.normalization import normalize_todo
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo
 from killchain_docker.state.evidence_facts import EvidenceFactStore
 from killchain_docker.state.recon_facts import ReconFactStore

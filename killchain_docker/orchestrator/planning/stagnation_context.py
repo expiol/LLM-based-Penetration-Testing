@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from killchain_docker.orchestrator.progress_families import (
+from killchain_docker.orchestrator.progress.families import (
     consecutive_failures_without_evidence,
     stagnation_snapshot,
 )
-from killchain_docker.orchestrator.progress_limits import CONSECUTIVE_FAILURE_CAP
-from killchain_docker.orchestrator.todo_family import family_for
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.progress.limits import CONSECUTIVE_FAILURE_CAP
+from killchain_docker.orchestrator.todo.family import family_for
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.metadata import RunMetadataStore
 from killchain_docker.state.planner_projection import PlannerStateProjection
 from killchain_docker.state.report_projection import RunReportProjection

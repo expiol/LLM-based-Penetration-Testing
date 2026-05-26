@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from killchain_docker.orchestrator.dispatch_types import AgentDirectoryView
-from killchain_docker.orchestrator.route_signals import (
+from killchain_docker.orchestrator.dispatch.types import AgentDirectoryView
+from killchain_docker.orchestrator.dispatch.signals import (
     active_exploit_closure,
     todo_has_file_signal,
     todo_has_web_signal,

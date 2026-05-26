@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from killchain_docker.orchestrator.dispatch_types import AgentDirectoryView
+from killchain_docker.orchestrator.dispatch.types import AgentDirectoryView
 from killchain_docker.state.artifact_projection import ArtifactProjectionStore
 from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.todos import TodoItem

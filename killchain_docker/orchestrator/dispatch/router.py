@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 from killchain_docker.llm.gateway import LLMClient, LLMClientError
 from killchain_docker.orchestrator.agent_directory import AgentDirectory
-from killchain_docker.orchestrator.dispatch_types import select_ready_batch
-from killchain_docker.orchestrator.assignment_planner import AssignmentPlanner
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.dispatch.types import select_ready_batch
+from killchain_docker.orchestrator.dispatch.planner import AssignmentPlanner
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.prompt_bounds import bounded_value
 from killchain_docker.prompt_projection import router_todo as prompt_router_todo
 from killchain_docker.state.run_state import RunState

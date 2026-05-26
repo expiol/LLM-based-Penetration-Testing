@@ -8,7 +8,7 @@ from killchain_docker.logging_utils import get_logger
 from killchain_docker.llm.gateway import LLMClient, build_llm_client_from_env
 from killchain_docker.orchestrator.loop import Orchestrator
 from killchain_docker.orchestrator.planning.planner import LLMPlanner
-from killchain_docker.orchestrator.router import RouterAgent
+from killchain_docker.orchestrator.dispatch.router import RouterAgent
 from killchain_docker.runtime.config import RunConfig
 from killchain_docker.state.run_state import RunState
 from killchain_docker.tools.core import ExecutionPlane

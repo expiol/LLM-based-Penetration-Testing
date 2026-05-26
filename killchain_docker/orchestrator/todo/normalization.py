@@ -3,13 +3,13 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
-from killchain_docker.orchestrator.todo_artifact_references import (
+from killchain_docker.orchestrator.todo.artifact_references import (
     DurableArtifactReferenceNormalizer,
 )
-from killchain_docker.orchestrator.todo_artifact_targets import (
+from killchain_docker.orchestrator.todo.artifact_targets import (
     TodoArtifactTargetNormalizer,
 )
-from killchain_docker.orchestrator.todo_family import (
+from killchain_docker.orchestrator.todo.family import (
     compound_disassembly_and_exploit,
     family_for,
     local_artifact_recovery,
@@ -17,15 +17,15 @@ from killchain_docker.orchestrator.todo_family import (
 from killchain_docker.orchestrator.actionable_tool_context import (
     apply_actionable_tool_context,
 )
-from killchain_docker.orchestrator.execution_closure_intent import (
+from killchain_docker.orchestrator.closure.intent import (
     apply_execution_closure_context,
 )
 from killchain_docker.orchestrator.goal_predicates import goal_needs_files
-from killchain_docker.orchestrator.todo_dispatch_intent import (
+from killchain_docker.orchestrator.todo.dispatch_intent import (
     finalize_dispatch_intent,
     set_required_capability,
 )
-from killchain_docker.orchestrator.todo_keys import default_key, structural_key
+from killchain_docker.orchestrator.todo.keys import default_key, structural_key
 from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.constants import DEFAULT_FILES_ROOT
 from killchain_docker.state.todos import TodoPhase

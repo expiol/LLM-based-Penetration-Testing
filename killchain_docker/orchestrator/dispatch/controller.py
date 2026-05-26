@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from killchain_docker.llm.gateway import LLMClientError
-from killchain_docker.orchestrator.assignment_batches import (
+from killchain_docker.orchestrator.dispatch.batches import (
     assignment_execution_batches,
 )
-from killchain_docker.orchestrator.closure_controller import ClosureExecutionController
-from killchain_docker.orchestrator.dispatch_types import (
+from killchain_docker.orchestrator.closure.controller import ClosureExecutionController
+from killchain_docker.orchestrator.dispatch.types import (
     AgentDirectoryView,
     DependencyBlock,
     DispatchCycleResult,
@@ -24,12 +24,12 @@ from killchain_docker.orchestrator.execution import (
     Execution,
     TransientLLMHandling,
 )
-from killchain_docker.orchestrator.run_progress import RunProgressController
+from killchain_docker.orchestrator.progress.run_progress import RunProgressController
 from killchain_docker.orchestrator.run_termination import (
     LLMFailureAction,
     RunTerminationController,
 )
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.run_state import RunState

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from killchain_docker.llm.gateway import LLMClientError
-from killchain_docker.orchestrator.dispatch_types import (
+from killchain_docker.orchestrator.dispatch.types import (
     ExecutionEventsView,
     RunTerminationView,
 )
@@ -14,7 +14,7 @@ from killchain_docker.orchestrator.planning.refresh_results import (
     DETERMINISTIC_BACKLOG_SUMMARY,
     PlanningCycleResult,
 )
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.metadata import RunMetadataStore
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.run_state import RunState

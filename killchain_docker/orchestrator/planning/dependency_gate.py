@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from killchain_docker.orchestrator.planning.schemas import PlannedTodo
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.run_state import RunState
 
 

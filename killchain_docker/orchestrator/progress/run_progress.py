@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from killchain_docker.orchestrator.forced_pivot import forced_pivot_directive
-from killchain_docker.orchestrator.round_progress_signals import (
+from killchain_docker.orchestrator.progress.round_signals import (
     had_meaningful_progress,
 )
 from killchain_docker.orchestrator.runtime_events import RuntimeEventController

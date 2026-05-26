@@ -4,25 +4,25 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from killchain_docker.orchestrator.progress_families import (
+from killchain_docker.orchestrator.progress.families import (
     consecutive_failures_without_evidence,
     family_counts,
 )
-from killchain_docker.orchestrator.progress_limits import (
+from killchain_docker.orchestrator.progress.limits import (
     CONSECUTIVE_FAILURE_CAP,
     FAILURE_COOLDOWN_THRESHOLD,
     MAX_FAMILY_ATTEMPTS,
     MAX_FLAG_VALIDATION_ATTEMPTS,
     UNCAPPED_FAMILIES,
 )
-from killchain_docker.orchestrator.progress_novelty import has_new_novelty
-from killchain_docker.orchestrator.todo_family import (
+from killchain_docker.orchestrator.progress.novelty import has_new_novelty
+from killchain_docker.orchestrator.todo.family import (
     broad_family_candidates_for,
     family_candidates_for,
     family_for,
 )
-from killchain_docker.orchestrator.todo_path_predicates import has_context_path
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.path_predicates import has_context_path
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.grounding_projection import GroundingProjection
 from killchain_docker.state.metadata import RunMetadataStore

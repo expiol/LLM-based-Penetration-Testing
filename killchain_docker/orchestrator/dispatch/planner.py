@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from killchain_docker.orchestrator.dispatch_types import AgentDirectoryView
-from killchain_docker.orchestrator.route_candidates import DispatchRoutePolicy
+from killchain_docker.orchestrator.dispatch.types import AgentDirectoryView
+from killchain_docker.orchestrator.dispatch.candidates import DispatchRoutePolicy
 from killchain_docker.state.todos import (
     RouterDecision,
     TodoItem,

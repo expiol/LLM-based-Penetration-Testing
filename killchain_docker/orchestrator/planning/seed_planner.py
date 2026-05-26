@@ -14,7 +14,7 @@ from killchain_docker.orchestrator.planning.schemas import PlannedTodo
 from killchain_docker.orchestrator.planning.suspicious_media_seeds import (
     SuspiciousMediaSeedPlanner,
 )
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoPhase

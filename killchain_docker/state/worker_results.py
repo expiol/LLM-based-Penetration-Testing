@@ -30,7 +30,7 @@ class WorkerResultApplier:
         self.delta_applier = StateDeltaApplier(state)
 
     def apply(self, result: WorkerResult) -> None:
-        from killchain_docker.orchestrator.todo_queue import TodoQueue
+        from killchain_docker.orchestrator.todo.queue import TodoQueue
 
         todos = TodoQueue(self.state)
         todo = todos.get(result.todo_id)

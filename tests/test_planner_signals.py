@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import unittest
-from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
+from killchain_docker.orchestrator.todo.queue import TodoQueue as todo_queue
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, WorkerResult
 from killchain_docker.state.report_projection import RunReportProjection

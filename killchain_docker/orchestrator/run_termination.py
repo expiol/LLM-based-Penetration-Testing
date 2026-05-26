@@ -6,7 +6,7 @@ from enum import StrEnum
 
 from killchain_docker.llm.gateway import LLMClientError
 from killchain_docker.orchestrator.runtime_events import RuntimeEventController
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.maintenance import RunStateMaintenance
 from killchain_docker.state.metadata import RunMetadataStore

@@ -5,7 +5,7 @@ import unittest
 from collections.abc import Iterable
 from killchain_docker.runtime.events import EventRecorder
 from killchain_docker.llm.gateway import LLMClientError, LLMFailureKind
-from killchain_docker.orchestrator.todo_queue import TodoQueue as todo_queue
+from killchain_docker.orchestrator.todo.queue import TodoQueue as todo_queue
 from killchain_docker.orchestrator.loop import Orchestrator
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
 from killchain_docker.orchestrator.planning.schemas import (
@@ -13,10 +13,10 @@ from killchain_docker.orchestrator.planning.schemas import (
     PlannedTodo,
     PlannerDecision,
 )
-from killchain_docker.orchestrator.round_progress_signals import (
+from killchain_docker.orchestrator.progress.round_signals import (
     had_meaningful_progress,
 )
-from killchain_docker.orchestrator.round_result_signals import is_hollow_result
+from killchain_docker.orchestrator.progress.result_signals import is_hollow_result
 from killchain_docker.state.domain import Artifact, FlagCandidate, StateDelta
 from killchain_docker.state.run_state import RunState, RunStatus
 from killchain_docker.state.todos import (

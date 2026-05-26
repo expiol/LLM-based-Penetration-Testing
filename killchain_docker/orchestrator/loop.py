@@ -4,19 +4,19 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from killchain_docker.logging_utils import get_logger
 from killchain_docker.llm.gateway import LLMClientError
-from killchain_docker.orchestrator.dispatch_controller import DispatchCycleController
+from killchain_docker.orchestrator.dispatch.controller import DispatchCycleController
 from killchain_docker.orchestrator.background_flags import (
     BackgroundFlagSolved,
     BackgroundFlagValidationController,
 )
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.orchestrator.execution import (
     Execution,
     routed_transient_llm_handling,
 )
-from killchain_docker.orchestrator.closure_controller import ClosureExecutionController
+from killchain_docker.orchestrator.closure.controller import ClosureExecutionController
 from killchain_docker.orchestrator.runtime_events import RuntimeEventController
-from killchain_docker.orchestrator.run_progress import RunProgressController
+from killchain_docker.orchestrator.progress.run_progress import RunProgressController
 from killchain_docker.orchestrator.run_termination import RunTerminationController
 from killchain_docker.orchestrator.planning.cycle_controller import (
     PlanningCycleController,
@@ -26,7 +26,7 @@ from killchain_docker.orchestrator.planning.queue_refresh import (
 )
 from killchain_docker.orchestrator.runtime_tasks import RuntimeTaskRegistry
 from killchain_docker.orchestrator.planning.schemas import PlannerAgent
-from killchain_docker.orchestrator.router import RouterAgent
+from killchain_docker.orchestrator.dispatch.router import RouterAgent
 from killchain_docker.orchestrator.agent_directory import AgentDirectory
 from killchain_docker.state.common import utc_now
 from killchain_docker.state.journal import RunJournal

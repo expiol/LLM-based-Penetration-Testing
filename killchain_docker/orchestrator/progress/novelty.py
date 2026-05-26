@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from killchain_docker.orchestrator.progress_families import todo_family_candidates
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.progress.families import todo_family_candidates
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.state.evidence_progress import evidence_ref_can_unlock_progress
 from killchain_docker.state.grounding_projection import GroundingProjection
 

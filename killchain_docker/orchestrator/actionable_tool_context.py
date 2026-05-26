@@ -10,7 +10,7 @@ from killchain_docker.orchestrator.goal_predicates import (
     goal_requires_executable_interaction,
     goal_requires_raw_artifact_access,
 )
-from killchain_docker.orchestrator.todo_dispatch_intent import (
+from killchain_docker.orchestrator.todo.dispatch_intent import (
     dispatch_profile,
     set_required_capability,
 )

@@ -11,12 +11,12 @@ from killchain_docker.orchestrator.planning.dependency_gate import (
 )
 from killchain_docker.orchestrator.planning.seed_planner import PlanningSeedPlanner
 from killchain_docker.orchestrator.candidate_policy import CandidatePolicy
-from killchain_docker.orchestrator.progress_families import family_counts
-from killchain_docker.orchestrator.progress_gate import progress_allows
-from killchain_docker.orchestrator.progress_limits import FAILURE_COOLDOWN_THRESHOLD
-from killchain_docker.orchestrator.todo_keys import default_key
-from killchain_docker.orchestrator.todo_normalization import normalize_todo
-from killchain_docker.orchestrator.todo_queue import TodoQueue
+from killchain_docker.orchestrator.progress.families import family_counts
+from killchain_docker.orchestrator.progress.gate import progress_allows
+from killchain_docker.orchestrator.progress.limits import FAILURE_COOLDOWN_THRESHOLD
+from killchain_docker.orchestrator.todo.keys import default_key
+from killchain_docker.orchestrator.todo.normalization import normalize_todo
+from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.scope_guard import (
     todo_ephemeral_artifact_dependency_reason,
     todo_loopback_block_reason,
