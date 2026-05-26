@@ -667,6 +667,16 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
         self.assertEqual(result.result_quality, "syntax_error")
         self.assertEqual(result.output_context["executed"], False)
         self.assertEqual(result.output_context["agent_handoff"]["target"], "planner")
+        self.assertEqual(
+            result.output_context["selected_metadata"]["script_code"],
+            "try:\n    print('broken')\n",
+        )
+        self.assertEqual(
+            result.output_context["validation_attempts"][0]["selected_metadata"][
+                "script_code"
+            ],
+            "try:\n    print('broken')\n",
+        )
 
     def test_artifact_triage_intent_runs_without_llm_selection(self) -> None:
 

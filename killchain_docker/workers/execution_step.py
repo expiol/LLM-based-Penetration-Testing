@@ -35,6 +35,7 @@ def run_tool_step(
     forced_capability: ToolCapability | None = None
     shell_python_script_rescue_used = False
     rationale = ""
+    selected_metadata: dict[str, object] | None = None
     while True:
         try:
             if forced_capability is not None:
@@ -69,7 +70,12 @@ def run_tool_step(
             metadata_retries += 1
             prior_steps.append(
                 validation_error_step(
-                    step, capability, rationale, error_text, failure_kind
+                    step,
+                    capability,
+                    rationale,
+                    error_text,
+                    failure_kind,
+                    selected_metadata,
                 )
             )
             if (
@@ -84,7 +90,13 @@ def run_tool_step(
                 continue
             if metadata_retries > max_metadata_retries:
                 return metadata_failure_result(
-                    task, agent.name, capability, error_text, failure_kind
+                    task,
+                    agent.name,
+                    capability,
+                    error_text,
+                    failure_kind,
+                    selected_metadata,
+                    prior_steps,
                 )
 
 

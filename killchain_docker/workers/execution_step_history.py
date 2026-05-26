@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from killchain_docker.tools.capabilities import ToolCapability
 from killchain_docker.tools.core import ToolExecutionBundle
+from killchain_docker.workers.execution_failures import metadata_preview
 
 
 def validation_error_step(
@@ -12,13 +13,14 @@ def validation_error_step(
     rationale: str,
     error_text: str,
     failure_kind: str,
+    selected_metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
     cap_str = (
         capability.value
         if capability and hasattr(capability, "value")
         else str(capability or "unknown")
     )
-    return {
+    record: dict[str, object] = {
         "step": step,
         "capability": cap_str,
         "rationale": rationale,
@@ -31,6 +33,9 @@ def validation_error_step(
         "failure_detail": error_text,
         "executed": False,
     }
+    if selected_metadata:
+        record["selected_metadata"] = metadata_preview(selected_metadata)
+    return record
 
 
 def executed_step(
