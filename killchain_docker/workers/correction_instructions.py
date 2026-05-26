@@ -64,7 +64,7 @@ def script_correction_instruction(failure_kind: object) -> str:
     if failure == "type_error":
         return (
             base
-            + "Use the traceback line to identify the incompatible operation and inspect the involved values before converting them."
+            + "Use the traceback line to identify the incompatible operation and inspect the involved values before converting them. If the source file is Python 2 style or hashes text strings, port only the needed logic into Python 3 with explicit bytes/text conversions instead of directly exec()ing the original file again."
         )
     if failure == "no_candidate":
         return (

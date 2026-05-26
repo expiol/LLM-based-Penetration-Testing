@@ -36,7 +36,7 @@ SCHEMA_TOTAL_DEADLINE_S = {
     "ToolUseDecision": 90.0,
 }
 SCHEMA_MAX_RETRIES = {
-    "ToolUseDecision": 1,
+    "ToolUseDecision": 0,
 }
 
 

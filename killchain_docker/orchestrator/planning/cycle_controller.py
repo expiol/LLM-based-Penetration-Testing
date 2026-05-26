@@ -15,6 +15,7 @@ from killchain_docker.orchestrator.planning.refresh_results import (
     PlanningCycleResult,
 )
 from killchain_docker.orchestrator.todo_queue_reader import TodoQueueReader
+from killchain_docker.state.metadata import RunMetadataStore
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.run_state import RunState
 
@@ -37,10 +38,13 @@ class PlanningCycleController:
         self.events = events
         self.termination = termination
         self.outcome = RunOutcomeStore(state)
+        self.metadata = RunMetadataStore(state)
 
     def plan(self, *, cycle: int) -> PlanningCycleResult:
         if self.reader.has_ready():
             self.events.emit(f"[cycle {cycle}] planner skipped - ready todo backlog")
+            if self.metadata.consume_transient_skip() is not None:
+                return PlanningCycleResult(summary=DETERMINISTIC_BACKLOG_SUMMARY)
             refresh = self.refresh.refresh_deterministic_seeds(cycle=cycle)
             return PlanningCycleResult(summary=refresh.summary)
         try:

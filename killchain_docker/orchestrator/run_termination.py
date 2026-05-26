@@ -60,6 +60,7 @@ class RunTerminationController:
         if not exc.transient or self.transient_skip_count >= self.max_transient_skips:
             return False
         self.transient_skip_count += 1
+        self.metadata.remember_transient_skip(cycle=cycle, source=source, exc=exc)
         if self.events is not None:
             self.events.emit(
                 f"[cycle {cycle}] transient LLM error in {source} "

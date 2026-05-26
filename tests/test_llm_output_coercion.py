@@ -352,6 +352,7 @@ class TestGatewayTransientClassification(unittest.TestCase):
                 user_prompt="",
                 schema=ToolUseDecision,
             )
+        self.assertEqual(ctx.exception.attempts, 1)
         self.assertLess(ctx.exception.attempts, 1 + client.max_retries)
         self.assertEqual(len(client.request_timeouts), ctx.exception.attempts)
 

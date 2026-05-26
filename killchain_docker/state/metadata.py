@@ -58,6 +58,23 @@ class RunMetadataStore:
         self.state.metadata["last_llm_error"] = payload
         return payload
 
+    def remember_transient_skip(
+        self, *, cycle: int, source: str, exc: "LLMClientError"
+    ) -> dict[str, Any]:
+        payload = {
+            "cycle": cycle,
+            "source": source,
+            "schema_name": getattr(exc, "schema_name", None),
+            "model": getattr(exc, "model", None),
+            "attempts": getattr(exc, "attempts", None),
+        }
+        self.state.metadata["last_transient_skip"] = payload
+        return payload
+
+    def consume_transient_skip(self) -> dict[str, Any] | None:
+        payload = self.state.metadata.pop("last_transient_skip", None)
+        return dict(payload) if isinstance(payload, dict) else None
+
     def forced_pivot(self) -> dict[str, Any] | None:
         payload = self.state.metadata.get("forced_pivot")
         return dict(payload) if isinstance(payload, dict) else None

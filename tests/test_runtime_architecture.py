@@ -221,6 +221,24 @@ class _RefreshPlanner:
         return self.decision
 
 
+class _TransientBacklogSeedPipeline:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def merge(self, state: RunState, *, llm_decision: PlannerDecision):
+        del state, llm_decision
+        self.calls += 1
+        return PlannerDecision(
+            summary="deterministic seed refresh",
+            todos=[
+                PlannedTodo(
+                    goal="Seed todo should not be created after transient skip.",
+                    dedupe_key="seed-after-transient",
+                )
+            ],
+        )
+
+
 class _SummaryRouter:
     def __init__(self) -> None:
         self.calls = 0
@@ -1826,6 +1844,40 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertFalse(result.retry_cycle)
         self.assertEqual(result.summary, "planner skipped: ready todo backlog")
         self.assertEqual(events[0][0], "[cycle 8] planner skipped - ready todo backlog")
+
+    def test_ready_backlog_after_transient_skip_does_not_seed_refresh(self) -> None:
+        state = RunState(objective="Solve.")
+        queue = _todo_queue(state)
+        queue.enqueue(TodoItem(goal="Ready.", dedupe_key="ready"))
+        state.metadata["last_transient_skip"] = {
+            "cycle": 7,
+            "source": "artifact-worker",
+            "schema_name": "ToolUseDecision",
+        }
+        events: list[tuple[str, dict[str, object]]] = []
+        planner = _RefreshPlanner(PlannerDecision(summary="unused"))
+        planner.pipeline = _TransientBacklogSeedPipeline()
+        controller = PlanningCycleController(
+            state=state,
+            reader=queue.reader,
+            refresh=PlanningRefreshController(
+                state=state,
+                planner=planner,
+                writer=queue.writer,
+                journal=RunJournal(state),
+                emit=lambda message: events.append((message, {})),
+            ),
+            events=self._runtime_events(state, events),
+            termination=_NoopTermination(),
+        )
+        result = controller.plan(cycle=8)
+        self.assertEqual(result.summary, "planner skipped: ready todo backlog")
+        self.assertEqual(planner.pipeline.calls, 0)
+        self.assertEqual(len(state.todos), 1)
+        self.assertNotIn("last_transient_skip", state.metadata)
+        self.assertFalse(
+            any(("deterministic seed refresh" in message for message, _ in events))
+        )
 
     def test_planning_cycle_controller_owns_planner_stop_transition(self) -> None:
         state = RunState(objective="Solve.")

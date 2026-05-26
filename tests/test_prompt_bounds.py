@@ -527,6 +527,12 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         self.assertIn("terminates within the tool timeout", instruction)
         self.assertNotIn("full recovery only on finalists", instruction)
 
+    def test_type_error_correction_warns_against_reexecing_python2_source(self) -> None:
+        instruction = script_correction_instruction("type_error")
+        self.assertIn("Python 2 style", instruction)
+        self.assertIn("Python 3", instruction)
+        self.assertIn("exec()ing the original file again", instruction)
+
     def test_binary_structure_error_correction_preserves_artifact_path(self) -> None:
         instruction = script_correction_instruction("binary_structure_error")
         self.assertIn("observed lengths", instruction)
