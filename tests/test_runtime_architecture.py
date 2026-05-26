@@ -299,6 +299,10 @@ class _NoopTermination:
         del kwargs
         raise AssertionError("unexpected LLM error")
 
+    def note_successful_step(self, source: str | None = None) -> None:
+        del source
+        return None
+
 
 class _BackgroundLifecycleFlags:
     def __init__(self) -> None:
@@ -2543,6 +2547,33 @@ class RuntimeArchitectureTests(unittest.TestCase):
         # After reset, two more transient skips are tolerated again.
         self.assertTrue(controller.skip_transient_llm_error(3, "planner", transient))
         self.assertTrue(controller.skip_transient_llm_error(4, "planner", transient))
+
+    def test_skip_budget_is_per_source(self) -> None:
+        """Cross-source successes do not shield against same-source failure.
+
+        A planner skip plus repeated worker skips should still halt at the
+        worker's own per-source budget — not at the sum across sources.  And
+        a planner success should clear only the planner slot, leaving any
+        in-flight worker streak intact.
+        """
+
+        state = RunState(objective="Solve.")
+        controller = RunTerminationController(state, max_transient_skips=2)
+        transient = LLMClientError("temporary", transient=True)
+        # Planner blips once, then recovers — its slot clears.
+        self.assertTrue(controller.skip_transient_llm_error(1, "planner", transient))
+        controller.note_successful_step("planner")
+        # Worker now keeps failing; budget is its own.
+        self.assertTrue(controller.skip_transient_llm_error(2, "worker", transient))
+        self.assertTrue(controller.skip_transient_llm_error(3, "worker", transient))
+        # Third worker skip exhausts the worker budget regardless of planner state.
+        self.assertFalse(controller.skip_transient_llm_error(4, "worker", transient))
+        # Planner resetting does not reset the worker counter.
+        controller.note_successful_step("planner")
+        self.assertFalse(controller.skip_transient_llm_error(5, "worker", transient))
+        # Worker recovering then failing again starts a fresh worker streak.
+        controller.note_successful_step("worker")
+        self.assertTrue(controller.skip_transient_llm_error(6, "worker", transient))
 
     def test_run_termination_controller_owns_step_llm_failure_policy(self) -> None:
         transient_state = RunState(objective="Solve.")

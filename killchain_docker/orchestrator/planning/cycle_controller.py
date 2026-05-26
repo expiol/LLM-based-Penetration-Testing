@@ -58,6 +58,7 @@ class PlanningCycleController:
                 permanent_message=f"[cycle {cycle}] planner LLM error - aborting run",
             )
             return self._result_from_failure_action(action, exc=exc)
+        self.termination.note_successful_step("planner")
         if refresh.stop_run and (self.outcome.is_solved or not self.todos.has_open()):
             self.events.emit(f"[cycle {cycle}] planner signalled stop - halting run")
             self.outcome.stopped("planner_stop", touch=False)

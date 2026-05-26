@@ -97,6 +97,7 @@ class DispatchCycleController:
                 permanent_message=f"[cycle {cycle}] router LLM error - aborting run",
             )
             return self._cycle_result_from_failure_action(action, exc=exc)
+        self.termination.note_successful_step("router")
         if not decision.assignments:
             empty = self._handle_no_assignments(cycle=cycle)
             return DispatchCycleResult(

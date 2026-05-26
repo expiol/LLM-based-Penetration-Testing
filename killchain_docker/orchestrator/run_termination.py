@@ -51,12 +51,26 @@ class RunTerminationController:
         self.metadata = RunMetadataStore(state)
         self.llm_error_message_limit = max(1, llm_error_message_limit)
         self.max_transient_skips = max(0, max_transient_skips)
-        self.transient_skip_count = 0
+        self._skip_counts: dict[str, int] = {}
+
+    @property
+    def transient_skip_count(self) -> int:
+        """Highest per-source consecutive skip count.
+
+        Surfaced for tests / introspection.  The halt decision lives in
+        :meth:`_record_skip` and is per-source: cross-source successes do
+        not shield against persistent failure of any single source.
+        """
+
+        return max(self._skip_counts.values(), default=0)
+
+    def _skip_count(self, source: str) -> int:
+        return self._skip_counts.get(source, 0)
 
     def skip_transient_llm_error(
         self, cycle: int, source: str, exc: LLMClientError
     ) -> bool:
-        if not exc.transient or self.transient_skip_count >= self.max_transient_skips:
+        if not exc.transient or self._skip_count(source) >= self.max_transient_skips:
             return False
         self._record_skip(cycle, source, exc, label="transient")
         return True
@@ -67,7 +81,7 @@ class RunTerminationController:
         kind = getattr(exc, "kind", None)
         if kind is not LLMFailureKind.SCHEMA_VALIDATION:
             return False
-        if self.transient_skip_count >= self.max_transient_skips:
+        if self._skip_count(source) >= self.max_transient_skips:
             return False
         self._record_skip(cycle, source, exc, label="schema-validation")
         return True
@@ -80,29 +94,36 @@ class RunTerminationController:
         *,
         label: str,
     ) -> None:
-        self.transient_skip_count += 1
+        count = self._skip_count(source) + 1
+        self._skip_counts[source] = count
         self.metadata.remember_transient_skip(cycle=cycle, source=source, exc=exc)
         if self.events is not None:
             self.events.emit(
                 f"[cycle {cycle}] {label} LLM error in {source} "
-                f"(skip {self.transient_skip_count}/{self.max_transient_skips}), "
+                f"(skip {count}/{self.max_transient_skips}), "
                 f"continuing next cycle: {exc}"
             )
         RunJournal(self.state).orchestration_note(
             f"cycle {cycle}: {label} LLM error skipped in {source} "
-            f"({self.transient_skip_count}/{self.max_transient_skips})"
+            f"({count}/{self.max_transient_skips})"
         )
 
-    def note_successful_step(self) -> None:
-        """Reset the consecutive transient-skip counter.
+    def note_successful_step(self, source: str | None = None) -> None:
+        """Reset the consecutive-skip counter for ``source`` (or all sources).
 
-        Called after any cycle that produced forward progress (planner output
-        or worker results).  This makes the budget a *consecutive* failure
-        budget: an upstream blip can't accumulate over many cycles to silently
-        kill a run that is otherwise healthy.
+        A successful planner/router/worker LLM call clears that source's
+        slot.  Counters are tracked per-source so a healthy planner does
+        not silently shield a worker that is consistently failing — the
+        worker still hits its own budget and ends the run cleanly.
+
+        ``source=None`` clears every source and remains the legacy
+        end-of-cycle reset semantics for callers that want them.
         """
 
-        self.transient_skip_count = 0
+        if source is None:
+            self._skip_counts.clear()
+            return
+        self._skip_counts.pop(source, None)
 
     def handle_step_llm_error(
         self,

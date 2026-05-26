@@ -161,6 +161,8 @@ class RunTerminationView(Protocol):
         self, *, cycle: int, source: str, exc: LLMClientError, permanent_message: str
     ): ...
 
+    def note_successful_step(self, source: str | None = None) -> None: ...
+
 
 class RouterView(Protocol):
     def route(
