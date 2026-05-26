@@ -4,7 +4,7 @@ We deliberately wrap :class:`fastembed.TextEmbedding` rather than calling it
 directly so the rest of the package can:
 
 1. Treat ``fastembed`` as an *optional* dependency — when it isn't installed
-   the retriever degrades to "no augmentation" instead of crashing.
+   the provider degrades to "no augmentation" instead of crashing.
 2. Hot-swap the embedding backend in tests via :class:`StubEmbedder`, so unit
    tests don't need a 67 MB ONNX download.
 3. Cache encoded corpus matrices to disk keyed by ``(model, content-hash)``,
@@ -36,7 +36,7 @@ LOGGER = get_logger(__name__)
 
 @runtime_checkable
 class EmbeddingBackend(Protocol):
-    """Protocol the retriever consumes — only :meth:`encode` is required."""
+    """Protocol the vector provider consumes; only :meth:`encode` is required."""
 
     @property
     def dimension(self) -> int: ...
@@ -110,7 +110,7 @@ class FastEmbedBackend:
         matrix = np.asarray(vectors, dtype=np.float32)
         # L2-normalize so cosine similarity collapses to a plain dot product
         # at retrieval time.  We do it here once for the corpus and once per
-        # query, instead of every cycle inside the retriever inner loop.
+        # query, instead of every cycle inside the provider inner loop.
         norms = np.linalg.norm(matrix, axis=1, keepdims=True)
         # Avoid divide-by-zero on degenerate empty texts.
         norms[norms == 0.0] = 1.0
@@ -158,7 +158,7 @@ class StubEmbedder:
 
 
 class EmbeddingUnavailable(RuntimeError):
-    """Raised when fastembed isn't installed (caught by :func:`get_retriever`)."""
+    """Raised when fastembed isn't installed."""
 
 
 class CachedEmbeddingMatrix:

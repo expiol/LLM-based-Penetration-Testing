@@ -52,8 +52,8 @@ from killchain_docker.tools.plugins.foremost import (
     build_output as foremost_output_builder,
 )
 from killchain_docker.tools.plugins.tshark import build_output as tshark_output_builder
-from killchain_docker.workers.catalog import PersonaSpec
-from killchain_docker.workers.worker import Worker
+from killchain_docker.workers.personas.catalog import PersonaSpec
+from killchain_docker.workers.runtime.worker import Worker
 from killchain_docker.llm.gateway import StaticLLMClient
 
 

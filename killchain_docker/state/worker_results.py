@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from killchain_docker.state.evidence_facts import EvidenceFactStore
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.maintenance import RunStateMaintenance
-from killchain_docker.state.memory_store import RunMemoryStore
+from killchain_docker.memory.store import RunMemoryStore
 from killchain_docker.state.recon_facts import ReconFactStore
 from killchain_docker.state.domain import StateDelta
 from killchain_docker.state.todos import TodoItem, WorkerResult

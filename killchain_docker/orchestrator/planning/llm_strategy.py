@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from killchain_docker.knowledge.augmenter import KnowledgeAugmenter
+from killchain_docker.rag.augmenter import RagAugmenter
 from killchain_docker.llm.gateway import LLMClient, LLMClientError
 from killchain_docker.orchestrator.planning.context_builder import PlannerContextBuilder
 from killchain_docker.orchestrator.planning.prompt_renderer import render_planner_prompt
@@ -17,7 +17,7 @@ class LLMPlanningStrategy:
     """Submit typed planner context to the LLM and sanitize the decision."""
 
     def __init__(
-        self, llm_client: LLMClient, *, augmenter: KnowledgeAugmenter | None = None
+        self, llm_client: LLMClient, *, augmenter: RagAugmenter | None = None
     ) -> None:
         if llm_client is None:
             raise LLMClientError("LLMPlanningStrategy requires an LLM client.")

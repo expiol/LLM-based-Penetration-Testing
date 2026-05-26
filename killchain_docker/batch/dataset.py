@@ -12,7 +12,7 @@ from typing import Any
 from nyuctf.challenge import CTFChallenge
 from nyuctf.dataset import CTFDataset
 
-from killchain_docker.knowledge.retriever import actionable_oracle_challenge_ids
+from killchain_docker.rag.oracle import actionable_oracle_challenge_ids
 from killchain_docker.logging_utils import get_logger
 
 

@@ -328,6 +328,6 @@ class RunReportProjection:
         return f"- RAG: enabled=`{payload.get('enabled')}` status=`{payload.get('status')}` policy=`{payload.get('policy')}` hints={payload.get('hint_count')}"
 
     def rag_payload(self) -> dict[str, Any] | None:
-        from killchain_docker.knowledge.status import public_rag_payload
+        from killchain_docker.rag.status import public_rag_payload
 
         return public_rag_payload(self.metadata.rag())

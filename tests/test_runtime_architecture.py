@@ -72,8 +72,8 @@ from killchain_docker.state.evidence_facts import EvidenceFactStore
 from killchain_docker.state.execution_facts import ExecutionFactStore
 from killchain_docker.state.recon_facts import ReconFactStore
 from killchain_docker.state.journal import RunJournal
-from killchain_docker.state.memory_policy import MemoryWritePolicy
-from killchain_docker.state.memory_store import RunMemoryStore
+from killchain_docker.memory.policy import MemoryWritePolicy
+from killchain_docker.memory.store import RunMemoryStore
 from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.domain import (
     Endpoint,
@@ -99,11 +99,11 @@ from killchain_docker.state.todos import (
 )
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.evidence_projection import EvidenceProjectionStore
-from killchain_docker.state.memory_projection import RunMemoryProjection
+from killchain_docker.memory.projection import RunMemoryProjection
 from killchain_docker.state.report_projection import RunReportProjection
 from killchain_docker.state.state_delta import StateDeltaApplier
 from killchain_docker.state.worker_results import WorkerResultApplier
-from killchain_docker.workers.correction_counters import bounded_counter_candidates
+from killchain_docker.workers.corrections.counters import bounded_counter_candidates
 from killchain_docker.tools.capabilities import (
     ToolCapability,
     dispatch_profile_spec,
@@ -112,9 +112,14 @@ from killchain_docker.tools.capabilities import (
     worker_preferences_for_profile,
 )
 from killchain_docker.tools.core import ToolInterruptBehavior
-from killchain_docker.workers.worker_agent import WorkerAgent
+from killchain_docker.workers.runtime.agent import WorkerAgent
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+WORKERS_ROOT = PROJECT_ROOT / "killchain_docker/workers"
+
+
+def worker_source(relative: str) -> str:
+    return (WORKERS_ROOT / relative).read_text()
 
 
 def _has_state_attr_access(source: str, *attrs: str) -> bool:
@@ -755,12 +760,12 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertNotIn("state.rounds", source)
 
     def test_worker_agent_uses_projection_for_runtime_history(self) -> None:
-        source = (PROJECT_ROOT / "killchain_docker/workers/worker_agent.py").read_text()
+        source = (PROJECT_ROOT / "killchain_docker/workers/runtime/agent.py").read_text()
         prompt_source = (
-            PROJECT_ROOT / "killchain_docker/workers/tool_prompt_payload.py"
+            PROJECT_ROOT / "killchain_docker/workers/prompts/payload.py"
         ).read_text()
         context_source = (
-            PROJECT_ROOT / "killchain_docker/workers/correction_context.py"
+            PROJECT_ROOT / "killchain_docker/workers/corrections/context.py"
         ).read_text()
         self.assertIn(".recent_failed_records(", prompt_source)
         self.assertIn(".recent_script_failure_context(", context_source)
@@ -771,21 +776,44 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertNotIn("state.execution_log", context_source)
         self.assertNotIn("state.evidence", context_source)
 
+    def test_worker_package_root_contains_only_grouped_modules(self) -> None:
+        root_files = sorted(
+            path.name
+            for path in WORKERS_ROOT.iterdir()
+            if path.is_file() and path.suffix == ".py"
+        )
+        self.assertEqual(root_files, [])
+        expected_groups = {
+            "corrections",
+            "execution",
+            "personas",
+            "prompts",
+            "results",
+            "runtime",
+            "tooling",
+        }
+        actual_groups = {
+            path.name
+            for path in WORKERS_ROOT.iterdir()
+            if path.is_dir() and not path.name.startswith("__")
+        }
+        self.assertEqual(actual_groups, expected_groups)
+
     def test_worker_execution_policies_are_split_from_worker_loop(self) -> None:
         worker_source = (
-            PROJECT_ROOT / "killchain_docker/workers/worker.py"
+            PROJECT_ROOT / "killchain_docker/workers/runtime/worker.py"
         ).read_text()
         intent_source = (
-            PROJECT_ROOT / "killchain_docker/workers/task_intent.py"
+            PROJECT_ROOT / "killchain_docker/workers/execution/intent.py"
         ).read_text()
         execution_policy_source = (
-            PROJECT_ROOT / "killchain_docker/workers/execution_policy.py"
+            PROJECT_ROOT / "killchain_docker/workers/execution/policy.py"
         ).read_text()
         self.assertIn("is_execution_closure_task", result_source := (
-            PROJECT_ROOT / "killchain_docker/workers/result_assembly.py"
+            PROJECT_ROOT / "killchain_docker/workers/results/assembly.py"
         ).read_text())
         self.assertIn("should_continue_after_step", loop_policy_source := (
-            PROJECT_ROOT / "killchain_docker/workers/tool_loop_policy.py"
+            PROJECT_ROOT / "killchain_docker/workers/execution/loop_policy.py"
         ).read_text())
         self.assertIn("run_worker_tool_loop(", worker_source)
         for forbidden in (
@@ -807,13 +835,13 @@ class RuntimeArchitectureTests(unittest.TestCase):
 
     def test_flag_validation_policy_is_not_worker_private_state(self) -> None:
         worker_source = (
-            PROJECT_ROOT / "killchain_docker/workers/worker.py"
+            PROJECT_ROOT / "killchain_docker/workers/runtime/worker.py"
         ).read_text()
         background_source = (
             PROJECT_ROOT / "killchain_docker/orchestrator/background_flags.py"
         ).read_text()
         policy_source = (
-            PROJECT_ROOT / "killchain_docker/workers/flag_validation.py"
+            PROJECT_ROOT / "killchain_docker/workers/results/flag_validation.py"
         ).read_text()
         self.assertIn("flag_validation_result", worker_source)
         self.assertIn("flag_matches", background_source)
@@ -913,21 +941,21 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertNotIn("RunMemoryStore", source)
 
     def test_worker_agent_delegates_correction_policy(self) -> None:
-        source = (PROJECT_ROOT / "killchain_docker/workers/worker_agent.py").read_text()
+        source = (PROJECT_ROOT / "killchain_docker/workers/runtime/agent.py").read_text()
         prompt_source = (
-            PROJECT_ROOT / "killchain_docker/workers/tool_prompt_payload.py"
+            PROJECT_ROOT / "killchain_docker/workers/prompts/payload.py"
         ).read_text()
         context_source = (
-            PROJECT_ROOT / "killchain_docker/workers/correction_context.py"
+            PROJECT_ROOT / "killchain_docker/workers/corrections/context.py"
         ).read_text()
         constraints_source = (
-            PROJECT_ROOT / "killchain_docker/workers/correction_constraints.py"
+            PROJECT_ROOT / "killchain_docker/workers/corrections/constraints.py"
         ).read_text()
         counters_source = (
-            PROJECT_ROOT / "killchain_docker/workers/correction_counters.py"
+            PROJECT_ROOT / "killchain_docker/workers/corrections/counters.py"
         ).read_text()
         instructions_source = (
-            PROJECT_ROOT / "killchain_docker/workers/correction_instructions.py"
+            PROJECT_ROOT / "killchain_docker/workers/corrections/instructions.py"
         ).read_text()
         self.assertIn("correction_context(", prompt_source)
         self.assertIn("execution_constraints(", prompt_source)
@@ -947,12 +975,12 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIn("def bounded_counter_candidates", counters_source)
         self.assertIn("def script_correction_instruction", instructions_source)
         self.assertFalse(
-            (PROJECT_ROOT / "killchain_docker/workers/correction_policy.py").exists()
+            (PROJECT_ROOT / "killchain_docker/workers/corrections/policy.py").exists()
         )
 
     def test_worker_execution_delegates_result_assembly_and_recon_assets(self) -> None:
         worker_source = (
-            PROJECT_ROOT / "killchain_docker/workers/worker.py"
+            PROJECT_ROOT / "killchain_docker/workers/runtime/worker.py"
         ).read_text()
         self.assertFalse(
             (PROJECT_ROOT / "killchain_docker/workers/execution_loop.py").exists()
@@ -962,34 +990,34 @@ class RuntimeArchitectureTests(unittest.TestCase):
         )
         self.assertFalse((PROJECT_ROOT / "killchain_docker/workers/base.py").exists())
         loop_source = (
-            PROJECT_ROOT / "killchain_docker/workers/tool_loop_runner.py"
+            PROJECT_ROOT / "killchain_docker/workers/execution/loop.py"
         ).read_text()
         loop_policy_source = (
-            PROJECT_ROOT / "killchain_docker/workers/tool_loop_policy.py"
+            PROJECT_ROOT / "killchain_docker/workers/execution/loop_policy.py"
         ).read_text()
         direct_source = (
-            PROJECT_ROOT / "killchain_docker/workers/direct_execution.py"
+            PROJECT_ROOT / "killchain_docker/workers/execution/direct.py"
         ).read_text()
         result_loop_source = (
-            PROJECT_ROOT / "killchain_docker/workers/execution_result.py"
+            PROJECT_ROOT / "killchain_docker/workers/execution/result.py"
         ).read_text()
         step_source = (
-            PROJECT_ROOT / "killchain_docker/workers/execution_step.py"
+            PROJECT_ROOT / "killchain_docker/workers/execution/step.py"
         ).read_text()
         enrichment_source = (
-            PROJECT_ROOT / "killchain_docker/workers/result_enrichment.py"
+            PROJECT_ROOT / "killchain_docker/workers/results/enrichment.py"
         ).read_text()
         selection_source = (
-            PROJECT_ROOT / "killchain_docker/workers/tool_selection.py"
+            PROJECT_ROOT / "killchain_docker/workers/execution/selection.py"
         ).read_text()
         metadata_source = (
-            PROJECT_ROOT / "killchain_docker/workers/execution_metadata.py"
+            PROJECT_ROOT / "killchain_docker/workers/execution/metadata.py"
         ).read_text()
         result_source = (
-            PROJECT_ROOT / "killchain_docker/workers/result_assembly.py"
+            PROJECT_ROOT / "killchain_docker/workers/results/assembly.py"
         ).read_text()
         recon_source = (
-            PROJECT_ROOT / "killchain_docker/workers/recon_assets.py"
+            PROJECT_ROOT / "killchain_docker/workers/results/recon.py"
         ).read_text()
         self.assertIn("run_direct_capability(", worker_source)
         self.assertIn("run_worker_tool_loop(", worker_source)
@@ -1034,24 +1062,24 @@ class RuntimeArchitectureTests(unittest.TestCase):
 
     def test_worker_agent_delegates_tool_use_prompt_construction(self) -> None:
         source = (
-            PROJECT_ROOT / "killchain_docker/workers/worker_tool_choice.py"
+            PROJECT_ROOT / "killchain_docker/workers/runtime/tool_choice.py"
         ).read_text()
         choice_source = (
-            PROJECT_ROOT / "killchain_docker/workers/tool_choice_prompt.py"
+            PROJECT_ROOT / "killchain_docker/workers/prompts/choice.py"
         ).read_text()
         fixed_source = (
-            PROJECT_ROOT / "killchain_docker/workers/fixed_tool_prompt.py"
+            PROJECT_ROOT / "killchain_docker/workers/prompts/fixed.py"
         ).read_text()
         payload_source = (
-            PROJECT_ROOT / "killchain_docker/workers/tool_prompt_payload.py"
+            PROJECT_ROOT / "killchain_docker/workers/prompts/payload.py"
         ).read_text()
         rules_source = (
-            PROJECT_ROOT / "killchain_docker/workers/tool_prompt_rules.py"
+            PROJECT_ROOT / "killchain_docker/workers/prompts/rules.py"
         ).read_text()
         self.assertIn("build_tool_choice_prompt", source)
         self.assertIn("build_fixed_tool_prompt", source)
         self.assertFalse(
-            (PROJECT_ROOT / "killchain_docker/workers/tool_use_prompt.py").exists()
+            (PROJECT_ROOT / "killchain_docker/workers/prompts/tool_use.py").exists()
         )
         for forbidden in (
             "def _tool_use_rules",
@@ -1075,24 +1103,24 @@ class RuntimeArchitectureTests(unittest.TestCase):
 
     def test_tool_metadata_delegates_contracts_and_script_metadata(self) -> None:
         source = (
-            PROJECT_ROOT / "killchain_docker/workers/tool_metadata_router.py"
+            PROJECT_ROOT / "killchain_docker/workers/tooling/metadata/router.py"
         ).read_text()
         artifact_source = (
-            PROJECT_ROOT / "killchain_docker/workers/artifact_metadata.py"
+            PROJECT_ROOT / "killchain_docker/workers/tooling/metadata/artifact.py"
         ).read_text()
         contracts_source = (
-            PROJECT_ROOT / "killchain_docker/workers/tool_contract_catalog.py"
+            PROJECT_ROOT / "killchain_docker/workers/tooling/contracts/catalog.py"
         ).read_text()
         script_source = (
-            PROJECT_ROOT / "killchain_docker/workers/script_metadata.py"
+            PROJECT_ROOT / "killchain_docker/workers/tooling/metadata/script.py"
         ).read_text()
         self.assertIn("normalize_script_metadata", source)
         self.assertIn("TOOL_METADATA_CONTRACT_CATALOG", source)
         self.assertFalse(
-            (PROJECT_ROOT / "killchain_docker/workers/tool_metadata.py").exists()
+            (PROJECT_ROOT / "killchain_docker/workers/tooling/metadata.py").exists()
         )
         self.assertFalse(
-            (PROJECT_ROOT / "killchain_docker/workers/tool_contracts.py").exists()
+            (PROJECT_ROOT / "killchain_docker/workers/tooling/contracts.py").exists()
         )
         self.assertIn("def normalize_disk_extract_metadata", artifact_source)
         self.assertIn("def normalize_media_scan_metadata", artifact_source)
@@ -1333,13 +1361,13 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIn("waiting for dependency", dependency_source)
 
     def test_worker_identity_uses_persona_spec_not_protocol_adapter(self) -> None:
-        from killchain_docker.workers.catalog import PersonaSpec
-        from killchain_docker.workers.worker import Worker
+        from killchain_docker.workers.personas.catalog import PersonaSpec
+        from killchain_docker.workers.runtime.worker import Worker
 
         type_hints = get_type_hints(Worker.__init__)
         self.assertIs(type_hints["persona"], PersonaSpec)
         worker_source = (
-            PROJECT_ROOT / "killchain_docker/workers/worker.py"
+            PROJECT_ROOT / "killchain_docker/workers/runtime/worker.py"
         ).read_text()
         self.assertNotIn("@name.setter", worker_source)
         self.assertNotIn("def name(self, value", worker_source)

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 from collections.abc import Callable
-from killchain_docker.knowledge.augmenter import KnowledgeAugmenter
-from killchain_docker.knowledge.retriever import rag_mode
+from killchain_docker.rag.augmenter import RagAugmenter
+from killchain_docker.rag.config import rag_mode
 from killchain_docker.logging_utils import get_logger
 from killchain_docker.llm.gateway import LLMClient, build_llm_client_from_env
 from killchain_docker.orchestrator.loop import Orchestrator
@@ -13,7 +13,7 @@ from killchain_docker.runtime.config import RunConfig
 from killchain_docker.state.run_state import RunState
 from killchain_docker.tools.core import ExecutionPlane
 from killchain_docker.tools.registry import build_execution_plane
-from killchain_docker.workers.catalog import WorkerBuildContext, build_builtin_workers
+from killchain_docker.workers.personas.catalog import WorkerBuildContext, build_builtin_workers
 
 LOGGER = get_logger(__name__)
 
@@ -31,7 +31,7 @@ def build_runtime(
     if llm_client is None:
         llm_client = build_llm_client_from_env()
     resolved_rag_mode = rag_mode(config.rag_mode)
-    augmenter = KnowledgeAugmenter.from_default(mode=resolved_rag_mode)
+    augmenter = RagAugmenter.from_default(mode=resolved_rag_mode)
     metadata = dict(config.metadata)
     rag_metadata = metadata.get("rag")
     metadata["rag"] = {

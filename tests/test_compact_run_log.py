@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from killchain_docker.knowledge.augmenter import KnowledgeAugmenter
+from killchain_docker.rag.augmenter import RagAugmenter
 from killchain_docker.llm.gateway import StaticLLMClient, TokenLedger
 from tests.queue_harness import todo_queue
 from killchain_docker.runtime.assembly import build_runtime
@@ -429,9 +429,9 @@ class CompactRunLogTests(unittest.TestCase):
         config = RunConfig(
             objective="fake objective", authorized_scope=[], rag_mode="strict"
         )
-        augmenter = KnowledgeAugmenter(None, mode="strict")
+        augmenter = RagAugmenter(None, mode="strict")
         with patch(
-            "killchain_docker.runtime.assembly.KnowledgeAugmenter.from_default",
+            "killchain_docker.runtime.assembly.RagAugmenter.from_default",
             return_value=augmenter,
         ) as from_default:
             state, _orchestrator, _client = build_runtime(

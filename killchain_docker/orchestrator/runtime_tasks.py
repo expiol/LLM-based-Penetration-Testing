@@ -9,7 +9,7 @@ from killchain_docker.orchestrator.todo_status_commands import TodoStatusCommand
 from killchain_docker.state.common import utc_now
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, WorkerResult
-from killchain_docker.workers.worker_agent import WorkerAgent
+from killchain_docker.workers.runtime.agent import WorkerAgent
 
 
 class RuntimeTaskType(StrEnum):

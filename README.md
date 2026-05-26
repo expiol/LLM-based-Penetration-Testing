@@ -130,8 +130,9 @@ Then open `http://127.0.0.1:8765/_batch_monitor.html`.
 
 Set `AUTOPENTEST_RAG_MODE` to control writeup augmentation:
 
-- `oracle`: append full-corpus hints to test whether the execution pipeline can
-  reliably turn a correct technical direction into a validated result.
+- `oracle`: use the temporary direct-oracle provider, which reads the local
+  corpus writeup for the current challenge and tests whether the execution
+  pipeline can turn a correct technical direction into a validated result.
 - `strict`: exclude same challenge and same event hits for answer-excluded generalization runs.
 - `disabled`: omit RAG hints entirely.
 
@@ -140,6 +141,10 @@ silently falling back to oracle mode.
 
 Retrieved writeups are used as method priors only. Literal flag-like values
 are redacted before planner prompt injection.
+
+RAG is wired through `killchain_docker.rag.providers.RagProvider`, so the
+current oracle-backed implementation can be replaced later with a security
+knowledge provider without changing planner or worker code.
 
 `conda run -n autopentest python run.py` and
 `conda run -n autopentest autopentest run` also accept `--rag-mode`, which is
@@ -240,7 +245,7 @@ conda run -n autopentest python scripts/plot_results.py logs/hy/batch_name/
 - **Structured novelty gates:** Cooldown escape requires new current-state `evidence_ids` or `hypothesis_id(s)`; `novelty_key` only labels the approach, and rephrased todo text is not progress.
 - **Decision-owned tool metadata:** Required executable metadata (`command`, `script_code`, paths, targets) comes from the current tool decision; todo context can only supply optional defaults.
 - **Forced Pivot:** After N rounds without progress, stalled approach families are banned and the planner must try a fundamentally different attack vector
-- **RAG augmentation:** Related CTF writeups are retrieved and provided to the planner as hints (with decontamination when they appear misleading)
+- **RAG augmentation:** A replaceable provider supplies technical hints to the planner; the current oracle provider directly reads local writeups, with decontamination when they appear misleading.
 - **Progress policy:** Family-based cooldown and novelty detection prevent infinite loops on the same approach
 - **Structured failure evidence:** Rejected flag candidates, no-candidate scripts, bytes/text errors, and network pipe failures are recorded as typed state/evidence signals.
 - **Working memory:** Key discoveries persist across cycles as established facts

@@ -42,7 +42,7 @@ from killchain_docker.orchestrator.router import RouterAgent
 from killchain_docker.orchestrator.agent_directory import AgentDirectory
 from killchain_docker.state.journal import RunJournal
 from killchain_docker.state.run_state import RunState
-from killchain_docker.workers.worker_agent import WorkerAgent
+from killchain_docker.workers.runtime.agent import WorkerAgent
 
 LOGGER = get_logger(__name__)
 

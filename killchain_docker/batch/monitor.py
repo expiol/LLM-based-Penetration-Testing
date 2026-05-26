@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from killchain_docker.knowledge.status import public_rag_payload
+from killchain_docker.rag.status import public_rag_payload
 from killchain_docker.logging_utils import get_logger, write_json_file, write_text_file
 from killchain_docker.thread_status import build_thread_registry, thread_info
 

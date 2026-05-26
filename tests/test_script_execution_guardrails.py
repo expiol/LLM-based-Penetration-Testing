@@ -69,11 +69,11 @@ from killchain_docker.tools.plugins.script_output import (
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, TodoPhase
 from killchain_docker.llm.gateway import StaticLLMClient
-from killchain_docker.workers.catalog import ARTIFACT_PERSONA
-from killchain_docker.workers.execution_policy import should_continue_after_step
-from killchain_docker.workers.task_intent import is_flag_recovery_task
-from killchain_docker.workers.tool_prompt_rules import tool_use_rules
-from killchain_docker.workers.worker import Worker
+from killchain_docker.workers.personas.catalog import ARTIFACT_PERSONA
+from killchain_docker.workers.execution.policy import should_continue_after_step
+from killchain_docker.workers.execution.intent import is_flag_recovery_task
+from killchain_docker.workers.prompts.rules import tool_use_rules
+from killchain_docker.workers.runtime.worker import Worker
 
 
 def _intent(capability: str, profile: str) -> dict[str, str]:

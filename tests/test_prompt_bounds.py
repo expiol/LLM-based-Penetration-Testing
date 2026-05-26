@@ -16,8 +16,8 @@ from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, WorkerResult
 from killchain_docker.tools.core import ExecutionPlane
 from killchain_docker.tools.capabilities import ToolCapability
-from killchain_docker.workers.worker_agent import WorkerAgent
-from killchain_docker.workers.correction_instructions import (
+from killchain_docker.workers.runtime.agent import WorkerAgent
+from killchain_docker.workers.corrections.instructions import (
     script_correction_instruction,
 )
 

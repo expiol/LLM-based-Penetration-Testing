@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from killchain_docker.evidence_context import EvidenceContextBuilder
-from killchain_docker.knowledge.augmenter import KnowledgeAugmenter
+from killchain_docker.rag.augmenter import RagAugmenter
 from killchain_docker.orchestrator.planning.context_models import PlannerContext
 from killchain_docker.orchestrator.planning.context_temperature import (
     compute_planner_temperature,
@@ -19,7 +19,7 @@ from killchain_docker.prompt_projection import planner_todo as prompt_planner_to
 from killchain_docker.prompts.planner import build_planner_system_prompt
 from killchain_docker.state.challenge_projection import ChallengeProjection
 from killchain_docker.state.evidence_projection import EvidenceProjectionStore
-from killchain_docker.state.memory_projection import RunMemoryProjection
+from killchain_docker.memory.projection import RunMemoryProjection
 from killchain_docker.state.planner_projection import PlannerStateProjection
 from killchain_docker.state.report_projection import RunReportProjection
 from killchain_docker.state.run_state import RunState
@@ -42,10 +42,10 @@ class PlannerContextBuilder:
     def __init__(
         self,
         *,
-        augmenter: KnowledgeAugmenter | None = None,
+        augmenter: RagAugmenter | None = None,
         evidence_builder: EvidenceContextBuilder | None = None,
     ) -> None:
-        self.augmenter = augmenter or KnowledgeAugmenter.from_default()
+        self.augmenter = augmenter or RagAugmenter.from_default()
         self.evidence_builder = evidence_builder or EvidenceContextBuilder()
 
     def build(self, state: RunState) -> PlannerContext:

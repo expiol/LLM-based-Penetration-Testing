@@ -3,7 +3,7 @@
 from __future__ import annotations
 import json
 import unittest
-from killchain_docker.knowledge.augmenter import KnowledgeAugmenter
+from killchain_docker.rag.augmenter import RagAugmenter
 from killchain_docker.llm.gateway import LLMClientError, StaticLLMClient
 from tests.queue_harness import todo_queue
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
@@ -2852,7 +2852,7 @@ class LLMPlannerTests(unittest.TestCase):
             )
         )
         decision = LLMPlanner(
-            StaticLLMClient(responder), augmenter=KnowledgeAugmenter(None)
+            StaticLLMClient(responder), augmenter=RagAugmenter(None)
         ).plan(state)
         self.assertEqual(len(captured), 2)
         self.assertNotIn("planner_retry_instruction", captured[0])
@@ -2916,7 +2916,7 @@ class LLMPlannerTests(unittest.TestCase):
         )
         todo_queue(state).complete(inventory, "done")
         decision = LLMPlanner(
-            StaticLLMClient(responder), augmenter=KnowledgeAugmenter(None)
+            StaticLLMClient(responder), augmenter=RagAugmenter(None)
         ).plan(state)
         self.assertEqual(len(captured), 2)
         self.assertNotIn("planner_retry_instruction", captured[0])
@@ -2985,7 +2985,7 @@ class LLMPlannerTests(unittest.TestCase):
         )
         todo_queue(state).complete(inventory, "capture.bin")
         decision = LLMPlanner(
-            StaticLLMClient(responder), augmenter=KnowledgeAugmenter(None)
+            StaticLLMClient(responder), augmenter=RagAugmenter(None)
         ).plan(state)
         self.assertEqual(len(captured), 2)
         self.assertEqual(len(decision.todos), 1)
@@ -3041,7 +3041,7 @@ class LLMPlannerTests(unittest.TestCase):
         )
         todo_queue(state).complete(inventory, "only csawpad.py is present")
         decision = LLMPlanner(
-            StaticLLMClient(responder), augmenter=KnowledgeAugmenter(None)
+            StaticLLMClient(responder), augmenter=RagAugmenter(None)
         ).plan(state)
         self.assertEqual(len(captured), 2)
         self.assertIn("planner_retry_instruction", captured[1])

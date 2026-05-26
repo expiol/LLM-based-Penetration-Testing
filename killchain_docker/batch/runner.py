@@ -32,8 +32,8 @@ from killchain_docker.batch.docker import (
     start_challenge_with_retry,
 )
 from killchain_docker.environment import CTFEnvironment
-from killchain_docker.knowledge.retriever import oracle_context_status
-from killchain_docker.knowledge.status import public_rag_payload
+from killchain_docker.rag.oracle import oracle_context_status
+from killchain_docker.rag.status import public_rag_payload
 from killchain_docker.logging_utils import (
     configure_logging,
     get_logger,

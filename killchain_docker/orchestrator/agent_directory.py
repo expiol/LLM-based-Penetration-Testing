@@ -8,7 +8,7 @@ from killchain_docker.orchestrator.agent_lifecycle import AgentLifecycle
 if TYPE_CHECKING:
     from killchain_docker.state.run_state import RunState
     from killchain_docker.state.todos import TodoItem
-    from killchain_docker.workers.worker_agent import WorkerAgent
+    from killchain_docker.workers.runtime.agent import WorkerAgent
 
 
 class AgentDirectory:

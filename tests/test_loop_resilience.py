@@ -28,7 +28,7 @@ from killchain_docker.state.todos import (
     WorkerAssignment,
     WorkerResult,
 )
-from killchain_docker.workers.worker_agent import WorkerAgent
+from killchain_docker.workers.runtime.agent import WorkerAgent
 
 
 class _ScriptedPlanner(PlannerAgent):

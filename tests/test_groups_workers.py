@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from killchain_docker.tools.capabilities import ToolCapability
-from killchain_docker.workers.catalog import (
+from killchain_docker.workers.personas.catalog import (
     ALL_PERSONAS,
     WorkerBuildContext,
     build_builtin_workers,

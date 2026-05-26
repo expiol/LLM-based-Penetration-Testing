@@ -6,7 +6,7 @@ from killchain_docker.llm.gateway import StaticLLMClient
 from killchain_docker.tools.core import ExecutionPlane
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, TodoPhase
-from killchain_docker.workers.catalog import (
+from killchain_docker.workers.personas.catalog import (
     ALL_PERSONAS,
     WorkerBuildContext,
     build_builtin_workers,

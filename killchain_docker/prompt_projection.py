@@ -12,7 +12,7 @@ from killchain_docker.prompt_bounds import bounded_value, trim_text
 from killchain_docker.state.artifact_projection import ArtifactProjectionStore
 from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.domain import Artifact, ExecutionRecord
-from killchain_docker.state.memory_projection import RunMemoryProjection
+from killchain_docker.memory.projection import RunMemoryProjection
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem
 

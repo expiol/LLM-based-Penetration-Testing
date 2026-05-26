@@ -12,8 +12,8 @@ from killchain_docker.state.domain import FlagCandidate, StateDelta
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.state_delta import StateDeltaApplier
-from killchain_docker.workers.worker_agent import WorkerAgent
-from killchain_docker.workers.flag_validation import flag_matches
+from killchain_docker.workers.runtime.agent import WorkerAgent
+from killchain_docker.workers.results.flag_validation import flag_matches
 
 
 class BackgroundFlagSolved(Exception):

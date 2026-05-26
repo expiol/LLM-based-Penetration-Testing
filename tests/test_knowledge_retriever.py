@@ -14,21 +14,21 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 from killchain_docker.batch.dataset import challenge_metadata
-from killchain_docker.knowledge.augmenter import KnowledgeAugmenter
+from killchain_docker.rag.augmenter import RagAugmenter
 from killchain_docker.knowledge.corpus import (
     KnowledgeEntry,
     extract_solution_sketch,
     load_corpus,
 )
 from killchain_docker.knowledge.embedder import CachedEmbeddingMatrix, StubEmbedder
-from killchain_docker.knowledge.retriever import (
-    KnowledgeRetriever,
-    RetrievalHit,
+from killchain_docker.rag.config import rag_mode
+from killchain_docker.rag.hit import RetrievalHit
+from killchain_docker.rag.oracle import (
     actionable_oracle_challenge_ids,
     oracle_context_status,
-    rag_mode,
 )
-from killchain_docker.knowledge.status import public_rag_payload
+from killchain_docker.rag.vector import VectorKnowledgeProvider
+from killchain_docker.rag.status import public_rag_payload
 from killchain_docker.orchestrator.planning.context_builder import PlannerContextBuilder
 from killchain_docker.orchestrator.planning.prompt_renderer import render_planner_prompt
 from killchain_docker.state.run_state import RunState
@@ -279,7 +279,7 @@ class LoadCorpusTests(unittest.TestCase):
         )
 
 
-class KnowledgeRetrieverTests(unittest.TestCase):
+class VectorKnowledgeProviderTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
@@ -324,10 +324,10 @@ class KnowledgeRetrieverTests(unittest.TestCase):
         ]
 
     def test_category_prefilter_restricts_results(self):
-        retriever = KnowledgeRetriever(
+        provider = VectorKnowledgeProvider(
             self.entries, embedder=StubEmbedder(), cache_dir=self.tmp
         )
-        hits = retriever.retrieve(
+        hits = provider.retrieve(
             "LFSR-based file encryption stored in a Secure Test File Unit. files: stfu, flag.stfu",
             category="crypto",
             top_k=4,
@@ -337,10 +337,10 @@ class KnowledgeRetrieverTests(unittest.TestCase):
             self.assertEqual(hit.category, "crypto")
 
     def test_excludes_challenge_id(self):
-        retriever = KnowledgeRetriever(
+        provider = VectorKnowledgeProvider(
             self.entries, embedder=StubEmbedder(), cache_dir=self.tmp
         )
-        hits = retriever.retrieve(
+        hits = provider.retrieve(
             "LFSR-based file encryption stored in a Secure Test File Unit.",
             category="crypto",
             top_k=4,
@@ -350,17 +350,17 @@ class KnowledgeRetrieverTests(unittest.TestCase):
         self.assertNotIn("2013f-cry-stfu", ids)
 
     def test_direct_challenge_lookup_returns_corpus_hit(self):
-        retriever = KnowledgeRetriever(
+        provider = VectorKnowledgeProvider(
             self.entries, embedder=StubEmbedder(), cache_dir=self.tmp
         )
-        hit = retriever.hit_by_challenge_id("2013f-cry-stfu")
+        hit = provider.hit_by_challenge_id("2013f-cry-stfu")
         self.assertIsNotNone(hit)
         assert hit is not None
         self.assertEqual(hit.challenge_id, "2013f-cry-stfu")
         self.assertEqual(hit.score, 1.0)
 
     def test_direct_challenge_lookup_can_return_description_only_context(self):
-        retriever = KnowledgeRetriever(
+        provider = VectorKnowledgeProvider(
             [
                 _entry(
                     "description-only",
@@ -374,8 +374,8 @@ class KnowledgeRetrieverTests(unittest.TestCase):
             embedder=StubEmbedder(),
             cache_dir=self.tmp,
         )
-        default_hit = retriever.hit_by_challenge_id("description-only")
-        direct_hit = retriever.hit_by_challenge_id(
+        default_hit = provider.hit_by_challenge_id("description-only")
+        direct_hit = provider.hit_by_challenge_id(
             "description-only", require_solution_sketch=False
         )
         self.assertIsNone(default_hit)
@@ -387,10 +387,10 @@ class KnowledgeRetrieverTests(unittest.TestCase):
         )
 
     def test_excludes_event_pair(self):
-        retriever = KnowledgeRetriever(
+        provider = VectorKnowledgeProvider(
             self.entries, embedder=StubEmbedder(), cache_dir=self.tmp
         )
-        hits = retriever.retrieve(
+        hits = provider.retrieve(
             "LFSR-based file encryption stored in a Secure Test File Unit.",
             category="crypto",
             top_k=4,
@@ -400,25 +400,25 @@ class KnowledgeRetrieverTests(unittest.TestCase):
             self.assertNotEqual((hit.year, hit.event), ("2013", "CSAW-Finals"))
 
     def test_unknown_category_falls_back_to_full_corpus(self):
-        retriever = KnowledgeRetriever(
+        provider = VectorKnowledgeProvider(
             self.entries, embedder=StubEmbedder(), cache_dir=self.tmp
         )
-        hits = retriever.retrieve(
+        hits = provider.retrieve(
             "LFSR-based file encryption", category="totally_unknown_category", top_k=4
         )
         self.assertGreaterEqual(len(hits), 1)
 
     def test_to_prompt_dict_truncates_long_solution(self):
-        retriever = KnowledgeRetriever(
+        provider = VectorKnowledgeProvider(
             self.entries, embedder=StubEmbedder(), cache_dir=self.tmp
         )
-        hits = retriever.retrieve("FuelPHP cookie forging", category="web", top_k=1)
+        hits = provider.retrieve("FuelPHP cookie forging", category="web", top_k=1)
         self.assertEqual(len(hits), 1)
         rendered = hits[0].to_prompt_dict(max_solution_chars=10)
         self.assertLessEqual(len(rendered["solution_sketch"]), 10)
 
     def test_to_prompt_dict_redacts_literal_flags(self):
-        hit = KnowledgeRetriever(
+        hit = VectorKnowledgeProvider(
             [
                 _entry(
                     "flaggy",
@@ -436,7 +436,7 @@ class KnowledgeRetrieverTests(unittest.TestCase):
         self.assertIn("[REDACTED_FLAG]", rendered["solution_sketch"])
 
     def test_to_prompt_dict_redacts_flags_from_description(self):
-        hit = KnowledgeRetriever(
+        hit = VectorKnowledgeProvider(
             [
                 _entry(
                     "description-flaggy",
@@ -454,7 +454,7 @@ class KnowledgeRetrieverTests(unittest.TestCase):
         self.assertIn("[REDACTED_FLAG]", rendered["description"])
 
     def test_to_prompt_dict_redacts_flags_from_file_names(self):
-        hit = KnowledgeRetriever(
+        hit = VectorKnowledgeProvider(
             [
                 _entry(
                     "file-flaggy",
@@ -484,7 +484,7 @@ class KnowledgeRetrieverTests(unittest.TestCase):
         self.assertIn("[REDACTED_FLAG].bin", files)
 
     def test_to_prompt_dict_redacts_bare_flag_tokens(self):
-        hit = KnowledgeRetriever(
+        hit = VectorKnowledgeProvider(
             [
                 _entry(
                     "bare-flaggy",
@@ -504,7 +504,7 @@ class KnowledgeRetrieverTests(unittest.TestCase):
         self.assertIn("[REDACTED_FLAG]", rendered["solution_sketch"])
 
     def test_to_prompt_dict_redacts_context_labeled_lowercase_bare_flags(self):
-        hit = KnowledgeRetriever(
+        hit = VectorKnowledgeProvider(
             [
                 _entry(
                     "lower-bare-flaggy",
@@ -522,7 +522,7 @@ class KnowledgeRetrieverTests(unittest.TestCase):
         self.assertIn("[REDACTED_FLAG]", rendered["solution_sketch"])
 
     def test_to_prompt_dict_keeps_lowercase_method_tokens(self):
-        hit = KnowledgeRetriever(
+        hit = VectorKnowledgeProvider(
             [
                 _entry(
                     "method-token",
@@ -551,10 +551,10 @@ class KnowledgeRetrieverTests(unittest.TestCase):
                 files=[],
             ),
         ]
-        retriever = KnowledgeRetriever(
+        provider = VectorKnowledgeProvider(
             entries, embedder=StubEmbedder(), cache_dir=self.tmp
         )
-        hits = retriever.retrieve(
+        hits = provider.retrieve(
             "placeholder", category="crypto", top_k=10, require_solution_sketch=True
         )
         self.assertNotIn("2099-misc-empty", {hit.challenge_id for hit in hits})
@@ -688,12 +688,12 @@ class CachedEmbeddingMatrixTests(unittest.TestCase):
 
 
 class _AugmenterFixture:
-    """Small mixin that builds a stub-embedder retriever + augmenter."""
+    """Small mixin that builds a stub-embedder provider + augmenter."""
 
     @classmethod
     def build(
         cls, tmp: Path
-    ) -> tuple[KnowledgeRetriever, KnowledgeAugmenter, RunState]:
+    ) -> tuple[VectorKnowledgeProvider, RagAugmenter, RunState]:
         entries = [
             _entry(
                 "2013f-cry-stfu",
@@ -714,7 +714,7 @@ class _AugmenterFixture:
                 event="CSAW-Quals",
             ),
         ]
-        retriever = KnowledgeRetriever(entries, embedder=StubEmbedder(), cache_dir=tmp)
+        provider = VectorKnowledgeProvider(entries, embedder=StubEmbedder(), cache_dir=tmp)
         state = RunState(
             objective="LFSR-based file encryption stored in a Secure Test File Unit.",
             authorized_scope=[],
@@ -730,11 +730,11 @@ class _AugmenterFixture:
                 }
             },
         )
-        return (retriever, KnowledgeAugmenter(retriever), state)
+        return (provider, RagAugmenter(provider), state)
 
 
-class _DirectLookupRetriever:
-    """Retriever double whose dense result misses the current challenge."""
+class _DirectLookupProvider:
+    """Provider double whose ranked result misses the current challenge."""
 
     def __len__(self) -> int:
         return 2
@@ -770,7 +770,7 @@ class _DirectLookupRetriever:
         )
 
 
-class KnowledgeAugmenterTests(unittest.TestCase):
+class RagAugmenterTests(unittest.TestCase):
     """The augmenter is the planner RAG integration point."""
 
     def setUp(self):
@@ -786,7 +786,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         )
         env.start()
         self.addCleanup(env.stop)
-        self.retriever, self.augmenter, self.state = _AugmenterFixture.build(self.tmp)
+        self.provider, self.augmenter, self.state = _AugmenterFixture.build(self.tmp)
 
     def test_context_can_render_shaped_hits_for_retrieval_tests(self):
         context = self.augmenter.context_for(self.state)
@@ -808,7 +808,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         self.assertLessEqual(score, 1.0)
         self.assertIn(
             context.top_challenge_id,
-            {entry.challenge_id for entry in self.retriever.entries},
+            {entry.challenge_id for entry in self.provider.entries},
         )
         cached = self.state.metadata.get("rag")
         self.assertIsNotNone(cached)
@@ -822,7 +822,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         self.assertEqual(cached["hit_count"], len(rendered_hits))
         self.assertIn(
             cached["top_challenge_id"],
-            {entry.challenge_id for entry in self.retriever.entries},
+            {entry.challenge_id for entry in self.provider.entries},
         )
         self.assertIn("hit_provenance", cached)
         self.assertEqual(cached["knowledge_hints"], rendered_hits)
@@ -833,7 +833,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
 
     def test_context_for_logs_public_rag_status_only(self):
         with self.assertLogs(
-            "killchain_docker.knowledge.augmenter", level="INFO"
+            "killchain_docker.rag.augmenter", level="INFO"
         ) as captured:
             self.augmenter.context_for(self.state)
         records = [
@@ -865,8 +865,8 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         self.assertEqual(len(cached["hit_provenance"]), 2)
         self.assertEqual(cached["hint_count"], 1)
 
-    def test_oracle_mode_adds_direct_context_when_dense_retrieval_misses_identity(self):
-        retriever = _DirectLookupRetriever()
+    def test_oracle_mode_adds_direct_context_when_provider_ranking_misses_identity(self):
+        provider = _DirectLookupProvider()
         state = RunState(
             objective="generic query whose dense result is a distractor",
             metadata={
@@ -877,7 +877,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
                 }
             },
         )
-        augmenter = KnowledgeAugmenter(retriever, top_k=1, mode="oracle")
+        augmenter = RagAugmenter(provider, top_k=1, mode="oracle")
         context = augmenter.context_for(state)
         self.assertEqual(
             [hit.challenge_id for hit in context.hits or []], ["target-challenge"]
@@ -894,7 +894,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         )
 
     def test_strict_mode_does_not_add_direct_context(self):
-        retriever = _DirectLookupRetriever()
+        provider = _DirectLookupProvider()
         state = RunState(
             objective="generic query whose dense result is a distractor",
             metadata={
@@ -905,7 +905,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
                 }
             },
         )
-        augmenter = KnowledgeAugmenter(retriever, top_k=1, mode="strict")
+        augmenter = RagAugmenter(provider, top_k=1, mode="strict")
         context = augmenter.context_for(state)
         self.assertEqual(
             [hit.challenge_id for hit in context.hits or []], ["distractor-challenge"]
@@ -914,7 +914,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
     def test_description_only_identity_hint_is_not_actionable_oracle_context(self):
         late_hint = "late protocol hint survives description budget"
         description = "start " + "filler " * 80 + late_hint
-        retriever = KnowledgeRetriever(
+        provider = VectorKnowledgeProvider(
             [
                 _entry(
                     "description-only",
@@ -938,7 +938,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
                 }
             },
         )
-        augmenter = KnowledgeAugmenter(retriever, mode="oracle")
+        augmenter = RagAugmenter(provider, mode="oracle")
         context = augmenter.context_for(state)
         hints = context.prompt_hits(
             max_solution_chars=9000, max_description_chars=280, max_files=8
@@ -951,14 +951,14 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         self.assertEqual(cached["hint_count"], 0)
         self.assertNotIn("knowledge_hints", cached)
 
-    def test_disabled_when_retriever_none(self):
-        augmenter = KnowledgeAugmenter(retriever=None)
+    def test_disabled_when_provider_none(self):
+        augmenter = RagAugmenter(None)
         self.assertFalse(augmenter.enabled)
         self.assertEqual(augmenter.for_planner(self.state), [])
         self.assertEqual(augmenter.context_for(self.state).top_score, 0.0)
         self.assertEqual(self.state.metadata["rag"]["status"], "unavailable")
 
-    def test_disabled_mode_skips_even_configured_retriever(self):
+    def test_disabled_mode_skips_even_configured_provider(self):
         with mock.patch.dict(os.environ, {"AUTOPENTEST_RAG_MODE": "disabled"}):
             hits = self.augmenter.for_planner(self.state)
         self.assertEqual(hits, [])
@@ -993,7 +993,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         self.state.metadata["challenge"].pop("year", None)
         self.state.metadata["challenge"].pop("event", None)
         self.state.metadata["challenge"]["event_key"] = "2013:csaw-finals"
-        augmenter = KnowledgeAugmenter(self.retriever, mode="strict")
+        augmenter = RagAugmenter(self.provider, mode="strict")
         context = augmenter.context_for(self.state)
         self.assertNotIn(
             "2013f-cry-stfu", {hit.challenge_id for hit in context.hits or []}
@@ -1004,7 +1004,7 @@ class KnowledgeAugmenterTests(unittest.TestCase):
         )
 
     def test_explicit_mode_overrides_environment(self):
-        augmenter = KnowledgeAugmenter(self.retriever, mode="strict")
+        augmenter = RagAugmenter(self.provider, mode="strict")
         with mock.patch.dict(os.environ, {"AUTOPENTEST_RAG_MODE": "oracle"}):
             context = augmenter.context_for(self.state)
         self.assertNotIn(
@@ -1060,7 +1060,7 @@ class PlannerInjectionTests(unittest.TestCase):
         )
         env.start()
         self.addCleanup(env.stop)
-        self.retriever, self.augmenter, self.state = _AugmenterFixture.build(self.tmp)
+        self.provider, self.augmenter, self.state = _AugmenterFixture.build(self.tmp)
 
     def test_user_prompt_includes_redacted_method_hints_without_provenance(self):
         ctx = PlannerContextBuilder(augmenter=self.augmenter).build(self.state)
@@ -1126,7 +1126,7 @@ class PlannerInjectionTests(unittest.TestCase):
         self.assertIn("solution_sketch", knowledge["knowledge_hints"][0])
 
     def test_disabled_augmenter_omits_knowledge_hints(self):
-        ctx = PlannerContextBuilder(augmenter=KnowledgeAugmenter(retriever=None)).build(
+        ctx = PlannerContextBuilder(augmenter=RagAugmenter(None)).build(
             self.state
         )
         payload = json.loads(render_planner_prompt(ctx))

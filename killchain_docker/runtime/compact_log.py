@@ -6,7 +6,7 @@ from killchain_docker.llm.gateway import TokenLedger
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.outcome import RunOutcomeStore
 from killchain_docker.state.challenge_projection import ChallengeProjection
-from killchain_docker.state.memory_projection import RunMemoryProjection
+from killchain_docker.memory.projection import RunMemoryProjection
 from killchain_docker.state.projection_common import compact_text
 from killchain_docker.state.report_projection import RunReportProjection
 

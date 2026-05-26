@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from killchain_docker.knowledge.retriever import (
+from killchain_docker.rag.hit import (
     redact_file_path_literals,
     redact_flag_literals,
 )

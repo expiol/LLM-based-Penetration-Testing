@@ -10,13 +10,13 @@ from killchain_docker.orchestrator.router import RouterAgent
 from killchain_docker.state.dispatch import DispatchIntent
 from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem, TodoPhase, WorkerResult
-from killchain_docker.workers.worker_agent import WorkerAgent
-from killchain_docker.workers.catalog import (
+from killchain_docker.workers.runtime.agent import WorkerAgent
+from killchain_docker.workers.personas.catalog import (
     ARTIFACT_PERSONA,
     EXPLOIT_PERSONA,
     RECON_PERSONA,
 )
-from killchain_docker.workers.worker import Worker
+from killchain_docker.workers.runtime.worker import Worker
 
 
 class _DirectoryWorker(WorkerAgent):

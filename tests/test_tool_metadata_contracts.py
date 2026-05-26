@@ -6,8 +6,8 @@ from killchain_docker.state.run_state import RunState
 from killchain_docker.state.todos import TodoItem
 from killchain_docker.tools.capabilities import ToolCapability
 from killchain_docker.tools.core import ToolExecutionError
-from killchain_docker.workers.tool_contract_catalog import tool_metadata_contract
-from killchain_docker.workers.tool_metadata_router import normalize_tool_metadata
+from killchain_docker.workers.tooling.contracts.catalog import tool_metadata_contract
+from killchain_docker.workers.tooling.metadata.router import normalize_tool_metadata
 
 
 class ToolMetadataContractTests(unittest.TestCase):
