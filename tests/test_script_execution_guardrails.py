@@ -678,6 +678,48 @@ class TestWorkerInnerLoopPolicy(unittest.TestCase):
             "try:\n    print('broken')\n",
         )
 
+    def test_missing_required_metadata_degrades_to_partial(self) -> None:
+        """Schema-validation failures from missing required metadata fields
+        must produce a recoverable PARTIAL, not a fatal todo failure.
+
+        The pydantic ToolUseDecision validator rejects responses that omit a
+        required metadata field (e.g. ``script_code`` for ``script.exec``).
+        That error reaches the worker as ``LLMClientError(SCHEMA_VALIDATION)``,
+        but it is structurally identical to the ToolExecutionError raised by
+        downstream metadata normalisation: the LLM picked a tool and forgot
+        an argument.  Both paths should hand back to the planner with a
+        PARTIAL result so the run can keep going.
+        """
+
+        calls = 0
+
+        def missing_metadata_response(
+            _system_prompt: str, _user_prompt: str
+        ) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            return {
+                "capability": "script.exec",
+                "metadata": {},
+                "rationale": "forgot to include script_code",
+            }
+
+        worker = Worker(
+            persona=ARTIFACT_PERSONA,
+            llm_client=StaticLLMClient(missing_metadata_response),
+            tool_gateway=ToolGateway(ExecutionPlane()),
+        )
+        result = worker.run(
+            TodoItem(goal="Recover the flag from computed plaintext."),
+            RunState(objective="test"),
+        )
+        self.assertGreaterEqual(calls, 2)
+        self.assertFalse(result.success)
+        self.assertTrue(result.partial)
+        self.assertEqual(result.output_context["executed"], False)
+        self.assertEqual(result.output_context["agent_handoff"]["target"], "planner")
+        self.assertIn("script_code", result.output_context["failure_detail"])
+
     def test_artifact_triage_intent_runs_without_llm_selection(self) -> None:
 
         def fail_if_called(_system_prompt: str, _user_prompt: str) -> dict[str, object]:

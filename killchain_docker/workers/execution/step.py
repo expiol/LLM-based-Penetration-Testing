@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+from killchain_docker.llm.gateway import LLMClientError, LLMFailureKind
 from killchain_docker.reasoning.schemas import ToolUseDecision
 from killchain_docker.memory.durable import DurableMemoryUpdate
 from killchain_docker.state.dispatch import DispatchIntent
@@ -124,6 +125,32 @@ def run_tool_step(
                 selected_metadata=selected_metadata,
             )
             return (capability, rationale, bundle)
+        except LLMClientError as exc:
+            if exc.kind is not LLMFailureKind.SCHEMA_VALIDATION:
+                raise
+            error_text = str(exc)
+            failure_kind = "schema_validation"
+            metadata_retries += 1
+            prior_steps.append(
+                _validation_error_step(
+                    step,
+                    capability,
+                    rationale,
+                    error_text,
+                    failure_kind,
+                    selected_metadata,
+                )
+            )
+            if metadata_retries > max_metadata_retries:
+                return metadata_failure_result(
+                    task,
+                    agent.name,
+                    capability,
+                    error_text,
+                    failure_kind,
+                    selected_metadata,
+                    prior_steps,
+                )
         except (ToolExecutionError, ValueError) as exc:
             error_text = str(exc)
             failure_kind = ToolGuardPolicy.metadata_failure_kind(error_text, capability)
