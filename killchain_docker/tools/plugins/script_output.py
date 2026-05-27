@@ -312,6 +312,25 @@ def script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str,
             "script attempted an oversized range/search; use fast-forward math or bounded sampling",
         )
     if "script.exec python time limit exceeded" in text:
+        io_markers = (
+            "time.sleep",
+            "socket.recv",
+            "sock.recv",
+            ".recvuntil",
+            ".recvline",
+            ".recvall",
+            ".interactive",
+            "select.select",
+            "select.poll",
+            "ssl.read",
+        )
+        if any(marker in text for marker in io_markers):
+            return (
+                "script_runtime_exhausted_io",
+                "script's network/IO work exceeded the runtime guard; "
+                "reduce round-trips, shorten sleeps, or split the work into "
+                "multiple smaller script.exec invocations that hand state forward",
+            )
         return (
             "unbounded_loop_guard",
             "script exceeded Python runtime guard; use bounded loops or fast-forward math",

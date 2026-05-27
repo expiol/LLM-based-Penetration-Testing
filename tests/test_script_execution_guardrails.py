@@ -1612,6 +1612,32 @@ class TestScriptExecutionRuntime(unittest.TestCase):
             "Python runtime guard", str(output.output_context["failure_detail"])
         )
 
+    def test_runtime_guard_in_io_wait_routes_to_io_runtime_exhausted(self) -> None:
+        output = build_script_output(
+            ToolExecutionRequest(
+                tool_name="script_exec", metadata={"script_language": "python"}
+            ),
+            ToolExecutionResult(
+                tool_name="script_exec",
+                mode=ExecutionMode.LOCAL_COMMAND,
+                exit_code=1,
+                stdout="connecting...\n",
+                stderr=(
+                    "Traceback (most recent call last):\n"
+                    "RuntimeError: script.exec Python time limit exceeded "
+                    "at line 28; code='time.sleep(0.2)'; "
+                    "use bounded loops or fast-forward math\n"
+                ),
+            ),
+            ParsedToolOutput(summary="raw"),
+        )
+        self.assertEqual(
+            output.output_context["failure_kind"], "script_runtime_exhausted_io"
+        )
+        self.assertIn(
+            "split", str(output.output_context["failure_detail"]).lower()
+        )
+
     def test_readable_ascii_art_without_flag_is_near_miss(self) -> None:
         ascii_art = "\n".join(
             [
