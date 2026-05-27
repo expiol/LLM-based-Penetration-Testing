@@ -1,171 +1,364 @@
 # LLM-based Penetration Testing
 
-A multi-agent LLM-driven killchain framework for autonomous CTF solving and security assessment, built on the [NYUCTF](https://github.com/NYU-LLM-CTF/nyuctf) dataset.
+An LLM-driven autonomous CTF solving and authorized security assessment
+framework. The project uses the NYUCTF dataset as its main benchmark and
+combines LLM planning, task routing, persona-based workers, guarded tool
+execution, Docker isolation, RAG hints, durable memory, batch evaluation, and
+run reporting into one reproducible workflow.
+
+> This project is intended for academic research, CTFs, security education, and
+> explicitly authorized lab environments only. Do not use it against systems you
+> do not own or have permission to test.
+
+## Overview
+
+Manual penetration testing and CTF solving require repeatedly switching between
+reconnaissance, hypothesis generation, tool execution, exploit attempts, and
+result validation. This project models that workflow as an observable kill chain.
+
+At runtime, a Planner proposes high-level todos, a Router assigns them to
+specialized workers, workers select concrete tool capabilities, and tool plugins
+execute bounded commands inside the authorized environment. Each cycle updates a
+shared run state and writes structured artifacts for debugging, scoring, and
+post-run analysis.
+
+The current implementation supports:
+
+- Single challenge, category, subset, sampled, and full-split NYUCTF runs.
+- Common CTF categories such as web, crypto, reverse, pwn, forensics, and misc.
+- An OpenAI-compatible LLM gateway with Pydantic-validated structured output.
+- Docker-based execution for tools such as nmap, curl, sqlmap, nikto, radare2,
+  gdb, binwalk, tshark, steghide, john, and more.
+- RAG-based method hints from prior writeups, including a strict decontamination
+  mode for benchmark comparisons.
+- Runtime logs, live status files, static HTML batch monitoring, compact run
+  timelines, Markdown reports, and experiment summaries.
 
 ## Architecture
 
+```text
+User / batch runner
+        |
+        v
++-------------------+       +-------------------+
+| Runtime Session   | ----> | RunState / Memory |
++-------------------+       +-------------------+
+        |
+        v
++-------------------+       +-------------------+
+| Planner Agent     | ----> | TodoQueue         |
++-------------------+       +-------------------+
+        |
+        v
++-------------------+
+| Router Agent      |
++-------------------+
+        |
+        v
++-------------------------------------------------------+
+| Persona Workers                                       |
+| recon / artifact / web / exploit / flag               |
++-------------------------------------------------------+
+        |
+        v
++-------------------------------------------------------+
+| Tool Plugins                                          |
+| shell, script, nmap, curl, sqlmap, gdb, r2, tshark... |
++-------------------------------------------------------+
+        |
+        v
++-------------------+
+| Docker lab/files  |
++-------------------+
 ```
-Planner (LLM) ──→ Router (LLM) ──→ Persona Workers ──→ Tool Plugins
-    │                                    │                    │
-    │  proposes todos                    │  selects tool      │  executes in
-    │  with goals/context                │  capability        │  Docker container
-    ▼                                    ▼                    ▼
-RunState ◄──────── Evidence ◄─────── Parsed Output ◄──── Container stdout
-```
 
-**Orchestration loop:** Each cycle, the Planner observes the full run state and proposes high-level todos. The Router assigns todos to specialized workers. Workers select concrete tool capabilities, execute them inside a Docker container, and merge results back into shared state.
+One assessment loop works like this:
 
-**Persona Workers:**
-- `recon-worker` — scope mapping, service discovery
-- `artifact-worker` — file analysis, binary disassembly, script execution
-- `web-worker` — HTTP probing, form interaction, path enumeration
-- `exploit-worker` — vulnerability probes, exploit scripts, credential testing
-- `flag-worker` — flag candidate validation with fuzzy matching
+1. The Planner observes the objective, authorized scope, accumulated evidence,
+   RAG hints, durable memory, and current run state.
+2. It creates high-level todos only when more work is needed.
+3. The Router assigns ready todos to the most suitable persona worker.
+4. The worker asks the LLM for a concrete capability and metadata.
+5. The selected tool plugin executes in a guarded local or Docker context.
+6. Parsed output is merged back into evidence, assets, candidates, todos, and
+   run metrics.
+7. The state is persisted and the next cycle begins until the run is solved,
+   exhausted, interrupted, or rejected by safety/configuration checks.
 
-**Tool Plugins (22+):** binary disassembly, binary execution, script execution, HTTP metadata/content/forms/paths, credential harvesting/login, archive/sqlite/pcap review, exploit probes, flag harvesting, and more.
+## Repository Layout
 
-## Setup
+| Path | Purpose |
+| --- | --- |
+| `run.py` | NYUCTF benchmark entrypoint for single, category, subset, random, and full runs |
+| `killchain_docker/cli.py` | `autopentest` CLI for custom assessments, demos, self-test, and lab helpers |
+| `killchain_docker/runtime/` | Runtime assembly, session execution, event recording, and artifact persistence |
+| `killchain_docker/orchestrator/` | Planner, router, dispatch loop, progress policy, todo queue, and termination logic |
+| `killchain_docker/workers/` | Persona workers, prompts, capability selection, correction, and result handling |
+| `killchain_docker/tools/` | Tool abstractions, plugin registry, guard policies, and output parsers |
+| `killchain_docker/state/` | RunState, evidence, artifacts, candidates, todos, report projections, and facts |
+| `killchain_docker/llm/` | OpenAI-compatible gateway, JSON repair, typed failures, and token accounting |
+| `killchain_docker/rag/` | RAG mode handling, retrieval provider, prompt projection, and strict exclusions |
+| `killchain_docker/memory/` | Filesystem-backed durable memory across runs |
+| `killchain_docker/batch/` | Dataset loading, Docker challenge lifecycle, parallel execution, and monitoring |
+| `scripts/` | Analysis utilities for summaries, RAG ablations, transcripts, flags, and plots |
+| `tests/` | Unit tests and architecture contract tests |
+
+## Persona Workers
+
+| Worker | Responsibility |
+| --- | --- |
+| `recon-worker` | Scope mapping, port scanning, first-pass HTTP recon, file identification |
+| `artifact-worker` | Offline analysis for files, binaries, pcaps, images, Office docs, archives, databases, and APKs |
+| `web-worker` | HTTP probing, path exploration, vulnerability scanning, SQL injection checks |
+| `exploit-worker` | Evidence-driven exploit attempts, credential attacks, binary debugging, active validation |
+| `flag-worker` | Concrete flag candidate validation and final answer checking |
+
+## Tool Capabilities
+
+Tool plugins are registered in `killchain_docker/tools/registry.py`.
+
+- General execution: `shell.exec`, `script.exec`
+- Network and web: `nmap`, `curl`, `nikto`, `sqlmap`
+- Binary and reversing: `file`, `strings`, `checksec`, `radare2`, `objdump`,
+  `gdb`, `ltrace`, `strace`
+- Forensics and steganography: `binwalk`, `tshark`, `exiftool`, `steghide`,
+  `foremost`, `png.inspect`, `media.scan`, `office.inspect`, `disk.extract`
+- Data and credentials: `sqlite3`, `john`, `fcrackzip`
+- Mobile: `jadx`
+
+The execution layer includes guardrails such as blocking package installation
+inside `shell.exec`, preventing out-of-scope target access, discouraging
+unbounded extraction, preserving stderr diagnostics, and pushing complex
+multi-line code into `script.exec`.
+
+## Requirements
+
+- Python 3.11 or newer
+- Conda
+- Docker
+- An OpenAI-compatible LLM API endpoint
+- Optional: a local NYUCTF dataset cache, or the default dataset access provided
+  by the `nyuctf` package
+
+## Installation
+
+Create and activate the Conda environment:
 
 ```bash
-# Clone and install
-git clone https://github.com/expiol/LLM-based-Penetration-Testing.git
-cd LLM-based-Penetration-Testing
-
-# Build Docker environment and install package
-bash setup.sh
-
-# Configure LLM provider
-cp configs/llm_gateway.json.example configs/llm_gateway.json
-# Edit configs/llm_gateway.json with your API key and model
+conda create -n autopentest python=3.11 -y
+conda activate autopentest
 ```
 
-### LLM Configuration
+Install Python dependencies:
 
-Edit `configs/llm_gateway.json`:
+```bash
+python -m pip install -r requirements.txt
+python -m pip install -e .
+```
+
+Build the Docker execution environment:
+
+```bash
+bash setup.sh
+```
+
+`setup.sh` creates the Docker network, builds the `ctfenv:latest` image, and
+installs this package into the `autopentest` Conda environment in editable mode.
+
+## LLM Configuration
+
+The gateway reads:
+
+```text
+configs/llm_gateway.json
+```
+
+Example:
 
 ```json
 {
   "provider": "openai_compatible",
   "base_url": "https://api.openai.com/v1",
-  "api_key": "sk-...",
+  "api_key": "YOUR_API_KEY",
   "default_model": "gpt-4o",
-  "timeout_s": 60,
-  "max_retries": 4,
-  "max_completion_tokens": 16384
+  "schema_models": {
+    "*": "gpt-4o"
+  },
+  "timeout_s": 180,
+  "max_retries": 5,
+  "total_deadline_s": 300,
+  "max_completion_tokens": 65536
 }
 ```
 
-Supports any OpenAI-compatible provider (OpenAI, DeepSeek, Together, Groq, OpenRouter).
+The gateway works with OpenAI, DeepSeek, Groq, Together, OpenRouter, or any
+provider that exposes an OpenAI-compatible Chat Completions API. `schema_models`
+can route specific structured-output schemas to different models; `"*"` is the
+fallback override.
 
-## Usage
+Do not commit real API keys. If a key has already been committed or shared,
+rotate it before publishing the project.
+
+## Quick Self-Test
+
+Run a local deterministic self-test without a real Docker challenge or live LLM:
 
 ```bash
-# Run a single challenge
-conda run -n autopentest python run.py --challenge "<challenge-name>"
-
-# Run all challenges in a category
-conda run -n autopentest python run.py --category crypto --run-all
-
-# Run with custom cycle limit
-conda run -n autopentest python run.py --challenge "<challenge-name>" --max-cycles 15
-
-# Run a random challenge
-conda run -n autopentest python run.py --challenge __random__
+conda run -n autopentest autopentest selftest --output-root selftest_output
 ```
 
-### Common Flags
+The self-test uses `StaticLLMClient` and simulated tools to verify the Planner,
+Router, Worker, state persistence, reporting, and flag validation path.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--dataset` | NYUCTF path | Dataset JSON file |
-| `--split` | `development` | Dataset split (`test` / `development`) |
-| `--category` | unset | Filter by category (`web`, `crypto`, `rev`, `pwn`, `forensics`, `misc`) |
-| `--max-cycles` | `8` | Maximum orchestrator cycles per challenge |
-| `--auto-max-cycles` | off | Scale the cycle budget from challenge files/scope instead of treating `--max-cycles` as a hard limit |
-| `--parallel-workers` | `1` | Concurrent challenge workers for `--run-all` |
-| `--container-image` | `ctfenv:latest` | Docker image for execution |
-| `--container-network` | `ctfnet` | Docker network name |
-| `--logdir` | `logs/<user>` | Batch logs and live monitor output |
-| `--output-root` | unset | Artifact root; defaults under the run log directory |
+## Running NYUCTF Experiments
 
-## Output
+Run one challenge:
 
-Results are written to `logs/<user>/<batch_name>/`:
-
+```bash
+conda run -n autopentest python run.py \
+  --challenge "<challenge-name>" \
+  --max-cycles 8 \
+  --name single_demo
 ```
-logs/hy/5.15_development_3/
-├── _batch_summary.json          # Aggregated metrics
-├── _batch_monitor.html          # Static live dashboard for batch progress
-├── _batch_monitor.json          # Dashboard snapshot, refreshed during runs
-├── example-challenge.status.json # Current stage for one challenge process
-├── example-challenge.json        # Full execution trace
+
+Run a random challenge:
+
+```bash
+conda run -n autopentest python run.py \
+  --challenge __random__ \
+  --split development \
+  --max-cycles 8
+```
+
+Run all challenges in one category:
+
+```bash
+conda run -n autopentest python run.py \
+  --category web \
+  --run-all \
+  --parallel-workers 5 \
+  --max-cycles 25 \
+  --name web_batch
+```
+
+Run a fixed subset:
+
+```bash
+conda run -n autopentest python run.py \
+  --challenges "<challenge-a>" "<challenge-b>" \
+  --parallel-workers 2 \
+  --max-cycles 15 \
+  --name subset_eval
+```
+
+Common options:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--challenge` | from `RUN_CONFIG` | Challenge name, `__all__`, or `__random__` |
+| `--challenges` | unset | Fixed ordered challenge subset |
+| `--run-all` | config-dependent | Run all selected challenges |
+| `--split` | `development` | NYUCTF split: `development` or `test` |
+| `--category` | unset | Category filter, such as `web`, `crypto`, `rev`, `pwn`, `forensics` |
+| `--dataset` | unset | Custom dataset JSON path |
+| `--max-cycles` | `25` in `RUN_CONFIG` | Maximum orchestration cycles per challenge |
+| `--auto-max-cycles` | off | Estimate cycle budget from challenge files and services, capped at 30 |
+| `--parallel-workers` | `5` in `RUN_CONFIG` | Concurrent challenge workers in batch mode |
+| `--replicas` | `1` | Repeat count for a single selected challenge |
+| `--sample-size` | unset | Sample a subset from the selected challenge list |
+| `--sample-seed` | unset | Random seed for sampling |
+| `--sample-strategy` | `random` | `random` or `category_round_robin` |
+| `--container-image` | `ctfenv:latest` | Docker image used for tool execution |
+| `--container-network` | `ctfnet` | Docker network for challenge containers |
+| `--logdir` | `logs/<user>` | Batch log root |
+| `--name` | `5.19_development_1` | Batch run name |
+| `--rag-mode` | resolved by config/env | `enabled`, `strict`, or `disabled` |
+
+## Generic `autopentest` CLI
+
+You can also run a direct authorized assessment without the NYUCTF batch wrapper:
+
+```bash
+conda run -n autopentest autopentest run \
+  --objective "Map and review the authorized web surface" \
+  --scope "http://127.0.0.1:8080" \
+  --output-root runs \
+  --max-cycles 6
+```
+
+Available subcommands:
+
+```bash
+autopentest run       # Run one custom authorized assessment
+autopentest demo      # Run the built-in demo configuration
+autopentest selftest  # Run the deterministic local self-test
+autopentest lab up    # Start a Docker Compose lab
+autopentest lab down  # Stop a Docker Compose lab
+autopentest lab health --url http://127.0.0.1:8080
+```
+
+## Output Artifacts
+
+Batch results are written under:
+
+```text
+logs/<user>/<batch-name>/
+```
+
+Typical layout:
+
+```text
+logs/hy/web_batch/
+├── _batch_summary.json          # Aggregated batch metrics
+├── _batch_monitor.html          # Static HTML monitor
+├── _batch_monitor.json          # JSON snapshot polled by the monitor
+├── <challenge>.status.json      # Live per-challenge status
+├── <challenge>.json             # Per-challenge result log
 └── artifacts/
-    └── example-challenge/
-        └── run-986b921320/
-            ├── config.json      # Challenge config
-            ├── events.log       # JSONL cycle-by-cycle structured events
-            ├── evidence.json    # Collected evidence
-            ├── compact_log.json # Lightweight live run timeline
-            ├── compact_log.md   # Human/LLM readable run timeline
-            ├── report.md        # Human-readable report
-            ├── state.json       # Complete run state
-            └── summary.json     # Execution metrics
+    └── <challenge>/
+        └── run-xxxxxxxxxx/
+            ├── config.json       # Runtime configuration
+            ├── state.json        # Full RunState
+            ├── evidence.json     # Evidence projection
+            ├── events.log        # JSONL event stream
+            ├── compact_log.json  # Compact timeline
+            ├── compact_log.md    # Human/LLM-readable timeline
+            ├── report.md         # Markdown report
+            └── summary.json      # Metrics summary
 ```
 
-Open `_batch_monitor.html` from the batch log directory through any static file
-server rooted at that directory to watch active challenge runs, worker process
-status, reported pid/thread ids, current todo, latest event, current status
-files, and completed artifact links refresh in place. The dashboard polls JSON
-status files; before a child worker writes its own status, parallel runs are
-shown as scheduled rather than as a real worker thread.
-For example:
+Serve and open the batch monitor:
 
 ```bash
-conda run -n autopentest python -m http.server 8765 -d logs/<run-name>
+conda run -n autopentest python -m http.server 8765 -d logs/<user>/<batch-name>
 ```
 
-Then open `http://127.0.0.1:8765/_batch_monitor.html`.
+Then visit:
+
+```text
+http://127.0.0.1:8765/_batch_monitor.html
+```
 
 ## RAG Modes
 
-Set `AUTOPENTEST_RAG_MODE` to control writeup augmentation:
+RAG provides method-level hints from prior challenge writeups. It is intended to
+help the Planner choose techniques, not to inject literal answers.
 
-- `enabled`: use the configured RAG provider to retrieve technical context.
-- `strict`: exclude same challenge and same event hits for answer-excluded generalization runs.
-- `disabled`: omit RAG hints entirely.
-
-Only these three mode names are accepted; invalid values fail fast instead of
-silently falling back to a default mode.
-
-Retrieved writeups are used as method priors only. Literal flag-like values
-are redacted before planner prompt injection.
-
-RAG is wired through `killchain_docker.rag.providers.RagProvider`, so the
-retrieval backend can be replaced later with a security knowledge provider
-without changing planner or worker code.
-
-`conda run -n autopentest python run.py` and
-`conda run -n autopentest autopentest run` also accept `--rag-mode`, which is
-recorded in `config.json`, per-run summaries, status files, and batch
-summaries. Use `--rag-mode enabled` for normal retrieval, `--rag-mode strict`
-for answer-excluded runs, or a domain knowledge corpus for the formal test
-collection.
-For direct `autopentest run` or `autopentest demo` usage outside batch mode,
-pass `--status-path <path>.status.json` when a live status file is needed.
-
-To run the same benchmark slice in both modes and collect one comparison
-manifest:
+Set the mode with `--rag-mode`:
 
 ```bash
-conda run -n autopentest python scripts/run_rag_ablation.py \
-  --challenge "<challenge-name>" \
-  --max-cycles 1 \
-  --logdir logs/rag_ablation \
-  --name smoke \
-  --audit
+--rag-mode enabled
+--rag-mode strict
+--rag-mode disabled
 ```
 
-For a reproducible named subset before running a full split:
+| Mode | Behavior |
+| --- | --- |
+| `enabled` | Retrieve hints using challenge name, category, description, and file names |
+| `strict` | Exclude the same challenge and same event, useful for decontaminated evaluations |
+| `disabled` | Disable retrieval completely for baseline comparisons |
+
+Run a RAG ablation:
 
 ```bash
 conda run -n autopentest python scripts/run_rag_ablation.py \
@@ -177,81 +370,82 @@ conda run -n autopentest python scripts/run_rag_ablation.py \
   --audit
 ```
 
-For the full development split:
+Audit an existing ablation manifest:
 
 ```bash
-conda run -n autopentest python scripts/run_rag_ablation.py \
-  --run-all \
-  --split development \
-  --parallel-workers 5 \
-  --max-cycles 25 \
-  --logdir logs/rag_ablation \
-  --name development_rag \
-  --audit
+conda run -n autopentest python scripts/audit_rag_ablation.py \
+  logs/rag_ablation/subset_rag/_rag_ablation.json
 ```
 
-The manifest is written to
-`logs/rag_ablation/<name>/_rag_ablation.json`, with per-mode batch summaries
-and `_batch_monitor.html` files under sibling `<name>_<mode>` directories.
-By default, run artifacts stay under those per-mode log directories so monitor
-artifact links work from the same static file server root.
-The ablation runner uses the current Python interpreter for child runs, so
-launching it through `conda run -n autopentest` keeps the full flow in that
-environment. `--audit` writes `_rag_ablation_audit.json` next to the manifest.
-You can also audit an existing manifest directly:
+## Analysis Scripts
 
 ```bash
-conda run -n autopentest python scripts/audit_rag_ablation.py logs/rag_ablation/development_rag/_rag_ablation.json
+# Summarize dataset metadata
+conda run -n autopentest python scripts/database_summary.py \
+  --dataset-root ./LLM_CTF_Database \
+  --output ./chal_data.json
+
+# Render a legacy transcript
+conda run -n autopentest python scripts/print_transcript.py \
+  -t path/to/transcript.json
+
+# Plot batch results
+conda run -n autopentest python scripts/plot_results.py \
+  logs/<user>/<batch-name>/
+
+# Check whether a flag appears in run outputs
+conda run -n autopentest python scripts/flag_in_output.py \
+  logs/<user>/<batch-name>/
 ```
 
-The audit verifies that the selected modes finished, summaries and monitors
-agree, status files and event JSONL are readable, RAG payloads match their
-mode, and strict mode did not retrieve challenge-identical or same-event hints.
+## Tests
 
-## Logging
-
-Runtime logs use the standard Python `logging` module. Context passed through
-`extra={...}` is rendered by default, and `AUTOPENTEST_LOG_JSON=1` switches
-process logs to JSON lines. Per-run `events.log` is also JSONL and includes
-timestamp, level, event type, process/thread ids and names, run id, challenge
-id, and the human-readable event message.
-Each live `*.status.json` file mirrors the same run id, pid/thread id/name,
-latest event summary, current todo, RAG status, and monitor-safe artifact
-links.
-During long LLM calls a lightweight heartbeat refreshes `updated_at` while
-`state_updated_at` remains the last actual RunState change timestamp.
-The dashboard shows both ages and marks active rows stale if the heartbeat
-stops updating.
-
-### Analysis Scripts
+Run the full test suite:
 
 ```bash
-conda run -n autopentest python scripts/database_summary.py --dataset-root ./LLM_CTF_Database --output ./chal_data.json
-conda run -n autopentest python scripts/print_transcript.py -t path/to/legacy_transcript.json
-conda run -n autopentest python scripts/plot_results.py logs/hy/batch_name/
+conda run -n autopentest python -m pytest
 ```
 
-## Key Design Decisions
+Run selected tests:
 
-- **Backlog-first planning:** The Planner creates work only when no ready todo is queued; the Router and workers consume the current plan before asking for more.
-- **Bounded script correction:** Workers may make one deterministic corrective script attempt for flag-recovery failures, with structured failure context.
-- **Bounded process lifecycle:** Tool plugins and Docker helpers share one subprocess runner with bounded output capture, stdin delivery, timeout reporting, and process-group cleanup.
-- **Gateway-owned structured output repair:** Common LLM JSON failures around source-code strings are repaired at the gateway before schema validation, keeping workers focused on typed decisions.
-- **Typed LLM failures:** LLM errors carry explicit failure kinds (connection, timeout, schema validation, rate limit, config) so retry and batch reporting are not driven by free-form exception text.
-- **Structured novelty gates:** Cooldown escape requires new current-state `evidence_ids` or `hypothesis_id(s)`; `novelty_key` only labels the approach, and rephrased todo text is not progress.
-- **Decision-owned tool metadata:** Required executable metadata (`command`, `script_code`, paths, targets) comes from the current tool decision; todo context can only supply optional defaults.
-- **Forced Pivot:** After N rounds without progress, stalled approach families are banned and the planner must try a fundamentally different attack vector
-- **RAG augmentation:** A replaceable provider supplies technical hints to the planner, with decontamination when they appear misleading.
-- **Progress policy:** Family-based cooldown and novelty detection prevent infinite loops on the same approach
-- **Structured failure evidence:** Rejected flag candidates, no-candidate scripts, bytes/text errors, and network pipe failures are recorded as typed state/evidence signals.
-- **Working memory:** Key discoveries persist across cycles as established facts
+```bash
+conda run -n autopentest python -m pytest tests/test_run_entrypoint.py
+conda run -n autopentest python -m pytest tests/test_runtime_architecture.py
+conda run -n autopentest python -m pytest tests/test_capability_gateway.py
+```
 
-## Requirements
+The tests cover CLI arguments, planner behavior, tool capability contracts,
+script execution guardrails, RAG ablations, log summaries, batch monitoring,
+runtime persistence, and architecture constraints.
 
-- Python ≥ 3.11
-- Docker
-- An OpenAI-compatible LLM API endpoint
+## Design Notes
+
+- **Multi-agent decomposition:** Planner handles strategy, Router handles
+  assignment, and workers handle execution decisions.
+- **Structured LLM output:** Critical model decisions are validated through
+  Pydantic schemas and repaired at the gateway layer when possible.
+- **Plugin-based execution:** Security tools share a common capability and
+  output contract, making new tools easier to add.
+- **State-driven loop:** RunState tracks assets, evidence, candidates, todos,
+  execution records, result quality, and stop conditions.
+- **Safety boundaries:** Authorized scope, Docker execution, command guards, and
+  metadata validation reduce accidental misuse in lab environments.
+- **RAG evaluation support:** `strict` mode supports cleaner comparisons by
+  excluding same-challenge and same-event retrieval hits.
+- **Observability:** Events, status snapshots, compact logs, reports, and token
+  usage are written to disk.
+- **Durable memory:** Trusted worker discoveries can be persisted at global,
+  category, or challenge scope for future runs.
+
+## Limitations
+
+- Performance depends heavily on the chosen LLM and API reliability.
+- Some unusual CTF tasks may need new tool plugins or prompt tuning.
+- Complex interactive exploitation may require a larger `--max-cycles` budget.
+- This framework targets CTF and lab workflows. It does not replace human
+  authorization, risk assessment, or compliance review for real engagements.
 
 ## License
 
-MIT License — NYU Tandon School of Engineering and NYU Abu Dhabi.
+See `LICENSE`. When using NYUCTF or bundled security tools, also follow their
+respective licenses, dataset rules, and lab usage restrictions.
