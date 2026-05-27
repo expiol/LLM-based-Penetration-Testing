@@ -334,44 +334,11 @@ class TestGatewayTransientClassification(unittest.TestCase):
         self.assertEqual(record.total_tokens, 0)
         self.assertFalse(record.usage_available)
 
-    def test_tool_use_decision_uses_bounded_completion_token_budget(self) -> None:
-        completions = _FakeCompletionsEndpoint()
-        client = object.__new__(GatewayLLMClient)
-        client.default_model = "test-model"
-        client.schema_models = {}
-        client.timeout_s = 20
-        client.max_retries = 0
-        client.total_deadline_s = 5
-        client.max_completion_tokens = 65536
-        client.token_ledger = TokenLedger()
-        client._client = _FakeOpenAIClient(completions)
-        decision = client.generate_json(
-            system_prompt="",
-            user_prompt="",
-            schema=ToolUseDecision,
-        )
-        self.assertEqual(decision.capability, "script.exec")
-        self.assertLess(completions.captured_kwargs["max_tokens"], 65536)
-        self.assertLessEqual(completions.captured_kwargs["max_tokens"], 12000)
-
-    def test_tool_use_decision_uses_shorter_request_deadline(self) -> None:
-        client = _ToolDecisionDeadlineGateway()
-        decision = client.generate_json(
-            system_prompt="",
-            user_prompt="",
-            schema=ToolUseDecision,
-        )
-        self.assertEqual(decision.capability, "script.exec")
-        assert client.request_timeouts[0] is not None
-        self.assertLess(client.request_timeouts[0], 180.0)
-        self.assertLessEqual(client.request_timeouts[0], 45.0)
-
-    def test_tool_use_decision_retries_transient_within_schema_deadline(self) -> None:
+    def test_tool_use_decision_retries_transient_within_total_deadline(self) -> None:
         """Transient transport failures retry up to global max_retries.
 
-        Schema-level overrides bound per-call timeouts and total deadline; they
-        do not silently disable transport retries.  A single upstream timeout
-        must not collapse the whole call.
+        A single upstream timeout must not collapse the whole call; the gateway
+        should retry up to max_retries within the total deadline.
         """
 
         client = _ToolDecisionDeadlineGateway(fail=True)

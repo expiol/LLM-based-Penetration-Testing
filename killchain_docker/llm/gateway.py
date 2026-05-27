@@ -31,15 +31,6 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 FIXED_LLM_CONFIG_PATH = (
     Path(__file__).resolve().parents[2] / "configs" / "llm_gateway.json"
 )
-SCHEMA_MAX_COMPLETION_TOKENS = {
-    "ToolUseDecision": 12000,
-}
-SCHEMA_REQUEST_TIMEOUT_S = {
-    "ToolUseDecision": 45.0,
-}
-SCHEMA_TOTAL_DEADLINE_S = {
-    "ToolUseDecision": 90.0,
-}
 
 
 class LLMClientError(RuntimeError):
@@ -551,7 +542,7 @@ class GatewayLLMClient:
             "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": self._max_tokens_for_schema(schema),
+            "max_tokens": self.max_completion_tokens,
             "response_format": {"type": "json_object"},
         }
         if request_timeout_s is not None:
@@ -733,38 +724,11 @@ class GatewayLLMClient:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, prior_handler)
 
-    def _max_tokens_for_schema(self, schema: type[BaseModel]) -> int:
-        cap = SCHEMA_MAX_COMPLETION_TOKENS.get(schema.__name__)
-        if cap is None:
-            return self.max_completion_tokens
-        return max(1, min(self.max_completion_tokens, cap))
-
-    def _request_timeout_s_for_schema(self, schema: type[BaseModel]) -> float:
-        cap = SCHEMA_REQUEST_TIMEOUT_S.get(schema.__name__)
-        if cap is None:
-            return float(self.timeout_s)
-        return max(0.1, min(float(self.timeout_s), cap))
-
-    def _call_deadline_s(self, schema: type[BaseModel] | None = None) -> float:
-        if schema is None:
-            retry_budget = float(self.timeout_s * (1 + self.max_retries))
-            if self.total_deadline_s is None:
-                return retry_budget
-            return min(float(self.total_deadline_s), retry_budget)
-        retry_budget = self._request_timeout_s_for_schema(schema) * (
-            1 + self.max_retries
-        )
-        deadline = self.total_deadline_s
-        schema_deadline = SCHEMA_TOTAL_DEADLINE_S.get(schema.__name__)
-        if schema_deadline is not None:
-            deadline = (
-                schema_deadline
-                if deadline is None
-                else min(float(deadline), schema_deadline)
-            )
-        if deadline is None:
+    def _call_deadline_s(self) -> float:
+        retry_budget = float(self.timeout_s * (1 + self.max_retries))
+        if self.total_deadline_s is None:
             return retry_budget
-        return min(float(deadline), retry_budget)
+        return min(float(self.total_deadline_s), retry_budget)
 
     def generate_json(
         self,
@@ -782,7 +746,7 @@ class GatewayLLMClient:
         # Total deadline across all retry attempts so a single generate_json
         # call never blocks a worker indefinitely.
         max_retries = self.max_retries
-        deadline = time.monotonic() + self._call_deadline_s(schema)
+        deadline = time.monotonic() + self._call_deadline_s()
         last_exc: Exception | None = None
         attempts_used = 0
         for attempt in range(1 + max_retries):
@@ -792,7 +756,7 @@ class GatewayLLMClient:
             try:
                 attempts_used += 1
                 request_timeout_s = max(
-                    0.1, min(self._request_timeout_s_for_schema(schema), remaining_s)
+                    0.1, min(float(self.timeout_s), remaining_s)
                 )
                 with self._hard_request_deadline(request_timeout_s):
                     parsed, completion = self._create_structured(
