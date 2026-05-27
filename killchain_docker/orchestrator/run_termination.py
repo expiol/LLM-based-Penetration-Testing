@@ -197,6 +197,33 @@ class RunTerminationController:
         RunStateMaintenance(self.state).touch()
         return reason
 
+    def interrupt_todo_after_transient_budget(
+        self,
+        cycle: int,
+        source: str,
+        exc: LLMClientError,
+        *,
+        todo: TodoItem | None = None,
+    ) -> str:
+        """Mark the offending todo interrupted, reset the source's skip
+        budget, and let the run continue.
+
+        Unlike :meth:`halt_after_transient_llm_error`, this does not set
+        ``outcome.failed`` — repeated transient failures on a single
+        todo should not kill the entire run while other work remains.
+        """
+        reason = self.remember_llm_error(cycle, source, exc)
+        TodoQueue(self.state).halt_for_transient_error(reason, todo=todo)
+        self._skip_counts.pop(source, None)
+        if self.events is not None:
+            self.events.emit(
+                f"[cycle {cycle}] transient LLM error budget exhausted in {source}; "
+                "interrupting offending todo and continuing run",
+                event_type="llm_transient_error",
+            )
+        RunStateMaintenance(self.state).touch()
+        return reason
+
     def worker_llm_error_result(
         self, *, cycle: int, todo: TodoItem, worker_name: str, exc: LLMClientError
     ) -> WorkerResult:

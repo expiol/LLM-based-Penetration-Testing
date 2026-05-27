@@ -668,7 +668,7 @@ class OrchestratorLoopTests(unittest.TestCase):
             any((item.status == TodoStatus.FAILED for item in final_state.todos))
         )
         self.assertEqual(final_state.status, RunStatus.FAILED)
-        self.assertEqual(final_state.stop_reason, "llm_transient_error")
+        self.assertEqual(final_state.stop_reason, "router_no_assignments")
         self.assertEqual(final_state.metadata["last_llm_error"]["kind"], "transient")
         self.assertTrue(final_state.metadata["last_llm_error"]["transient"])
         self.assertTrue(any(("budget exhausted" in event for event in events)))
