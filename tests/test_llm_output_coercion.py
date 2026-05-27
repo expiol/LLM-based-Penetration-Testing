@@ -654,6 +654,37 @@ class TestLenientStructuredOutput(unittest.TestCase):
         self.assertTrue(hasattr(ctx.exception, "raw_content"))
         self.assertTrue(hasattr(ctx.exception, "validator_message"))
 
+    def test_decode_rejects_capability_missing_required_metadata(self) -> None:
+        client = object.__new__(GatewayLLMClient)
+        content = '{"capability": "script.exec", "metadata": {}}'
+        with self.assertRaises(LLMClientError) as ctx:
+            client._decode_into_schema(content, ToolUseDecision)
+        self.assertEqual(ctx.exception.kind, LLMFailureKind.SCHEMA_VALIDATION)
+        self.assertIn("script_code", str(ctx.exception))
+
+    def test_correction_prompt_recovers_missing_metadata_fields(self) -> None:
+        bad = '{"capability": "script.exec", "metadata": {}}'
+        good = '{"capability": "script.exec", "metadata": {"script_code": "print(\'ok\')"}}'
+        completions = _FakeCompletionsEndpoint([bad, good])
+        client = object.__new__(GatewayLLMClient)
+        client.default_model = "test-model"
+        client.schema_models = {}
+        client.timeout_s = 20
+        client.max_retries = 0
+        client.total_deadline_s = 5
+        client.max_completion_tokens = 1024
+        client.token_ledger = TokenLedger()
+        client._client = _FakeOpenAIClient(completions)
+        decision = client.generate_json(
+            system_prompt="sys",
+            user_prompt="user",
+            schema=ToolUseDecision,
+        )
+        self.assertEqual(decision.metadata["script_code"], "print('ok')")
+        self.assertEqual(len(completions.calls), 2)
+        feedback = completions.calls[1]["messages"][3]["content"]
+        self.assertIn("script_code", feedback)
+
     def test_correction_prompt_recovers_after_first_invalid_response(self) -> None:
         bad = '{ "capability": 12 }'  # invalid: capability must be string-ish
         good = '{"capability": "script.exec", "metadata": {"script_code": "print(\'ok\')"}}'
