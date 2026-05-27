@@ -81,6 +81,7 @@ from killchain_docker.state.todos import (
     RouterRoundSummary,
     TodoItem,
     TodoPhase,
+    TodoStatus,
     WorkerAssignment,
     WorkerResult,
     normalize_todo_phase,
@@ -1170,17 +1171,19 @@ class RuntimeArchitectureTests(unittest.TestCase):
         queue.release_transient(todo, "temporary LLM outage")
         self.assertEqual(todo.status.value, "pending")
         queue.start(todo, "runtime-worker")
-        queue.apply_result(
-            todo,
-            WorkerResult(
-                todo_id=todo.todo_id,
-                worker_name="runtime-worker",
-                success=False,
-                summary="diagnostic evidence",
-                partial=True,
-                partial_reason="no flag yet",
-            ),
+        partial_result = WorkerResult(
+            todo_id=todo.todo_id,
+            worker_name="runtime-worker",
+            success=False,
+            summary="diagnostic evidence",
+            partial=True,
+            partial_reason="no flag yet",
         )
+        queue.apply_result(todo, partial_result)
+        self.assertEqual(todo.status.value, "pending")
+        self.assertEqual(todo.error, "no flag yet")
+        queue.start(todo, "runtime-worker")
+        queue.apply_result(todo, partial_result)
         self.assertEqual(todo.status.value, "partial")
         self.assertEqual(todo.error, "no flag yet")
         queue.block(todo, "terminal path")
@@ -1265,6 +1268,30 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertNotIn("todo.status == TodoStatus.FAILED", execution_source)
         self.assertNotIn("todo.status == TodoStatus.BLOCKED", execution_source)
         self.assertNotIn("todo.status == TodoStatus.PARTIAL", execution_source)
+
+    def test_partial_result_repends_until_retry_budget_exhausted(self) -> None:
+        state = RunState(objective="Solve.")
+        queue = _todo_queue(state)
+        todo = queue.enqueue(TodoItem(goal="Recover flag.", max_attempts=2))
+        partial_result = WorkerResult(
+            todo_id=todo.todo_id,
+            worker_name="runtime-worker",
+            success=True,
+            summary="script ran but no flag",
+            partial=True,
+            partial_reason="no flag candidate yet",
+        )
+        queue.start(todo, "runtime-worker")
+        queue.apply_result(todo, partial_result)
+        self.assertEqual(todo.status, TodoStatus.PENDING)
+        self.assertIsNone(todo.assigned_worker)
+        self.assertEqual(todo.attempts, 1)
+        self.assertEqual(todo.error, "no flag candidate yet")
+        queue.start(todo, "runtime-worker")
+        queue.apply_result(todo, partial_result)
+        self.assertEqual(todo.status, TodoStatus.PARTIAL)
+        self.assertEqual(todo.attempts, 2)
+        self.assertEqual(queue.terminal_unsolved_reason(), "partial_todos_unsolved")
 
     def test_worker_identity_uses_persona_spec_not_protocol_adapter(self) -> None:
         from killchain_docker.workers.personas.catalog import PersonaSpec

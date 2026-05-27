@@ -356,12 +356,15 @@ class TodoQueue:
 
     def apply_result(self, todo: TodoItem, result, *, touch: bool = True) -> None:
         if result.partial:
-            self.partial(
-                todo,
-                result.summary,
-                result.partial_reason or result.error,
-                touch=False,
-            )
+            partial_reason = result.partial_reason or result.error
+            if todo.attempts < todo.max_attempts:
+                todo.status = TodoStatus.PENDING
+                todo.result_summary = result.summary
+                todo.error = partial_reason
+                todo.assigned_worker = None
+                todo.updated_at = utc_now()
+            else:
+                self.partial(todo, result.summary, partial_reason, touch=False)
         elif result.success:
             self.complete(todo, result.summary, touch=False)
         else:

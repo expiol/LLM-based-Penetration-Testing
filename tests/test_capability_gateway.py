@@ -760,7 +760,7 @@ class CapabilityGatewayTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertTrue(result.partial)
         self.assertFalse(result.retryable)
-        self.assertEqual(state.todos[0].status.value, "partial")
+        self.assertEqual(state.todos[0].status.value, "pending")
         self.assertIn("oversized range", state.todos[0].error or "")
 
     def test_worker_retries_metadata_validation_then_normalizes_stderr_suppression(

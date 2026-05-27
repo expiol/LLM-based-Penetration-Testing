@@ -950,10 +950,11 @@ class OrchestratorLoopTests(unittest.TestCase):
             router=_ContextRouter(),
             emit=lambda _: None,
         )
-        final_state = orchestrator.run(max_cycles=1)
+        final_state = orchestrator.run(max_cycles=2)
         self.assertEqual(final_state.status, RunStatus.FAILED)
         self.assertEqual(final_state.stop_reason, "partial_todos_unsolved")
         self.assertEqual(final_state.todos[0].status, TodoStatus.PARTIAL)
+        self.assertEqual(final_state.todos[0].attempts, 2)
 
     def test_partial_script_failure_allows_next_planner_cycle(self) -> None:
         planner = _ScriptedPlanner(
@@ -987,7 +988,7 @@ class OrchestratorLoopTests(unittest.TestCase):
             router=_ContextRouter(),
             emit=lambda _: None,
         )
-        final_state = orchestrator.run(max_cycles=2)
+        final_state = orchestrator.run(max_cycles=3)
         self.assertEqual(planner.calls, 2)
         self.assertEqual(
             {todo.dedupe_key: todo.status for todo in final_state.todos},

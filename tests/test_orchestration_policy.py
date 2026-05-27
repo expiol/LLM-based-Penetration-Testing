@@ -666,6 +666,7 @@ class RoundProgressSignalTests(unittest.TestCase):
         todo = todo_queue(state).enqueue(
             TodoItem(goal="Inspect archive and recover evidence.")
         )
+        todo.attempts = todo.max_attempts
         result = WorkerResult(
             todo_id=todo.todo_id,
             worker_name="artifact-worker",
