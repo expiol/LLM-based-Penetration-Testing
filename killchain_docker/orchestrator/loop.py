@@ -171,11 +171,17 @@ class Orchestrator:
         """Per-cycle entry gate. Return True if the run should halt."""
         if self._events.sync_background_flags(cycle):
             self._events.emit(
-                f"[cycle {cycle}] background flag validation solved - halting run"
+                f"[cycle {cycle}] background flag validation solved - halting run",
+                event_type="solved",
+                cycle=cycle,
             )
             return True
         if self._outcome.is_solved:
-            self._events.emit(f"[cycle {cycle}] validated flag found - halting run")
+            self._events.emit(
+                f"[cycle {cycle}] validated flag found - halting run",
+                event_type="solved",
+                cycle=cycle,
+            )
             return True
         self._outcome.cycle_started(at=utc_now(), touch=False)
         maybe_refresh_session_summary(self.state, cycle=cycle)
@@ -284,7 +290,9 @@ class Orchestrator:
             raise
         except BackgroundFlagSolved:
             self._events.emit(
-                f"[cycle {current_cycle}] background flag validation solved - halting run"
+                f"[cycle {current_cycle}] background flag validation solved - halting run",
+                event_type="solved",
+                cycle=current_cycle,
             )
             max_cycles_exhausted = False
         except (KeyboardInterrupt, SystemExit) as exc:
