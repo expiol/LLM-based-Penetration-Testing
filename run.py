@@ -35,7 +35,7 @@ RUN_CONFIG = {
     "run_all": True,
     "category": None,
     "dataset": None,
-    "split": "development",
+    "split": "test",
     "container_image": "ctfenv:latest",
     "container_network": "ctfnet",
     "objective": None,

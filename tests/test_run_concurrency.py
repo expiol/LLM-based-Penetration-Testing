@@ -137,6 +137,185 @@ class RunConcurrencyTests(unittest.TestCase):
         self.assertEqual(events, ["enter:dummy-compose", "inner", "exit:dummy-compose"])
         self.assertEqual(inner.call_count, 1)
 
+    def test_single_challenge_reuses_terminal_existing_log(self) -> None:
+        challenge = _DummyChallenge()
+        challenge.name = "dummy"
+        challenge.category = "crypto"
+        challenge.description = "dummy"
+        challenge.flag = "flag{dummy}"
+        challenge.flag_format = "flag{...}"
+        challenge.files = []
+        challenge.server_name = ""
+        challenge.port = None
+        challenge.server_type = None
+        challenge.server_description = None
+        challenge.challenge = {"name": "dummy", "category": "crypto"}
+        challenge.challenge_info = {"name": "dummy", "category": "crypto"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = _args(Path(tmp))
+            args.skip_exist = True
+            logfile = Path(tmp) / "dummy-compose.json"
+            logfile.write_text(
+                json.dumps(
+                    {
+                        "status": "unsolved_exhausted",
+                        "solved": False,
+                        "effective_max_cycles": 8,
+                        "state_metrics": {
+                            "todo_count": 1,
+                            "open_todo_count": 0,
+                        },
+                        "token_usage": {
+                            "llm_calls": 2,
+                            "prompt_tokens": 11,
+                            "completion_tokens": 3,
+                            "total_tokens": 14,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch(
+                "killchain_docker.batch.runner._run_single_challenge_inner"
+            ) as inner:
+                result = run_single_challenge(args, challenge)
+
+            status = json.loads(
+                (Path(tmp) / "dummy-compose.status.json").read_text(encoding="utf-8")
+            )
+
+        inner.assert_not_called()
+        self.assertTrue(result["resumed_from_existing_log"])
+        self.assertEqual(result["status"], "unsolved_exhausted")
+        self.assertEqual(result["skip_reason"], "preexisting_log")
+        self.assertEqual(result["token_usage"]["total_tokens"], 14)
+        self.assertEqual(status["status"], "skipped")
+        self.assertEqual(status["original_status"], "unsolved_exhausted")
+
+    def test_single_challenge_reruns_existing_log_over_max_cycles(self) -> None:
+        challenge = _DummyChallenge()
+
+        @contextmanager
+        def fake_lock(_challenge):
+            yield
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = _args(Path(tmp))
+            args.skip_exist = True
+            logfile = Path(tmp) / "dummy-compose.json"
+            logfile.write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "solved": False,
+                        "effective_max_cycles": 1,
+                        "state": {
+                            "rounds": [
+                                {
+                                    "cycle": 2,
+                                    "planner_summary": "normal retry cycle",
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch(
+                    "killchain_docker.batch.runner.compose_challenge_run_lock",
+                    fake_lock,
+                ),
+                patch(
+                    "killchain_docker.batch.runner._run_single_challenge_inner",
+                    return_value={
+                        "challenge": "dummy-compose",
+                        "status": "rerun",
+                    },
+                ) as inner,
+            ):
+                result = run_single_challenge(args, challenge)
+
+        self.assertEqual(result["status"], "rerun")
+        inner.assert_called_once()
+
+    def test_single_challenge_reuses_final_closure_over_max_cycle_log(self) -> None:
+        challenge = _DummyChallenge()
+        challenge.name = "dummy"
+        challenge.category = "crypto"
+        challenge.description = "dummy"
+        challenge.flag = "flag{dummy}"
+        challenge.flag_format = "flag{...}"
+        challenge.files = []
+        challenge.server_name = ""
+        challenge.port = None
+        challenge.server_type = None
+        challenge.server_description = None
+        challenge.challenge = {"name": "dummy", "category": "crypto"}
+        challenge.challenge_info = {"name": "dummy", "category": "crypto"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = _args(Path(tmp))
+            args.skip_exist = True
+            logfile = Path(tmp) / "dummy-compose.json"
+            logfile.write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "solved": False,
+                        "effective_max_cycles": 1,
+                        "state": {
+                            "rounds": [
+                                {
+                                    "cycle": 2,
+                                    "planner_summary": "final flag validation pass",
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch(
+                "killchain_docker.batch.runner._run_single_challenge_inner"
+            ) as inner:
+                result = run_single_challenge(args, challenge)
+
+        inner.assert_not_called()
+        self.assertTrue(result["resumed_from_existing_log"])
+        self.assertEqual(result["status"], "failed")
+
+    def test_single_challenge_reruns_interrupted_existing_log(self) -> None:
+        challenge = _DummyChallenge()
+
+        @contextmanager
+        def fake_lock(_challenge):
+            yield
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = _args(Path(tmp))
+            args.skip_exist = True
+            logfile = Path(tmp) / "dummy-compose.json"
+            logfile.write_text(
+                json.dumps({"status": "interrupted", "interrupted": True}),
+                encoding="utf-8",
+            )
+            with (
+                patch(
+                    "killchain_docker.batch.runner.compose_challenge_run_lock",
+                    fake_lock,
+                ),
+                patch(
+                    "killchain_docker.batch.runner._run_single_challenge_inner",
+                    return_value={"challenge": "dummy-compose", "status": "rerun"},
+                ) as inner,
+            ):
+                result = run_single_challenge(args, challenge)
+
+        self.assertEqual(result["status"], "rerun")
+        inner.assert_called_once()
+
     def test_run_all_uses_process_pool_when_parallel_workers_gt_one(self) -> None:
         submissions: list[tuple[str, str]] = []
         observed_workers: list[int] = []

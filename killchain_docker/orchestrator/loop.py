@@ -256,12 +256,11 @@ class Orchestrator:
     def run(self, max_cycles: int = 10) -> RunState:
         max_cycles_exhausted = True
         current_cycle = 0
-        productive_cycles = 0
         cycle = 0
         self._outcome.start(touch=False)
         self._background_flags.start()
         try:
-            while productive_cycles < max_cycles:
+            while cycle < max_cycles:
                 cycle += 1
                 current_cycle = cycle
                 if self._begin_cycle(cycle=cycle):
@@ -272,8 +271,6 @@ class Orchestrator:
                     max_cycles_exhausted = False
                     break
                 if planning.retry_cycle:
-                    if not planning.transient_skip:
-                        productive_cycles += 1
                     continue
                 dispatch = self._dispatch_cycle_controller.dispatch(
                     cycle=cycle, planner_summary=planning.summary
@@ -283,7 +280,6 @@ class Orchestrator:
                     break
                 if dispatch.retry_cycle and dispatch.transient_skip:
                     continue
-                productive_cycles += 1
         except LLMClientError as exc:
             self._handle_uncaught_llm_error(cycle=current_cycle, exc=exc)
             max_cycles_exhausted = False

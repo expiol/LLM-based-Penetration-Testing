@@ -412,6 +412,193 @@ def _is_evaluated_result(result: dict[str, Any]) -> bool:
     return not _is_skipped_result(result) and not _is_interrupted_result(result)
 
 
+_FINAL_CLOSURE_PLANNER_SUMMARIES = frozenset(
+    {
+        "final deterministic evidence closure pass",
+        "final flag validation pass",
+    }
+)
+
+
+def _recorded_main_loop_max_cycle(log_payload: dict[str, Any]) -> int | None:
+    state_payload = log_payload.get("state")
+    if not isinstance(state_payload, dict):
+        return None
+    cycles: list[int] = []
+    for round_payload in state_payload.get("rounds") or []:
+        if not isinstance(round_payload, dict):
+            continue
+        planner_summary = str(round_payload.get("planner_summary") or "").strip()
+        if planner_summary in _FINAL_CLOSURE_PLANNER_SUMMARIES:
+            continue
+        try:
+            cycle = int(round_payload.get("cycle") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cycle > 0:
+            cycles.append(cycle)
+    return max(cycles) if cycles else None
+
+
+def _exceeded_recorded_max_cycles(log_payload: dict[str, Any]) -> bool:
+    try:
+        effective_max_cycles = int(log_payload.get("effective_max_cycles") or 0)
+    except (TypeError, ValueError):
+        return False
+    if effective_max_cycles <= 0:
+        return False
+    max_recorded_cycle = _recorded_main_loop_max_cycle(log_payload)
+    return max_recorded_cycle is not None and max_recorded_cycle > effective_max_cycles
+
+
+def _existing_log_resume_decision(logfile: Path) -> tuple[bool, str, dict[str, Any] | None]:
+    """Return whether an existing challenge log is terminal enough to skip."""
+
+    payload = _safe_read_json(logfile)
+    if not isinstance(payload, dict):
+        return False, "invalid_existing_log", None
+
+    status = str(payload.get("status") or payload.get("finish_reason") or "").strip()
+    if not status:
+        return False, "incomplete_existing_log", payload
+    if payload.get("interrupted") or status == "interrupted":
+        return False, "interrupted_existing_log", payload
+    if payload.get("api_error"):
+        return False, "api_error_existing_log", payload
+    if payload.get("llm_error") and payload.get("artifacts") is None:
+        return False, "preflight_llm_error_existing_log", payload
+    if payload.get("error") or payload.get("runtime_error"):
+        return False, "runtime_error_existing_log", payload
+    state_payload = payload.get("state")
+    if isinstance(state_payload, dict):
+        metadata = state_payload.get("metadata")
+        if isinstance(metadata, dict) and isinstance(
+            metadata.get("runtime_error"), dict
+        ):
+            return False, "runtime_error_existing_log", payload
+    if _exceeded_recorded_max_cycles(payload):
+        return False, "over_max_cycles_existing_log", payload
+    if status in {"starting", "running"}:
+        return False, "active_existing_log", payload
+    if payload.get("solved") or status in {
+        "solved",
+        "unsolved_exhausted",
+        "max_cycles_exhausted",
+        "completed",
+        "failed",
+        "stopped",
+        "partial_todos_unsolved",
+        "router_no_assignments",
+        "todo_blocked",
+        "blocked",
+    }:
+        return True, "preexisting_log", payload
+    return False, f"nonterminal_existing_log:{status}", payload
+
+
+def _skip_existing_result(
+    logfile: Path,
+    status_file: Path,
+    challenge: CTFChallenge,
+    log_payload: dict[str, Any] | None,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    metadata = challenge_metadata(challenge)
+    summary_payload = None
+    state_payload = None
+    token_usage = _token_usage(None)
+    knowledge_payload = None
+    artifacts_payload = None
+    state_metrics: dict[str, Any] = {}
+    runtime_sec = 0.0
+
+    if isinstance(log_payload, dict):
+        summary_payload = (
+            log_payload.get("summary")
+            if isinstance(log_payload.get("summary"), dict)
+            else None
+        )
+        state_payload = (
+            log_payload.get("state")
+            if isinstance(log_payload.get("state"), dict)
+            else None
+        )
+        token_usage = _token_usage(log_payload.get("token_usage"))
+        if not any(token_usage.values()) and isinstance(summary_payload, dict):
+            token_usage = _token_usage(summary_payload.get("token_usage"))
+        knowledge_payload = _knowledge_payload(summary_payload, state_payload)
+        artifacts_payload = (
+            log_payload.get("artifacts")
+            if isinstance(log_payload.get("artifacts"), dict)
+            else None
+        )
+        state_metrics = _state_metrics(state_payload)
+        if isinstance(log_payload.get("state_metrics"), dict):
+            state_metrics = dict(log_payload["state_metrics"])
+        runtime_sec = float(log_payload.get("runtime_sec") or 0.0)
+
+    solved = bool(log_payload.get("solved")) if isinstance(log_payload, dict) else False
+    status = (
+        str(
+            log_payload.get("status")
+            or log_payload.get("finish_reason")
+            or ("solved" if solved else "skipped")
+        )
+        if isinstance(log_payload, dict)
+        else "skipped"
+    )
+    write_run_status(
+        status_file,
+        challenge=challenge.canonical_name,
+        stage="skipped",
+        status="skipped",
+        solved=solved,
+        original_status=status,
+        skip_reason=reason,
+        logfile=str(logfile),
+        artifacts=artifacts_payload,
+        state_metrics=state_metrics,
+        knowledge=public_knowledge_payload(knowledge_payload),
+        token_usage=token_usage,
+        runtime_sec=runtime_sec,
+        message=f"skipped existing terminal log: {status}",
+    )
+    args_payload = (
+        log_payload.get("args")
+        if isinstance(log_payload, dict) and isinstance(log_payload.get("args"), dict)
+        else {}
+    )
+
+    return {
+        "challenge": challenge.canonical_name,
+        "status": status,
+        "skip_reason": reason,
+        "resumed_from_existing_log": True,
+        "solved": solved,
+        "api_error": False,
+        "llm_error": False,
+        "logfile": str(logfile),
+        "status_file": str(status_file),
+        "runtime_sec": runtime_sec,
+        "knowledge_mode": args_payload.get("knowledge_mode"),
+        "run_id": None
+        if artifacts_payload is None
+        else artifacts_payload.get("run_id"),
+        "artifacts": artifacts_payload,
+        "knowledge": public_knowledge_payload(knowledge_payload),
+        "challenge_metadata": metadata,
+        "authorized_scope": log_payload.get("authorized_scope", [])
+        if isinstance(log_payload, dict)
+        else [],
+        "max_cycles": log_payload.get("effective_max_cycles")
+        if isinstance(log_payload, dict)
+        else None,
+        "token_usage": token_usage,
+        "state_metrics": state_metrics,
+    }
+
+
 def _failure_buckets(log_payload: dict[str, Any], result: dict[str, Any]) -> list[str]:
     buckets: set[str] = set()
     if result.get("solved"):
@@ -923,26 +1110,31 @@ def run_single_challenge(
     status_file = status_path_for_logfile(logfile)
 
     if logfile.exists() and args.skip_exist:
+        should_skip, reason, log_payload = _existing_log_resume_decision(logfile)
+        if should_skip:
+            LOGGER.info(
+                "using existing terminal challenge log",
+                extra={
+                    "challenge": challenge.canonical_name,
+                    "logfile": str(logfile),
+                    "resume_reason": reason,
+                },
+            )
+            return _skip_existing_result(
+                logfile,
+                status_file,
+                challenge,
+                log_payload,
+                reason=reason,
+            )
         LOGGER.info(
-            "skipping existing challenge log",
-            extra={"challenge": challenge.canonical_name, "logfile": str(logfile)},
+            "rerunning existing nonterminal challenge log",
+            extra={
+                "challenge": challenge.canonical_name,
+                "logfile": str(logfile),
+                "resume_reason": reason,
+            },
         )
-        write_run_status(
-            status_file,
-            challenge=challenge.canonical_name,
-            stage="skipped",
-            status="skipped",
-            logfile=str(logfile),
-        )
-        return {
-            "challenge": challenge.canonical_name,
-            "status": "skipped",
-            "solved": False,
-            "api_error": False,
-            "llm_error": False,
-            "logfile": str(logfile),
-            "status_file": str(status_file),
-        }
 
     with compose_challenge_run_lock(challenge):
         return _run_single_challenge_inner(args, challenge, logfile)

@@ -31,6 +31,7 @@ _TERMINAL_UNSOLVED_STATUSES = {
     TodoStatus.FAILED,
     TodoStatus.BLOCKED,
     TodoStatus.PARTIAL,
+    TodoStatus.INTERRUPTED,
 }
 
 
@@ -190,6 +191,8 @@ class TodoQueue:
             return "todo_blocked"
         if any(todo.status == TodoStatus.PARTIAL for todo in todos):
             return "partial_todos_unsolved"
+        if any(todo.status == TodoStatus.INTERRUPTED for todo in todos):
+            return "interrupted_todos_unsolved"
         if todos:
             return "unsolved_no_work_remaining"
         return "no_todos_created"

@@ -104,6 +104,33 @@ class _ScriptedPlannerWithPipeline(_ScriptedPlanner):
         self.pipeline = PlanningPipeline()
 
 
+class _SchemaValidationThenTodoPlanner(PlannerAgent):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def plan(self, state: RunState) -> PlannerDecision:
+        del state
+        self.calls += 1
+        if self.calls == 1:
+            raise LLMClientError(
+                "schema retry",
+                kind=LLMFailureKind.SCHEMA_VALIDATION,
+                schema_name="PlannerDecision",
+                model="test-model",
+                attempts=1,
+            )
+        return PlannerDecision(
+            summary="cycle after retry",
+            todos=[
+                PlannedTodo(
+                    goal="This must not run after the cap",
+                    context={"worker_name": "success-worker"},
+                    dedupe_key="after-cap",
+                )
+            ],
+        )
+
+
 class _ContextRouter:
     def route(
         self, state: RunState, *, agent_directory, max_assignments: int
@@ -668,7 +695,7 @@ class OrchestratorLoopTests(unittest.TestCase):
             any((item.status == TodoStatus.FAILED for item in final_state.todos))
         )
         self.assertEqual(final_state.status, RunStatus.FAILED)
-        self.assertEqual(final_state.stop_reason, "router_no_assignments")
+        self.assertEqual(final_state.stop_reason, "interrupted_todos_unsolved")
         self.assertEqual(final_state.metadata["last_llm_error"]["kind"], "transient")
         self.assertTrue(final_state.metadata["last_llm_error"]["transient"])
         self.assertTrue(any(("budget exhausted" in event for event in events)))
@@ -1053,6 +1080,27 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertEqual(final_state.stop_reason, "max_cycles_exhausted")
         self.assertFalse(todo_queue(final_state).has_open())
         self.assertEqual(final_state.todos[0].status, TodoStatus.BLOCKED)
+
+    def test_max_cycles_caps_schema_retry_cycle_numbers(self) -> None:
+        planner = _SchemaValidationThenTodoPlanner()
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_SuccessWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+        final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(planner.calls, 1)
+        self.assertEqual(final_state.rounds, [])
+        self.assertEqual(final_state.todos, [])
+        self.assertEqual(final_state.status, RunStatus.FAILED)
+        self.assertEqual(final_state.stop_reason, "no_todos_created")
+        self.assertEqual(
+            final_state.metadata["last_transient_skip"]["schema_name"],
+            "PlannerDecision",
+        )
 
     def test_final_cycle_candidate_gets_validation_pass(self) -> None:
         planner = _ScriptedPlanner(
