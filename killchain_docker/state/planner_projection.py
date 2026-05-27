@@ -31,8 +31,8 @@ class PlannerStateProjection:
         self.state = state
         self.metadata = RunMetadataStore(state)
 
-    def rag_metadata(self) -> dict[str, Any]:
-        raw = self.metadata.rag()
+    def knowledge_augmentation(self) -> dict[str, Any]:
+        raw = self.metadata.knowledge()
         if not isinstance(raw, dict):
             return {}
         allowed = {
@@ -61,7 +61,7 @@ class PlannerStateProjection:
                     suppressed_count = 0
             if suppressed_count:
                 metadata["suppressed_hint_count"] = suppressed_count
-                metadata["suppressed_reason"] = "rag_policy_possibly_misleading"
+                metadata["suppressed_reason"] = "knowledge_policy_possibly_misleading"
             return metadata
         if valid_hints:
             metadata["knowledge_hints"] = valid_hints[:3]

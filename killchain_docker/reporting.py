@@ -50,10 +50,10 @@ def render_markdown_report(state: RunState) -> str:
     runtime_error = payload.get("runtime_error")
     if runtime_error:
         lines.insert(22, str(runtime_error))
-    rag = payload.get("rag")
-    if rag:
+    knowledge = payload.get("knowledge")
+    if knowledge:
         insert_at = 23 if runtime_error else 22
-        lines.insert(insert_at, str(rag))
+        lines.insert(insert_at, str(knowledge))
     assets = _items(payload, "assets")
     if assets:
         for asset in assets:

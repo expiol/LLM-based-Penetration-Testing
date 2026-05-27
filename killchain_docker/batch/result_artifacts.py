@@ -17,7 +17,7 @@ class BatchResultReaders:
     read_json: Callable[[str | Path | None], dict[str, Any] | None]
     token_usage: Callable[[Any], dict[str, int]]
     state_metrics: Callable[[dict[str, Any] | None], dict[str, Any]]
-    rag_payload: Callable[
+    knowledge_payload: Callable[
         [dict[str, Any] | None, dict[str, Any] | None], dict[str, Any] | None
     ]
     failure_buckets: Callable[[dict[str, Any], dict[str, Any]], list[str]]
@@ -38,7 +38,7 @@ def build_challenge_entry(
     state_metrics = _result_state_metrics(result, log_payload, readers)
     token_usage = _result_token_usage(result, log_payload, readers)
     artifacts = _result_artifacts(result, log_payload)
-    rag = _result_rag(result, log_payload, readers)
+    knowledge = _result_knowledge(result, log_payload, readers)
     failure_buckets = readers.failure_buckets(log_payload, result)
     return {
         "challenge": result["challenge"],
@@ -50,8 +50,8 @@ def build_challenge_entry(
         "status": result.get("status", "unknown"),
         "skip_reason": result.get("skip_reason") or log_payload.get("skip_reason"),
         "runtime_sec": result.get("runtime_sec"),
-        "rag_mode": result.get("rag_mode")
-        or (log_payload.get("args") or {}).get("rag_mode"),
+        "knowledge_mode": result.get("knowledge_mode")
+        or (log_payload.get("args") or {}).get("knowledge_mode"),
         "category": metadata.get("category"),
         "files_count": len(metadata.get("files") or []),
         "has_server": bool(metadata.get("server_name") and metadata.get("port")),
@@ -64,7 +64,7 @@ def build_challenge_entry(
         "token_usage": token_usage,
         "state_metrics": state_metrics,
         "artifacts": artifacts,
-        "rag": rag,
+        "knowledge": knowledge,
         "threads": _result_threads(result, log_payload, status_payload),
         "runtime_error": _result_runtime_error(
             result, log_payload, summary, status_payload
@@ -142,20 +142,20 @@ def _result_artifacts(
     return artifacts if isinstance(artifacts, dict) else None
 
 
-def _result_rag(
+def _result_knowledge(
     result: dict[str, Any],
     log_payload: dict[str, Any],
     readers: BatchResultReaders,
 ) -> dict[str, Any] | None:
-    rag = result.get("rag")
-    if isinstance(rag, dict):
-        return rag
-    rag = log_payload.get("rag")
-    if isinstance(rag, dict):
-        return rag
+    knowledge = result.get("knowledge")
+    if isinstance(knowledge, dict):
+        return knowledge
+    knowledge = log_payload.get("knowledge")
+    if isinstance(knowledge, dict):
+        return knowledge
     summary = _result_summary(result, log_payload)
     state_payload = log_payload.get("state")
-    return readers.rag_payload(
+    return readers.knowledge_payload(
         summary, state_payload if isinstance(state_payload, dict) else None
     )
 

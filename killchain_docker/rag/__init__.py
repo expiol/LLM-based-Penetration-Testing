@@ -1,2 +1,0 @@
-"""Replaceable retrieval-augmentation runtime."""
-

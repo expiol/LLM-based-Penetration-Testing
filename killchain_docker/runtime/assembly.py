@@ -3,8 +3,8 @@
 from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
-from killchain_docker.rag.augmenter import RagAugmenter
-from killchain_docker.rag.config import rag_mode
+from killchain_docker.intelligence.augmenter import IntelligenceAugmenter
+from killchain_docker.intelligence.config import knowledge_mode
 from killchain_docker.logging_utils import get_logger
 from killchain_docker.llm.gateway import LLMClient, build_llm_client_from_env
 from killchain_docker.memory.persistence import DurableMemoryStore
@@ -39,13 +39,18 @@ def build_runtime(
     """Assemble state, planner, workers, and execution plane for one run."""
     if llm_client is None:
         llm_client = build_llm_client_from_env()
-    resolved_rag_mode = rag_mode(config.rag_mode)
-    augmenter = RagAugmenter.from_default(mode=resolved_rag_mode)
+    resolved_knowledge_mode = knowledge_mode(config.knowledge_mode)
+    memory_root = _resolve_memory_root(config)
+    augmenter = IntelligenceAugmenter.from_default(
+        mode=resolved_knowledge_mode,
+        memory_root=memory_root,
+        llm_client=llm_client,
+    )
     metadata = dict(config.metadata)
-    rag_metadata = metadata.get("rag")
-    metadata["rag"] = {
-        **(rag_metadata if isinstance(rag_metadata, dict) else {}),
-        "mode": resolved_rag_mode,
+    knowledge_meta = metadata.get("knowledge")
+    metadata["knowledge"] = {
+        **(knowledge_meta if isinstance(knowledge_meta, dict) else {}),
+        "mode": resolved_knowledge_mode,
     }
     planner = LLMPlanner(llm_client, augmenter=augmenter)
     router = RouterAgent(llm_client)
@@ -56,7 +61,7 @@ def build_runtime(
         authorized_scope=config.authorized_scope,
         metadata=metadata,
     )
-    memory_store = DurableMemoryStore(_resolve_memory_root(config))
+    memory_store = DurableMemoryStore(memory_root)
     challenge = ChallengeProjection(state)
     state.cross_run_memory = memory_store.load_relevant(
         category=challenge.category_raw() or None,
@@ -65,7 +70,6 @@ def build_runtime(
     worker_context = WorkerBuildContext(
         llm_client=llm_client,
         execution_plane=execution_plane,
-        augmenter=augmenter,
         expected_flag=expected_flag,
     )
     orchestrator = Orchestrator(

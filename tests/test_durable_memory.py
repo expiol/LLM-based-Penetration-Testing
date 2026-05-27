@@ -27,7 +27,7 @@ class CoerceDurableUpdatesTests(unittest.TestCase):
     def test_dict_input_uses_keys_as_keys(self) -> None:
         updates = coerce_durable_updates({"k1": "v1", "k2": "v2"})
         self.assertEqual({u.key for u in updates}, {"k1", "k2"})
-        self.assertTrue(all(u.scope == DurableMemoryScope.CHALLENGE for u in updates))
+        self.assertTrue(all(u.scope == DurableMemoryScope.CATEGORY for u in updates))
 
     def test_list_of_dicts_with_explicit_scope(self) -> None:
         updates = coerce_durable_updates(
@@ -41,9 +41,15 @@ class CoerceDurableUpdatesTests(unittest.TestCase):
         self.assertEqual(updates[0].scope, DurableMemoryScope.GLOBAL)
         self.assertEqual(updates[1].scope, DurableMemoryScope.CATEGORY)
 
-    def test_unknown_scope_falls_back_to_challenge(self) -> None:
+    def test_legacy_challenge_scope_coerces_to_category(self) -> None:
+        updates = coerce_durable_updates(
+            [{"key": "k", "value": "v", "scope": "challenge"}]
+        )
+        self.assertEqual(updates[0].scope, DurableMemoryScope.CATEGORY)
+
+    def test_unknown_scope_falls_back_to_category(self) -> None:
         updates = coerce_durable_updates([{"key": "k", "value": "v", "scope": "weird"}])
-        self.assertEqual(updates[0].scope, DurableMemoryScope.CHALLENGE)
+        self.assertEqual(updates[0].scope, DurableMemoryScope.CATEGORY)
 
     def test_filters_empty_keys(self) -> None:
         self.assertEqual(coerce_durable_updates([{"key": "", "value": "v"}]), [])
@@ -93,7 +99,7 @@ class DurableMemoryStoreRoundTripTests(unittest.TestCase):
         update = DurableMemoryUpdate(
             key="repeat-fact",
             value="first version",
-            scope=DurableMemoryScope.CHALLENGE,
+            scope=DurableMemoryScope.CATEGORY,
         )
         self.store.apply_updates(
             [update], run_id="run-1", category="cat", challenge="ch"
@@ -101,7 +107,7 @@ class DurableMemoryStoreRoundTripTests(unittest.TestCase):
         update2 = DurableMemoryUpdate(
             key="repeat-fact",
             value="second version",
-            scope=DurableMemoryScope.CHALLENGE,
+            scope=DurableMemoryScope.CATEGORY,
         )
         self.store.apply_updates(
             [update2], run_id="run-2", category="cat", challenge="ch"
@@ -111,6 +117,22 @@ class DurableMemoryStoreRoundTripTests(unittest.TestCase):
         record = loaded[0]
         self.assertEqual(record.value, "second version")
         self.assertEqual(record.run_ids, ["run-1", "run-2"])
+
+    def test_load_relevant_ignores_challenge_argument(self) -> None:
+        # Even if the caller passes a challenge identifier, the store must not
+        # surface per-challenge memory — only category/global.
+        self.store.apply_updates(
+            [DurableMemoryUpdate(key="lesson", value="v", scope=DurableMemoryScope.CATEGORY)],
+            run_id="r",
+            category="alpha",
+            challenge="A",
+        )
+        same_with_challenge = self.store.load_relevant(category="alpha", challenge="A")
+        same_without_challenge = self.store.load_relevant(category="alpha", challenge=None)
+        self.assertEqual(
+            [r.key for r in same_with_challenge],
+            [r.key for r in same_without_challenge],
+        )
 
     def test_scope_routing_filters_unrelated_categories(self) -> None:
         self.store.apply_updates(
@@ -197,9 +219,8 @@ class CrossRunMemoryProjectionTests(unittest.TestCase):
                 slug="long",
                 key="long-key",
                 value="x" * 1000,
-                scope=DurableMemoryScope.CHALLENGE,
+                scope=DurableMemoryScope.CATEGORY,
                 category="cat",
-                challenge="ch",
                 title="Long",
             ),
             DurableMemoryRecord(
@@ -216,7 +237,7 @@ class CrossRunMemoryProjectionTests(unittest.TestCase):
         self.assertLessEqual(len(long_entry["value"]), 50)
         self.assertTrue(long_entry["value"].endswith("…"))
         scopes = {item["scope"] for item in projected}
-        self.assertEqual(scopes, {"challenge", "global"})
+        self.assertEqual(scopes, {"category", "global"})
 
 
 if __name__ == "__main__":

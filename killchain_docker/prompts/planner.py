@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from killchain_docker.prompts.rag import PLANNER_RAG_GUIDE
+from killchain_docker.prompts.knowledge import PLANNER_KNOWLEDGE_GUIDE
 
 _DECISION_GUIDE = """\
 Decision guidance:
@@ -22,9 +22,9 @@ Decision guidance:
   flag candidate is analysis unless it is running a grounded exploit.
 * Keep the todo list small and current. Prefer 1-4 concrete todos per cycle.
 * Planner summaries should explain the technical rationale only. Do not
-  mention evaluation rounds, RAG modes, source documents, writeups, similarity
-  scores, knowledge hints, source identity labels, or cycle numbers in the
-  summary text.
+  mention evaluation rounds, knowledge modes, source documents, writeups,
+  similarity scores, knowledge hints, source identity labels, or cycle numbers
+  in the summary text.
 * If a todo depends on facts another proposed todo would produce, return only
   the upstream todo now. Wait for RouterAgent worker results and the next
   planner cycle before proposing dependent todos.
@@ -77,5 +77,5 @@ def build_planner_system_prompt(category: str | None) -> str:
         "Never fabricate vulnerability details, credentials, or flag candidates.\n\n"
         + _DECISION_GUIDE
         + "\n"
-        + PLANNER_RAG_GUIDE
+        + PLANNER_KNOWLEDGE_GUIDE
     )

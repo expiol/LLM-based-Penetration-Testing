@@ -216,7 +216,7 @@ def load_challenge(args: argparse.Namespace) -> CTFChallenge:
             extra={
                 "challenge": chosen,
                 "category_filter": category_filter,
-                "rag_mode": getattr(args, "rag_mode", None),
+                "knowledge_mode": getattr(args, "knowledge_mode", None),
             },
         )
         args.challenge = chosen

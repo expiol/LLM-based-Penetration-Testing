@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from killchain_docker.rag.augmenter import RagAugmenter
+from killchain_docker.intelligence.augmenter import IntelligenceAugmenter
 from killchain_docker.llm.gateway import StaticLLMClient, TokenLedger
 from killchain_docker.orchestrator.todo.queue import TodoQueue as todo_queue
 from killchain_docker.runtime.assembly import build_runtime
@@ -103,10 +103,10 @@ class CompactRunLogTests(unittest.TestCase):
         self.assertIn("Runtime error", markdown)
         self.assertIn("router crashed before finalizing state", markdown)
 
-    def test_compact_markdown_surfaces_public_rag_status(self) -> None:
+    def test_compact_markdown_surfaces_public_knowledge_status(self) -> None:
         state = self._state_with_round()
-        state.metadata["rag"] = {
-            "mode": "strict",
+        state.metadata["knowledge"] = {
+            "mode": "offline",
             "enabled": True,
             "status": "hit",
             "knowledge_hints": [{"solution_sketch": "raw hint"}],
@@ -114,17 +114,17 @@ class CompactRunLogTests(unittest.TestCase):
         }
         payload = build_compact_run_log(state)
         markdown = render_compact_run_markdown(payload)
-        self.assertEqual(payload["rag"]["policy"], "filtered_context")
-        self.assertIn("## RAG", markdown)
+        self.assertEqual(payload["knowledge"]["policy"], "filtered_context")
+        self.assertIn("## Knowledge", markdown)
         self.assertIn("status=`hit`", markdown)
         self.assertIn("policy=`filtered_context`", markdown)
         self.assertIn("hints=1", markdown)
         self.assertNotIn("hidden", markdown)
 
-    def test_persister_summary_uses_public_rag_payload(self) -> None:
+    def test_persister_summary_uses_public_knowledge_payload(self) -> None:
         state = self._state_with_round()
-        state.metadata["rag"] = {
-            "mode": "strict",
+        state.metadata["knowledge"] = {
+            "mode": "offline",
             "enabled": True,
             "status": "hit",
             "knowledge_hints": [{"solution_sketch": "raw hint"}],
@@ -134,11 +134,11 @@ class CompactRunLogTests(unittest.TestCase):
             persister = RunPersister(Path(tmp), EventRecorder(quiet=True))
             persister.write_all(state)
             summary = json.loads(persister.summary_path.read_text(encoding="utf-8"))
-            self.assertEqual(summary["rag"]["policy"], "filtered_context")
-            self.assertEqual(summary["rag"]["hint_count"], 1)
-            self.assertNotIn("mode", summary["rag"])
-            self.assertNotIn("knowledge_hints", summary["rag"])
-            self.assertNotIn("hit_provenance", summary["rag"])
+            self.assertEqual(summary["knowledge"]["policy"], "filtered_context")
+            self.assertEqual(summary["knowledge"]["hint_count"], 1)
+            self.assertNotIn("mode", summary["knowledge"])
+            self.assertNotIn("knowledge_hints", summary["knowledge"])
+            self.assertNotIn("hit_provenance", summary["knowledge"])
 
     def test_persister_writes_compact_files_on_checkpoint(self) -> None:
         state = self._state_with_round()
@@ -245,7 +245,7 @@ class CompactRunLogTests(unittest.TestCase):
             persister = RunPersister(
                 Path(tmp) / "run", recorder, status_path, token_ledger
             )
-            state.metadata["rag"] = {"mode": "strict", "status": "hit"}
+            state.metadata["knowledge"] = {"mode": "offline", "status": "hit"}
             persister.write_state(state)
             status = json.loads(status_path.read_text(encoding="utf-8"))
             compact = json.loads(
@@ -291,8 +291,8 @@ class CompactRunLogTests(unittest.TestCase):
             self.assertEqual(status["latest_event"]["event_type"], "runtime")
             self.assertIsInstance(status["latest_event"]["thread_id"], int)
             self.assertIsInstance(status["latest_event"]["thread_name"], str)
-            self.assertEqual(status["rag"]["policy"], "filtered_context")
-            self.assertNotIn("mode", status["rag"])
+            self.assertEqual(status["knowledge"]["policy"], "filtered_context")
+            self.assertNotIn("mode", status["knowledge"])
             self.assertIn("compact_log.json", status["artifacts"]["compact_json_path"])
             self.assertFalse(
                 Path(status["artifacts"]["compact_json_path"]).is_absolute()
@@ -425,20 +425,23 @@ class CompactRunLogTests(unittest.TestCase):
             self.assertEqual(first["token_usage"]["total_tokens"], 3)
             self.assertEqual(second["token_usage"]["total_tokens"], 10)
 
-    def test_build_runtime_passes_explicit_rag_mode(self) -> None:
+    def test_build_runtime_passes_explicit_knowledge_mode(self) -> None:
         config = RunConfig(
-            objective="fake objective", authorized_scope=[], rag_mode="strict"
+            objective="fake objective", authorized_scope=[], knowledge_mode="offline"
         )
-        augmenter = RagAugmenter(None, mode="strict")
+        augmenter = IntelligenceAugmenter(mode="offline")
         with patch(
-            "killchain_docker.runtime.assembly.RagAugmenter.from_default",
+            "killchain_docker.runtime.assembly.IntelligenceAugmenter.from_default",
             return_value=augmenter,
         ) as from_default:
             state, _orchestrator, _client = build_runtime(
                 config, llm_client=StaticLLMClient([{}])
             )
-        from_default.assert_called_once_with(mode="strict")
-        self.assertEqual(state.metadata["rag"]["mode"], "strict")
+        from_default.assert_called_once()
+        kwargs = from_default.call_args.kwargs
+        self.assertEqual(kwargs["mode"], "offline")
+        self.assertIsNotNone(kwargs.get("memory_root"))
+        self.assertEqual(state.metadata["knowledge"]["mode"], "offline")
 
 
 if __name__ == "__main__":

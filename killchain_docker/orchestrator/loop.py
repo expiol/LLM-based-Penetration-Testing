@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from collections.abc import Callable, Iterable
+from killchain_docker.intelligence.session.summary import maybe_refresh_session_summary
 from killchain_docker.logging_utils import get_logger
 from killchain_docker.llm.gateway import LLMClientError
 from killchain_docker.memory.persistence import DurableMemoryStore
@@ -177,6 +178,7 @@ class Orchestrator:
             self._events.emit(f"[cycle {cycle}] validated flag found - halting run")
             return True
         self._outcome.cycle_started(at=utc_now(), touch=False)
+        maybe_refresh_session_summary(self.state, cycle=cycle)
         return False
 
     def _handle_uncaught_llm_error(self, *, cycle: int, exc: LLMClientError) -> None:

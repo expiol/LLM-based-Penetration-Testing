@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from killchain_docker.rag.status import public_rag_payload
+from killchain_docker.intelligence.status import public_knowledge_payload
 from killchain_docker.logging_utils import get_logger, write_json_file, write_text_file
 from killchain_docker.thread_status import build_thread_registry, thread_info
 
@@ -31,7 +31,7 @@ _MONITOR_RESULT_KEYS = frozenset(
         "finish_reason",
         "skip_reason",
         "runtime_sec",
-        "rag_mode",
+        "knowledge_mode",
         "category",
         "files_count",
         "has_server",
@@ -42,6 +42,7 @@ _MONITOR_RESULT_KEYS = frozenset(
         "state_metrics",
         "artifacts",
         "rag",
+        "knowledge",
         "threads",
         "runtime_error",
         "error",
@@ -187,8 +188,12 @@ def monitor_result(
         else:
             payload.pop(key, None)
     clean = sanitize_monitor_paths(payload, logdir)
-    if isinstance(clean.get("rag"), dict):
-        clean["rag"] = public_rag_payload(clean["rag"])
+    if isinstance(clean.get("knowledge"), dict):
+        clean["knowledge"] = public_knowledge_payload(clean["knowledge"])
+    elif isinstance(clean.get("rag"), dict):
+        # Legacy log entries written before the rename — surface them as
+        # ``knowledge`` so the dashboard JS can use a single field.
+        clean["knowledge"] = public_knowledge_payload(clean.pop("rag"))
     return clean
 
 
@@ -564,12 +569,12 @@ def render_monitor_html() -> str:
       }, { warnings: 0, errors: 0 });
     }
 
-    function countRagStatus(rows) {
+    function countKnowledgeStatus(rows) {
       return rows.reduce((total, row) => {
-        const rag = row.rag || {};
-        if (rag.enabled) total.enabled += 1;
-        if (rag.status === "hit") total.hits += 1;
-        total.hints += finiteNumber(rag.hint_count) || 0;
+        const knowledge = row.knowledgeRaw || {};
+        if (knowledge.enabled) total.enabled += 1;
+        if (knowledge.status === "hit") total.hits += 1;
+        total.hints += finiteNumber(knowledge.hint_count) || 0;
         return total;
       }, { enabled: 0, hits: 0, hints: 0 });
     }
@@ -584,10 +589,10 @@ def render_monitor_html() -> str:
       return values.find((value) => value !== undefined && value !== null && value !== "");
     }
 
-    function fmtRagKnowledge(rag) {
-      if (!rag || typeof rag !== "object") return "";
-      const label = rag.policy || rag.status || "";
-      const hintCount = finiteNumber(rag.hint_count);
+    function fmtKnowledge(knowledge) {
+      if (!knowledge || typeof knowledge !== "object") return "";
+      const label = knowledge.policy || knowledge.status || "";
+      const hintCount = finiteNumber(knowledge.hint_count);
       const parts = [];
       if (label) parts.push(label);
       if (hintCount !== null) parts.push(`hints ${hintCount}`);
@@ -1073,7 +1078,7 @@ def render_monitor_html() -> str:
           const runError = live.error || result.error || {};
           const activeThreads = active.threads || {};
           const tokenUsage = live.token_usage || result.token_usage || {};
-          const rag = firstNonEmptyObject(live.rag, result.rag);
+          const rag = firstNonEmptyObject(live.knowledge, result.knowledge, live.rag, result.rag);
           const threads = live.threads || {};
           const threadRegistry = Array.isArray(threads.registry)
             ? threads.registry
@@ -1098,8 +1103,8 @@ def render_monitor_html() -> str:
             status: firstPresent(result.status, live.status, active.status, entry.state),
             solved: Boolean(firstPresent(result.solved, live.solved, false)),
             stage: live.stage || active.stage || entry.state,
-            knowledge: fmtRagKnowledge(rag),
-            rag,
+            knowledge: fmtKnowledge(rag),
+            knowledgeRaw: rag,
             runtimeSec: firstPresent(result.runtime_sec, live.runtime_sec, active.runtime_sec),
             tokenUsage,
             pid: firstPresent(live.pid, active.pid),
@@ -1144,7 +1149,7 @@ def render_monitor_html() -> str:
         const staleRows = lastRows.filter((row) => liveness(row) === "stale").length;
         const tokenTotals = sumTokenUsage(lastRows);
         const eventLevels = countEventLevels(lastRows);
-        const ragTotals = countRagStatus(lastRows);
+        const knowledgeTotals = countKnowledgeStatus(lastRows);
         const primaryStats = [
           ["Total", counts.total],
           ["Completed", counts.completed],
@@ -1159,9 +1164,9 @@ def render_monitor_html() -> str:
           ["Warnings", eventLevels.warnings],
           ["Errors", eventLevels.errors],
           ["Skipped", counts.skipped],
-          ["RAG On", ragTotals.enabled],
-          ["RAG Hits", ragTotals.hits],
-          ["RAG Hints", ragTotals.hints],
+          ["Knowledge On", knowledgeTotals.enabled],
+          ["Knowledge Hits", knowledgeTotals.hits],
+          ["Knowledge Hints", knowledgeTotals.hints],
           ["LLM Calls", tokenTotals.llmCalls],
           ["LLM Tokens", tokenTotals.totalTokens]
         ];

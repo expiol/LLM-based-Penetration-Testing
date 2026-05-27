@@ -23,11 +23,11 @@ class RunMetadataStore:
         value = challenge.get("canonical_name") or challenge.get("name")
         return str(value) if value else None
 
-    def rag(self) -> object:
-        return self.state.metadata.get("rag")
+    def knowledge(self) -> object:
+        return self.state.metadata.get("knowledge")
 
-    def mutable_rag(self) -> dict[str, Any] | None:
-        payload = self.state.metadata.setdefault("rag", {})
+    def mutable_knowledge(self) -> dict[str, Any] | None:
+        payload = self.state.metadata.setdefault("knowledge", {})
         return payload if isinstance(payload, dict) else None
 
     def runtime_error(self) -> dict[str, Any] | None:

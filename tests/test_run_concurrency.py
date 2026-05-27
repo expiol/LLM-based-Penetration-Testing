@@ -57,7 +57,7 @@ def _args(logdir: Path) -> argparse.Namespace:
         skip_exist=False,
         parallel_workers=1,
         replicas=1,
-        rag_mode=None,
+        knowledge_mode=None,
     )
 
 

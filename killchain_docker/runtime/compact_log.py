@@ -41,7 +41,7 @@ def build_compact_run_log(
         },
         "challenge": challenge_projection.payload(),
         "counts": {**report_projection.metrics()},
-        "rag": report_projection.rag_payload() or {},
+        "knowledge": report_projection.knowledge_payload() or {},
         "flag_candidates": report_projection.compact_flag_candidates(),
         "run_memory": memory_projection.prompt_entries(limit=30, width=260),
         "hypotheses_tail": report_projection.compact_hypotheses_tail(),
@@ -91,13 +91,13 @@ def render_compact_run_markdown(payload: dict[str, Any]) -> str:
                 "",
             ]
         )
-    rag = payload.get("rag")
-    if isinstance(rag, dict) and rag:
+    knowledge = payload.get("knowledge")
+    if isinstance(knowledge, dict) and knowledge:
         lines.extend(
             [
-                "## RAG",
+                "## Knowledge",
                 "",
-                f"- Enabled: `{rag.get('enabled')}` status=`{rag.get('status')}` policy=`{rag.get('policy')}` hints={rag.get('hint_count')}",
+                f"- Enabled: `{knowledge.get('enabled')}` status=`{knowledge.get('status')}` policy=`{knowledge.get('policy')}` hints={knowledge.get('hint_count')}",
                 "",
             ]
         )

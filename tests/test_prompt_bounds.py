@@ -120,7 +120,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
             source="foremost",
             size=12,
         )
-        state.metadata["rag"] = {
+        state.metadata["knowledge"] = {
             "knowledge_hints": [
                 {
                     "rank": 1,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 import json
 import unittest
-from killchain_docker.rag.augmenter import RagAugmenter
+from killchain_docker.intelligence.augmenter import IntelligenceAugmenter
 from killchain_docker.llm.gateway import LLMClientError, StaticLLMClient
 from killchain_docker.orchestrator.todo.queue import TodoQueue as todo_queue
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
@@ -145,7 +145,15 @@ class PlanningPipelineSeedTests(unittest.TestCase):
                 json.dumps(recovery.context, sort_keys=True),
             ]
         ).lower()
-        for disallowed in ("oracle", "rag", "benchmark", "zbar", "sleuth", "foremost"):
+        for disallowed in (
+            "oracle",
+            "rag",
+            "knowledge_mode",
+            "benchmark",
+            "zbar",
+            "sleuth",
+            "foremost",
+        ):
             self.assertNotIn(disallowed, text)
 
     def test_candidate_recovery_waits_for_ready_validation_candidate(self) -> None:
@@ -200,6 +208,7 @@ class PlanningPipelineSeedTests(unittest.TestCase):
         text = " ".join([todo.goal, *todo.success_criteria, *todo.constraints]).lower()
         self.assertNotIn("oracle", text)
         self.assertNotIn("rag", text)
+        self.assertNotIn("knowledge_mode", text)
 
     def test_execution_closure_seed_waits_for_artifact_inventory(self) -> None:
         state = _state(["capture.bin"])
@@ -2289,17 +2298,17 @@ class LLMPlannerTests(unittest.TestCase):
             StaticLLMClient(
                 [
                     {
-                        "summary": "The RAG retrieval result is a self-hit. The knowledge hints confirm the related writeup for the 'stfu' challenge is highly similar (score 0.879) and source identity labels describe an LFSR cipher from the exact same CSAW challenge in oracle mode.",
+                        "summary": "The RAG retrieval result is a self-hit. The knowledge hints confirm the related writeup for the 'stfu' challenge is highly similar (score 0.879) and source identity labels describe an LFSR cipher from the exact same CSAW challenge.",
                         "todos": [
                             {
-                                "goal": "Use the RAG retrieval result from oracle mode to port the solver.",
+                                "goal": "Use the RAG retrieval result to port the solver.",
                                 "phase": "recon",
                                 "context": {"family": "solver-port"},
                                 "success_criteria": [
                                     "Do not rely on the self-hit label."
                                 ],
                                 "constraints": [
-                                    "Treat oracle source identity labels as provenance only."
+                                    "Treat source identity labels as provenance only."
                                 ],
                                 "dedupe_key": "solver-port",
                             },
@@ -2311,7 +2320,7 @@ class LLMPlannerTests(unittest.TestCase):
                             },
                         ],
                         "notes": [
-                            "RAG retrieval hits and oracle source identity labels were used for planning."
+                            "RAG retrieval hits and source identity labels were used for planning."
                         ],
                         "stop_run": False,
                     }
@@ -2332,8 +2341,8 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIn("technical evidence suggests", decision.summary.lower())
         self.assertNotIn("technical context confirm", decision.summary.lower())
         self.assertNotIn("exact same", decision.summary.lower())
-        self.assertNotIn("oracle", decision.summary.lower())
         self.assertNotIn("rag", decision.summary.lower())
+        self.assertNotIn("knowledge_mode", decision.summary.lower())
         self.assertNotIn("retrieval", decision.summary.lower())
         self.assertNotIn("self-hit", decision.summary.lower())
         self.assertNotIn("writeup", decision.summary.lower())
@@ -2341,14 +2350,14 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertNotIn("score", decision.summary.lower())
         self.assertNotIn("knowledge hints", decision.summary.lower())
         self.assertNotIn("rag", note_text)
+        self.assertNotIn("knowledge_mode", note_text)
         self.assertNotIn("retrieval", note_text)
-        self.assertNotIn("oracle", note_text)
         self.assertNotIn("source identity", note_text)
         self.assertIn("port the solver", todo_text)
         self.assertIn("padding oracle", todo_text)
         self.assertNotIn("rag", todo_text)
+        self.assertNotIn("knowledge_mode", todo_text)
         self.assertNotIn("retrieval", todo_text)
-        self.assertNotIn("oracle mode", todo_text)
         self.assertNotIn("self-hit", todo_text)
         self.assertNotIn("source identity", todo_text)
 
@@ -2852,7 +2861,7 @@ class LLMPlannerTests(unittest.TestCase):
             )
         )
         decision = LLMPlanner(
-            StaticLLMClient(responder), augmenter=RagAugmenter(None)
+            StaticLLMClient(responder), augmenter=IntelligenceAugmenter()
         ).plan(state)
         self.assertEqual(len(captured), 2)
         self.assertNotIn("planner_retry_instruction", captured[0])
@@ -2916,7 +2925,7 @@ class LLMPlannerTests(unittest.TestCase):
         )
         todo_queue(state).complete(inventory, "done")
         decision = LLMPlanner(
-            StaticLLMClient(responder), augmenter=RagAugmenter(None)
+            StaticLLMClient(responder), augmenter=IntelligenceAugmenter()
         ).plan(state)
         self.assertEqual(len(captured), 2)
         self.assertNotIn("planner_retry_instruction", captured[0])
@@ -2985,7 +2994,7 @@ class LLMPlannerTests(unittest.TestCase):
         )
         todo_queue(state).complete(inventory, "capture.bin")
         decision = LLMPlanner(
-            StaticLLMClient(responder), augmenter=RagAugmenter(None)
+            StaticLLMClient(responder), augmenter=IntelligenceAugmenter()
         ).plan(state)
         self.assertEqual(len(captured), 2)
         self.assertEqual(len(decision.todos), 1)
@@ -3041,7 +3050,7 @@ class LLMPlannerTests(unittest.TestCase):
         )
         todo_queue(state).complete(inventory, "only csawpad.py is present")
         decision = LLMPlanner(
-            StaticLLMClient(responder), augmenter=RagAugmenter(None)
+            StaticLLMClient(responder), augmenter=IntelligenceAugmenter()
         ).plan(state)
         self.assertEqual(len(captured), 2)
         self.assertIn("planner_retry_instruction", captured[1])

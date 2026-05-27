@@ -12,11 +12,16 @@ from killchain_docker.state.common import utc_now
 
 
 class DurableMemoryScope(StrEnum):
-    """Where a durable memory entry applies."""
+    """Where a durable memory entry applies.
+
+    Note: only ``GLOBAL`` and ``CATEGORY`` are accepted. Per-challenge memory
+    is intentionally disallowed — durable lessons must abstract experience
+    into category-wide or globally-applicable patterns rather than pinning
+    answers to a specific challenge identity.
+    """
 
     GLOBAL = "global"
     CATEGORY = "category"
-    CHALLENGE = "challenge"
 
 
 class DurableMemoryUpdate(BaseModel):
@@ -26,7 +31,7 @@ class DurableMemoryUpdate(BaseModel):
 
     key: str
     value: str
-    scope: DurableMemoryScope = DurableMemoryScope.CHALLENGE
+    scope: DurableMemoryScope = DurableMemoryScope.CATEGORY
     title: str | None = None
 
     @field_validator("key", "value")
@@ -45,7 +50,6 @@ class DurableMemoryRecord(BaseModel):
     value: str
     scope: DurableMemoryScope
     category: str | None = None
-    challenge: str | None = None
     title: str = ""
     run_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
@@ -57,7 +61,13 @@ class DurableMemoryRecord(BaseModel):
 
 
 def coerce_durable_updates(value: Any) -> list[DurableMemoryUpdate]:
-    """Coerce loose dicts/lists to typed DurableMemoryUpdate items."""
+    """Coerce loose dicts/lists to typed DurableMemoryUpdate items.
+
+    Note: any incoming ``challenge`` scope is coerced to ``category``.
+    Durable memory is intentionally not allowed at challenge granularity —
+    lessons must generalise so future runs cannot retrieve a previous run's
+    answer for the same challenge.
+    """
     if value is None:
         return []
     if isinstance(value, list):
@@ -77,11 +87,13 @@ def coerce_durable_updates(value: Any) -> list[DurableMemoryUpdate]:
         val = str(item.get("value") or "").strip()
         if not key or not val:
             continue
-        scope_raw = str(item.get("scope") or DurableMemoryScope.CHALLENGE).strip().lower()
+        scope_raw = str(item.get("scope") or DurableMemoryScope.CATEGORY).strip().lower()
+        if scope_raw == "challenge":
+            scope_raw = DurableMemoryScope.CATEGORY.value
         try:
             scope = DurableMemoryScope(scope_raw)
         except ValueError:
-            scope = DurableMemoryScope.CHALLENGE
+            scope = DurableMemoryScope.CATEGORY
         title = item.get("title")
         out.append(
             DurableMemoryUpdate(

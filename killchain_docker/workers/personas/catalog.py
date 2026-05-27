@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from killchain_docker.rag.augmenter import RagAugmenter
 from killchain_docker.llm.gateway import LLMClient
 from killchain_docker.tools.capabilities import ToolCapability
 from killchain_docker.tools.core import ExecutionPlane
@@ -158,7 +157,6 @@ class WorkerBuildContext:
 
     llm_client: LLMClient
     execution_plane: ExecutionPlane
-    augmenter: RagAugmenter | None = None
     expected_flag: str | None = None
 
 

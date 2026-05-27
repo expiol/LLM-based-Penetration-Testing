@@ -127,7 +127,7 @@ def _write_artifacts(root: Path, status: str = "failed") -> RunArtifacts:
                 "run_id": "run-attached",
                 "status": status,
                 "solved": False,
-                "rag": {"mode": "strict", "status": "hit"},
+                "knowledge": {"mode": "offline", "status": "hit"},
                 "token_usage": {
                     "llm_calls": 1,
                     "prompt_tokens": 7,
@@ -174,11 +174,11 @@ def _write_artifacts(root: Path, status: str = "failed") -> RunArtifacts:
 
 
 class BatchSummaryTests(unittest.TestCase):
-    def test_artifact_solved_ignores_rag_hint_literals(self) -> None:
+    def test_artifact_solved_ignores_knowledge_hint_literals(self) -> None:
         state_payload = {
             "solved": False,
             "metadata": {
-                "rag": {
+                "knowledge": {
                     "knowledge_hints": [
                         {"solution_sketch": "This text may contain flag{fake}."}
                     ]
@@ -466,9 +466,9 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertFalse(payload["api_error"])
             self.assertTrue(payload["llm_error"])
             self.assertEqual(payload["state_metrics"]["todo_count"], 1)
-            self.assertEqual(payload["rag"]["mode"], "strict")
-            self.assertEqual(result["rag"]["policy"], "filtered_context")
-            self.assertNotIn("mode", result["rag"])
+            self.assertEqual(payload["knowledge"]["mode"], "offline")
+            self.assertEqual(result["knowledge"]["policy"], "filtered_context")
+            self.assertNotIn("mode", result["knowledge"])
             status_payload = json.loads(
                 (root / "fake-attached-artifacts.status.json").read_text(
                     encoding="utf-8"
@@ -476,9 +476,9 @@ class BatchSummaryTests(unittest.TestCase):
             )
             self.assertFalse(status_payload["api_error"])
             self.assertTrue(status_payload["llm_error"])
-            self.assertEqual(status_payload["rag"]["policy"], "filtered_context")
+            self.assertEqual(status_payload["knowledge"]["policy"], "filtered_context")
             self.assertEqual(status_payload["token_usage"]["total_tokens"], 9)
-            self.assertNotIn("mode", status_payload["rag"])
+            self.assertNotIn("mode", status_payload["knowledge"])
 
     def test_single_challenge_docker_execution_plane_keeps_stdin_open(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -581,13 +581,13 @@ class BatchSummaryTests(unittest.TestCase):
     def test_summary_includes_token_usage_and_paper_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = _args(Path(tmp))
-            args.rag_mode = "strict"
+            args.knowledge_mode = "offline"
             result = {
                 "challenge": "2013f-cry-example",
                 "run_id": "run-direct",
                 "solved": True,
                 "status": "solved",
-                "rag_mode": "strict",
+                "knowledge_mode": "offline",
                 "runtime_sec": 12.5,
                 "logfile": None,
                 "max_cycles": 20,
@@ -642,14 +642,14 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(payload["paper_metrics"]["category_counts"]["crypto"], 1)
             self.assertEqual(payload["experiment_config"]["max_cycles_arg"], 20)
             self.assertEqual(payload["experiment_config"]["parallel_workers"], 2)
-            self.assertEqual(payload["experiment_config"]["rag_mode"], "strict")
+            self.assertEqual(payload["experiment_config"]["knowledge_mode"], "offline")
             self.assertEqual(
                 payload["experiment_config"]["llm_gateway"]["default_model"],
                 "test-model",
             )
             detail = payload["details"][0]
             self.assertEqual(detail["run_id"], "run-direct")
-            self.assertEqual(detail["rag_mode"], "strict")
+            self.assertEqual(detail["knowledge_mode"], "offline")
             self.assertEqual(detail["files_count"], 2)
             self.assertTrue(detail["has_server"])
             self.assertEqual(detail["authorized_scope_count"], 1)
@@ -673,8 +673,8 @@ class BatchSummaryTests(unittest.TestCase):
                 "status": "skipped",
                 "skip_reason": "preexisting_log",
                 "runtime_sec": 0.01,
-                "rag_mode": "enabled",
-                "rag": {
+                "knowledge_mode": "enabled",
+                "knowledge": {
                     "enabled": True,
                     "status": "metadata_only",
                     "policy": "retrieved_context",

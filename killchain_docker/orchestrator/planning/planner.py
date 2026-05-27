@@ -1,7 +1,7 @@
 """PlannerAgent pipeline for high-level todo generation."""
 
 from __future__ import annotations
-from killchain_docker.rag.augmenter import RagAugmenter
+from killchain_docker.intelligence.augmenter import IntelligenceAugmenter
 from killchain_docker.llm.gateway import LLMClient, LLMClientError
 from killchain_docker.orchestrator.planning.pipeline import PlanningPipeline
 from killchain_docker.orchestrator.planning.schemas import (
@@ -26,7 +26,7 @@ class LLMPlanner(PlannerAgent):
         *,
         strategy: LLMPlanningStrategy | None = None,
         pipeline: PlanningPipeline | None = None,
-        augmenter: RagAugmenter | None = None,
+        augmenter: IntelligenceAugmenter | None = None,
     ) -> None:
         if llm_client is None:
             raise LLMClientError("LLMPlanner requires an LLM client.")

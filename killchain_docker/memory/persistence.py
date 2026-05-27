@@ -27,16 +27,13 @@ def slugify(text: str, *, fallback: str = "memory") -> str:
 
 def _scope_dir(root: Path, scope: DurableMemoryScope, *, category: str | None,
                challenge: str | None) -> Path:
+    del challenge  # challenge-scoped durable memory is intentionally disallowed
     if scope == DurableMemoryScope.GLOBAL:
         return root / "global"
     if scope == DurableMemoryScope.CATEGORY:
         if not category:
             raise ValueError("category scope requires a category")
         return root / "category" / slugify(category, fallback="misc")
-    if scope == DurableMemoryScope.CHALLENGE:
-        if not challenge:
-            raise ValueError("challenge scope requires a challenge")
-        return root / "challenge" / slugify(challenge, fallback="unnamed")
     raise ValueError(f"unknown scope: {scope}")
 
 
@@ -48,8 +45,6 @@ def _format_frontmatter(record: DurableMemoryRecord) -> str:
     lines.append(f"scope: {record.scope.value}")
     if record.category:
         lines.append(f"category: {json.dumps(record.category, ensure_ascii=False)}")
-    if record.challenge:
-        lines.append(f"challenge: {json.dumps(record.challenge, ensure_ascii=False)}")
     runs_payload = json.dumps(record.run_ids, ensure_ascii=False)
     lines.append(f"run_ids: {runs_payload}")
     lines.append(f"created_at: {record.created_at.isoformat()}")
@@ -95,11 +90,15 @@ def _read_record(path: Path) -> DurableMemoryRecord | None:
     key = str(meta.get("key") or slug).strip()
     if not key:
         return None
-    scope_raw = str(meta.get("scope") or DurableMemoryScope.CHALLENGE.value).lower()
+    scope_raw = str(meta.get("scope") or DurableMemoryScope.CATEGORY.value).lower()
+    if scope_raw == "challenge":
+        # Legacy on-disk records: drop them silently. Challenge-scoped memory
+        # would otherwise reintroduce per-challenge oracle behaviour.
+        return None
     try:
         scope = DurableMemoryScope(scope_raw)
     except ValueError:
-        scope = DurableMemoryScope.CHALLENGE
+        scope = DurableMemoryScope.CATEGORY
     runs = meta.get("run_ids") or []
     if not isinstance(runs, list):
         runs = []
@@ -111,7 +110,6 @@ def _read_record(path: Path) -> DurableMemoryRecord | None:
         value=body.strip(),
         scope=scope,
         category=str(meta["category"]).strip() if meta.get("category") else None,
-        challenge=str(meta["challenge"]).strip() if meta.get("challenge") else None,
         title=str(meta.get("title") or "").strip(),
         run_ids=[str(item) for item in runs if str(item).strip()],
         created_at=created,
@@ -169,18 +167,18 @@ class DurableMemoryStore:
         category: str | None = None,
         challenge: str | None = None,
     ) -> list[DurableMemoryRecord]:
-        """Return all records visible to a run with the given category/challenge."""
+        """Return all records visible to a run with the given category.
+
+        ``challenge`` is accepted for API compatibility but ignored — durable
+        memory is intentionally scoped no narrower than ``category`` so the
+        recall path cannot oracle the answer to a previously-seen challenge.
+        """
+        del challenge
         records: list[DurableMemoryRecord] = []
         records.extend(_scan_records(self.root / "global"))
         if category:
             records.extend(
                 _scan_records(self.root / "category" / slugify(category, fallback="misc"))
-            )
-        if challenge:
-            records.extend(
-                _scan_records(
-                    self.root / "challenge" / slugify(challenge, fallback="unnamed")
-                )
             )
         return records
 
@@ -190,20 +188,23 @@ class DurableMemoryStore:
         *,
         run_id: str,
         category: str | None,
-        challenge: str | None,
+        challenge: str | None = None,
     ) -> list[DurableMemoryRecord]:
-        """Persist `updates`; merge into existing records by (scope, key)."""
+        """Persist ``updates``; merge into existing records by (scope, key).
+
+        ``challenge`` is accepted for API compatibility but no longer used.
+        """
+        del challenge
         applied: list[DurableMemoryRecord] = []
         touched_dirs: set[Path] = set()
         for update in updates:
             scope_category = category if update.scope != DurableMemoryScope.GLOBAL else None
-            scope_challenge = challenge if update.scope == DurableMemoryScope.CHALLENGE else None
             try:
                 scope_dir = _scope_dir(
                     self.root,
                     update.scope,
                     category=category,
-                    challenge=challenge,
+                    challenge=None,
                 )
             except ValueError:
                 continue
@@ -224,7 +225,6 @@ class DurableMemoryStore:
                     value=update.value,
                     scope=update.scope,
                     category=scope_category if update.scope != DurableMemoryScope.GLOBAL else None,
-                    challenge=scope_challenge,
                     title=update.title or update.key,
                     run_ids=[run_id] if run_id else [],
                     created_at=now,
@@ -277,7 +277,6 @@ class DurableMemoryStore:
         for scope_label, sub in (
             ("Global", self.root / "global"),
             ("Category", self.root / "category"),
-            ("Challenge", self.root / "challenge"),
         ):
             if not sub.exists():
                 continue

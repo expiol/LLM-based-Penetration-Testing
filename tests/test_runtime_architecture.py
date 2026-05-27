@@ -534,8 +534,8 @@ class RuntimeArchitectureTests(unittest.TestCase):
         progress_source = (
             PROJECT_ROOT / "killchain_docker/orchestrator/progress/gate.py"
         ).read_text()
-        rag_source = (
-            PROJECT_ROOT / "killchain_docker/orchestrator/rag_policy.py"
+        knowledge_policy_source = (
+            PROJECT_ROOT / "killchain_docker/intelligence/policy.py"
         ).read_text()
         self.assertIn("ChallengeProjection", todo_source)
         self.assertIsNone(
@@ -551,7 +551,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIn("ArtifactProjectionStore", reference_source)
         self.assertIn("ChallengeProjection", candidate_source)
         self.assertIn("RunMetadataStore", progress_source)
-        self.assertIn("RunMetadataStore", rag_source)
+        self.assertIn("RunMetadataStore", knowledge_policy_source)
         direct_sources = "\n".join(
             [
                 todo_source,
@@ -559,7 +559,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
                 reference_source,
                 candidate_source,
                 progress_source,
-                rag_source,
+                knowledge_policy_source,
             ]
         )
         direct_sources = direct_sources.replace("killchain_docker.state.metadata", "")
@@ -1646,7 +1646,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertIn(".runtime_error_payload()", source)
         self.assertIn(".payload()", source)
         self.assertIn(".name()", source)
-        self.assertIn(".rag_payload()", source)
+        self.assertIn(".knowledge_payload()", source)
         self.assertIn("RunReportProjection", source)
         self.assertNotIn("state.metadata", source)
 

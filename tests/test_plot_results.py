@@ -15,15 +15,13 @@ import plot_results  # noqa: E402
 
 
 class PlotResultsTests(unittest.TestCase):
-    def test_iter_result_logs_skips_batch_status_and_ablation_artifacts(self) -> None:
+    def test_iter_result_logs_skips_batch_and_status_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in (
                 "demo.json",
                 "_batch_summary.json",
                 "_batch_monitor.json",
-                "_rag_ablation.json",
-                "_rag_ablation_audit.json",
                 "demo.status.json",
             ):
                 (root / name).write_text("{}", encoding="utf-8")
@@ -32,14 +30,14 @@ class PlotResultsTests(unittest.TestCase):
 
         self.assertEqual(names, ["demo.json"])
 
-    def test_summarize_logdir_ignores_ablation_audit_payload(self) -> None:
+    def test_summarize_logdir_ignores_unrelated_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "demo.json").write_text(
                 json.dumps({"solved": True}), encoding="utf-8"
             )
-            (root / "_rag_ablation_audit.json").write_text(
-                json.dumps({"ok": False}), encoding="utf-8"
+            (root / "_batch_summary.json").write_text(
+                json.dumps({"finished": True}), encoding="utf-8"
             )
 
             summary = plot_results.summarize_logdir(root)

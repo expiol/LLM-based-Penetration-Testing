@@ -233,7 +233,7 @@ class RunReportProjection:
                 "evidence": len(self.state.evidence),
             },
             "runtime_error": self.runtime_error_line(),
-            "rag": self.rag_line(),
+            "knowledge": self.knowledge_line(),
             "assets": [
                 {
                     "asset_id": asset.asset_id,
@@ -321,13 +321,13 @@ class RunReportProjection:
     def runtime_error_payload(self) -> dict[str, Any] | None:
         return self.metadata.runtime_error()
 
-    def rag_line(self) -> str | None:
-        payload = self.rag_payload()
+    def knowledge_line(self) -> str | None:
+        payload = self.knowledge_payload()
         if not payload:
             return None
-        return f"- RAG: enabled=`{payload.get('enabled')}` status=`{payload.get('status')}` policy=`{payload.get('policy')}` hints={payload.get('hint_count')}"
+        return f"- Knowledge: enabled=`{payload.get('enabled')}` status=`{payload.get('status')}` policy=`{payload.get('policy')}` hints={payload.get('hint_count')}"
 
-    def rag_payload(self) -> dict[str, Any] | None:
-        from killchain_docker.rag.status import public_rag_payload
+    def knowledge_payload(self) -> dict[str, Any] | None:
+        from killchain_docker.intelligence.status import public_knowledge_payload
 
-        return public_rag_payload(self.metadata.rag())
+        return public_knowledge_payload(self.metadata.knowledge())

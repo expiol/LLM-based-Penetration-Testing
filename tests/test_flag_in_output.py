@@ -41,8 +41,6 @@ class FlagInOutputTests(unittest.TestCase):
                 "demo.json",
                 "_batch_summary.json",
                 "_batch_monitor.json",
-                "_rag_ablation.json",
-                "_rag_ablation_audit.json",
                 "demo.status.json",
             ):
                 (root / name).write_text("{}", encoding="utf-8")

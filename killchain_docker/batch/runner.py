@@ -32,7 +32,7 @@ from killchain_docker.batch.docker import (
     start_challenge_with_retry,
 )
 from killchain_docker.environment import CTFEnvironment
-from killchain_docker.rag.status import public_rag_payload
+from killchain_docker.intelligence.status import public_knowledge_payload
 from killchain_docker.logging_utils import (
     configure_logging,
     get_logger,
@@ -341,19 +341,19 @@ class _MonitorRunState:
             ]
 
 
-def _rag_payload(
+def _knowledge_payload(
     summary_payload: dict[str, Any] | None,
     state_payload: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     if isinstance(summary_payload, dict) and isinstance(
-        summary_payload.get("rag"), dict
+        summary_payload.get("knowledge"), dict
     ):
-        return dict(summary_payload["rag"])
+        return dict(summary_payload["knowledge"])
     metadata = (
         state_payload.get("metadata") if isinstance(state_payload, dict) else None
     )
-    if isinstance(metadata, dict) and isinstance(metadata.get("rag"), dict):
-        return dict(metadata["rag"])
+    if isinstance(metadata, dict) and isinstance(metadata.get("knowledge"), dict):
+        return dict(metadata["knowledge"])
     return None
 
 
@@ -988,7 +988,7 @@ def _run_single_challenge_inner(
         max_cycles=effective_max_cycles,
         quiet=args.quiet,
         status_path=str(status_file),
-        rag_mode=getattr(args, "rag_mode", None),
+        knowledge_mode=getattr(args, "knowledge_mode", None),
         metadata={"challenge": metadata},
     )
 
@@ -1013,7 +1013,7 @@ def _run_single_challenge_inner(
             stage="llm_preflight",
             status="starting",
             logfile=str(logfile),
-            rag_mode=getattr(args, "rag_mode", None),
+            knowledge_mode=getattr(args, "knowledge_mode", None),
             message="building LLM client",
         )
         _configure_llm_environment()
@@ -1186,7 +1186,7 @@ def _run_single_challenge_inner(
         token_usage = _token_usage(summary_payload.get("token_usage"))
     else:
         token_usage = _llm_token_usage(llm_client)
-    rag_payload = _rag_payload(summary_payload, state_payload)
+    knowledge_payload = _knowledge_payload(summary_payload, state_payload)
     metadata = challenge_metadata(challenge)
     log_payload = {
         "args": _sanitize_for_log(vars(args)),
@@ -1203,7 +1203,7 @@ def _run_single_challenge_inner(
         "artifacts": None if artifacts is None else artifacts.model_dump(mode="json"),
         "summary": summary_payload,
         "token_usage": token_usage,
-        "rag": rag_payload,
+        "knowledge": knowledge_payload,
         "state_metrics": state_metrics,
         "state": state_payload,
         "error": error_payload,
@@ -1214,7 +1214,7 @@ def _run_single_challenge_inner(
         "end_time": ended_at,
         "runtime_sec": round(ended_at - started_at, 3),
         "status_file": str(status_file),
-        "rag_mode": getattr(args, "rag_mode", None),
+        "knowledge_mode": getattr(args, "knowledge_mode", None),
     }
     write_log(logfile, log_payload)
     write_run_status(
@@ -1227,7 +1227,7 @@ def _run_single_challenge_inner(
         logfile=str(logfile),
         artifacts=None if artifacts is None else artifacts.model_dump(mode="json"),
         state_metrics=state_metrics,
-        rag=public_rag_payload(rag_payload),
+        knowledge=public_knowledge_payload(knowledge_payload),
         token_usage=token_usage,
         runtime_sec=round(ended_at - started_at, 3),
         error=error_payload,
@@ -1243,10 +1243,10 @@ def _run_single_challenge_inner(
         "logfile": str(logfile),
         "status_file": str(status_file),
         "runtime_sec": round(ended_at - started_at, 3),
-        "rag_mode": getattr(args, "rag_mode", None),
+        "knowledge_mode": getattr(args, "knowledge_mode", None),
         "run_id": None if artifacts is None else artifacts.run_id,
         "artifacts": None if artifacts is None else artifacts.model_dump(mode="json"),
-        "rag": public_rag_payload(rag_payload),
+        "knowledge": public_knowledge_payload(knowledge_payload),
         "challenge_metadata": metadata,
         "authorized_scope": authorized_scope,
         "max_cycles": effective_max_cycles,
@@ -1583,7 +1583,7 @@ def _save_batch_progress(
         read_json=_safe_read_json,
         token_usage=_token_usage,
         state_metrics=_state_metrics,
-        rag_payload=_rag_payload,
+        knowledge_payload=_knowledge_payload,
         failure_buckets=_failure_buckets,
     )
     details = [
@@ -1687,7 +1687,7 @@ def _save_batch_progress(
             "output_root": getattr(args, "output_root", None),
             "objective_overridden": bool(getattr(args, "objective", None)),
             "scope_overridden": bool(getattr(args, "scope", None)),
-            "rag_mode": getattr(args, "rag_mode", None),
+            "knowledge_mode": getattr(args, "knowledge_mode", None),
             "llm_gateway": _load_llm_experiment_config(),
         },
         "paper_metrics": {

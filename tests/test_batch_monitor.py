@@ -296,12 +296,12 @@ class BatchMonitorTests(unittest.TestCase):
             self.assertNotIn("run_dir", result["artifacts"])
             self.assertNotIn("compact_markdown_path", result["artifacts"])
 
-    def test_monitor_result_exposes_public_rag_status_only(self) -> None:
+    def test_monitor_result_exposes_public_knowledge_status_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = monitor_result(
                 {
                     "challenge": "alpha",
-                    "rag": {
+                    "knowledge": {
                         "enabled": True,
                         "mode": "enabled",
                         "status": "hit",
@@ -315,7 +315,7 @@ class BatchMonitorTests(unittest.TestCase):
 
             assert result is not None
             self.assertEqual(
-                result["rag"],
+                result["knowledge"],
                 {
                     "enabled": True,
                     "status": "hit",
@@ -324,12 +324,12 @@ class BatchMonitorTests(unittest.TestCase):
                 },
             )
 
-    def test_monitor_result_preserves_public_rag_hint_count(self) -> None:
+    def test_monitor_result_preserves_public_knowledge_hint_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = monitor_result(
                 {
                     "challenge": "alpha",
-                    "rag": {
+                    "knowledge": {
                         "enabled": True,
                         "status": "hit",
                         "policy": "retrieved_context",
@@ -340,7 +340,34 @@ class BatchMonitorTests(unittest.TestCase):
             )
 
             assert result is not None
-            self.assertEqual(result["rag"]["hint_count"], 3)
+            self.assertEqual(result["knowledge"]["hint_count"], 3)
+
+    def test_monitor_result_normalises_legacy_rag_key_to_knowledge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = monitor_result(
+                {
+                    "challenge": "alpha",
+                    "rag": {
+                        "enabled": True,
+                        "mode": "enabled",
+                        "status": "hit",
+                        "hit_count": 2,
+                    },
+                },
+                Path(tmp),
+            )
+
+            assert result is not None
+            self.assertNotIn("rag", result)
+            self.assertEqual(
+                result["knowledge"],
+                {
+                    "enabled": True,
+                    "status": "hit",
+                    "policy": "retrieved_context",
+                    "hint_count": 2,
+                },
+            )
 
     def test_monitor_result_drops_raw_debug_payloads_and_compacts_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -555,10 +582,10 @@ class BatchMonitorTests(unittest.TestCase):
             self.assertIn("function fmtTokenUsage", html)
             self.assertIn("function sumTokenUsage", html)
             self.assertIn("function countEventLevels", html)
-            self.assertIn("function countRagStatus", html)
+            self.assertIn("function countKnowledgeStatus", html)
             self.assertIn("function firstNonEmptyObject", html)
             self.assertIn("function firstPresent", html)
-            self.assertIn("function fmtRagKnowledge", html)
+            self.assertIn("function fmtKnowledge", html)
             self.assertIn("function metricNumber", html)
             self.assertIn("function fmtStateMetrics", html)
             self.assertIn("tokenUsage = live.token_usage || result.token_usage", html)
@@ -567,9 +594,9 @@ class BatchMonitorTests(unittest.TestCase):
             self.assertIn('["LLM Tokens", tokenTotals.totalTokens]', html)
             self.assertIn('["Warnings", eventLevels.warnings]', html)
             self.assertIn('["Errors", eventLevels.errors]', html)
-            self.assertIn('["RAG On", ragTotals.enabled]', html)
-            self.assertIn('["RAG Hits", ragTotals.hits]', html)
-            self.assertIn('["RAG Hints", ragTotals.hints]', html)
+            self.assertIn('["Knowledge On", knowledgeTotals.enabled]', html)
+            self.assertIn('["Knowledge Hits", knowledgeTotals.hits]', html)
+            self.assertIn('["Knowledge Hints", knowledgeTotals.hints]', html)
             self.assertIn("function pollStatusText", html)
             self.assertIn("browser refresh", html)
             self.assertIn("polling ${(refreshMs / 1000).toFixed(0)}s", html)
@@ -815,7 +842,7 @@ global.setInterval = () => 0;
             }
             status_payload["latest_event"]["level"] = "WARNING"
             status_payload["latest_event"]["timestamp"] = "2026-05-23T00:00:00Z"
-            status_payload["rag"] = {
+            status_payload["knowledge"] = {
                 "enabled": True,
                 "status": "hit",
                 "policy": "retrieved_context",
@@ -897,9 +924,9 @@ Date.now = () => Date.parse("2026-05-23T00:00:05Z");
   assert(stats.includes("<span>Warnings</span><strong>1</strong>"), stats);
   assert(stats.includes("<span>Errors</span><strong>0</strong>"), stats);
   assert(stats.includes("<span>Interrupted</span><strong>0</strong>"), stats);
-  assert(stats.includes("<span>RAG On</span><strong>1</strong>"), stats);
-  assert(stats.includes("<span>RAG Hits</span><strong>1</strong>"), stats);
-  assert(stats.includes("<span>RAG Hints</span><strong>2</strong>"), stats);
+  assert(stats.includes("<span>Knowledge On</span><strong>1</strong>"), stats);
+  assert(stats.includes("<span>Knowledge Hits</span><strong>1</strong>"), stats);
+  assert(stats.includes("<span>Knowledge Hints</span><strong>2</strong>"), stats);
             assert(rows.includes("WARNING worker_progress 5s ago: tool running"), rows);
             assert(rows.includes("beta"), rows);
             assert(rows.includes("status read failed"), rows);

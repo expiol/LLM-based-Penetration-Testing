@@ -27,8 +27,6 @@ class BatchResultLogTests(unittest.TestCase):
                 "zeta.json",
                 "_batch_summary.json",
                 "_batch_monitor.json",
-                "_rag_ablation.json",
-                "_rag_ablation_audit.json",
                 "demo.status.json",
                 "notes.txt",
             ):

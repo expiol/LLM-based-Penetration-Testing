@@ -211,7 +211,6 @@ def cross_run_memory(
                 "title": record.title or record.key,
                 "value": value,
                 "category": record.category or "",
-                "challenge": record.challenge or "",
             }
         )
     return out

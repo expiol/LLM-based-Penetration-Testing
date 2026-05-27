@@ -36,7 +36,7 @@ class _Dataset:
 class BatchDatasetTests(unittest.TestCase):
     def test_random_sample_is_seeded(self) -> None:
         args = argparse.Namespace(
-            rag_mode="strict",
+            knowledge_mode="offline",
             sample_size=2,
             sample_seed=7,
             sample_strategy="random",
@@ -53,7 +53,7 @@ class BatchDatasetTests(unittest.TestCase):
 
     def test_category_round_robin_sample_spreads_categories(self) -> None:
         args = argparse.Namespace(
-            rag_mode="strict",
+            knowledge_mode="offline",
             sample_size=3,
             sample_seed=0,
             sample_strategy="category_round_robin",
@@ -70,7 +70,7 @@ class BatchDatasetTests(unittest.TestCase):
 
     def test_enabled_sample_uses_original_candidate_pool(self) -> None:
         args = argparse.Namespace(
-            rag_mode="enabled",
+            knowledge_mode="enabled",
             split="development",
             category=None,
             sample_size=2,
@@ -87,7 +87,7 @@ class BatchDatasetTests(unittest.TestCase):
         self,
     ) -> None:
         args = argparse.Namespace(
-            rag_mode="enabled",
+            knowledge_mode="enabled",
             split="development",
             category=None,
             sample_size=None,
@@ -108,7 +108,7 @@ class BatchDatasetTests(unittest.TestCase):
 
     def test_sample_size_larger_than_pool_fails(self) -> None:
         args = argparse.Namespace(
-            rag_mode="strict",
+            knowledge_mode="offline",
             sample_size=3,
             sample_seed=0,
             sample_strategy="random",

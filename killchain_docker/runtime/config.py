@@ -20,7 +20,7 @@ class RunConfig(BaseModel):
     max_cycles: int = Field(default=8, ge=1)
     quiet: bool = False
     status_path: str | None = None
-    rag_mode: str | None = None
+    knowledge_mode: str | None = None
     memory_root: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 

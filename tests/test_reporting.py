@@ -17,10 +17,10 @@ class ReportingTests(unittest.TestCase):
             report,
         )
 
-    def test_report_surfaces_public_rag_status(self) -> None:
-        state = RunState(objective="Solve strict run", authorized_scope=[])
-        state.metadata["rag"] = {
-            "mode": "strict",
+    def test_report_surfaces_public_knowledge_status(self) -> None:
+        state = RunState(objective="Solve offline run", authorized_scope=[])
+        state.metadata["knowledge"] = {
+            "mode": "offline",
             "enabled": True,
             "status": "hit",
             "knowledge_hints": [{"solution_sketch": "raw hint"}],
@@ -28,7 +28,7 @@ class ReportingTests(unittest.TestCase):
         }
         report = render_markdown_report(state)
         self.assertIn(
-            "- RAG: enabled=`True` status=`hit` policy=`filtered_context` hints=1",
+            "- Knowledge: enabled=`True` status=`hit` policy=`filtered_context` hints=1",
             report,
         )
         self.assertNotIn("hidden", report)

@@ -51,7 +51,7 @@ RUN_CONFIG = {
     "output_root": None,
     "parallel_workers": 5,
     "replicas": 1,
-    "rag_mode": None,
+    "knowledge_mode": None,
     "sample_size": None,
     "sample_seed": None,
     "sample_strategy": "random",
@@ -83,7 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root")
     parser.add_argument("--parallel-workers", type=int)
     parser.add_argument("--replicas", type=int)
-    parser.add_argument("--rag-mode", choices=["enabled", "strict", "disabled"])
+    parser.add_argument(
+        "--knowledge-mode", choices=["enabled", "offline", "disabled"]
+    )
     parser.add_argument("--sample-size", type=int)
     parser.add_argument("--sample-seed", type=int)
     parser.add_argument(

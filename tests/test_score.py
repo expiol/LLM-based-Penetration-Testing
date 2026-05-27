@@ -53,7 +53,6 @@ class ScoreTests(unittest.TestCase):
                 },
             )
             _write_json(root / "_batch_summary.json", {"solved_count": 999})
-            _write_json(root / "_rag_ablation_audit.json", {"ok": False})
             _write_json(root / "demo.status.json", {"status": "running"})
 
             results = score.summarize_logdir(root)

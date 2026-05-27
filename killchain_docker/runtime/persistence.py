@@ -195,7 +195,7 @@ class RunPersister:
             "current_todo": current_todo,
             "state_metrics": report_projection.metrics(),
             "runtime_error": runtime_error,
-            "rag": report_projection.rag_payload(),
+            "knowledge": report_projection.knowledge_payload(),
             "artifacts": self._status_artifacts(),
         }
         token_usage = self._token_usage()
@@ -264,9 +264,9 @@ class RunPersister:
             runtime_error = runtime_error_payload(state)
             if runtime_error is not None:
                 summary["runtime_error"] = runtime_error
-            public_rag = RunReportProjection(state).rag_payload()
-            if public_rag is not None:
-                summary["rag"] = public_rag
+            public_knowledge = RunReportProjection(state).knowledge_payload()
+            if public_knowledge is not None:
+                summary["knowledge"] = public_knowledge
             token_usage = self._token_usage()
             if token_usage is not None:
                 summary["token_usage"] = token_usage

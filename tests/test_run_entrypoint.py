@@ -11,7 +11,7 @@ class RunEntrypointTests(unittest.TestCase):
             [
                 "--challenge",
                 "demo-challenge",
-                "--rag-mode",
+                "--knowledge-mode",
                 "enabled",
                 "--max-cycles",
                 "3",
@@ -27,7 +27,7 @@ class RunEntrypointTests(unittest.TestCase):
 
         self.assertEqual(args.challenge, "demo-challenge")
         self.assertFalse(args.run_all)
-        self.assertEqual(args.rag_mode, "enabled")
+        self.assertEqual(args.knowledge_mode, "enabled")
         self.assertEqual(args.max_cycles, 3)
         self.assertEqual(args.parallel_workers, 2)
         self.assertEqual(args.logdir, "logs/test")
@@ -40,7 +40,7 @@ class RunEntrypointTests(unittest.TestCase):
                 "--challenges",
                 "alpha",
                 "beta",
-                "--rag-mode",
+                "--knowledge-mode",
                 "enabled",
             ]
         )
@@ -52,7 +52,7 @@ class RunEntrypointTests(unittest.TestCase):
         args = run_entrypoint._args_from_config(
             [
                 "--run-all",
-                "--rag-mode",
+                "--knowledge-mode",
                 "enabled",
                 "--sample-size",
                 "4",

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from killchain_docker.evidence_context import EvidenceContextBuilder
-from killchain_docker.rag.augmenter import RagAugmenter
+from killchain_docker.intelligence.augmenter import IntelligenceAugmenter
+from killchain_docker.intelligence.policy import KnowledgePolicy
 from killchain_docker.orchestrator.planning.context_models import PlannerContext
 from killchain_docker.orchestrator.planning.context_temperature import (
     compute_planner_temperature,
@@ -13,7 +14,6 @@ from killchain_docker.orchestrator.planning.stagnation_context import (
     pivot_summaries,
 )
 from killchain_docker.orchestrator.planning.techniques import technique_matrix_for
-from killchain_docker.orchestrator.rag_policy import RagPolicy
 from killchain_docker.orchestrator.todo.queue import TodoQueue
 from killchain_docker.prompt_projection import (
     cross_run_memory as prompt_cross_run_memory,
@@ -45,10 +45,10 @@ class PlannerContextBuilder:
     def __init__(
         self,
         *,
-        augmenter: RagAugmenter | None = None,
+        augmenter: IntelligenceAugmenter | None = None,
         evidence_builder: EvidenceContextBuilder | None = None,
     ) -> None:
-        self.augmenter = augmenter or RagAugmenter.from_default()
+        self.augmenter = augmenter or IntelligenceAugmenter.from_default()
         self.evidence_builder = evidence_builder or EvidenceContextBuilder()
 
     def build(self, state: RunState) -> PlannerContext:
@@ -59,7 +59,7 @@ class PlannerContextBuilder:
         queue = TodoQueue(state)
         if self.augmenter is not None:
             self.augmenter.context_for(state)
-        RagPolicy.annotate(state)
+        KnowledgePolicy.annotate(state)
         return PlannerContext(
             objective=state.objective,
             authorized_scope=list(state.authorized_scope),
@@ -92,7 +92,7 @@ class PlannerContextBuilder:
             stagnation=build_stagnation_signals(state),
             near_miss_evidence=EvidenceProjectionStore(state).near_miss_summary(),
             pivot_summaries=pivot_summaries(state),
-            knowledge_augmentation=planner_projection.rag_metadata(),
+            knowledge_augmentation=planner_projection.knowledge_augmentation(),
             open_todo_count=queue.open_count(),
             temperature=compute_planner_temperature(state),
         )

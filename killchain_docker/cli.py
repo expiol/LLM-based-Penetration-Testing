@@ -41,7 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-cycles", type=int, help="Maximum orchestrator cycles"
     )
     run_parser.add_argument(
-        "--rag-mode", choices=["enabled", "strict", "disabled"], help="RAG policy mode"
+        "--knowledge-mode",
+        choices=["enabled", "offline", "disabled"],
+        help="Knowledge augmentation mode (default: offline = memory only)",
     )
     run_parser.add_argument(
         "--quiet", action="store_true", help="Suppress orchestrator event streaming"
@@ -53,7 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     demo_parser.add_argument("--status-path", help="Optional live status JSON path")
     demo_parser.add_argument(
-        "--rag-mode", choices=["enabled", "strict", "disabled"], help="RAG policy mode"
+        "--knowledge-mode",
+        choices=["enabled", "offline", "disabled"],
+        help="Knowledge augmentation mode (default: offline = memory only)",
     )
     demo_parser.add_argument(
         "--quiet", action="store_true", help="Suppress orchestrator event streaming"
@@ -118,7 +122,7 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
                 max_cycles=base.max_cycles,
                 quiet=args.quiet,
                 status_path=args.status_path or base.status_path,
-                rag_mode=args.rag_mode or base.rag_mode,
+                knowledge_mode=args.knowledge_mode or base.knowledge_mode,
                 metadata=dict(base.metadata),
             )
         return RunConfig(
@@ -128,7 +132,7 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
             max_cycles=4,
             quiet=args.quiet,
             status_path=args.status_path,
-            rag_mode=args.rag_mode,
+            knowledge_mode=args.knowledge_mode,
         )
 
     base = RunConfig.from_json_file(args.config) if args.config else None
@@ -154,9 +158,9 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         status_path=args.status_path
         if args.status_path is not None
         else (base.status_path if base is not None else None),
-        rag_mode=args.rag_mode
-        if args.rag_mode is not None
-        else (base.rag_mode if base is not None else None),
+        knowledge_mode=args.knowledge_mode
+        if args.knowledge_mode is not None
+        else (base.knowledge_mode if base is not None else None),
         metadata=dict(base.metadata) if base is not None else {},
     )
 

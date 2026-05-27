@@ -3,8 +3,9 @@
 An LLM-driven autonomous CTF solving and authorized security assessment
 framework. The project uses the NYUCTF dataset as its main benchmark and
 combines LLM planning, task routing, persona-based workers, guarded tool
-execution, Docker isolation, RAG hints, durable memory, batch evaluation, and
-run reporting into one reproducible workflow.
+execution, Docker isolation, durable cross-run memory with optional networked
+intelligence retrieval, batch evaluation, and run reporting into one
+reproducible workflow.
 
 > This project is intended for academic research, CTFs, security education, and
 > explicitly authorized lab environments only. Do not use it against systems you
@@ -29,8 +30,10 @@ The current implementation supports:
 - An OpenAI-compatible LLM gateway with Pydantic-validated structured output.
 - Docker-based execution for tools such as nmap, curl, sqlmap, nikto, radare2,
   gdb, binwalk, tshark, steghide, john, and more.
-- RAG-based method hints from prior writeups, including a strict decontamination
-  mode for benchmark comparisons.
+- A multi-layer file-backed memory system (global and category scope) plus
+  optional networked retrieval (CVE / MITRE ATT&CK / Exploit-DB) gated by an
+  explicit knowledge mode, with challenge identifiers and the validated flag
+  redacted from every outbound query.
 - Runtime logs, live status files, static HTML batch monitoring, compact run
   timelines, Markdown reports, and experiment summaries.
 
@@ -75,7 +78,8 @@ User / batch runner
 One assessment loop works like this:
 
 1. The Planner observes the objective, authorized scope, accumulated evidence,
-   RAG hints, durable memory, and current run state.
+   recalled durable memory, optional networked intelligence hits, and current
+   run state.
 2. It creates high-level todos only when more work is needed.
 3. The Router assigns ready todos to the most suitable persona worker.
 4. The worker asks the LLM for a concrete capability and metadata.
@@ -97,10 +101,10 @@ One assessment loop works like this:
 | `killchain_docker/tools/` | Tool abstractions, plugin registry, guard policies, and output parsers |
 | `killchain_docker/state/` | RunState, evidence, artifacts, candidates, todos, report projections, and facts |
 | `killchain_docker/llm/` | OpenAI-compatible gateway, JSON repair, typed failures, and token accounting |
-| `killchain_docker/rag/` | RAG mode handling, retrieval provider, prompt projection, and strict exclusions |
-| `killchain_docker/memory/` | Filesystem-backed durable memory across runs |
+| `killchain_docker/intelligence/` | Knowledge augmenter, durable-memory recall, and networked retrieval (CVE / ATT&CK / Exploit-DB) |
+| `killchain_docker/memory/` | Filesystem-backed durable cross-run memory (global and category scope only) |
 | `killchain_docker/batch/` | Dataset loading, Docker challenge lifecycle, parallel execution, and monitoring |
-| `scripts/` | Analysis utilities for summaries, RAG ablations, transcripts, flags, and plots |
+| `scripts/` | Analysis utilities for summaries, transcripts, flags, and plots |
 | `tests/` | Unit tests and architecture contract tests |
 
 ## Persona Workers
@@ -272,7 +276,7 @@ Common options:
 | `--container-network` | `ctfnet` | Docker network for challenge containers |
 | `--logdir` | `logs/<user>` | Batch log root |
 | `--name` | `5.19_development_1` | Batch run name |
-| `--rag-mode` | resolved by config/env | `enabled`, `strict`, or `disabled` |
+| `--knowledge-mode` | resolved by config/env | `enabled`, `offline`, or `disabled` |
 
 ## Generic `autopentest` CLI
 
@@ -339,43 +343,30 @@ Then visit:
 http://127.0.0.1:8765/_batch_monitor.html
 ```
 
-## RAG Modes
+## Knowledge Modes
 
-RAG provides method-level hints from prior challenge writeups. It is intended to
-help the Planner choose techniques, not to inject literal answers.
-
-Set the mode with `--rag-mode`:
+The Planner sees an augmented context built by `IntelligenceAugmenter`. It
+combines durable cross-run memory (loaded from `memory/` at the start of each
+run) with optional networked retrieval from public security databases. The mode
+flag controls what is allowed:
 
 ```bash
---rag-mode enabled
---rag-mode strict
---rag-mode disabled
+--knowledge-mode enabled
+--knowledge-mode offline
+--knowledge-mode disabled
 ```
 
 | Mode | Behavior |
 | --- | --- |
-| `enabled` | Retrieve hints using challenge name, category, description, and file names |
-| `strict` | Exclude the same challenge and same event, useful for decontaminated evaluations |
-| `disabled` | Disable retrieval completely for baseline comparisons |
+| `enabled` | Recall durable memory and fetch from CVE / MITRE ATT&CK / Exploit-DB |
+| `offline` | Recall durable memory only; no outbound network requests |
+| `disabled` | Skip both memory recall and network retrieval |
 
-Run a RAG ablation:
-
-```bash
-conda run -n autopentest python scripts/run_rag_ablation.py \
-  --challenges "<challenge-a>" "<challenge-b>" \
-  --modes enabled strict disabled \
-  --max-cycles 8 \
-  --logdir logs/rag_ablation \
-  --name subset_rag \
-  --audit
-```
-
-Audit an existing ablation manifest:
-
-```bash
-conda run -n autopentest python scripts/audit_rag_ablation.py \
-  logs/rag_ablation/subset_rag/_rag_ablation.json
-```
+Durable memory is intentionally limited to `global` and `category` scope. There
+is no per-challenge scope, so a previous run's notes for a specific challenge
+cannot be retrieved as an answer when the same challenge runs again. Outbound
+queries redact challenge identifiers, event names, and the validated flag
+before leaving the host.
 
 ## Analysis Scripts
 
@@ -415,8 +406,8 @@ conda run -n autopentest python -m pytest tests/test_capability_gateway.py
 ```
 
 The tests cover CLI arguments, planner behavior, tool capability contracts,
-script execution guardrails, RAG ablations, log summaries, batch monitoring,
-runtime persistence, and architecture constraints.
+script execution guardrails, durable memory, knowledge augmentation, log
+summaries, batch monitoring, runtime persistence, and architecture constraints.
 
 ## Design Notes
 
@@ -430,12 +421,14 @@ runtime persistence, and architecture constraints.
   execution records, result quality, and stop conditions.
 - **Safety boundaries:** Authorized scope, Docker execution, command guards, and
   metadata validation reduce accidental misuse in lab environments.
-- **RAG evaluation support:** `strict` mode supports cleaner comparisons by
-  excluding same-challenge and same-event retrieval hits.
+- **Knowledge augmentation:** Durable memory recall is bounded to global and
+  category scope; outbound network retrieval (CVE / ATT&CK / Exploit-DB) is
+  gated by an explicit mode and redacts challenge-identifying tokens.
 - **Observability:** Events, status snapshots, compact logs, reports, and token
   usage are written to disk.
-- **Durable memory:** Trusted worker discoveries can be persisted at global,
-  category, or challenge scope for future runs.
+- **Durable memory:** Trusted worker discoveries can be persisted at global or
+  category scope for future runs. Per-challenge scope is intentionally not
+  supported so memory cannot become a per-challenge answer oracle.
 
 ## Limitations
 
