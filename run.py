@@ -51,7 +51,7 @@ RUN_CONFIG = {
     "output_root": None,
     "parallel_workers": 5,
     "replicas": 1,
-    "knowledge_mode": None,
+    "knowledge_mode": "enabled",
     "sample_size": None,
     "sample_seed": None,
     "sample_strategy": "random",

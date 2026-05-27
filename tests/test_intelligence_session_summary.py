@@ -14,9 +14,11 @@ from killchain_docker.intelligence.session import (
     SessionSummaryThresholds,
     maybe_refresh_session_summary,
 )
-from killchain_docker.state.domain import ExecutionRecord
+from killchain_docker.intelligence.session.summary import MAX_SUMMARY_CHARS
+from killchain_docker.memory.projection import RunMemoryProjection
+from killchain_docker.state.domain import EvidenceRecord, ExecutionRecord, Finding
 from killchain_docker.state.run_state import RunState
-from killchain_docker.state.todos import RouterRound, RouterRoundSummary
+from killchain_docker.state.todos import RouterRound, RouterRoundSummary, TodoItem
 
 
 def _make_state(**overrides: object) -> RunState:
@@ -134,6 +136,125 @@ class RenderSummaryTests(unittest.TestCase):
         # Objective is truncated to 240 chars in the projection.
         self.assertIn("A" * 240, text)
         self.assertNotIn("A" * 241, text)
+
+    def test_summary_rolls_up_old_rounds_and_evidence_refs(self) -> None:
+        state = _make_state()
+        for cycle in range(1, 5):
+            state.rounds.append(
+                RouterRound(
+                    cycle=cycle,
+                    planner_summary=f"planner chose phase {cycle}",
+                    summary=RouterRoundSummary(
+                        summary=f"cycle {cycle} recovered useful clue",
+                        key_findings=[f"finding from cycle {cycle}"],
+                        next_focus=f"continue from clue {cycle}",
+                    ),
+                )
+            )
+            state.evidence[f"evidence-{cycle}"] = EvidenceRecord(
+                evidence_id=f"evidence-{cycle}",
+                task_id=f"todo-{cycle}",
+                capability="script.exec",
+                tool_name="script_exec",
+                mode="tool",
+                summary=f"evidence summary {cycle}",
+                extracted={
+                    "output_context": {
+                        "flag_candidates": [f"FLAG{{candidate-{cycle}}}"]
+                    }
+                },
+            )
+        state.findings["finding-1"] = Finding(
+            finding_id="finding-1",
+            title="Recovered XOR key",
+            evidence_refs=["evidence-3"],
+        )
+        state.todos.append(TodoItem(goal="Validate recovered candidate."))
+        maybe_refresh_session_summary(state, cycle=5)
+
+        text = state.run_memory[SESSION_SUMMARY_KEY]
+        self.assertIn("coverage: cycles=1-4", text)
+        self.assertIn("round_rollup:", text)
+        self.assertIn("cycle 4 recovered useful clue", text)
+        self.assertIn("evidence_anchors:", text)
+        self.assertIn("evidence-3", text)
+        self.assertIn("FLAG{candidate-4}", text)
+        self.assertIn("findings:", text)
+        self.assertIn("Recovered XOR key", text)
+        self.assertIn("open_focus:", text)
+        self.assertEqual(
+            state.metadata["session_summary"],
+            {
+                "key": SESSION_SUMMARY_KEY,
+                "cycle": 5,
+                "rounds": 4,
+                "evidence": 4,
+                "executions": 0,
+            },
+        )
+
+    def test_summary_is_bounded(self) -> None:
+        state = _make_state(objective="Summarize a noisy run.")
+        for cycle in range(30):
+            huge = f"cycle {cycle} " + ("X" * 1000)
+            state.rounds.append(
+                RouterRound(
+                    cycle=cycle,
+                    planner_summary=huge,
+                    summary=RouterRoundSummary(summary=huge, key_findings=[huge]),
+                )
+            )
+            state.evidence[f"evidence-{cycle}"] = EvidenceRecord(
+                evidence_id=f"evidence-{cycle}",
+                task_id=f"todo-{cycle}",
+                tool_name="shell_exec",
+                mode="tool",
+                summary=huge,
+            )
+
+        maybe_refresh_session_summary(state, cycle=30)
+
+        text = state.run_memory[SESSION_SUMMARY_KEY]
+        self.assertLessEqual(len(text), MAX_SUMMARY_CHARS)
+        self.assertIn("...[session summary truncated]", text)
+
+    def test_summary_keeps_early_high_value_evidence_as_milestone(self) -> None:
+        state = _make_state()
+        state.evidence["evidence-early"] = EvidenceRecord(
+            evidence_id="evidence-early",
+            task_id="todo-early",
+            tool_name="strings_cmd",
+            mode="tool",
+            summary="Recovered secret key material from the first artifact.",
+            extracted={"output_context": {"flag_candidates": ["FLAG{early-secret}"]}},
+        )
+        for index in range(25):
+            state.evidence[f"evidence-noise-{index}"] = EvidenceRecord(
+                evidence_id=f"evidence-noise-{index}",
+                task_id=f"todo-noise-{index}",
+                tool_name="shell_exec",
+                mode="tool",
+                summary=f"routine diagnostic output {index}",
+            )
+
+        maybe_refresh_session_summary(state, cycle=5)
+
+        text = state.run_memory[SESSION_SUMMARY_KEY]
+        self.assertIn("historical_milestones:", text)
+        self.assertIn("evidence-early", text)
+        self.assertIn("FLAG{early-secret}", text)
+
+    def test_projection_always_includes_session_summary_with_wider_budget(self) -> None:
+        state = _make_state()
+        state.run_memory.update({f"memory-{index}": "value" for index in range(25)})
+        state.run_memory[SESSION_SUMMARY_KEY] = "S" * 1200
+
+        projected = RunMemoryProjection(state).prompt_entries(limit=3, width=100)
+
+        self.assertIn(SESSION_SUMMARY_KEY, projected)
+        self.assertGreater(len(projected[SESSION_SUMMARY_KEY]), 100)
+        self.assertLessEqual(len(projected[SESSION_SUMMARY_KEY]), 1200)
+        self.assertIn("memory-24", projected)
 
 
 if __name__ == "__main__":
