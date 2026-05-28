@@ -627,6 +627,50 @@ class TodoProgressGateTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("cooldown", reason)
 
+    def test_partial_with_progress_evidence_does_not_count_toward_cooldown(
+        self,
+    ) -> None:
+        state = _state()
+        for idx in range(FAILURE_COOLDOWN_THRESHOLD):
+            item = todo_queue(state).enqueue(
+                TodoItem(
+                    goal=f"Try XOR decrypt strategy {idx}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "crypto-decrypt"},
+                    dedupe_key=f"crypto-decrypt-{idx}",
+                )
+            )
+            todo_queue(state).start(item, "artifact-worker")
+            EvidenceFactStore(state).evidence(
+                EvidenceRecord(
+                    evidence_id=f"e-{idx}",
+                    task_id=item.todo_id,
+                    capability="script.exec",
+                    tool_name="script_exec",
+                    mode="local_command",
+                    summary=f"recovered partial key bytes attempt {idx}",
+                    extracted={
+                        "output_context": {
+                            "result_quality": "near_miss",
+                            "near_miss_candidates": [f"flag{{partial-{idx}}}"],
+                        }
+                    },
+                )
+            )
+            todo_queue(state).partial(
+                item, "script (python)", "no flag candidate but recovered key bytes"
+            )
+        total, failed = family_counts(state, "crypto-decrypt")
+        self.assertEqual(total, FAILURE_COOLDOWN_THRESHOLD)
+        self.assertEqual(failed, 0)
+        todo = PlannedTodo(
+            goal="Try another XOR decrypt strategy with the longer key.",
+            phase=TodoPhase.ANALYSIS,
+            context={"family": "crypto-decrypt"},
+        )
+        allowed, _reason = progress_allows(todo, state)
+        self.assertTrue(allowed)
+
     def test_progress_gate_counts_mislabelled_same_semantic_family(self) -> None:
         state = _state()
         for idx, explicit_family in enumerate(
