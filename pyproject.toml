@@ -37,6 +37,11 @@ dependencies = [
   "numpy",
 ]
 
+[project.optional-dependencies]
+test = [
+  "pytest",
+]
+
 [project.urls]
 Homepage = "https://nyu-llm-ctf.github.io"
 

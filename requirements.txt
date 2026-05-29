@@ -30,3 +30,4 @@ together
 # AUTOPENTEST_RAG_DISABLED=1 to skip augmentation entirely.
 fastembed
 numpy
+pytest
