@@ -28,10 +28,26 @@ from killchain_docker.tools.plugins.shell_output import (
     build_output as shell_output_builder,
 )
 from killchain_docker.tools.plugins.strace import StracePlugin
-from killchain_docker.tools.plugins.workspace import protected_shell_command
+from killchain_docker.tools.plugins.workspace import (
+    disposable_script_command,
+    protected_shell_command,
+)
 
 
 class ToolWorkspaceTests(unittest.TestCase):
+    def test_protected_shell_defaults_to_no_virtual_memory_limit(self) -> None:
+        command = protected_shell_command("printf ok", "/tmp/ctf_files")
+
+        self.assertIn("_kc_memory_limit_kb=0", command)
+
+    def test_disposable_script_defaults_to_no_virtual_memory_limit(self) -> None:
+        command = disposable_script_command(
+            files_root="/tmp/ctf_files",
+            interpreter_cmd="python3 -u",
+        )
+
+        self.assertIn("_kc_memory_limit_kb=0", command)
+
     def test_shell_exec_restores_challenge_files_after_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -203,6 +219,33 @@ class ToolWorkspaceTests(unittest.TestCase):
             self.assertEqual(output.output_context["generated_artifacts_durable"], True)
             self.assertEqual(output.artifacts[0].source, "shell_exec")
             self.assertRegex(str(record["digest"]), r"^[0-9a-f]{64}$")
+
+    def test_shell_exec_does_not_publish_modified_original_file_as_artifact(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original = root / "flag.dat"
+            original.write_text("original", encoding="utf-8")
+            request = ToolExecutionRequest(
+                tool_name="shell_exec",
+                timeout_s=5,
+                metadata={
+                    "files_root": str(root),
+                    "command": "printf decoded > flag.dat; printf done",
+                },
+            )
+
+            result = ShellPlugin().execute(request)
+            output = shell_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
+
+            self.assertEqual(result.exit_code, 0, result.stderr)
+            self.assertEqual(original.read_text(encoding="utf-8"), "original")
+            self.assertNotIn("__KILLCHAIN_SCRIPT_ARTIFACTS__", result.stdout)
+            self.assertNotIn("generated_artifact_records", output.output_context)
+            self.assertEqual(output.artifacts, [])
 
     def test_shell_exec_prioritizes_readable_generated_artifacts_before_cap(
         self,
@@ -671,6 +714,38 @@ class ToolWorkspaceTests(unittest.TestCase):
             )
             self.assertEqual(output.artifacts[0].path, str(artifact_path))
             self.assertRegex(str(records[0]["digest"]), r"^[0-9a-f]{64}$")
+
+    def test_script_exec_does_not_publish_modified_original_file_as_artifact(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original = root / "flag.dat"
+            original.write_text("original", encoding="utf-8")
+            request = ToolExecutionRequest(
+                tool_name="script_exec",
+                timeout_s=5,
+                metadata={
+                    "files_root": str(root),
+                    "script_language": "python",
+                    "script_code": (
+                        "from pathlib import Path\n"
+                        "Path('flag.dat').write_text('decoded')\n"
+                        "print('done', end='')\n"
+                    ),
+                },
+            )
+
+            result = ScriptPlugin().execute(request)
+            output = script_output_builder(
+                request, result, ParsedToolOutput(summary="raw")
+            )
+
+            self.assertEqual(result.exit_code, 0, result.stderr)
+            self.assertEqual(original.read_text(encoding="utf-8"), "original")
+            self.assertNotIn("__KILLCHAIN_SCRIPT_ARTIFACTS__", result.stdout)
+            self.assertNotIn("generated_artifact_records", output.output_context)
+            self.assertEqual(output.artifacts, [])
 
     def test_script_exec_enforces_workspace_growth_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

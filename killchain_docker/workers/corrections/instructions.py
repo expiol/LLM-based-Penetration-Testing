@@ -93,4 +93,9 @@ def script_correction_instruction(failure_kind: object) -> str:
             base
             + "Correct scratch file usage so temporary files stay within the tool's provided writable locations and the script preserves concise diagnostics."
         )
+    if failure == "scratch_cleanup_error":
+        return (
+            base
+            + "Remove manual cleanup of CTF_TEMP_DIR or tempfile.mkdtemp() directories after writing files there. The runner cleans disposable scratch and publishes generated artifacts. If a private temporary tree truly must be deleted, use shutil.rmtree(path, ignore_errors=True) only after printing the needed diagnostics."
+        )
     return base

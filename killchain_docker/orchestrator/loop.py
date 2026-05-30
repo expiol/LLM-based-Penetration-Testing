@@ -257,10 +257,14 @@ class Orchestrator:
         max_cycles_exhausted = True
         current_cycle = 0
         cycle = 0
+        effective_cycles = 0
         self._outcome.start(touch=False)
         self._background_flags.start()
         try:
-            while cycle < max_cycles:
+            # ``max_cycles`` is the effective assessment budget. Provider or
+            # schema retries keep monotonic cycle labels for logs, but do not
+            # consume the budget because no worker round was assessable.
+            while effective_cycles < max_cycles:
                 cycle += 1
                 current_cycle = cycle
                 if self._begin_cycle(cycle=cycle):
@@ -271,7 +275,12 @@ class Orchestrator:
                     max_cycles_exhausted = False
                     break
                 if planning.retry_cycle:
+                    if not planning.transient_skip:
+                        effective_cycles += 1
                     continue
+                if not self.todos.has_open():
+                    max_cycles_exhausted = False
+                    break
                 dispatch = self._dispatch_cycle_controller.dispatch(
                     cycle=cycle, planner_summary=planning.summary
                 )
@@ -280,6 +289,7 @@ class Orchestrator:
                     break
                 if dispatch.retry_cycle and dispatch.transient_skip:
                     continue
+                effective_cycles += 1
         except LLMClientError as exc:
             self._handle_uncaught_llm_error(cycle=current_cycle, exc=exc)
             max_cycles_exhausted = False

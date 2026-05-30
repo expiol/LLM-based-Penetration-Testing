@@ -197,6 +197,7 @@ class WorkerPromptBoundsTests(unittest.TestCase):
         self.assertIn("Prefer stdlib", rules)
         self.assertIn("ImportError", rules)
         self.assertIn("stdlib fallback", rules)
+        self.assertIn("Do not manually os.rmdir()", rules)
         self.assertIn("connect/read socket timeouts <=5 seconds", rules)
         self.assertIn("localhost/127.0.0.1", rules)
         self.assertIn("explicit challenge paths", rules)
@@ -547,6 +548,12 @@ class WorkerPromptBoundsTests(unittest.TestCase):
     def test_scratch_space_correction_uses_disposable_temp_dir(self) -> None:
         instruction = script_correction_instruction("scratch_space_exhausted")
         self.assertIn("provided writable locations", instruction)
+
+    def test_scratch_cleanup_correction_leaves_runner_owned_temp_dirs(self) -> None:
+        instruction = script_correction_instruction("scratch_cleanup_error")
+        self.assertIn("Remove manual cleanup", instruction)
+        self.assertIn("CTF_TEMP_DIR", instruction)
+        self.assertIn("runner cleans", instruction)
 
     def test_same_todo_unbounded_failure_survives_local_no_candidate_step(self) -> None:
         captured: dict[str, object] = {}

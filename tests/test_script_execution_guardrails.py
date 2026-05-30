@@ -1211,6 +1211,18 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
         )
         self.assertEqual(ctx["failure_kind"], "no_candidate")
 
+    def test_local_decryption_no_match_is_not_network_incomplete_read(self) -> None:
+        ctx = self._output_context(
+            stdout=(
+                "No valid decryption found.\n"
+                "Still no match. Trying with data starting after header...\n"
+                "No matches found with basic LFSR configurations.\n"
+            ),
+            exit_code=0,
+        )
+
+        self.assertEqual(ctx["failure_kind"], "no_candidate")
+
     def test_classifies_zero_exit_reported_parse_failure(self) -> None:
         ctx = self._output_context(
             stdout="Connected!\nReceived header: ''\nCannot parse header: \nDone.\n",
@@ -1293,6 +1305,17 @@ class TestScriptOutputFailureSignals(unittest.TestCase):
         self.assertEqual(ctx["failure_kind"], "missing_tool")
         self.assertIn("module", str(ctx["failure_detail"]))
         self.assertIn("stdlib", str(ctx["failure_detail"]))
+
+    def test_classifies_nonempty_scratch_rmdir_as_cleanup_error(self) -> None:
+        ctx = self._output_context(
+            "Traceback (most recent call last):\n"
+            "  File \"/tmp/_script_exec_abcd/_script_main\", line 42, in main\n"
+            "    os.rmdir(tmpdir)\n"
+            "OSError: [Errno 39] Directory not empty: "
+            "'/tmp/_script_exec_abcd/scratch/tmpxyz'\n"
+        )
+        self.assertEqual(ctx["failure_kind"], "scratch_cleanup_error")
+        self.assertIn("runner", str(ctx["failure_detail"]))
 
     def test_classifies_socket_gaierror_as_host_resolution_error(self) -> None:
         ctx = self._output_context(

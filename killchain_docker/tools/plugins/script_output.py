@@ -295,6 +295,20 @@ def script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str,
             "script scratch workspace could not be created or filled the container overlay",
         )
     if (
+        "oserror:" in text
+        and "directory not empty" in text
+        and (
+            "ctf_temp_dir" in text
+            or "/scratch/" in text
+            or "/tmp/_script_exec_" in text
+            or "tempfile.mkdtemp" in text
+        )
+    ):
+        return (
+            "scratch_cleanup_error",
+            "script tried to remove a non-empty disposable scratch directory; leave CTF_TEMP_DIR/tempfile cleanup to the runner or use shutil.rmtree only for private throwaway directories",
+        )
+    if (
         "modulenotfounderror:" in text
         or "importerror:" in text
         or "no module named" in text
@@ -443,6 +457,17 @@ def script_failure_signal(output_text: str, exit_code: int | None) -> tuple[str,
 def network_incomplete_read_signal(text: str) -> bool:
     if not text:
         return False
+    has_transport_context = bool(
+        re.search(
+            r"\b(?:connect(?:ed|ing|ion)?|socket|tcp|server|remote|endpoint|"
+            r"send(?:ing)?|sent|recv|receive(?:d|ing)?|response|banner|"
+            r"prompt|round)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    if not has_transport_context:
+        return False
     missing_expected_data = bool(
         re.search(
             r"\b(?:no|missing|failed\s+to\s+receive|unable\s+to\s+receive|did\s+not\s+receive|could\s+not\s+read|unexpected\s+eof|eof)\b.{0,80}\b(?:data|response|banner|header|line|prompt|message|round|payload|final|bytes?)\b",
@@ -460,13 +485,7 @@ def network_incomplete_read_signal(text: str) -> bool:
         )
     if not missing_expected_data:
         return False
-    return bool(
-        re.search(
-            r"\b(?:connect(?:ed|ing|ion)?|socket|tcp|server|remote|endpoint|send(?:ing)?|sent|recv|receive(?:d|ing)?|read(?:ing)?|response|banner|header|prompt|round)\b",
-            text,
-            re.IGNORECASE,
-        )
-    )
+    return True
 
 
 def script_reported_error_line(output_text: str) -> str:

@@ -2542,7 +2542,14 @@ class RuntimeArchitectureTests(unittest.TestCase):
             ),
             max_transient_skips=1,
         )
-        transient = LLMClientError("temporary", transient=True)
+        transient = LLMClientError(
+            "temporary",
+            transient=True,
+            kind="connection",
+            schema_name="ToolUseDecision",
+            model="test-model",
+            attempts=4,
+        )
         first = controller.skip_transient_llm_error(2, "planner", transient)
         second = controller.skip_transient_llm_error(3, "planner", transient)
         permanent = controller.skip_transient_llm_error(
@@ -2553,6 +2560,10 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertFalse(permanent)
         self.assertEqual(controller.transient_skip_count, 1)
         self.assertIn("skip 1/1", events[0])
+        self.assertIn("kind=connection", events[0])
+        self.assertIn("attempts=4", events[0])
+        self.assertIn("schema=ToolUseDecision", events[0])
+        self.assertIn("model=test-model", events[0])
         self.assertIn("transient LLM error skipped", state.orchestration_notes[0])
 
     def test_transient_skip_counter_resets_on_successful_step(self) -> None:

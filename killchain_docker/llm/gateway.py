@@ -13,6 +13,8 @@ import signal
 import threading
 import time
 from contextlib import contextmanager
+import fcntl
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
@@ -237,6 +239,63 @@ def _config_int(payload: dict[str, Any], key: str, default: int | None) -> int |
         ) from exc
 
 
+def _normalize_schema_int_map(
+    payload: Any, *, field_name: str, minimum: int = 1
+) -> dict[str, int]:
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise LLMClientError(
+            f"{field_name} must be a JSON object.",
+            kind=LLMFailureKind.CONFIG,
+        )
+    normalized: dict[str, int] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise LLMClientError(
+                f"{field_name}[{key!r}] must be an integer.",
+                kind=LLMFailureKind.CONFIG,
+            ) from exc
+        if parsed < minimum:
+            raise LLMClientError(
+                f"{field_name}[{key!r}] must be >= {minimum}.",
+                kind=LLMFailureKind.CONFIG,
+            )
+        normalized[key.strip()] = parsed
+    return normalized
+
+
+def _normalize_request_options(payload: Any) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise LLMClientError(
+            "request_options must be a JSON object.",
+            kind=LLMFailureKind.CONFIG,
+        )
+    return dict(payload)
+
+
+def _config_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
+    value = payload.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise LLMClientError(
+        f"LLM config field {key!r} must be a boolean.",
+        kind=LLMFailureKind.CONFIG,
+    )
+
+
 class LLMSettings(BaseModel):
     """Gateway settings loaded from configs/llm_gateway.json."""
 
@@ -251,6 +310,15 @@ class LLMSettings(BaseModel):
     max_retries: int = Field(default=4, ge=0)
     total_deadline_s: int | None = Field(default=None, ge=1)
     max_completion_tokens: int = Field(default=16384, ge=1)
+    schema_max_completion_tokens: dict[str, int] = Field(default_factory=dict)
+    schema_timeout_s: dict[str, int] = Field(default_factory=dict)
+    schema_total_deadline_s: dict[str, int] = Field(default_factory=dict)
+    schema_max_retries: dict[str, int] = Field(default_factory=dict)
+    cross_process_serial: bool = False
+    cross_process_slots: int = Field(default=0, ge=0)
+    max_slot_wait_s: int = Field(default=180, ge=1)
+    token_parameter: str = "auto"
+    request_options: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> "LLMSettings":
@@ -280,6 +348,36 @@ class LLMSettings(BaseModel):
                 max_completion_tokens=_config_int(
                     payload, "max_completion_tokens", 16384
                 ),
+                schema_max_completion_tokens=_normalize_schema_int_map(
+                    payload.get("schema_max_completion_tokens"),
+                    field_name="schema_max_completion_tokens",
+                ),
+                schema_timeout_s=_normalize_schema_int_map(
+                    payload.get("schema_timeout_s"),
+                    field_name="schema_timeout_s",
+                ),
+                schema_total_deadline_s=_normalize_schema_int_map(
+                    payload.get("schema_total_deadline_s"),
+                    field_name="schema_total_deadline_s",
+                ),
+                schema_max_retries=_normalize_schema_int_map(
+                    payload.get("schema_max_retries"),
+                    field_name="schema_max_retries",
+                    minimum=0,
+                ),
+                cross_process_serial=_config_bool(
+                    payload, "cross_process_serial", False
+                ),
+                cross_process_slots=_config_int(
+                    payload, "cross_process_slots", 0
+                ),
+                max_slot_wait_s=_config_int(payload, "max_slot_wait_s", 180),
+                token_parameter=str(payload.get("token_parameter") or "auto")
+                .strip()
+                .lower(),
+                request_options=_normalize_request_options(
+                    payload.get("request_options")
+                ),
             )
         except ValidationError as exc:
             raise LLMClientError(
@@ -301,6 +399,48 @@ _PROVIDER_DEFAULT_BASE_URL: dict[str, str] = {
     "groq": "https://api.groq.com/openai/v1",
     "openrouter": "https://openrouter.ai/api/v1",
 }
+
+_OPENAI_CHAT_COMPLETION_DIRECT_OPTIONS = {
+    "frequency_penalty",
+    "logit_bias",
+    "max_completion_tokens",
+    "max_tokens",
+    "metadata",
+    "n",
+    "presence_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "stream",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p",
+    "user",
+}
+
+
+def _is_reasoning_gateway_provider(provider: str, base_url: str | None) -> bool:
+    text = f"{provider} {base_url or ''}".lower()
+    return "reasoning_gateway" in text or "reasoning-gateway" in text or "reasoning-gateway.example" in text
+
+
+def _resolve_token_parameter(
+    token_parameter: str, *, provider: str, base_url: str | None
+) -> str:
+    normalized = (token_parameter or "auto").strip().lower()
+    if normalized == "auto":
+        return (
+            "max_completion_tokens"
+            if _is_reasoning_gateway_provider(provider, base_url)
+            else "max_tokens"
+        )
+    if normalized not in {"max_tokens", "max_completion_tokens", "both"}:
+        raise LLMClientError(
+            "token_parameter must be one of: auto, max_tokens, max_completion_tokens, both.",
+            kind=LLMFailureKind.CONFIG,
+        )
+    return normalized
 
 
 class StaticLLMClient:
@@ -374,6 +514,15 @@ class GatewayLLMClient:
         max_retries: int = 4,
         total_deadline_s: int | None = None,
         max_completion_tokens: int = 16384,
+        schema_max_completion_tokens: Mapping[str, int] | None = None,
+        schema_timeout_s: Mapping[str, int] | None = None,
+        schema_total_deadline_s: Mapping[str, int] | None = None,
+        schema_max_retries: Mapping[str, int] | None = None,
+        cross_process_serial: bool = False,
+        cross_process_slots: int = 0,
+        max_slot_wait_s: int = 180,
+        token_parameter: str = "auto",
+        request_options: Mapping[str, Any] | None = None,
     ) -> None:
         self.provider = provider.strip().lower()
         self.api_key = api_key
@@ -386,6 +535,18 @@ class GatewayLLMClient:
         self.max_retries = max_retries
         self.total_deadline_s = total_deadline_s
         self.max_completion_tokens = max_completion_tokens
+        self.schema_max_completion_tokens = dict(schema_max_completion_tokens or {})
+        self.schema_timeout_s = dict(schema_timeout_s or {})
+        self.schema_total_deadline_s = dict(schema_total_deadline_s or {})
+        self.schema_max_retries = dict(schema_max_retries or {})
+        self.cross_process_serial = bool(cross_process_serial)
+        self.cross_process_slots = max(0, int(cross_process_slots or 0))
+        self.max_slot_wait_s = max(1, int(max_slot_wait_s or 180))
+        self.token_parameter = _resolve_token_parameter(
+            token_parameter, provider=self.provider, base_url=self.base_url
+        )
+        self.request_options = self._default_request_options()
+        self.request_options.update(dict(request_options or {}))
         _validate_model_names(self.default_model, self.schema_models)
         self.token_ledger = TokenLedger()
         self._client = self._build_client()
@@ -411,6 +572,43 @@ class GatewayLLMClient:
         # raw client (not instructor) and run repair + validation ourselves on
         # the success path so the JSON-coercion pipeline is observable.
         return OpenAI(**kwargs)
+
+    def _reset_transport_after_failure(self, exc: Exception) -> None:
+        """Drop pooled HTTP state before retrying after transport failures."""
+
+        kind = self._classify_failure(exc)
+        if kind not in {
+            LLMFailureKind.CONNECTION,
+            LLMFailureKind.DEADLINE_EXCEEDED,
+            LLMFailureKind.RATE_LIMIT,
+            LLMFailureKind.SERVICE_UNAVAILABLE,
+            LLMFailureKind.TIMEOUT,
+            LLMFailureKind.TRANSIENT,
+        }:
+            return
+        old_client = getattr(self, "_client", None)
+        close = getattr(old_client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                log.debug("failed to close LLM client after transient error", exc_info=True)
+        try:
+            self._client = self._build_client()
+        except Exception:
+            log.debug("failed to rebuild LLM client after transient error", exc_info=True)
+
+    def _default_request_options(self) -> dict[str, Any]:
+        if not _is_reasoning_gateway_provider(self.provider, self.base_url):
+            return {}
+        return {
+            "top_p": 0.95,
+            "stream": False,
+            "stop": None,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking": {"type": "disabled"},
+        }
 
     def _decode_into_schema(
         self, content: str, schema: type[ModelT]
@@ -527,7 +725,8 @@ class GatewayLLMClient:
         schema: type[ModelT],
         model: str,
         temperature: float,
-        request_timeout_s: float | None = None,
+        request_timeout_s: float,
+        deadline_monotonic: float,
     ) -> tuple[ModelT, Any | None]:
         """Issue one chat completion request and decode it.
 
@@ -542,13 +741,39 @@ class GatewayLLMClient:
             "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": self.max_completion_tokens,
             "response_format": {"type": "json_object"},
         }
-        if request_timeout_s is not None:
-            kwargs["timeout"] = request_timeout_s
-
-        completion = endpoint.create(**kwargs)
+        token_limit = self._completion_token_limit(schema)
+        token_parameter = getattr(self, "token_parameter", "max_tokens")
+        if token_parameter in {"max_tokens", "both"}:
+            kwargs["max_tokens"] = token_limit
+        if token_parameter in {"max_completion_tokens", "both"}:
+            kwargs["max_completion_tokens"] = token_limit
+        extra_body: dict[str, Any] = {}
+        for key, value in (getattr(self, "request_options", {}) or {}).items():
+            if key == "extra_body":
+                if isinstance(value, Mapping):
+                    extra_body.update(dict(value))
+                continue
+            if key in _OPENAI_CHAT_COMPLETION_DIRECT_OPTIONS:
+                kwargs[key] = value
+                continue
+            # OpenAI-compatible providers often expose extension fields, while
+            # the SDK validates known kwargs.  Put unknown provider options in
+            # extra_body so they still reach the HTTP request.
+            extra_body[key] = value
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        completion = self._send_completion_request(
+            endpoint=endpoint,
+            kwargs=kwargs,
+            schema_name=schema.__name__,
+            model=model,
+            token_limit=token_limit,
+            correction=False,
+            request_timeout_s=request_timeout_s,
+            attempt_deadline_monotonic=deadline_monotonic,
+        )
         content = completion_content(completion) or ""
         try:
             return self._decode_into_schema(content, schema), completion
@@ -572,10 +797,173 @@ class GatewayLLMClient:
             corrected_kwargs = dict(kwargs)
             corrected_kwargs["messages"] = corrected_messages
             corrected_kwargs["temperature"] = max(0.0, temperature * 0.5)
-            corrected = endpoint.create(**corrected_kwargs)
+            corrected = self._send_completion_request(
+                endpoint=endpoint,
+                kwargs=corrected_kwargs,
+                schema_name=schema.__name__,
+                model=model,
+                token_limit=token_limit,
+                correction=True,
+                request_timeout_s=request_timeout_s,
+                attempt_deadline_monotonic=deadline_monotonic,
+            )
             corrected_content = completion_content(corrected) or ""
             parsed = self._decode_into_schema(corrected_content, schema)
             return parsed, corrected
+
+    def _send_completion_request(
+        self,
+        *,
+        endpoint: Any,
+        kwargs: dict[str, Any],
+        schema_name: str,
+        model: str,
+        token_limit: int,
+        correction: bool,
+        request_timeout_s: float,
+        attempt_deadline_monotonic: float,
+    ) -> Any:
+        slot_deadline = time.monotonic() + float(
+            max(1, int(getattr(self, "max_slot_wait_s", 180) or 180))
+        )
+        with self._request_slot(
+            schema_name=schema_name,
+            model=model,
+            deadline_monotonic=slot_deadline,
+        ):
+            del attempt_deadline_monotonic
+            effective_timeout_s = max(0.1, float(request_timeout_s))
+            request_kwargs = dict(kwargs)
+            request_kwargs["timeout"] = effective_timeout_s
+            self._log_request_start(
+                schema_name=schema_name,
+                model=model,
+                request_timeout_s=effective_timeout_s,
+                token_limit=token_limit,
+                correction=correction,
+                kwargs=request_kwargs,
+            )
+            with self._hard_request_deadline(effective_timeout_s):
+                return endpoint.create(**request_kwargs)
+
+    @contextmanager
+    def _request_slot(
+        self,
+        *,
+        schema_name: str,
+        model: str,
+        deadline_monotonic: float | None = None,
+    ):
+        slot_count = self._request_slot_count()
+        if slot_count <= 0:
+            yield
+            return
+        lock_dir = Path(tempfile.gettempdir()) / "killchain_docker_llm_gateway_slots"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        handles = [
+            (lock_dir / f"slot-{index}.lock").open("a+", encoding="utf-8")
+            for index in range(slot_count)
+        ]
+        acquired: Any | None = None
+        acquired_index: int | None = None
+        waited = False
+        try:
+            while acquired is None:
+                for index, handle in enumerate(handles):
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue
+                    acquired = handle
+                    acquired_index = index
+                    break
+                if acquired is None:
+                    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                        raise TimeoutError(
+                            f"LLM request slot wait exceeded remaining deadline for {schema_name}"
+                        )
+                    if not waited:
+                        waited = True
+                        log.info(
+                            "waiting for LLM request slot",
+                            extra={
+                                "schema": schema_name,
+                                "model": model,
+                                "slots": slot_count,
+                            },
+                        )
+                    sleep_s = 0.25
+                    if deadline_monotonic is not None:
+                        sleep_s = max(
+                            0.0,
+                            min(sleep_s, deadline_monotonic - time.monotonic()),
+                        )
+                    if sleep_s <= 0:
+                        continue
+                    time.sleep(sleep_s)
+            handle.seek(0)
+            handle.truncate()
+            handle.write(
+                f"{time.time():.3f} slot={acquired_index} {schema_name} {model}\n"
+            )
+            handle.flush()
+            if waited:
+                log.info(
+                    "acquired LLM request slot",
+                    extra={
+                        "schema": schema_name,
+                        "model": model,
+                        "slot": acquired_index,
+                        "slots": slot_count,
+                    },
+                )
+            try:
+                yield
+            finally:
+                if acquired is not None:
+                    fcntl.flock(acquired, fcntl.LOCK_UN)
+        finally:
+            for handle in handles:
+                handle.close()
+
+    def _request_slot_count(self) -> int:
+        configured = int(getattr(self, "cross_process_slots", 0) or 0)
+        if configured > 0:
+            return configured
+        return 1 if getattr(self, "cross_process_serial", False) else 0
+
+    def _log_request_start(
+        self,
+        *,
+        schema_name: str,
+        model: str,
+        request_timeout_s: float | None,
+        token_limit: int,
+        correction: bool,
+        kwargs: Mapping[str, Any],
+    ) -> None:
+        extra_body = kwargs.get("extra_body")
+        extra_body_keys = (
+            sorted(str(key) for key in extra_body)
+            if isinstance(extra_body, Mapping)
+            else []
+        )
+        log.info(
+            "LLM request starting",
+            extra={
+                "schema": schema_name,
+                "model": model,
+                "provider": getattr(self, "provider", ""),
+                "base_url": getattr(self, "base_url", ""),
+                "timeout_s": request_timeout_s,
+                "token_parameter": getattr(self, "token_parameter", "max_tokens"),
+                "max_completion_tokens": token_limit,
+                "temperature": kwargs.get("temperature"),
+                "response_format": kwargs.get("response_format"),
+                "extra_body_keys": extra_body_keys,
+                "correction": correction,
+            },
+        )
 
     def _select_model(self, schema: type[BaseModel]) -> str:
         schema_name = schema.__name__
@@ -584,6 +972,49 @@ class GatewayLLMClient:
             if model:
                 return model
         return self.default_model
+
+    def _completion_token_limit(self, schema: type[BaseModel]) -> int:
+        return self._schema_int_setting(
+            schema,
+            mapping_name="schema_max_completion_tokens",
+            default=int(self.max_completion_tokens),
+        )
+
+    def _request_timeout_s(self, schema: type[BaseModel]) -> int:
+        return self._schema_int_setting(
+            schema,
+            mapping_name="schema_timeout_s",
+            default=int(self.timeout_s),
+        )
+
+    def _total_deadline_s_for_schema(self, schema: type[BaseModel]) -> int | None:
+        return self._schema_int_setting(
+            schema,
+            mapping_name="schema_total_deadline_s",
+            default=self.total_deadline_s,
+        )
+
+    def _max_retries_for_schema(self, schema: type[BaseModel]) -> int:
+        return self._schema_int_setting(
+            schema,
+            mapping_name="schema_max_retries",
+            default=int(self.max_retries),
+        )
+
+    def _schema_int_setting(
+        self,
+        schema: type[BaseModel],
+        *,
+        mapping_name: str,
+        default: int | None,
+    ) -> int | None:
+        schema_name = schema.__name__
+        schema_limits = getattr(self, mapping_name, {}) or {}
+        for candidate in (schema_name, schema_name.lower(), "*"):
+            value = schema_limits.get(candidate)
+            if value is not None:
+                return int(value)
+        return default
 
     def _is_schema_validation_error(self, exc: Exception) -> bool:
         if isinstance(exc, ValidationError):
@@ -607,6 +1038,18 @@ class GatewayLLMClient:
             return exc.kind
         if self._is_schema_validation_error(exc):
             return LLMFailureKind.SCHEMA_VALIDATION
+        status_code = self._http_status_code(exc)
+        if status_code is not None:
+            if status_code == 408:
+                return LLMFailureKind.TIMEOUT
+            if status_code == 429:
+                return LLMFailureKind.RATE_LIMIT
+            if status_code == 409:
+                return LLMFailureKind.TRANSIENT
+            if status_code >= 500:
+                return LLMFailureKind.SERVICE_UNAVAILABLE
+            if 400 <= status_code < 500:
+                return LLMFailureKind.CONFIG
         message = str(exc).lower()
         if "rate limit" in message or "429" in message:
             return LLMFailureKind.RATE_LIMIT
@@ -626,11 +1069,33 @@ class GatewayLLMClient:
         name = type(exc).__name__.lower()
         if "ratelimit" in name:
             return LLMFailureKind.RATE_LIMIT
-        if "timeout" in name:
+        if "timeout" in name or "apitimeo" in name:
             return LLMFailureKind.TIMEOUT
-        if "connection" in name:
+        if "connection" in name or "apiconnection" in name:
             return LLMFailureKind.CONNECTION
+        if "internalserver" in name:
+            return LLMFailureKind.SERVICE_UNAVAILABLE
+        if (
+            "badrequest" in name
+            or "authentication" in name
+            or "permissiondenied" in name
+            or "notfound" in name
+        ):
+            return LLMFailureKind.CONFIG
         return LLMFailureKind.UNKNOWN
+
+    @staticmethod
+    def _http_status_code(exc: Exception) -> int | None:
+        raw_status = getattr(exc, "status_code", None)
+        if raw_status is None:
+            response = getattr(exc, "response", None)
+            raw_status = getattr(response, "status_code", None)
+        if raw_status is None:
+            return None
+        try:
+            return int(raw_status)
+        except (TypeError, ValueError):
+            return None
 
     def _is_transient(self, exc: Exception) -> bool:
         return self._classify_failure(exc).is_transient
@@ -724,11 +1189,14 @@ class GatewayLLMClient:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, prior_handler)
 
-    def _call_deadline_s(self) -> float:
-        retry_budget = float(self.timeout_s * (1 + self.max_retries))
-        if self.total_deadline_s is None:
+    def _call_deadline_s(self, schema: type[BaseModel]) -> float:
+        request_timeout_s = self._request_timeout_s(schema)
+        max_retries = self._max_retries_for_schema(schema)
+        total_deadline_s = self._total_deadline_s_for_schema(schema)
+        retry_budget = float(request_timeout_s * (1 + max_retries))
+        if total_deadline_s is None:
             return retry_budget
-        return min(float(self.total_deadline_s), retry_budget)
+        return min(float(total_deadline_s), retry_budget)
 
     def generate_json(
         self,
@@ -744,9 +1212,11 @@ class GatewayLLMClient:
             {"role": "user", "content": user_prompt},
         ]
         # Total deadline across all retry attempts so a single generate_json
-        # call never blocks a worker indefinitely.
-        max_retries = self.max_retries
-        deadline = time.monotonic() + self._call_deadline_s()
+        # call never blocks indefinitely on upstream requests.  Local slot
+        # queueing is bounded separately by max_slot_wait_s.
+        max_retries = self._max_retries_for_schema(schema)
+        per_request_timeout_s = self._request_timeout_s(schema)
+        deadline = time.monotonic() + self._call_deadline_s(schema)
         last_exc: Exception | None = None
         attempts_used = 0
         for attempt in range(1 + max_retries):
@@ -756,16 +1226,16 @@ class GatewayLLMClient:
             try:
                 attempts_used += 1
                 request_timeout_s = max(
-                    0.1, min(float(self.timeout_s), remaining_s)
+                    0.1, min(float(per_request_timeout_s), remaining_s)
                 )
-                with self._hard_request_deadline(request_timeout_s):
-                    parsed, completion = self._create_structured(
-                        messages=messages,
-                        schema=schema,
-                        model=selected_model,
-                        temperature=temperature,
-                        request_timeout_s=request_timeout_s,
-                    )
+                parsed, completion = self._create_structured(
+                    messages=messages,
+                    schema=schema,
+                    model=selected_model,
+                    temperature=temperature,
+                    request_timeout_s=request_timeout_s,
+                    deadline_monotonic=deadline,
+                )
                 self._record_usage(
                     completion,
                     schema_name=schema.__name__,
@@ -777,6 +1247,7 @@ class GatewayLLMClient:
                 transient = self._is_transient(exc)
                 if not transient or attempt >= max_retries:
                     break
+                self._reset_transport_after_failure(exc)
                 base_delay = min(
                     self._RETRY_BASE_DELAY * (2**attempt), self._RETRY_MAX_DELAY
                 )
@@ -858,6 +1329,15 @@ def build_llm_client_from_env(*, preflight: bool = True) -> LLMClient:
         max_retries=settings.max_retries,
         total_deadline_s=settings.total_deadline_s,
         max_completion_tokens=settings.max_completion_tokens,
+        schema_max_completion_tokens=settings.schema_max_completion_tokens,
+        schema_timeout_s=settings.schema_timeout_s,
+        schema_total_deadline_s=settings.schema_total_deadline_s,
+        schema_max_retries=settings.schema_max_retries,
+        cross_process_serial=settings.cross_process_serial,
+        cross_process_slots=settings.cross_process_slots,
+        max_slot_wait_s=settings.max_slot_wait_s,
+        token_parameter=settings.token_parameter,
+        request_options=settings.request_options,
     )
     if preflight:
         client.preflight()

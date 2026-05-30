@@ -97,15 +97,16 @@ class RunTerminationController:
         count = self._skip_count(source) + 1
         self._skip_counts[source] = count
         self.metadata.remember_transient_skip(cycle=cycle, source=source, exc=exc)
+        detail = self._llm_error_detail(exc)
         if self.events is not None:
             self.events.emit(
                 f"[cycle {cycle}] {label} LLM error in {source} "
                 f"(skip {count}/{self.max_transient_skips}), "
-                f"continuing next cycle: {exc}"
+                f"continuing next cycle: {detail}"
             )
         RunJournal(self.state).orchestration_note(
             f"cycle {cycle}: {label} LLM error skipped in {source} "
-            f"({count}/{self.max_transient_skips})"
+            f"({count}/{self.max_transient_skips}); {detail}"
         )
 
     def note_successful_step(self, source: str | None = None) -> None:
@@ -263,3 +264,17 @@ class RunTerminationController:
         if len(message) <= self.llm_error_message_limit:
             return message
         return f"{message[: self.llm_error_message_limit].rstrip()}... [truncated]"
+
+    def _llm_error_detail(self, exc: LLMClientError) -> str:
+        parts = [
+            f"kind={getattr(exc, 'kind', 'unknown')}",
+            f"attempts={getattr(exc, 'attempts', None)}",
+        ]
+        schema_name = getattr(exc, "schema_name", None)
+        if schema_name:
+            parts.append(f"schema={schema_name}")
+        model = getattr(exc, "model", None)
+        if model:
+            parts.append(f"model={model}")
+        parts.append(f"message={self._compact_llm_error(exc)}")
+        return "; ".join(parts)

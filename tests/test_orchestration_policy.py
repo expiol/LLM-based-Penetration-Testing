@@ -811,6 +811,39 @@ class RoundProgressSignalTests(unittest.TestCase):
         self.assertEqual(directive["banned_families"], ["repeated-decrypt"])
         self.assertIn("FORCED PIVOT #2", str(directive["instruction"]))
 
+    def test_forced_pivot_directive_falls_back_to_repeated_family(
+        self,
+    ) -> None:
+        state = _state()
+        for idx in range(2):
+            todo_queue(state).enqueue(
+                TodoItem(
+                    goal=f"Inspect binary control flow attempt {idx}",
+                    phase=TodoPhase.ANALYSIS,
+                    context={"family": "binary-static"},
+                    dedupe_key=f"binary-static-{idx}",
+                    status=TodoStatus.COMPLETED,
+                    result_summary="script (python)",
+                )
+            )
+        todo_queue(state).enqueue(
+            TodoItem(
+                goal="Inventory bundled files.",
+                phase=TodoPhase.RECON,
+                context={"family": "artifact-inventory"},
+                dedupe_key="artifact-inventory",
+                status=TodoStatus.COMPLETED,
+                result_summary="artifact.triage",
+            )
+        )
+
+        directive = forced_pivot_directive(state, pivot_number=1, cycle=8, threshold=5)
+
+        self.assertEqual(len(directive["banned_families"]), 1)
+        self.assertIn(
+            directive["banned_families"][0], {"binary-analysis", "binary-static"}
+        )
+
     def test_forced_pivot_blocks_goal_derived_banned_family(self) -> None:
         state = _state()
         state.metadata["forced_pivot"] = {

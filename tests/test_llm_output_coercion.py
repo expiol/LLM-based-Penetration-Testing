@@ -47,9 +47,16 @@ class _DeadlineGateway(GatewayLLMClient):
         self.fail = fail
 
     def _create_structured(
-        self, *, messages, schema, model, temperature, request_timeout_s=None
+        self,
+        *,
+        messages,
+        schema,
+        model,
+        temperature,
+        request_timeout_s=None,
+        deadline_monotonic=None,
     ):
-        del messages, schema, model, temperature
+        del messages, schema, model, temperature, deadline_monotonic
         self.request_timeouts.append(request_timeout_s)
         if self.fail:
             raise ConnectionError("Connection error.")
@@ -64,10 +71,21 @@ class _ToolDecisionDeadlineGateway(_DeadlineGateway):
         super().__init__(fail=fail, total_deadline_s=300)
         self.timeout_s = 180
         self.max_retries = 5
+        self.schema_timeout_s = {}
+        self.schema_total_deadline_s = {}
+        self.schema_max_retries = {}
 
     def _create_structured(
-        self, *, messages, schema, model, temperature, request_timeout_s=None
+        self,
+        *,
+        messages,
+        schema,
+        model,
+        temperature,
+        request_timeout_s=None,
+        deadline_monotonic=None,
     ):
+        del deadline_monotonic
         self.request_timeouts.append(request_timeout_s)
         if self.fail:
             raise TimeoutError("tool metadata timeout")
@@ -78,6 +96,28 @@ class _ToolDecisionDeadlineGateway(_DeadlineGateway):
             ),
             None,
         )
+
+
+class _RebuildOnRetryGateway(_DeadlineGateway):
+    def __init__(self) -> None:
+        super().__init__(fail=True, total_deadline_s=10)
+        self.max_retries = 1
+        self.builds = 0
+        self.closes = 0
+        self._client = self._new_fake_client()
+
+    def _new_fake_client(self):
+        owner = self
+
+        class _Client:
+            def close(self) -> None:
+                owner.closes += 1
+
+        return _Client()
+
+    def _build_client(self):
+        self.builds += 1
+        return self._new_fake_client()
 
 
 class _UsageCompletion:
@@ -92,27 +132,52 @@ class _UsageGateway(_DeadlineGateway):
         self.completion = completion
 
     def _create_structured(
-        self, *, messages, schema, model, temperature, request_timeout_s=None
+        self,
+        *,
+        messages,
+        schema,
+        model,
+        temperature,
+        request_timeout_s=None,
+        deadline_monotonic=None,
     ):
-        del messages, schema, model, temperature, request_timeout_s
+        del messages, schema, model, temperature, request_timeout_s, deadline_monotonic
         return (_RequiredPayload(name="ok"), self.completion)
 
     def _record_usage(self, completion, **kwargs) -> None:
         GatewayLLMClient._record_usage(self, completion, **kwargs)
 
 
-class _HangingGateway(_DeadlineGateway):
+class _HangingGateway(GatewayLLMClient):
     def __init__(self) -> None:
-        super().__init__(fail=False, total_deadline_s=1)
+        self.provider = "openai_compatible"
+        self.base_url = "https://example.test/v1"
+        self.default_model = "test-model"
+        self.schema_models = {}
         self.timeout_s = 1
         self.max_retries = 0
+        self.total_deadline_s = 1
+        self.max_completion_tokens = 128
+        self.schema_max_completion_tokens = {}
+        self.schema_timeout_s = {}
+        self.schema_total_deadline_s = {}
+        self.schema_max_retries = {}
+        self.cross_process_serial = False
+        self.cross_process_slots = 0
+        self.token_parameter = "max_tokens"
+        self.request_options = {}
+        self.request_timeouts: list[float | None] = []
+        self.token_ledger = TokenLedger()
+        self._client = _FakeOpenAIClient(_HangingCompletionsEndpoint(self))
 
-    def _create_structured(
-        self, *, messages, schema, model, temperature, request_timeout_s=None
-    ):
-        self.request_timeouts.append(request_timeout_s)
+class _HangingCompletionsEndpoint:
+    def __init__(self, owner: _HangingGateway) -> None:
+        self.owner = owner
+
+    def create(self, **kwargs):
+        self.owner.request_timeouts.append(kwargs.get("timeout"))
         time.sleep(5)
-        return (_RequiredPayload(name="late"), None)
+        return _FakeChatCompletion('{"name": "late"}')
 
 
 class _PreflightClient:
@@ -162,6 +227,12 @@ class _FakeChoice:
 class _FakeMessage:
     def __init__(self, content: str) -> None:
         self.content = content
+
+
+class _FakeHTTPStatusError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
 
 
 class _FakeChat:
@@ -276,6 +347,28 @@ class TestGatewayTransientClassification(unittest.TestCase):
             client._classify_failure(TimeoutError("timed out")), LLMFailureKind.TIMEOUT
         )
 
+    def test_http_status_errors_are_classified_by_retryability(self) -> None:
+        client = object.__new__(GatewayLLMClient)
+        self.assertEqual(
+            client._classify_failure(_FakeHTTPStatusError(400)),
+            LLMFailureKind.CONFIG,
+        )
+        self.assertFalse(client._is_transient(_FakeHTTPStatusError(400)))
+        self.assertEqual(
+            client._classify_failure(_FakeHTTPStatusError(408)),
+            LLMFailureKind.TIMEOUT,
+        )
+        self.assertEqual(
+            client._classify_failure(_FakeHTTPStatusError(429)),
+            LLMFailureKind.RATE_LIMIT,
+        )
+        self.assertEqual(
+            client._classify_failure(_FakeHTTPStatusError(500)),
+            LLMFailureKind.SERVICE_UNAVAILABLE,
+        )
+        self.assertTrue(client._is_transient(_FakeHTTPStatusError(429)))
+        self.assertTrue(client._is_transient(_FakeHTTPStatusError(500)))
+
     def test_client_error_carries_typed_failure_metadata(self) -> None:
         exc = LLMClientError(
             "structured output failed",
@@ -355,6 +448,19 @@ class TestGatewayTransientClassification(unittest.TestCase):
         self.assertGreater(ctx.exception.attempts, 1)
         self.assertLessEqual(ctx.exception.attempts, 1 + client.max_retries)
         self.assertEqual(len(client.request_timeouts), ctx.exception.attempts)
+
+    def test_transient_retry_rebuilds_transport_client(self) -> None:
+        client = _RebuildOnRetryGateway()
+        with (
+            patch("killchain_docker.llm.gateway.random.uniform", return_value=0.0),
+            patch("killchain_docker.llm.gateway.time.sleep"),
+            self.assertRaises(LLMClientError),
+        ):
+            client.generate_json(
+                system_prompt="", user_prompt="", schema=_RequiredPayload
+            )
+        self.assertEqual(client.closes, 1)
+        self.assertEqual(client.builds, 1)
 
     def test_token_ledger_records_thread_safe_snapshots(self) -> None:
         ledger = TokenLedger()
@@ -444,6 +550,15 @@ class TestGatewayTransientClassification(unittest.TestCase):
             timeout_s=180,
             max_retries=5,
             total_deadline_s=300,
+            schema_max_completion_tokens={"ToolUseDecision": 4096},
+            schema_timeout_s={"ToolUseDecision": 45},
+            schema_total_deadline_s={"ToolUseDecision": 90},
+            schema_max_retries={"ToolUseDecision": 1},
+            cross_process_serial=True,
+            cross_process_slots=2,
+            max_slot_wait_s=120,
+            token_parameter="max_completion_tokens",
+            request_options={"top_p": 0.95},
         )
         with (
             patch(
@@ -459,6 +574,33 @@ class TestGatewayTransientClassification(unittest.TestCase):
         self.assertIs(client, fake_client)
         self.assertTrue(fake_client.preflight_called)
         self.assertEqual(gateway_cls.call_args.kwargs["total_deadline_s"], 300)
+        self.assertEqual(
+            gateway_cls.call_args.kwargs["schema_max_completion_tokens"],
+            {"ToolUseDecision": 4096},
+        )
+        self.assertEqual(
+            gateway_cls.call_args.kwargs["schema_timeout_s"],
+            {"ToolUseDecision": 45},
+        )
+        self.assertEqual(
+            gateway_cls.call_args.kwargs["schema_total_deadline_s"],
+            {"ToolUseDecision": 90},
+        )
+        self.assertEqual(
+            gateway_cls.call_args.kwargs["schema_max_retries"],
+            {"ToolUseDecision": 1},
+        )
+        self.assertTrue(gateway_cls.call_args.kwargs["cross_process_serial"])
+        self.assertEqual(gateway_cls.call_args.kwargs["cross_process_slots"], 2)
+        self.assertEqual(gateway_cls.call_args.kwargs["max_slot_wait_s"], 120)
+        self.assertEqual(
+            gateway_cls.call_args.kwargs["token_parameter"],
+            "max_completion_tokens",
+        )
+        self.assertEqual(
+            gateway_cls.call_args.kwargs["request_options"],
+            {"top_p": 0.95},
+        )
 
     def test_llm_settings_rejects_invalid_numeric_config_as_config_error(self) -> None:
         payload = {
@@ -474,6 +616,41 @@ class TestGatewayTransientClassification(unittest.TestCase):
             with self.assertRaises(LLMClientError) as ctx:
                 LLMSettings.from_env()
         self.assertEqual(ctx.exception.kind, LLMFailureKind.CONFIG)
+
+    def test_llm_settings_loads_provider_request_options(self) -> None:
+        payload = {
+            "provider": "openai_compatible",
+            "api_key": "test-key",
+            "default_model": "example-reasoning-model",
+            "schema_max_completion_tokens": {"ToolUseDecision": "4096"},
+            "schema_timeout_s": {"ToolUseDecision": "45"},
+            "schema_total_deadline_s": {"ToolUseDecision": "90"},
+            "schema_max_retries": {"ToolUseDecision": "1"},
+            "cross_process_serial": True,
+            "cross_process_slots": 2,
+            "max_slot_wait_s": 120,
+            "token_parameter": "max_completion_tokens",
+            "request_options": {
+                "top_p": 0.95,
+                "thinking": {"type": "disabled"},
+            },
+        }
+        with patch(
+            "killchain_docker.llm.gateway._load_runtime_config_payload",
+            return_value=payload,
+        ):
+            settings = LLMSettings.from_env()
+        self.assertEqual(
+            settings.schema_max_completion_tokens, {"ToolUseDecision": 4096}
+        )
+        self.assertEqual(settings.schema_timeout_s, {"ToolUseDecision": 45})
+        self.assertEqual(settings.schema_total_deadline_s, {"ToolUseDecision": 90})
+        self.assertEqual(settings.schema_max_retries, {"ToolUseDecision": 1})
+        self.assertTrue(settings.cross_process_serial)
+        self.assertEqual(settings.cross_process_slots, 2)
+        self.assertEqual(settings.max_slot_wait_s, 120)
+        self.assertEqual(settings.token_parameter, "max_completion_tokens")
+        self.assertEqual(settings.request_options["thinking"], {"type": "disabled"})
 
     def test_llm_settings_rejects_out_of_range_numeric_config_as_config_error(
         self,
@@ -502,6 +679,24 @@ class TestGatewayTransientClassification(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 3.0)
         self.assertEqual(ctx.exception.kind, LLMFailureKind.TIMEOUT)
         self.assertEqual(ctx.exception.attempts, 1)
+
+    def test_generate_json_uses_schema_specific_runtime_budget(self) -> None:
+        client = _ToolDecisionDeadlineGateway(fail=True)
+        client.schema_timeout_s = {"ToolUseDecision": 7}
+        client.schema_total_deadline_s = {"ToolUseDecision": 15}
+        client.schema_max_retries = {"ToolUseDecision": 1}
+        with (
+            patch("killchain_docker.llm.gateway.random.uniform", return_value=0.0),
+            patch("killchain_docker.llm.gateway.time.sleep"),
+            self.assertRaises(LLMClientError) as ctx,
+        ):
+            client.generate_json(
+                system_prompt="",
+                user_prompt="",
+                schema=ToolUseDecision,
+            )
+        self.assertEqual(ctx.exception.attempts, 2)
+        self.assertEqual(client.request_timeouts, [7.0, 7.0])
 
 
 class TestLenientStructuredOutput(unittest.TestCase):
@@ -684,6 +879,202 @@ class TestLenientStructuredOutput(unittest.TestCase):
         # the model has an authoritative key list, not just a validator hint.
         self.assertIn("capability", feedback)
         self.assertIn("metadata", feedback)
+
+    def test_reasoning_gateway_requests_use_completion_tokens_and_disable_thinking(self) -> None:
+        completions = _FakeCompletionsEndpoint()
+        client = object.__new__(GatewayLLMClient)
+        client.provider = "openai_compatible"
+        client.base_url = "https://reasoning-gateway.example/v1"
+        client.default_model = "example-reasoning-model"
+        client.schema_models = {}
+        client.timeout_s = 20
+        client.max_retries = 0
+        client.total_deadline_s = 5
+        client.max_completion_tokens = 8192
+        client.schema_max_completion_tokens = {"ToolUseDecision": 4096}
+        client.token_parameter = "max_completion_tokens"
+        client.request_options = client._default_request_options()
+        client.cross_process_serial = False
+        client.token_ledger = TokenLedger()
+        client._client = _FakeOpenAIClient(completions)
+
+        decision = client.generate_json(
+            system_prompt="sys",
+            user_prompt="user",
+            schema=ToolUseDecision,
+        )
+
+        self.assertEqual(decision.capability, "script.exec")
+        kwargs = completions.calls[0]
+        self.assertEqual(kwargs["max_completion_tokens"], 4096)
+        self.assertNotIn("max_tokens", kwargs)
+        self.assertEqual(kwargs["top_p"], 0.95)
+        self.assertIs(kwargs["stream"], False)
+        self.assertEqual(kwargs["frequency_penalty"], 0)
+        self.assertEqual(kwargs["presence_penalty"], 0)
+        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_reasoning_gateway_constructor_derives_provider_defaults(self) -> None:
+        with patch.object(
+            GatewayLLMClient,
+            "_build_client",
+            return_value=_FakeOpenAIClient(_FakeCompletionsEndpoint()),
+        ):
+            client = GatewayLLMClient(
+                provider="openai_compatible",
+                api_key="test-key",
+                default_model="example-reasoning-model",
+                base_url="https://reasoning-gateway.example/v1",
+            )
+        self.assertEqual(client.token_parameter, "max_completion_tokens")
+        self.assertEqual(client.request_options["thinking"], {"type": "disabled"})
+        self.assertEqual(client.request_options["top_p"], 0.95)
+
+    def test_cross_process_slots_use_file_lock_when_enabled(self) -> None:
+        client = object.__new__(GatewayLLMClient)
+        client.cross_process_serial = False
+        client.cross_process_slots = 2
+        client.max_slot_wait_s = 30
+        calls: list[int] = []
+
+        def fake_flock(_handle, operation):
+            calls.append(operation)
+
+        with patch("killchain_docker.llm.gateway.fcntl.flock", side_effect=fake_flock):
+            with client._request_slot(schema_name="ToolUseDecision", model="test-model"):
+                pass
+
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_cross_process_slots_log_wait_when_all_slots_busy(self) -> None:
+        client = object.__new__(GatewayLLMClient)
+        client.cross_process_serial = False
+        client.cross_process_slots = 2
+        client.max_slot_wait_s = 30
+        calls = 0
+
+        def fake_flock(_handle, _operation):
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                raise BlockingIOError()
+
+        with (
+            patch("killchain_docker.llm.gateway.fcntl.flock", side_effect=fake_flock),
+            self.assertLogs("killchain_docker.llm.gateway", level="INFO") as captured,
+        ):
+            with client._request_slot(schema_name="ToolUseDecision", model="test-model"):
+                pass
+
+        messages = [record.getMessage() for record in captured.records]
+        self.assertIn("waiting for LLM request slot", messages)
+        self.assertIn("acquired LLM request slot", messages)
+
+    def test_cross_process_serial_disabled_does_not_lock(self) -> None:
+        client = object.__new__(GatewayLLMClient)
+        client.cross_process_serial = False
+        client.cross_process_slots = 0
+        client.max_slot_wait_s = 30
+        with (
+            patch("killchain_docker.llm.gateway.fcntl.flock") as flock,
+            client._request_slot(schema_name="ToolUseDecision", model="test-model"),
+        ):
+            pass
+        flock.assert_not_called()
+
+    def test_send_completion_starts_hard_deadline_after_slot_acquisition(self) -> None:
+        completions = _FakeCompletionsEndpoint()
+        client = object.__new__(GatewayLLMClient)
+        client.cross_process_slots = 1
+        client.cross_process_serial = False
+        client.max_slot_wait_s = 30
+        observed_timeouts: list[float] = []
+
+        def fake_deadline(timeout_s):
+            observed_timeouts.append(timeout_s)
+            return patch("killchain_docker.llm.gateway.time.sleep")
+
+        with patch.object(client, "_hard_request_deadline", side_effect=fake_deadline):
+            client._send_completion_request(
+                endpoint=completions,
+                kwargs={"model": "test-model", "messages": []},
+                schema_name="ToolUseDecision",
+                model="test-model",
+                token_limit=128,
+                correction=False,
+                request_timeout_s=7.0,
+                attempt_deadline_monotonic=time.monotonic() + 30.0,
+            )
+
+        self.assertEqual(observed_timeouts, [7.0])
+        self.assertEqual(completions.calls[0]["timeout"], 7.0)
+
+    def test_send_completion_slot_wait_does_not_consume_request_timeout(self) -> None:
+        completions = _FakeCompletionsEndpoint()
+        client = object.__new__(GatewayLLMClient)
+        client.cross_process_slots = 1
+        client.cross_process_serial = False
+        client.max_slot_wait_s = 30
+        observed_timeouts: list[float] = []
+        first_lock_attempt = True
+
+        def fake_flock(_handle, _operation):
+            nonlocal first_lock_attempt
+            if first_lock_attempt:
+                first_lock_attempt = False
+                raise BlockingIOError()
+
+        def fake_deadline(timeout_s):
+            observed_timeouts.append(timeout_s)
+            return patch("killchain_docker.llm.gateway.time.sleep")
+
+        with (
+            patch("killchain_docker.llm.gateway.fcntl.flock", side_effect=fake_flock),
+            patch("killchain_docker.llm.gateway.time.sleep"),
+            patch.object(client, "_hard_request_deadline", side_effect=fake_deadline),
+        ):
+            client._send_completion_request(
+                endpoint=completions,
+                kwargs={"model": "test-model", "messages": []},
+                schema_name="ToolUseDecision",
+                model="test-model",
+                token_limit=128,
+                correction=False,
+                request_timeout_s=7.0,
+                attempt_deadline_monotonic=time.monotonic() + 30.0,
+            )
+
+        self.assertEqual(observed_timeouts, [7.0])
+        self.assertEqual(completions.calls[0]["timeout"], 7.0)
+
+    def test_non_reasoning_gateway_requests_keep_legacy_max_tokens_default(self) -> None:
+        completions = _FakeCompletionsEndpoint()
+        client = object.__new__(GatewayLLMClient)
+        client.provider = "openai_compatible"
+        client.base_url = "https://example.test/v1"
+        client.default_model = "test-model"
+        client.schema_models = {}
+        client.timeout_s = 20
+        client.max_retries = 0
+        client.total_deadline_s = 5
+        client.max_completion_tokens = 1024
+        client.schema_max_completion_tokens = {}
+        client.token_parameter = "max_tokens"
+        client.request_options = {}
+        client.cross_process_serial = False
+        client.token_ledger = TokenLedger()
+        client._client = _FakeOpenAIClient(completions)
+
+        client.generate_json(
+            system_prompt="sys",
+            user_prompt="user",
+            schema=ToolUseDecision,
+        )
+
+        kwargs = completions.calls[0]
+        self.assertEqual(kwargs["max_tokens"], 1024)
+        self.assertNotIn("max_completion_tokens", kwargs)
+        self.assertNotIn("extra_body", kwargs)
 
 
 if __name__ == "__main__":

@@ -191,10 +191,14 @@ class _UnknownWorkerRouter:
 
 
 class _NoAssignmentRouter:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def route(
         self, state: RunState, *, agent_directory, max_assignments: int
     ) -> RouterDecision:
         del state, agent_directory, max_assignments
+        self.calls += 1
         return RouterDecision(rationale="intentionally empty")
 
     def summarize_round(
@@ -1081,7 +1085,7 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertFalse(todo_queue(final_state).has_open())
         self.assertEqual(final_state.todos[0].status, TodoStatus.BLOCKED)
 
-    def test_max_cycles_caps_schema_retry_cycle_numbers(self) -> None:
+    def test_schema_retry_does_not_consume_effective_cycle_budget(self) -> None:
         planner = _SchemaValidationThenTodoPlanner()
         orchestrator = Orchestrator(
             state=_state(),
@@ -1092,15 +1096,132 @@ class OrchestratorLoopTests(unittest.TestCase):
         )
         final_state = orchestrator.run(max_cycles=1)
 
-        self.assertEqual(planner.calls, 1)
-        self.assertEqual(final_state.rounds, [])
-        self.assertEqual(final_state.todos, [])
-        self.assertEqual(final_state.status, RunStatus.FAILED)
-        self.assertEqual(final_state.stop_reason, "no_todos_created")
+        self.assertEqual(planner.calls, 2)
+        self.assertEqual(len(final_state.rounds), 1)
+        self.assertEqual(final_state.rounds[0].cycle, 2)
+        self.assertEqual(final_state.todos[0].status, TodoStatus.COMPLETED)
+        self.assertEqual(final_state.status, RunStatus.COMPLETED)
+        self.assertEqual(final_state.stop_reason, "unsolved_no_work_remaining")
         self.assertEqual(
             final_state.metadata["last_transient_skip"]["schema_name"],
             "PlannerDecision",
         )
+
+    def test_worker_transient_retry_does_not_consume_effective_cycle_budget(
+        self,
+    ) -> None:
+        worker = _TransientThenSuccessWorker()
+        planner = _ScriptedPlanner(
+            [
+                PlannerDecision(
+                    summary="cycle 1",
+                    todos=[
+                        PlannedTodo(
+                            goal="Retry after infrastructure hiccup",
+                            context={"worker_name": "transient-worker"},
+                            dedupe_key="transient-budget",
+                        )
+                    ],
+                )
+            ]
+        )
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[worker],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+        final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(worker.calls, 2)
+        self.assertEqual(len(final_state.rounds), 1)
+        self.assertEqual(final_state.rounds[0].cycle, 2)
+        self.assertEqual(final_state.todos[0].status, TodoStatus.COMPLETED)
+        self.assertEqual(final_state.status, RunStatus.COMPLETED)
+        self.assertEqual(final_state.stop_reason, "unsolved_no_work_remaining")
+
+    def test_completed_round_does_not_stop_before_cycle_budget(self) -> None:
+        planner = _ScriptedPlanner(
+            [
+                PlannerDecision(
+                    summary="cycle 1",
+                    todos=[
+                        PlannedTodo(
+                            goal="Finish recon.",
+                            context={"worker_name": "success-worker"},
+                            dedupe_key="first-success",
+                        )
+                    ],
+                ),
+                PlannerDecision(
+                    summary="cycle 2",
+                    todos=[
+                        PlannedTodo(
+                            goal="Continue from recon.",
+                            context={"worker_name": "success-worker"},
+                            dedupe_key="second-success",
+                        )
+                    ],
+                ),
+            ]
+        )
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_SuccessWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+        final_state = orchestrator.run(max_cycles=2)
+
+        self.assertEqual(planner.calls, 2)
+        self.assertEqual(len(final_state.rounds), 2)
+        self.assertEqual(
+            {todo.dedupe_key for todo in final_state.todos},
+            {"first-success", "second-success"},
+        )
+        self.assertEqual(final_state.status, RunStatus.COMPLETED)
+        self.assertEqual(final_state.stop_reason, "unsolved_no_work_remaining")
+
+    def test_interrupted_todo_allows_planner_recovery_before_finalizing(
+        self,
+    ) -> None:
+        state = _state()
+        interrupted = todo_queue(state).enqueue(
+            TodoItem(goal="Interrupted transient todo.", dedupe_key="transient-dead")
+        )
+        todo_queue(state).interrupt(interrupted, "llm_error:worker:transient")
+        planner = _ScriptedPlanner(
+            [
+                PlannerDecision(
+                    summary="recover after transient interruption",
+                    todos=[
+                        PlannedTodo(
+                            goal="Try an alternate route.",
+                            context={"worker_name": "success-worker"},
+                            dedupe_key="alternate-after-transient",
+                        )
+                    ],
+                )
+            ]
+        )
+        orchestrator = Orchestrator(
+            state=state,
+            workers=[_SuccessWorker()],
+            planner=planner,
+            router=_ContextRouter(),
+            emit=lambda _: None,
+        )
+        final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(planner.calls, 1)
+        self.assertEqual(len(final_state.rounds), 1)
+        self.assertEqual(final_state.rounds[0].cycle, 1)
+        self.assertEqual(final_state.todos[0].status, TodoStatus.INTERRUPTED)
+        self.assertEqual(final_state.todos[1].status, TodoStatus.COMPLETED)
+        self.assertEqual(final_state.status, RunStatus.FAILED)
+        self.assertEqual(final_state.stop_reason, "interrupted_todos_unsolved")
 
     def test_final_cycle_candidate_gets_validation_pass(self) -> None:
         planner = _ScriptedPlanner(
@@ -1376,11 +1497,12 @@ class OrchestratorLoopTests(unittest.TestCase):
                 )
             ]
         )
+        router = _NoAssignmentRouter()
         orchestrator = Orchestrator(
             state=_state(),
             workers=[_SuccessWorker()],
             planner=planner,
-            router=_NoAssignmentRouter(),
+            router=router,
             emit=recorder.emit,
         )
         final_state = orchestrator.run(max_cycles=2)
@@ -1398,8 +1520,9 @@ class OrchestratorLoopTests(unittest.TestCase):
                 for note in final_state.orchestration_notes
             )
         )
+        self.assertEqual(router.calls, 0)
         self.assertEqual(
-            orchestrator._dispatch_cycle_controller.consecutive_empty_rounds, 2
+            orchestrator._dispatch_cycle_controller.consecutive_empty_rounds, 0
         )
         self.assertFalse(dependency_events)
 

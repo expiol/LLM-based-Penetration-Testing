@@ -15,7 +15,7 @@ from killchain_docker.state.constants import DEFAULT_FILES_ROOT
 
 
 _DEFAULT_WORKSPACE_MAX_MB = 512
-_DEFAULT_MEMORY_MAX_MB = 3072
+_DEFAULT_MEMORY_MAX_MB = 0
 _DEFAULT_CPU_MAX_S = 0
 
 
@@ -353,7 +353,7 @@ def _generated_artifact_publish_function() -> str:
         '      _kc_rel="${_kc_src#$_kc_work/}";',
         '      case "$_kc_rel" in .autopentest_artifacts/*) continue ;; esac;',
         '      _kc_orig="$_kc_original/$_kc_rel";',
-        '      if [ -f "$_kc_orig" ] && cmp -s "$_kc_src" "$_kc_orig"; then continue; fi;',
+        '      if [ -f "$_kc_orig" ]; then continue; fi;',
         '      _kc_queue_artifact_candidate "$_kc_src" "work" "$_kc_rel";',
         '    done < <(find "$_kc_work" -type f -print0 2>/dev/null);',
         "  fi;",
