@@ -1,0 +1,51 @@
+{
+  "provider": "openai_compatible",
+  "base_url": "https://your-llm-endpoint.example/v1",
+  "api_key": "",
+  "default_model": "your-model-name",
+  "schema_models": {
+    "*": "your-model-name"
+  },
+  "timeout_s": 90,
+  "max_retries": 2,
+  "total_deadline_s": 180,
+  "max_completion_tokens": 8192,
+  "schema_max_completion_tokens": {
+    "ToolUseDecision": 4096,
+    "PlannerDecision": 8192,
+    "RouterDecision": 2048,
+    "RouterRoundSummary": 2048,
+    "_RecallDecision": 1024,
+    "_LLMPreflightResult": 512,
+    "*": 8192
+  },
+  "schema_timeout_s": {
+    "ToolUseDecision": 45,
+    "RouterDecision": 20,
+    "RouterRoundSummary": 20,
+    "_RecallDecision": 15,
+    "_LLMPreflightResult": 15,
+    "*": 75
+  },
+  "schema_total_deadline_s": {
+    "ToolUseDecision": 120,
+    "RouterDecision": 60,
+    "RouterRoundSummary": 60,
+    "_RecallDecision": 45,
+    "_LLMPreflightResult": 35,
+    "*": 120
+  },
+  "schema_max_retries": {
+    "ToolUseDecision": 1,
+    "RouterDecision": 1,
+    "RouterRoundSummary": 1,
+    "_RecallDecision": 1,
+    "_LLMPreflightResult": 1,
+    "*": 2
+  },
+  "cross_process_serial": false,
+  "cross_process_slots": 2,
+  "max_slot_wait_s": 45,
+  "token_parameter": "auto",
+  "request_options": {}
+}

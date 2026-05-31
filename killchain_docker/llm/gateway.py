@@ -33,6 +33,9 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 FIXED_LLM_CONFIG_PATH = (
     Path(__file__).resolve().parents[2] / "configs" / "llm_gateway.json"
 )
+EXAMPLE_LLM_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2] / "configs" / "llm_gateway.example.json"
+)
 
 
 class LLMClientError(RuntimeError):
@@ -203,7 +206,12 @@ def _validate_model_names(default_model: str, schema_models: Mapping[str, str]) 
             )
 
 
-def _load_runtime_config_payload(path: Path) -> dict[str, Any]:
+def _runtime_config_path() -> Path:
+    return FIXED_LLM_CONFIG_PATH if FIXED_LLM_CONFIG_PATH.exists() else EXAMPLE_LLM_CONFIG_PATH
+
+
+def _load_runtime_config_payload(path: Path | None = None) -> dict[str, Any]:
+    path = path or _runtime_config_path()
     try:
         raw_text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -297,7 +305,7 @@ def _config_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
 
 
 class LLMSettings(BaseModel):
-    """Gateway settings loaded from configs/llm_gateway.json."""
+    """Gateway settings loaded from the local LLM config."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -322,7 +330,7 @@ class LLMSettings(BaseModel):
 
     @classmethod
     def from_env(cls) -> "LLMSettings":
-        payload = _load_runtime_config_payload(FIXED_LLM_CONFIG_PATH)
+        payload = _load_runtime_config_payload(_runtime_config_path())
         configured_default = payload.get("default_model")
         schema_models = _normalize_schema_model_map(payload.get("schema_models"))
         if not configured_default or not isinstance(configured_default, str):
@@ -422,7 +430,7 @@ _OPENAI_CHAT_COMPLETION_DIRECT_OPTIONS = {
 
 def _is_reasoning_gateway_provider(provider: str, base_url: str | None) -> bool:
     text = f"{provider} {base_url or ''}".lower()
-    return "reasoning_gateway" in text or "reasoning-gateway" in text or "reasoning-gateway.example" in text
+    return "reasoning_gateway" in text or "reasoning-gateway.example" in text
 
 
 def _resolve_token_parameter(
@@ -1310,12 +1318,12 @@ def build_llm_client_from_env(*, preflight: bool = True) -> LLMClient:
     settings = LLMSettings.from_env()
     if not settings.api_key:
         raise LLMClientError(
-            f"'api_key' is required in {FIXED_LLM_CONFIG_PATH}.",
+            f"'api_key' is required in {_runtime_config_path()}.",
             kind=LLMFailureKind.CONFIG,
         )
     if not settings.default_model:
         raise LLMClientError(
-            f"'default_model' is required in {FIXED_LLM_CONFIG_PATH}.",
+            f"'default_model' is required in {_runtime_config_path()}.",
             kind=LLMFailureKind.CONFIG,
         )
 

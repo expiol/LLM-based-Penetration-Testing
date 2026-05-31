@@ -2,6 +2,7 @@
 .git
 .venv
 .env
+configs/llm_gateway.json
 **/__pycache__
 *.py[cod]
 .pytest_cache

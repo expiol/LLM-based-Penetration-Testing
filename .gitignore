@@ -22,6 +22,26 @@ myenv
 llm_ctf/.DS_Store
 llm_ctf/toolset/.DS_Store
 keys.cfg
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.csr
+*.kdbx
+*.sqlite
+*.sqlite3
+*.db
+*.log
+*.bak
+*.tmp
+*.local
+*.local.*
+!.env.example
+!*.example
+!*.example.*
+configs/llm_gateway.json
+configs/*local*.json
 batch_runs*/
 .cursor/
 

@@ -883,7 +883,7 @@ class TestLenientStructuredOutput(unittest.TestCase):
     def test_reasoning_gateway_requests_use_completion_tokens_and_disable_thinking(self) -> None:
         completions = _FakeCompletionsEndpoint()
         client = object.__new__(GatewayLLMClient)
-        client.provider = "openai_compatible"
+        client.provider = "reasoning_gateway"
         client.base_url = "https://reasoning-gateway.example/v1"
         client.default_model = "example-reasoning-model"
         client.schema_models = {}
@@ -921,7 +921,7 @@ class TestLenientStructuredOutput(unittest.TestCase):
             return_value=_FakeOpenAIClient(_FakeCompletionsEndpoint()),
         ):
             client = GatewayLLMClient(
-                provider="openai_compatible",
+                provider="reasoning_gateway",
                 api_key="test-key",
                 default_model="example-reasoning-model",
                 base_url="https://reasoning-gateway.example/v1",

@@ -171,10 +171,16 @@ installs this package into the `autopentest` Conda environment in editable mode.
 
 ## LLM Configuration
 
-The gateway reads:
+The gateway reads local credentials from:
 
 ```text
 configs/llm_gateway.json
+```
+
+Create it from the public template:
+
+```bash
+cp configs/llm_gateway.example.json configs/llm_gateway.json
 ```
 
 Example:

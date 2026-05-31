@@ -70,6 +70,7 @@ _SENSITIVE_KEYS = frozenset({"api_key", "authorization", "token", "secret", "pas
 _TOKEN_USAGE_KEYS = ("llm_calls", "prompt_tokens", "completion_tokens", "total_tokens")
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _LLM_GATEWAY_CONFIG = _PROJECT_ROOT / "configs" / "llm_gateway.json"
+_LLM_GATEWAY_EXAMPLE_CONFIG = _PROJECT_ROOT / "configs" / "llm_gateway.example.json"
 _BATCH_MONITOR_REFRESH_SEC = 3.0
 _FAILURE_EVENT_SCAN_LIMIT_BYTES = 5_000_000
 _CHALLENGE_WATCHDOG_GRACE_SEC = 10.0
@@ -209,11 +210,17 @@ def _utc_timestamp(ts: float | None = None) -> str:
 
 
 def _load_llm_experiment_config() -> dict[str, Any]:
-    payload = _safe_read_json(_LLM_GATEWAY_CONFIG) or {}
+    config_path = (
+        _LLM_GATEWAY_CONFIG
+        if _LLM_GATEWAY_CONFIG.exists()
+        else _LLM_GATEWAY_EXAMPLE_CONFIG
+    )
+    payload = _safe_read_json(config_path) or {}
     if not payload:
-        return {"config_path": str(_LLM_GATEWAY_CONFIG), "available": False}
+        return {"config_path": str(config_path), "available": False}
     sanitized = _sanitize_for_log(payload)
-    sanitized["config_path"] = str(_LLM_GATEWAY_CONFIG)
+    sanitized["config_path"] = str(config_path)
+    sanitized["using_example_config"] = config_path == _LLM_GATEWAY_EXAMPLE_CONFIG
     sanitized["available"] = True
     return sanitized
 
