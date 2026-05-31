@@ -1365,6 +1365,10 @@ def _supervised_challenge_worker(
             _run_single_challenge_inner(worker_args, challenge, Path(logfile))
         )
     except BaseException as exc:
+        LOGGER.exception(
+            "supervised challenge worker failed",
+            extra={"challenge": challenge_name, "logfile": logfile},
+        )
         result_queue.put(
             {
                 "challenge": challenge_name,

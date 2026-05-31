@@ -595,16 +595,30 @@ class GatewayLLMClient:
         }:
             return
         old_client = getattr(self, "_client", None)
+        log_context = {
+            "provider": getattr(self, "provider", None),
+            "base_url": getattr(self, "base_url", None),
+            "failure_kind": str(kind),
+            "client_type": type(old_client).__name__ if old_client is not None else None,
+        }
         close = getattr(old_client, "close", None)
         if callable(close):
             try:
                 close()
             except Exception:
-                log.debug("failed to close LLM client after transient error", exc_info=True)
+                log.debug(
+                    "failed to close LLM client after transient error",
+                    exc_info=True,
+                    extra=log_context,
+                )
         try:
             self._client = self._build_client()
         except Exception:
-            log.debug("failed to rebuild LLM client after transient error", exc_info=True)
+            log.debug(
+                "failed to rebuild LLM client after transient error",
+                exc_info=True,
+                extra=log_context,
+            )
 
     def _default_request_options(self) -> dict[str, Any]:
         if not _is_reasoning_gateway_provider(self.provider, self.base_url):

@@ -122,14 +122,25 @@ def _kc_int_locals(_kc_frame):
             break
     return ", ".join(_kc_items)
 
+def _kc_source_line(_kc_frame):
+    _kc_lineno = _kc_frame.f_lineno
+    _kc_line = _kc_linecache.getline(
+        _kc_frame.f_code.co_filename, _kc_lineno
+    ).strip()
+    if _kc_line in {"pass", "..."} and _kc_lineno > 1:
+        _kc_prev_line = _kc_linecache.getline(
+            _kc_frame.f_code.co_filename, _kc_lineno - 1
+        ).strip()
+        if _kc_prev_line.startswith(("while ", "for ", "if ", "elif ", "else:", "try:", "except ", "finally:", "with ")):
+            return _kc_lineno - 1, _kc_prev_line
+    return _kc_lineno, _kc_line
+
 def _kc_callsite(_kc_frame):
     if _kc_frame is None:
         return ""
-    _kc_line = _kc_linecache.getline(
-        _kc_frame.f_code.co_filename, _kc_frame.f_lineno
-    ).strip()
+    _kc_lineno, _kc_line = _kc_source_line(_kc_frame)
     _kc_locals = _kc_int_locals(_kc_frame)
-    _kc_parts = [f"line {{_kc_frame.f_lineno}}"]
+    _kc_parts = [f"line {{_kc_lineno}}"]
     if _kc_line:
         _kc_parts.append(f"code={{_kc_line!r}}")
     if _kc_locals:

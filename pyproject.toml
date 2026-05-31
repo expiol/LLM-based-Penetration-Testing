@@ -3,18 +3,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "nyuctf_multiagent"
+name = "llm-based-penetration-testing"
 version = "0.1"
 authors = [
-  { name="NYU CTF", email="nyuctf@gmail.com" },
-  { name="Meet Udeshi", email="m.udeshi@nyu.edu" },
+  { name="expiol" },
 ]
-description = "LLM-driven structured killchain for CTF / security assessment (NYUCTF)"
+description = "LLM-driven structured killchain for CTF and authorized security assessment"
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
@@ -43,7 +42,7 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://nyu-llm-ctf.github.io"
+Homepage = "https://github.com/expiol/LLM-based-Penetration-Testing"
 
 [project.scripts]
 autopentest = "killchain_docker.cli:main"
