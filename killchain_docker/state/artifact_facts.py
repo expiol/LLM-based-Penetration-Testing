@@ -202,6 +202,7 @@ def facts_from_artifact(artifact: Any) -> ArtifactFacts:
     is_low_signal = (
         _metadata_bool(metadata, "low_signal")
         or role in _LOW_SIGNAL_ROLES
+        or _is_generated_python_cache(path, metadata)
         or "font" in mime
         or any(
             token in semantic_text
@@ -340,6 +341,20 @@ def _metadata_bool(metadata: dict[str, Any], key: str) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _is_generated_python_cache(path: str, metadata: dict[str, Any]) -> bool:
+    normalized_path = str(path or "").replace("\\", "/")
+    if "/.autopentest_artifacts/" not in normalized_path:
+        return False
+    relative_path = str(metadata.get("relative_path") or "").replace("\\", "/")
+    candidates = [normalized_path, relative_path]
+    return any(
+        candidate.endswith((".pyc", ".pyo"))
+        or "/__pycache__/" in f"/{candidate}"
+        for candidate in candidates
+        if candidate
+    )
 
 
 def _has_nonempty_sequence(value: Any) -> bool:

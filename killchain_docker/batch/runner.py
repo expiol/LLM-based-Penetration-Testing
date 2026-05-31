@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import multiprocessing
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -29,6 +31,7 @@ from killchain_docker.batch.dataset import (
 )
 from killchain_docker.batch.docker import (
     compose_challenge_run_lock,
+    docker_compose_down,
     start_challenge_with_retry,
 )
 from killchain_docker.environment import CTFEnvironment
@@ -39,7 +42,7 @@ from killchain_docker.logging_utils import (
     write_json_stdout,
 )
 from killchain_docker.llm.gateway import LLMClientError, build_llm_client_from_env
-from killchain_docker.runtime.config import RunConfig
+from killchain_docker.runtime.config import RunArtifacts, RunConfig
 from killchain_docker.runtime.session import run_assessment
 from killchain_docker.thread_status import build_thread_registry, thread_info
 from killchain_docker.batch.monitor import (
@@ -69,6 +72,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _LLM_GATEWAY_CONFIG = _PROJECT_ROOT / "configs" / "llm_gateway.json"
 _BATCH_MONITOR_REFRESH_SEC = 3.0
 _FAILURE_EVENT_SCAN_LIMIT_BYTES = 5_000_000
+_CHALLENGE_WATCHDOG_GRACE_SEC = 10.0
 _LEGACY_LLM_ENV_KEYS = (
     "AUTOPENTEST_LLM_MODE",
     "AUTOPENTEST_LLM_CONFIG_PATH",
@@ -152,6 +156,17 @@ def _safe_read_json(path: str | Path | None) -> dict[str, Any] | None:
             "failed to read JSON payload", exc_info=True, extra={"path": str(candidate)}
         )
         return None
+
+
+def _challenge_timeout_s(args: argparse.Namespace) -> int | None:
+    raw = getattr(args, "challenge_timeout_s", None)
+    if raw in (None, "", 0):
+        return None
+    try:
+        timeout_s = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return timeout_s if timeout_s > 0 else None
 
 
 def _event_types_from_artifacts(*sources: dict[str, Any]) -> set[str]:
@@ -263,6 +278,8 @@ def _is_batch_fatal_api_error(
     if _is_api_balance_error(exc):
         return True
     if not isinstance(exc, LLMClientError):
+        return False
+    if exc.transient:
         return False
     return not has_run_artifacts
 
@@ -418,6 +435,17 @@ _FINAL_CLOSURE_PLANNER_SUMMARIES = frozenset(
         "final flag validation pass",
     }
 )
+_TERMINAL_OVER_CYCLE_STOP_REASONS = frozenset(
+    {
+        "partial_todos_unsolved",
+        "max_cycles_exhausted",
+        "unsolved_no_work_remaining",
+        "todo_failed",
+        "todo_blocked",
+        "router_no_assignments",
+        "blocked",
+    }
+)
 
 
 def _recorded_main_loop_max_cycle(log_payload: dict[str, Any]) -> int | None:
@@ -467,6 +495,8 @@ def _existing_log_resume_decision(logfile: Path) -> tuple[bool, str, dict[str, A
         return False, "api_error_existing_log", payload
     if payload.get("llm_error") and payload.get("artifacts") is None:
         return False, "preflight_llm_error_existing_log", payload
+    if status == "challenge_timeout":
+        return True, "preexisting_log", payload
     if payload.get("error") or payload.get("runtime_error"):
         return False, "runtime_error_existing_log", payload
     state_payload = payload.get("state")
@@ -476,7 +506,19 @@ def _existing_log_resume_decision(logfile: Path) -> tuple[bool, str, dict[str, A
             metadata.get("runtime_error"), dict
         ):
             return False, "runtime_error_existing_log", payload
-    if _exceeded_recorded_max_cycles(payload):
+    metrics = payload.get("state_metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    stop_reason = str(
+        metrics.get("stop_reason")
+        or (state_payload.get("stop_reason") if isinstance(state_payload, dict) else "")
+        or ""
+    )
+    if stop_reason == "llm_transient_error":
+        return False, "transient_llm_error_existing_log", payload
+    if _exceeded_recorded_max_cycles(payload) and not (
+        status in {"unsolved_exhausted", "completed"}
+        or stop_reason in _TERMINAL_OVER_CYCLE_STOP_REASONS
+    ):
         return False, "over_max_cycles_existing_log", payload
     if status in {"starting", "running"}:
         return False, "active_existing_log", payload
@@ -771,6 +813,8 @@ def _failure_buckets(log_payload: dict[str, Any], result: dict[str, Any]) -> lis
         buckets.add("router_no_assignments")
     if "runtime_error" in haystack:
         buckets.add("runtime_error")
+    if "challenge_timeout" in haystack or "challengewatchdogtimeout" in haystack:
+        buckets.add("challenge_timeout")
     if (
         result.get("llm_error")
         or log_payload.get("llm_error")
@@ -885,6 +929,68 @@ def _selected_challenge_names(
     return sample_challenge_names(dataset, args, selected), category_filter
 
 
+def _resume_priority_for_challenge(logdir: Path, name: str) -> tuple[int, str]:
+    logfile = logdir / f"{name}.json"
+    if not logfile.exists():
+        return 0, "missing_log"
+    should_skip, reason, _payload = _existing_log_resume_decision(logfile)
+    if should_skip:
+        return 3, reason
+    if reason == "transient_llm_error_existing_log":
+        return 2, reason
+    return 1, reason
+
+
+def _prioritize_resume_challenge_names(
+    logdir: Path, names: list[str], args: argparse.Namespace
+) -> list[str]:
+    if not bool(getattr(args, "skip_exist", False)):
+        return names
+
+    ranked: list[tuple[int, int, str, str]] = []
+    for index, name in enumerate(names):
+        priority, reason = _resume_priority_for_challenge(logdir, name)
+        ranked.append((priority, index, name, reason))
+    prioritized = [name for priority, _index, name, _reason in sorted(ranked)]
+    runnable_count = sum(1 for priority, _index, _name, _reason in ranked if priority == 0)
+    if runnable_count:
+        LOGGER.info(
+            "prioritized resume queue",
+            extra={
+                "runnable_first": runnable_count,
+                "skippable_later": len(ranked) - runnable_count,
+            },
+        )
+    return prioritized
+
+
+def _challenge_name_uses_compose(dataset: Any, name: str) -> bool:
+    try:
+        payload = dataset.get(name)
+    except Exception:
+        LOGGER.debug(
+            "failed to inspect challenge payload for compose scheduling",
+            exc_info=True,
+            extra={"challenge": name},
+        )
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if bool(payload.get("compose")):
+        return True
+    challenge_path = payload.get("path")
+    basedir = getattr(dataset, "basedir", None)
+    if not challenge_path or basedir is None:
+        return False
+    challenge_json = Path(str(basedir)) / str(challenge_path) / "challenge.json"
+    challenge_payload = _safe_read_json(challenge_json)
+    return bool(challenge_payload and challenge_payload.get("compose"))
+
+
+def _compose_challenge_name_set(dataset: Any, names: list[str]) -> set[str]:
+    return {name for name in names if _challenge_name_uses_compose(dataset, name)}
+
+
 def _interrupted_batch_result(
     args: argparse.Namespace,
     name: str,
@@ -979,6 +1085,385 @@ def _worker_failure_result(
         "traceback": traceback.format_exc(),
         "status_file": str(status_file),
     }
+
+
+def _cleanup_timed_out_challenge(
+    args: argparse.Namespace,
+    challenge_name: str,
+    challenge: CTFChallenge,
+    worker_pid: int | None,
+) -> None:
+    if worker_pid and worker_pid > 0:
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "ps",
+                    "-aq",
+                    "--filter",
+                    "label=killchain_docker.managed=true",
+                    "--filter",
+                    f"label=killchain_docker.owner_pid={worker_pid}",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+                check=False,
+            )
+            container_ids = [line.strip() for line in result.stdout.splitlines()]
+        except (OSError, subprocess.TimeoutExpired):
+            LOGGER.debug(
+                "failed to list timed-out execution containers",
+                exc_info=True,
+                extra={"challenge": challenge_name, "worker_pid": worker_pid},
+            )
+            container_ids = []
+        if container_ids:
+            try:
+                subprocess.run(
+                    ["docker", "rm", "-f", *container_ids],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=30,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                LOGGER.debug(
+                    "failed to remove timed-out execution containers",
+                    exc_info=True,
+                    extra={
+                        "challenge": challenge_name,
+                        "worker_pid": worker_pid,
+                        "containers": container_ids,
+                    },
+                )
+
+    try:
+        challenge.stop_challenge_container()
+    except Exception:
+        LOGGER.debug(
+            "failed to stop timed-out challenge container",
+            exc_info=True,
+            extra={"challenge": challenge_name},
+        )
+    try:
+        docker_compose_down(challenge)
+    except Exception:
+        LOGGER.debug(
+            "failed to clean timed-out compose services",
+            exc_info=True,
+            extra={"challenge": challenge_name},
+        )
+
+
+def _challenge_timeout_payload(
+    args: argparse.Namespace,
+    challenge: CTFChallenge,
+    *,
+    logfile: Path,
+    status_file: Path,
+    started_at: float,
+    timeout_s: int,
+    worker_pid: int | None,
+) -> dict[str, Any]:
+    ended_at = time.time()
+    runtime_sec = round(ended_at - started_at, 3)
+    challenge_name = challenge.canonical_name
+    message = f"challenge exceeded {timeout_s}s watchdog timeout"
+    runtime_error = {
+        "type": "ChallengeWatchdogTimeout",
+        "message": message,
+        "kind": "challenge_timeout",
+        "timeout_s": timeout_s,
+        "stage": "assessment",
+        "worker_pid": worker_pid,
+    }
+    error_payload = {
+        "type": runtime_error["type"],
+        "message": message,
+        "kind": runtime_error["kind"],
+    }
+    state_metrics = {
+        "run_status": "failed",
+        "stop_reason": "challenge_timeout",
+    }
+    recovered_artifacts = _latest_run_artifacts_for_timeout(args, challenge, logfile)
+    summary_payload = None
+    state_payload = None
+    token_usage = _token_usage(None)
+    if recovered_artifacts is not None:
+        summary_payload = _safe_read_json(recovered_artifacts.summary_path)
+        state_payload = _safe_read_json(recovered_artifacts.state_path)
+        if isinstance(state_payload, dict):
+            state_payload = dict(state_payload)
+            metadata_payload = state_payload.get("metadata")
+            metadata_payload = (
+                dict(metadata_payload) if isinstance(metadata_payload, dict) else {}
+            )
+            metadata_payload["runtime_error"] = runtime_error
+            state_payload["metadata"] = metadata_payload
+            state_payload["status"] = "failed"
+            state_payload["stop_reason"] = "challenge_timeout"
+        recovered_state_metrics = _state_metrics(state_payload)
+        if recovered_state_metrics:
+            state_metrics.update(recovered_state_metrics)
+        state_metrics["run_status"] = "failed"
+        state_metrics["stop_reason"] = "challenge_timeout"
+        if summary_payload is not None:
+            token_usage = _token_usage(summary_payload.get("token_usage"))
+    metadata = challenge_metadata(challenge)
+    knowledge_payload = None
+    if isinstance(summary_payload, dict) or isinstance(state_payload, dict):
+        knowledge_payload = _knowledge_payload(summary_payload, state_payload)
+    log_payload = {
+        "args": _sanitize_for_log(vars(args)),
+        "challenge": challenge.challenge_info,
+        "challenge_metadata": metadata,
+        "objective": args.objective or derive_objective(
+            challenge, args.scope or derive_authorized_scope(challenge)
+        ),
+        "authorized_scope": args.scope or derive_authorized_scope(challenge),
+        "effective_max_cycles": _effective_max_cycles(
+            args, challenge, args.scope or derive_authorized_scope(challenge)
+        ),
+        "success": False,
+        "solved": False,
+        "status": "challenge_timeout",
+        "finish_reason": "challenge_timeout",
+        "interrupted": False,
+        "artifacts": None
+        if recovered_artifacts is None
+        else recovered_artifacts.model_dump(mode="json"),
+        "summary": summary_payload,
+        "token_usage": token_usage,
+        "knowledge": knowledge_payload,
+        "state_metrics": state_metrics,
+        "state": state_payload
+        if isinstance(state_payload, dict)
+        else {
+            "status": "failed",
+            "stop_reason": "challenge_timeout",
+            "metadata": {"runtime_error": runtime_error},
+        },
+        "runtime_error": runtime_error,
+        "error": error_payload,
+        "api_error": False,
+        "llm_error": False,
+        "traceback": None,
+        "start_time": started_at,
+        "end_time": ended_at,
+        "runtime_sec": runtime_sec,
+        "status_file": str(status_file),
+        "knowledge_mode": getattr(args, "knowledge_mode", None),
+    }
+    write_log(logfile, log_payload)
+    write_run_status(
+        status_file,
+        challenge=challenge_name,
+        stage="complete",
+        status="challenge_timeout",
+        solved=False,
+        run_id=None if recovered_artifacts is None else recovered_artifacts.run_id,
+        logfile=str(logfile),
+        artifacts=None
+        if recovered_artifacts is None
+        else recovered_artifacts.model_dump(mode="json"),
+        state_metrics=state_metrics,
+        knowledge=public_knowledge_payload(knowledge_payload),
+        token_usage=token_usage,
+        runtime_sec=runtime_sec,
+        runtime_error=runtime_error,
+        error=error_payload,
+        api_error=False,
+        llm_error=False,
+        message=message,
+    )
+    return {
+        "challenge": challenge_name,
+        "solved": False,
+        "status": "challenge_timeout",
+        "logfile": str(logfile),
+        "status_file": str(status_file),
+        "runtime_sec": runtime_sec,
+        "knowledge_mode": getattr(args, "knowledge_mode", None),
+        "run_id": None if recovered_artifacts is None else recovered_artifacts.run_id,
+        "artifacts": None
+        if recovered_artifacts is None
+        else recovered_artifacts.model_dump(mode="json"),
+        "knowledge": knowledge_payload,
+        "challenge_metadata": metadata,
+        "authorized_scope": log_payload["authorized_scope"],
+        "max_cycles": log_payload["effective_max_cycles"],
+        "token_usage": token_usage,
+        "state_metrics": state_metrics,
+        "runtime_error": runtime_error,
+        "error": error_payload,
+        "api_error": False,
+        "llm_error": False,
+        "interrupted": False,
+    }
+
+
+def _latest_run_artifacts_for_timeout(
+    args: argparse.Namespace,
+    challenge: CTFChallenge,
+    logfile: Path,
+) -> RunArtifacts | None:
+    output_root = resolve_output_root(args, challenge, logfile)
+    try:
+        run_dirs = [
+            path
+            for path in output_root.glob("run-*")
+            if path.is_dir() and (path / "state.json").exists()
+        ]
+    except OSError:
+        LOGGER.debug(
+            "failed to inspect timeout artifact directory",
+            exc_info=True,
+            extra={"challenge": challenge.canonical_name, "output_root": str(output_root)},
+        )
+        return None
+    if not run_dirs:
+        return None
+    run_dir = max(run_dirs, key=lambda path: path.stat().st_mtime)
+    run_id = run_dir.name
+    return RunArtifacts(
+        run_id=run_id,
+        run_dir=str(run_dir),
+        state_path=str(run_dir / "state.json"),
+        summary_path=str(run_dir / "summary.json"),
+        report_path=str(run_dir / "report.md"),
+        events_path=str(run_dir / "events.log"),
+        config_path=str(run_dir / "config.json"),
+        evidence_path=str(run_dir / "evidence.json"),
+        compact_json_path=str(run_dir / "compact_log.json"),
+        compact_markdown_path=str(run_dir / "compact_log.md"),
+        status="challenge_timeout",
+    )
+
+
+def _supervised_challenge_worker(
+    result_queue: multiprocessing.Queue,
+    args_dict: dict[str, Any],
+    challenge_name: str,
+    logfile: str,
+) -> None:
+    worker_args = argparse.Namespace(**args_dict)
+    worker_args.challenge = challenge_name
+    try:
+        challenge = load_challenge(worker_args)
+        result_queue.put(
+            _run_single_challenge_inner(worker_args, challenge, Path(logfile))
+        )
+    except BaseException as exc:
+        result_queue.put(
+            {
+                "challenge": challenge_name,
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+        )
+
+
+def _run_single_challenge_supervised(
+    args: argparse.Namespace,
+    challenge: CTFChallenge,
+    logfile: Path,
+    *,
+    timeout_s: int,
+) -> dict[str, Any]:
+    status_file = status_path_for_logfile(logfile)
+    started_at = time.time()
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue(maxsize=1)
+    args_dict = vars(args).copy()
+    args_dict["challenge"] = challenge.canonical_name
+    proc = ctx.Process(
+        target=_supervised_challenge_worker,
+        args=(result_queue, args_dict, challenge.canonical_name, str(logfile)),
+        name=f"challenge-watchdog-{challenge.canonical_name}",
+    )
+    write_run_status(
+        status_file,
+        challenge=challenge.canonical_name,
+        stage="watchdog",
+        status="running",
+        logfile=str(logfile),
+        message=f"challenge watchdog armed for {timeout_s}s",
+    )
+    proc.start()
+    result: Any = None
+    has_result = False
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            result = result_queue.get(timeout=min(1.0, remaining))
+            has_result = True
+            break
+        except queue.Empty:
+            if not proc.is_alive():
+                break
+
+    if has_result:
+        proc.join(_CHALLENGE_WATCHDOG_GRACE_SEC)
+        if proc.is_alive():
+            LOGGER.warning(
+                "challenge worker returned a result but did not exit; terminating",
+                extra={"challenge": challenge.canonical_name, "worker_pid": proc.pid},
+            )
+            proc.terminate()
+            proc.join(_CHALLENGE_WATCHDOG_GRACE_SEC)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(_CHALLENGE_WATCHDOG_GRACE_SEC)
+    elif proc.is_alive():
+        LOGGER.error(
+            "challenge watchdog timeout",
+            extra={
+                "challenge": challenge.canonical_name,
+                "timeout_s": timeout_s,
+                "worker_pid": proc.pid,
+            },
+        )
+        proc.terminate()
+        proc.join(_CHALLENGE_WATCHDOG_GRACE_SEC)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(_CHALLENGE_WATCHDOG_GRACE_SEC)
+        _cleanup_timed_out_challenge(args, challenge.canonical_name, challenge, proc.pid)
+        return _challenge_timeout_payload(
+            args,
+            challenge,
+            logfile=logfile,
+            status_file=status_file,
+            started_at=started_at,
+            timeout_s=timeout_s,
+            worker_pid=proc.pid,
+        )
+
+    if not has_result:
+        try:
+            result = result_queue.get_nowait()
+            has_result = True
+        except queue.Empty:
+            if proc.exitcode == 0:
+                exc = RuntimeError("challenge worker exited without a result")
+            else:
+                exc = RuntimeError(f"challenge worker exited with code {proc.exitcode}")
+            return _worker_failure_result(args, challenge.canonical_name, exc)
+
+    if isinstance(result, dict) and "exception_type" in result:
+        exc = RuntimeError(
+            f"{result.get('exception_type')}: {result.get('exception_message')}"
+        )
+        failure = _worker_failure_result(args, challenge.canonical_name, exc)
+        failure["traceback"] = str(result.get("traceback") or "")
+        return failure
+    return result
 
 
 def _parallel_result(
@@ -1136,7 +1621,15 @@ def run_single_challenge(
             },
         )
 
+    timeout_s = _challenge_timeout_s(args)
     with compose_challenge_run_lock(challenge):
+        if timeout_s is not None:
+            return _run_single_challenge_supervised(
+                args,
+                challenge,
+                logfile,
+                timeout_s=timeout_s,
+            )
         return _run_single_challenge_inner(args, challenge, logfile)
 
 
@@ -1469,6 +1962,7 @@ def run_all_challenges(args: argparse.Namespace) -> int:
         LOGGER.error("invalid challenge selection", extra={"error": str(exc)})
         return 1
     logdir = resolve_experiment_logdir(args)
+    all_names = _prioritize_resume_challenge_names(logdir, all_names, args)
 
     if category_filter:
         LOGGER.info(
@@ -1600,25 +2094,43 @@ def run_all_challenges(args: argparse.Namespace) -> int:
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=workers
             ) as executor:
-                pending_names = iter(enumerate(all_names, 1))
+                pending_names = list(enumerate(all_names, 1))
+                compose_names = _compose_challenge_name_set(dataset, all_names)
+                active_compose_names: set[str] = set()
                 future_map: dict[concurrent.futures.Future[dict[str, Any]], str] = {}
 
                 def submit_next() -> bool:
-                    try:
-                        challenge_index, challenge_name = next(pending_names)
-                    except StopIteration:
+                    if not pending_names:
                         return False
+                    selected_index = 0
+                    if active_compose_names:
+                        selected_index = -1
+                        for index, (_challenge_index, candidate_name) in enumerate(
+                            pending_names
+                        ):
+                            if candidate_name not in compose_names:
+                                selected_index = index
+                                break
+                        if selected_index < 0:
+                            return False
+                    challenge_index, challenge_name = pending_names.pop(selected_index)
                     future = executor.submit(
                         _run_named_challenge_worker, base_args, challenge_name
                     )
                     future_map[future] = challenge_name
+                    if challenge_name in compose_names:
+                        active_compose_names.add(challenge_name)
                     monitor_state.add_active_run(
                         _active_run_entry(challenge_name, challenge_index)
                     )
                     return True
 
-                for _ in range(min(workers, total)):
-                    submit_next()
+                def fill_worker_slots() -> None:
+                    while len(future_map) < workers:
+                        if not submit_next():
+                            break
+
+                fill_worker_slots()
 
                 write_batch_monitor(
                     logdir=logdir,
@@ -1637,6 +2149,7 @@ def run_all_challenges(args: argparse.Namespace) -> int:
                         )
                         for future in done:
                             name = future_map.pop(future)
+                            active_compose_names.discard(name)
                             current_name = name
                             result = _parallel_result(args, future, name)
                             monitor_state.append_result(result)
@@ -1665,7 +2178,7 @@ def run_all_challenges(args: argparse.Namespace) -> int:
                                 monitor_state.set_active_runs([])
                                 stop_batch = True
                             else:
-                                submit_next()
+                                fill_worker_slots()
 
                             _save_batch_progress(
                                 args,
@@ -1881,6 +2394,7 @@ def _save_batch_progress(
             "scope_overridden": bool(getattr(args, "scope", None)),
             "knowledge_mode": getattr(args, "knowledge_mode", None),
             "llm_gateway": _load_llm_experiment_config(),
+            "challenge_timeout_s": _challenge_timeout_s(args),
         },
         "paper_metrics": {
             "success_rate": success_rate,

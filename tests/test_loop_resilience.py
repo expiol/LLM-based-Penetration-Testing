@@ -161,6 +161,34 @@ class _ContextRouter:
         )
 
 
+class _AllReadyRouter:
+    def route(
+        self, state: RunState, *, agent_directory, max_assignments: int
+    ) -> RouterDecision:
+        del agent_directory
+        ready = todo_queue(state).ready(limit=max_assignments)
+        return RouterDecision(
+            assignments=[
+                WorkerAssignment(
+                    todo_id=todo.todo_id,
+                    worker_name=str(todo.context["worker_name"]),
+                    rationale="test route",
+                )
+                for todo in ready
+            ],
+            rationale="test route",
+        )
+
+    def summarize_round(
+        self, state: RunState, *, results: list[WorkerResult]
+    ) -> RouterRoundSummary:
+        del state
+        return RouterRoundSummary(
+            summary="; ".join((result.summary for result in results)),
+            direct_results=[result.summary for result in results],
+        )
+
+
 class _UnknownWorkerRouter:
     def route(
         self, state: RunState, *, agent_directory, max_assignments: int
@@ -243,6 +271,15 @@ class _TransientThenSuccessWorker(WorkerAgent):
             summary="ok after transient",
             result_quality="transient_recovered",
         )
+
+
+class _LateTransientWorker(WorkerAgent):
+    name = "late-transient-worker"
+    supported_todo_kinds = ("todo",)
+
+    def run(self, task: TodoItem, state: RunState) -> WorkerResult:
+        del task, state
+        raise LLMClientError("late provider timeout", transient=True)
 
 
 class _AlwaysTransientWorker(WorkerAgent):
@@ -662,7 +699,7 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertEqual(final_state.stop_reason, "unsolved_no_work_remaining")
         self.assertTrue(any(("transient LLM error" in event for event in events)))
 
-    def test_persistent_transient_worker_llm_error_does_not_fail_todo_logic(
+    def test_persistent_transient_worker_llm_error_stops_run_without_logic_failure(
         self,
     ) -> None:
         events: list[str] = []
@@ -699,7 +736,7 @@ class OrchestratorLoopTests(unittest.TestCase):
             any((item.status == TodoStatus.FAILED for item in final_state.todos))
         )
         self.assertEqual(final_state.status, RunStatus.FAILED)
-        self.assertEqual(final_state.stop_reason, "interrupted_todos_unsolved")
+        self.assertEqual(final_state.stop_reason, "llm_transient_error")
         self.assertEqual(final_state.metadata["last_llm_error"]["kind"], "transient")
         self.assertTrue(final_state.metadata["last_llm_error"]["transient"])
         self.assertTrue(any(("budget exhausted" in event for event in events)))
@@ -1140,6 +1177,59 @@ class OrchestratorLoopTests(unittest.TestCase):
         self.assertEqual(final_state.todos[0].status, TodoStatus.COMPLETED)
         self.assertEqual(final_state.status, RunStatus.COMPLETED)
         self.assertEqual(final_state.stop_reason, "unsolved_no_work_remaining")
+
+    def test_late_worker_transient_after_results_consumes_cycle_budget(
+        self,
+    ) -> None:
+        planner = _ScriptedPlanner(
+            [
+                PlannerDecision(
+                    summary="cycle 1",
+                    todos=[
+                        PlannedTodo(
+                            goal="Do useful work first.",
+                            context={"worker_name": "success-worker"},
+                            dedupe_key="completed-before-transient",
+                        ),
+                        PlannedTodo(
+                            goal="Timeout after useful work.",
+                            context={"worker_name": "late-transient-worker"},
+                            dedupe_key="late-transient",
+                        ),
+                    ],
+                ),
+                PlannerDecision(
+                    summary="cycle 2 must not run",
+                    todos=[
+                        PlannedTodo(
+                            goal="Should be blocked by budget.",
+                            context={"worker_name": "success-worker"},
+                            dedupe_key="after-budget",
+                        )
+                    ],
+                ),
+            ]
+        )
+        orchestrator = Orchestrator(
+            state=_state(),
+            workers=[_SuccessWorker(), _LateTransientWorker()],
+            planner=planner,
+            router=_AllReadyRouter(),
+            emit=lambda _: None,
+        )
+        final_state = orchestrator.run(max_cycles=1)
+
+        self.assertEqual(planner.calls, 1)
+        self.assertEqual(
+            {todo.dedupe_key: todo.status for todo in final_state.todos},
+            {
+                "completed-before-transient": TodoStatus.COMPLETED,
+                "late-transient": TodoStatus.BLOCKED,
+            },
+        )
+        self.assertEqual(final_state.status, RunStatus.FAILED)
+        self.assertEqual(final_state.stop_reason, "max_cycles_exhausted")
+        self.assertEqual(final_state.metadata["last_transient_skip"]["source"], "late-transient-worker")
 
     def test_completed_round_does_not_stop_before_cycle_budget(self) -> None:
         planner = _ScriptedPlanner(

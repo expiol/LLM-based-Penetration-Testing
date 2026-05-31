@@ -476,11 +476,11 @@ def routed_transient_llm_handling(
         if termination.skip_transient_llm_error(cycle, worker.name, exc):
             return LLMErrorOutcome(skip_cycle=True)
         if exc.transient:
-            termination.interrupt_todo_after_transient_budget(
+            termination.halt_after_transient_llm_error(
                 cycle, worker.name, exc, todo=todo
             )
             events.checkpoint()
-            return LLMErrorOutcome(skip_cycle=True)
+            return LLMErrorOutcome(halt_run=True)
         events.emit(
             f"[cycle {cycle}] worker LLM error in {worker.name} - marking {todo.todo_id} failed and continuing",
             event_type="worker_llm_error",

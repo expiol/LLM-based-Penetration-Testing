@@ -238,7 +238,11 @@ class DispatchCycleController:
             return DispatchCycleResult(halt_run=True)
         if round_execution.transient_skip:
             self.events.checkpoint()
-            return DispatchCycleResult(retry_cycle=True, transient_skip=True)
+            return DispatchCycleResult(
+                retry_cycle=True,
+                transient_skip=True,
+                consume_budget=bool(round_execution.results),
+            )
         if round_execution.solved or self.outcome.is_solved:
             return DispatchCycleResult(halt_run=True)
         results = list(round_execution.results)

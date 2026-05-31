@@ -1693,6 +1693,47 @@ class ShellPluginGuardrailTests(unittest.TestCase):
         )
         self.assertIn("./src/main.c", output.output_context["stdout"])
 
+    def test_shell_optional_grep_no_match_is_partial_observation(self) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={"command": "objdump -d -M intel program | grep -A 30 '<main>'"},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=1,
+            stdout="",
+            stderr="",
+        )
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+        self.assertEqual(output.status, ToolOutputStatus.SUCCESS)
+        self.assertEqual(output.output_context["failure_kind"], "partial_probe_miss")
+        self.assertEqual(output.output_context["result_quality"], "partial_probe_miss")
+
+    def test_stdout_text_does_not_create_path_resolution_error_without_diagnostic_prefix(
+        self,
+    ) -> None:
+        request = ToolExecutionRequest(
+            capability=ToolCapability.SHELL_EXEC.value,
+            tool_name="shell_exec",
+            metadata={"command": "strings program | grep -i access"},
+            timeout_s=5,
+        )
+        result = ToolExecutionResult(
+            tool_name="shell_exec",
+            mode=ExecutionMode.LOCAL_COMMAND,
+            exit_code=1,
+            stdout="user-facing text: cannot access the vault yet\n",
+            stderr="",
+        )
+        output = shell_output_builder(request, result, ParsedToolOutput(summary="raw"))
+        self.assertNotEqual(
+            output.output_context.get("failure_kind"), "path_resolution_error"
+        )
+        self.assertEqual(output.output_context["failure_kind"], "partial_probe_miss")
+
     def test_treats_long_bounded_head_sigpipe_as_successful_observation(self) -> None:
         long_prefix = " && ".join((f"printf prefix_{i} >/dev/null" for i in range(12)))
         command = f"{long_prefix} && find . -type f | head -2"

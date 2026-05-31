@@ -288,6 +288,8 @@ class Orchestrator:
                     max_cycles_exhausted = False
                     break
                 if dispatch.retry_cycle and dispatch.transient_skip:
+                    if dispatch.consume_budget:
+                        effective_cycles += 1
                     continue
                 effective_cycles += 1
         except LLMClientError as exc:

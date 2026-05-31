@@ -54,6 +54,45 @@ class _PortConflictChallenge(_FakeChallenge):
         )
 
 
+class _LegacyPinBuildFailureChallenge(_FakeChallenge):
+    def __init__(self, challenge_dir: Path) -> None:
+        super().__init__(challenge_dir)
+        self.starts = 0
+
+    def start_challenge_container(self) -> None:
+        self.starts += 1
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["docker", "compose", "up"],
+            stderr=(
+                "Dockerfile:13\n"
+                "RUN pip install -r pip-freeze.txt\n"
+                "ERROR: Could not find a version that satisfies the requirement "
+                "cmake==3.15.3\n"
+                "ERROR: No matching distribution found for cmake==3.15.3"
+            ),
+        )
+
+
+class _TruncatedLegacyPinBuildFailureChallenge(_FakeChallenge):
+    def __init__(self, challenge_dir: Path) -> None:
+        super().__init__(challenge_dir)
+        self.starts = 0
+
+    def start_challenge_container(self) -> None:
+        self.starts += 1
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["docker", "compose", "up"],
+            stderr=(
+                "Dockerfile:13\n"
+                "RUN pip install -r pip-freeze.txt\n"
+                "failed to solve: process \"/bin/sh -c pip install -r "
+                "pip-freeze.txt\" did not complete successfully: exit code: 1"
+            ),
+        )
+
+
 class DockerLifecycleTests(unittest.TestCase):
     def test_docker_compose_down_runs_cleanup_for_compose_challenge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -162,7 +201,7 @@ class DockerLifecycleTests(unittest.TestCase):
                     )
                 if "up" in command:
                     generated_configs.append(
-                        json.loads(Path(command[3]).read_text(encoding="utf-8"))
+                        json.loads(Path(command[5]).read_text(encoding="utf-8"))
                     )
                     return BoundedProcessResult(exit_code=0, stdout="", stderr="")
                 raise AssertionError(f"unexpected command: {command}")
@@ -178,6 +217,171 @@ class DockerLifecycleTests(unittest.TestCase):
             service = generated_configs[0]["services"]["server"]
             self.assertNotIn("ports", service)
             self.assertEqual(service["expose"], ["5000"])
+
+    def test_legacy_python_pin_build_failure_uses_temporary_patched_context(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            compose = root / "docker-compose.yml"
+            compose.write_text(
+                "services:\n"
+                "  client:\n"
+                "    build: ./client\n",
+                encoding="utf-8",
+            )
+            client = root / "client"
+            client.mkdir()
+            requirements = client / "pip-freeze.txt"
+            requirements.write_text("cmake==3.15.3\nFlask==1.1.1\n", encoding="utf-8")
+            challenge = _LegacyPinBuildFailureChallenge(root)
+            patched_requirements: list[str] = []
+
+            def fake_run(command: list[str], **_kwargs) -> BoundedProcessResult:
+                self.assertEqual(command[:4], ["docker", "compose", "--project-name", root.name])
+                patched_compose = Path(command[5])
+                patched_requirements.append(
+                    (patched_compose.parent / "client" / "pip-freeze.txt").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                return BoundedProcessResult(exit_code=0, stdout="", stderr="")
+
+            with patch(
+                "killchain_docker.batch.docker.run_bounded_process",
+                side_effect=fake_run,
+            ):
+                start_challenge_with_retry(challenge, attempts=2)  # type: ignore[arg-type]
+
+            self.assertEqual(challenge.starts, 1)
+            self.assertEqual(patched_requirements, ["cmake==3.15.3.post1\nFlask==1.1.1\n"])
+            self.assertEqual(
+                requirements.read_text(encoding="utf-8"),
+                "cmake==3.15.3\nFlask==1.1.1\n",
+            )
+
+    def test_truncated_python_pin_build_failure_checks_compose_context(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            compose = root / "docker-compose.yml"
+            compose.write_text(
+                "services:\n"
+                "  client:\n"
+                "    build: ./client\n",
+                encoding="utf-8",
+            )
+            client = root / "client"
+            client.mkdir()
+            dockerfile = client / "Dockerfile"
+            dockerfile.write_text(
+                "FROM python:3.6\n"
+                "COPY pip-freeze.txt /app/pip-freeze.txt\n"
+                "RUN pip install -r pip-freeze.txt\n",
+                encoding="utf-8",
+            )
+            requirements = client / "pip-freeze.txt"
+            requirements.write_text(
+                "cmake==3.15.3\nscikit-build==0.10.0\nFlask==1.1.1\n",
+                encoding="utf-8",
+            )
+            challenge = _TruncatedLegacyPinBuildFailureChallenge(root)
+            patched_requirements: list[str] = []
+            patched_dockerfiles: list[str] = []
+
+            def fake_run(command: list[str], **_kwargs) -> BoundedProcessResult:
+                patched_compose = Path(command[5])
+                patched_requirements.append(
+                    (patched_compose.parent / "client" / "pip-freeze.txt").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                patched_dockerfiles.append(
+                    (patched_compose.parent / "client" / "Dockerfile").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                return BoundedProcessResult(exit_code=0, stdout="", stderr="")
+
+            with patch(
+                "killchain_docker.batch.docker.run_bounded_process",
+                side_effect=fake_run,
+            ):
+                start_challenge_with_retry(challenge, attempts=2)  # type: ignore[arg-type]
+
+            self.assertEqual(challenge.starts, 1)
+            self.assertEqual(
+                patched_requirements,
+                ["cmake==3.15.3.post1\nscikit-build==0.10.0\nFlask==1.1.1\n"],
+            )
+            self.assertIn(
+                "RUN pip install scikit-build==0.10.0\n"
+                "RUN pip install -r pip-freeze.txt",
+                patched_dockerfiles[0],
+            )
+            self.assertEqual(
+                requirements.read_text(encoding="utf-8"),
+                "cmake==3.15.3\nscikit-build==0.10.0\nFlask==1.1.1\n",
+            )
+            self.assertNotIn(
+                "RUN pip install scikit-build==0.10.0",
+                dockerfile.read_text(encoding="utf-8"),
+            )
+
+    def test_system_package_install_removes_redundant_legacy_python_pin(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            compose = root / "docker-compose.yml"
+            compose.write_text(
+                "services:\n"
+                "  client:\n"
+                "    build: ./client\n",
+                encoding="utf-8",
+            )
+            client = root / "client"
+            client.mkdir()
+            dockerfile = client / "Dockerfile"
+            dockerfile.write_text(
+                "FROM python:3.6\n"
+                "RUN apt-get update && apt-get install -y build-essential cmake\n"
+                "COPY pip-freeze.txt /app/pip-freeze.txt\n"
+                "RUN pip install -r pip-freeze.txt\n",
+                encoding="utf-8",
+            )
+            requirements = client / "pip-freeze.txt"
+            requirements.write_text(
+                "cmake==3.15.3\nscikit-build==0.10.0\nFlask==1.1.1\n",
+                encoding="utf-8",
+            )
+            challenge = _TruncatedLegacyPinBuildFailureChallenge(root)
+            patched_requirements: list[str] = []
+
+            def fake_run(command: list[str], **_kwargs) -> BoundedProcessResult:
+                patched_compose = Path(command[5])
+                patched_requirements.append(
+                    (patched_compose.parent / "client" / "pip-freeze.txt").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                return BoundedProcessResult(exit_code=0, stdout="", stderr="")
+
+            with patch(
+                "killchain_docker.batch.docker.run_bounded_process",
+                side_effect=fake_run,
+            ):
+                start_challenge_with_retry(challenge, attempts=2)  # type: ignore[arg-type]
+
+            self.assertEqual(
+                patched_requirements,
+                ["scikit-build==0.10.0\nFlask==1.1.1\n"],
+            )
+            self.assertEqual(
+                requirements.read_text(encoding="utf-8"),
+                "cmake==3.15.3\nscikit-build==0.10.0\nFlask==1.1.1\n",
+            )
 
 
 if __name__ == "__main__":

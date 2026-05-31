@@ -50,6 +50,7 @@ RUN_CONFIG = {
     "index": None,
     "output_root": None,
     "parallel_workers": 5,
+    "challenge_timeout_s": None,
     "replicas": 1,
     "knowledge_mode": "enabled",
     "sample_size": None,
@@ -82,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--index", type=int)
     parser.add_argument("--output-root")
     parser.add_argument("--parallel-workers", type=int)
+    parser.add_argument("--challenge-timeout-s", type=int)
     parser.add_argument("--replicas", type=int)
     parser.add_argument(
         "--knowledge-mode", choices=["enabled", "offline", "disabled"]

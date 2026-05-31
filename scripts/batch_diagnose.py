@@ -20,6 +20,7 @@ LOGGER = get_logger(__name__)
 
 
 FRAMEWORK_BUCKETS = {
+    "challenge_timeout",
     "docker_start_error",
     "runtime_error",
     "script_missing_code",
@@ -36,6 +37,11 @@ LLM_LIMIT_BUCKETS = {
     "stagnated",
     "unsolved_exhausted",
 }
+PROVIDER_LIMIT_BUCKETS = {
+    "llm_connection",
+    "llm_timeout",
+    "llm_transient_error",
+}
 STATE_FRAMEWORK_FAILURES = {
     "docker_start_error",
     "runtime_error",
@@ -46,8 +52,11 @@ STATE_FRAMEWORK_FAILURES = {
 STATE_LLM_LIMIT_SIGNALS = {
     "candidate_mismatch",
     "candidate_rejected",
-    "near_miss",
+    "network_incomplete_read",
     "no_candidate",
+    "near_miss",
+    "partial_probe_miss",
+    "partial_probe_output",
     "partial_no_candidate",
 }
 STATE_MODEL_OUTPUT_SIGNALS = {
@@ -157,6 +166,34 @@ def _signal_reason(signals: set[str], allowed: set[str]) -> str:
     return ", ".join(matched)
 
 
+def _stop_reason(
+    result: dict[str, Any], summary: dict[str, Any], state: dict[str, Any]
+) -> str:
+    metrics = result.get("state_metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    return str(
+        metrics.get("stop_reason")
+        or summary.get("stop_reason")
+        or state.get("stop_reason")
+        or result.get("status")
+        or ""
+    )
+
+
+def _is_transient_llm_error(
+    result: dict[str, Any],
+    summary: dict[str, Any],
+    state: dict[str, Any],
+    buckets: set[str],
+) -> bool:
+    if _stop_reason(result, summary, state) == "llm_transient_error":
+        return True
+    last_llm_error = _nested_dict(state, "metadata", "last_llm_error")
+    if last_llm_error and bool(last_llm_error.get("transient")):
+        return True
+    return bool(buckets & PROVIDER_LIMIT_BUCKETS)
+
+
 def classify_result(
     result: dict[str, Any],
     summary: dict[str, Any],
@@ -165,8 +202,19 @@ def classify_result(
 ) -> tuple[str, str]:
     if bool(result.get("solved") or summary.get("solved") or state.get("solved")):
         return "solved", "validated or solved signal present"
+    buckets = set(_failure_buckets(result))
+    stop_reason = _stop_reason(result, summary, state)
+    if _is_transient_llm_error(result, summary, state, buckets):
+        return "needs_retry", "transient LLM provider error; rerun required"
+    if stop_reason == "challenge_timeout":
+        return "framework_signal", "challenge_timeout"
+    error_payload = result.get("error")
+    if isinstance(error_payload, dict):
+        error_text = " ".join(str(value) for value in error_payload.values()).lower()
+        if "docker compose" in error_text or "dockerfile:" in error_text:
+            return "framework_signal", "docker_start_error"
     if result.get("llm_error") or _nested_dict(state, "metadata", "last_llm_error"):
-        return "framework_or_api", "LLM client error recorded"
+        return "framework_or_api", "non-transient LLM client error recorded"
     if result.get("api_error"):
         return "framework_or_api", "fatal API error recorded"
     if result.get("interrupted"):
@@ -179,7 +227,6 @@ def classify_result(
     if isinstance(runtime_error, dict) and runtime_error:
         return "framework_or_api", "runtime_error recorded"
 
-    buckets = set(_failure_buckets(result))
     if buckets & FRAMEWORK_BUCKETS:
         return "framework_signal", ", ".join(sorted(buckets & FRAMEWORK_BUCKETS))
     if buckets & LLM_LIMIT_BUCKETS:
@@ -187,13 +234,6 @@ def classify_result(
 
     metrics = result.get("state_metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
-    stop_reason = str(
-        metrics.get("stop_reason")
-        or summary.get("stop_reason")
-        or state.get("stop_reason")
-        or result.get("status")
-        or ""
-    )
     status_counts = _status_counts(metrics)
     if stop_reason == "max_cycles_exhausted":
         return "likely_llm_limit", "max_cycles_exhausted"
@@ -218,6 +258,18 @@ def classify_result(
         if max_cycles and round_count >= max_cycles:
             return "likely_llm_limit", "bounded run exhausted without framework signal"
         return "likely_llm_limit", "partial_todos_unsolved"
+    if stop_reason == "unsolved_no_work_remaining":
+        reason = _signal_reason(state_signals, STATE_LLM_LIMIT_SIGNALS)
+        if reason:
+            return "likely_llm_limit", reason
+        return "likely_llm_limit", "no remaining actionable work after bounded run"
+    if stop_reason == "todo_failed":
+        reason = _signal_reason(state_signals, STATE_LLM_LIMIT_SIGNALS)
+        if reason:
+            return "likely_llm_limit", reason
+        reason = _signal_reason(state_signals, STATE_MODEL_OUTPUT_SIGNALS)
+        if reason:
+            return "model_output_quality", reason
     if status_counts.get("blocked") and not result.get("error"):
         return "likely_llm_limit", "blocked after bounded attempts"
     if any("schema" in text.lower() and "validation" in text.lower() for text in events_tail):

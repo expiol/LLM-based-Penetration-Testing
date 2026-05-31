@@ -87,6 +87,7 @@ class DispatchCycleResult:
     retry_cycle: bool = False
     halt_run: bool = False
     transient_skip: bool = False
+    consume_budget: bool = False
 
 
 @dataclass(frozen=True)

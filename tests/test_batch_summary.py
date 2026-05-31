@@ -244,7 +244,9 @@ class BatchSummaryTests(unittest.TestCase):
             self.assertEqual(payload["status"], "interrupted")
             self.assertEqual(payload["error"]["type"], "KeyboardInterrupt")
 
-    def test_single_challenge_llm_error_is_fatal_batch_error(self) -> None:
+    def test_single_challenge_transient_preflight_llm_error_is_not_api_error(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = _args(Path(tmp))
             args.name = None
@@ -266,7 +268,7 @@ class BatchSummaryTests(unittest.TestCase):
                     )
             payload = json.loads(logfile.read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "failed")
-            self.assertTrue(result["api_error"])
+            self.assertFalse(result["api_error"])
             self.assertTrue(result["llm_error"])
             self.assertEqual(payload["error"]["type"], "LLMClientError")
             self.assertTrue(payload["llm_error"])
@@ -274,7 +276,7 @@ class BatchSummaryTests(unittest.TestCase):
                 (Path(tmp) / "fake-llm-error.status.json").read_text(encoding="utf-8")
             )
             self.assertEqual(status_payload["error"]["type"], "LLMClientError")
-            self.assertTrue(status_payload["api_error"])
+            self.assertFalse(status_payload["api_error"])
             self.assertTrue(status_payload["llm_error"])
             self.assertTrue(
                 any(

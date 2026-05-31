@@ -62,6 +62,37 @@ class ArtifactFactsTests(unittest.TestCase):
         self.assertTrue(facts.is_low_signal)
         self.assertEqual(artifact_followup_priority(artifact), 0)
 
+    def test_generated_python_cache_is_low_signal(self) -> None:
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/.autopentest_artifacts/script_1/work/__pycache__/solver.cpython-310.pyc",
+            kind="script_artifact",
+            source="script_exec",
+            metadata={
+                "relative_path": "__pycache__/solver.cpython-310.pyc",
+                "file_type": "data",
+                "mime_type": "application/octet-stream",
+                "interesting_strings": ["flag", "secret"],
+            },
+        )
+        facts = facts_from_artifact(artifact)
+        self.assertTrue(facts.is_low_signal)
+        self.assertEqual(artifact_followup_priority(artifact), 0)
+
+    def test_challenge_python_cache_is_not_low_signal_by_path_only(self) -> None:
+        artifact = Artifact(
+            path="/home/ctfplayer/ctf_files/rev/solver.cpython-310.pyc",
+            kind="binary",
+            source="artifact_triage",
+            metadata={
+                "file_type": "python byte-compiled",
+                "mime_type": "application/octet-stream",
+                "interesting_strings": ["flag"],
+            },
+        )
+        facts = facts_from_artifact(artifact)
+        self.assertFalse(facts.is_low_signal)
+        self.assertGreater(artifact_followup_priority(artifact), 0)
+
     def test_tool_source_prefix_does_not_make_child_artifact_a_disk_image(self) -> None:
         artifact = Artifact(
             path="/home/ctfplayer/ctf_files/.autopentest_artifacts/disk/offset_0/store",

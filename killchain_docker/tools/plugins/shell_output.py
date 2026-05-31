@@ -50,8 +50,40 @@ MASKED_COMMAND_ERROR_RE = re.compile(
     r"|unrecognized option"
     r")\b.{0,240})$"
 )
+SHELL_DIAGNOSTIC_PREFIX_RE = (
+    r"(?:(?:bash|sh|/bin/sh)(?:: line \d+)?:|[A-Za-z0-9_./+-]+(?:\[[0-9]+\])?:)"
+)
+STDOUT_MASKED_COMMAND_ERROR_RE = re.compile(
+    r"(?im)^(?P<line>" + SHELL_DIAGNOSTIC_PREFIX_RE + r"\s*.{0,240}\b(?:"
+    r"No such file or directory"
+    r"|cannot access"
+    r"|cannot stat"
+    r"|cannot open"
+    r"|cannot read"
+    r"|Permission denied"
+    r"|Operation not permitted"
+    r"|Input/output error"
+    r"|Is a directory"
+    r"|Not a directory"
+    r"|command not found"
+    r"|syntax error near unexpected token"
+    r"|invalid option"
+    r"|unrecognized option"
+    r")\b.{0,240})$"
+)
 PATH_RESOLUTION_ERROR_RE = re.compile(
     r"(?im)^(?P<line>.{0,240}\b(?:"
+    r"No such file or directory"
+    r"|cannot access"
+    r"|cannot stat"
+    r"|cannot open"
+    r"|cannot read"
+    r"|Is a directory"
+    r"|Not a directory"
+    r")\b.{0,240})$"
+)
+STDOUT_PATH_RESOLUTION_ERROR_RE = re.compile(
+    r"(?im)^(?P<line>" + SHELL_DIAGNOSTIC_PREFIX_RE + r"\s*.{0,240}\b(?:"
     r"No such file or directory"
     r"|cannot access"
     r"|cannot stat"
@@ -96,8 +128,9 @@ def masked_command_error_detail(
 ) -> str | None:
     if exit_code not in (0, None):
         return None
-    combined = "\n".join(part for part in (stderr, stdout) if part)
-    match = MASKED_COMMAND_ERROR_RE.search(combined)
+    match = MASKED_COMMAND_ERROR_RE.search(stderr or "")
+    if not match:
+        match = STDOUT_MASKED_COMMAND_ERROR_RE.search(stdout or "")
     if not match:
         return None
     return match.group("line").strip()[:300]
@@ -108,8 +141,9 @@ def path_resolution_error_detail(
 ) -> str | None:
     if exit_code in (0, None):
         return None
-    combined = "\n".join(part for part in (stderr, stdout) if part)
-    match = PATH_RESOLUTION_ERROR_RE.search(combined)
+    match = PATH_RESOLUTION_ERROR_RE.search(stderr or "")
+    if not match:
+        match = STDOUT_PATH_RESOLUTION_ERROR_RE.search(stdout or "")
     if not match:
         return None
     return match.group("line").strip()[:300]
@@ -237,11 +271,11 @@ def partial_probe_observation(
         return False
     if not stdout.strip():
         return False
-    if PATH_RESOLUTION_ERROR_RE.search(stdout) or PATH_RESOLUTION_ERROR_RE.search(
-        stderr
-    ):
+    if path_resolution_error_detail(stdout, stderr, exit_code):
         return False
-    if MASKED_COMMAND_ERROR_RE.search(stdout) or MASKED_COMMAND_ERROR_RE.search(stderr):
+    if MASKED_COMMAND_ERROR_RE.search(stderr or ""):
+        return False
+    if STDOUT_MASKED_COMMAND_ERROR_RE.search(stdout or ""):
         return False
     if not (
         OPTIONAL_PROBE_RE.search(command) or BOUNDED_PIPE_CONSUMER_RE.search(command)
@@ -250,6 +284,34 @@ def partial_probe_observation(
     return STRUCTURED_PROBE_OUTPUT_RE.search(stdout) is not None or file_listing_output(
         stdout
     )
+
+
+def optional_probe_no_match_observation(
+    command: str,
+    stdout: str,
+    stderr: str,
+    exit_code: int | None,
+) -> bool:
+    if exit_code != 1:
+        return False
+    if not OPTIONAL_PROBE_RE.search(command):
+        return False
+    if path_resolution_error_detail(stdout, stderr, exit_code):
+        return False
+    stderr_l = (stderr or "").lower()
+    if stderr_l and any(
+        marker in stderr_l
+        for marker in (
+            "error",
+            "failed",
+            "permission denied",
+            "not found",
+            "no such file",
+            "cannot ",
+        )
+    ):
+        return False
+    return True
 
 
 def file_listing_output(stdout: str) -> bool:
@@ -370,6 +432,11 @@ def shell_failure_signal(
             "partial_probe_miss",
             "shell command produced useful probe output, then a later optional probe returned no matches",
         )
+    if optional_probe_no_match_observation(command, stdout, stderr, exit_code):
+        return (
+            "partial_probe_miss",
+            "optional shell search/probe returned no matches",
+        )
     return None
 
 
@@ -396,9 +463,17 @@ def build_output(
         stderr,
         result.exit_code,
     )
+    optional_probe_no_match = optional_probe_no_match_observation(
+        full_command,
+        stdout,
+        stderr,
+        result.exit_code,
+    )
     if bounded_sigpipe:
         status = ToolOutputStatus.SUCCESS
     elif partial_probe:
+        status = ToolOutputStatus.SUCCESS
+    elif optional_probe_no_match:
         status = ToolOutputStatus.SUCCESS
 
     summary = f"shell: {command}"
@@ -451,6 +526,11 @@ def build_output(
         output_context["result_quality"] = "partial_probe_output"
         output_context["partial_reason"] = (
             "later optional probe returned no matches after useful stdout was captured"
+        )
+    elif optional_probe_no_match:
+        output_context["result_quality"] = "partial_probe_miss"
+        output_context["partial_reason"] = (
+            "optional shell search/probe returned no matches"
         )
     failure = shell_failure_signal(
         stdout,
