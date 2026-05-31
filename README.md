@@ -1,5 +1,10 @@
 # LLM-based Penetration Testing
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/expiol/LLM-based-Penetration-Testing)
+
+Ask DeepWiki for an interactive, repository-aware explanation of the project
+architecture, workflows, and implementation details.
+
 An LLM-driven autonomous CTF solving and authorized security assessment
 framework. The project uses the NYUCTF dataset as its main benchmark and
 combines LLM planning, task routing, persona-based workers, guarded tool
